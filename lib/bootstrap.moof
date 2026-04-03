@@ -1,0 +1,198 @@
+; MOOF Bootstrap -- derived forms from the six kernel primitives
+; Everything here is built on: vau, send, def, quote, cons, eq
+
+; wrap: takes an operative, returns one that evaluates its args
+(def wrap
+  (vau (operative) $e
+    (lambda args
+      (eval (cons (eval operative $e) args)))))
+
+; my-if: if defined as a library function using vau
+(def my-if
+  (vau (condition then-branch else-branch) $e
+    (if (eval condition $e)
+      (eval then-branch $e)
+      (eval else-branch $e))))
+
+; cond: multi-branch conditional
+(def cond
+  (vau clauses $e
+    (def cond-helper
+      (lambda (cls)
+        (if (eq cls nil) nil
+          (let ((clause (car cls))
+                (rest (cdr cls)))
+            (let ((test (car clause))
+                  (body (car (cdr clause))))
+              (if (eq test 'else)
+                (eval body $e)
+                (if (eval test $e)
+                  (eval body $e)
+                  (cond-helper rest))))))))
+    (cond-helper clauses)))
+
+; when/unless
+(def when
+  (vau (condition . body) $e
+    (if (eval condition $e)
+      (eval (cons 'do body) $e)
+      nil)))
+
+(def unless
+  (vau (condition . body) $e
+    (if (eval condition $e)
+      nil
+      (eval (cons 'do body) $e))))
+
+; do: sequence of expressions
+(def do
+  (vau body $e
+    (def do-helper
+      (lambda (exprs)
+        (if (eq (cdr exprs) nil)
+          (eval (car exprs) $e)
+          (let ((_ (eval (car exprs) $e)))
+            (do-helper (cdr exprs))))))
+    (if (eq body nil) nil
+      (do-helper body))))
+
+; -- logic --
+(def not (lambda (x) (if x false true)))
+
+(def and
+  (vau (a b) $e
+    (if (eval a $e) (if (eval b $e) true false) false)))
+
+(def or
+  (vau (a b) $e
+    (if (eval a $e) true (if (eval b $e) true false))))
+
+; -- type predicates --
+(def null? (lambda (x) (eq x nil)))
+(def pair? (lambda (x) (eq (type-of x) 'Cons)))
+(def symbol? (lambda (x) (eq (type-of x) 'Symbol)))
+(def integer? (lambda (x) (eq (type-of x) 'Integer)))
+(def string? (lambda (x) (eq (type-of x) 'String)))
+(def lambda? (lambda (x) (eq (type-of x) 'Lambda)))
+(def operative? (lambda (x) (eq (type-of x) 'Operative)))
+(def object? (lambda (x) (eq (type-of x) 'Object)))
+
+; -- list operations --
+(def cadr (lambda (x) (car (cdr x))))
+(def caddr (lambda (x) (car (cdr (cdr x)))))
+(def cddr (lambda (x) (cdr (cdr x))))
+
+(def length
+  (lambda (lst)
+    (if (null? lst) 0 [1 + (length (cdr lst))])))
+
+(def append
+  (lambda (a b)
+    (if (null? a) b
+      (cons (car a) (append (cdr a) b)))))
+
+(def reverse
+  (lambda (lst)
+    (def rev-helper
+      (lambda (remaining acc)
+        (if (null? remaining) acc
+          (rev-helper (cdr remaining) (cons (car remaining) acc)))))
+    (rev-helper lst nil)))
+
+(def map
+  (lambda (f lst)
+    (if (null? lst) nil
+      (cons (f (car lst)) (map f (cdr lst))))))
+
+(def filter
+  (lambda (pred lst)
+    (if (null? lst) nil
+      (if (pred (car lst))
+        (cons (car lst) (filter pred (cdr lst)))
+        (filter pred (cdr lst))))))
+
+(def fold
+  (lambda (f init lst)
+    (if (null? lst) init
+      (fold f (f init (car lst)) (cdr lst)))))
+
+(def for-each
+  (lambda (f lst)
+    (if (null? lst) nil
+      (do (f (car lst)) (for-each f (cdr lst))))))
+
+(def nth
+  (lambda (lst n)
+    (if [n = 0] (car lst) (nth (cdr lst) [n - 1]))))
+
+(def range
+  (lambda (start end)
+    (if [start >= end] nil
+      (cons start (range [start + 1] end)))))
+
+(def last
+  (lambda (lst)
+    (if (null? (cdr lst)) (car lst) (last (cdr lst)))))
+
+(def take
+  (lambda (n lst)
+    (if (or [n <= 0] (null? lst)) nil
+      (cons (car lst) (take [n - 1] (cdr lst))))))
+
+(def drop
+  (lambda (n lst)
+    (if (or [n <= 0] (null? lst)) lst
+      (drop [n - 1] (cdr lst)))))
+
+(def zip
+  (lambda (a b)
+    (if (or (null? a) (null? b)) nil
+      (cons (list (car a) (car b)) (zip (cdr a) (cdr b))))))
+
+; -- higher-order --
+(def compose (lambda (f g) (lambda (x) (f (g x)))))
+(def identity (lambda (x) x))
+(def constantly (lambda (x) (lambda args x)))
+(def apply (lambda (f args) (eval (cons f args))))
+
+; -- printing --
+(def println (lambda (x) (print x)))
+(def display (lambda (x) (print x)))
+
+; -- Object model: the root Object prototype --
+(def Object (object nil))
+
+(handle! Object #describe (lambda (self) "<object>"))
+
+(handle! Object #interface
+  (lambda (self) [self handlerNames]))
+
+(handle! Object #sourceOf:
+  (lambda (self selector)
+    (let ((handler [self handlerAt: selector]))
+      (if (null? handler) nil (source handler)))))
+
+(handle! Object #clone (lambda (self) (object self)))
+
+; -- Self-modification tools --
+(def define-handler
+  (vau (obj selector handler) $e
+    (handle! (eval obj $e) (eval selector $e) (eval handler $e))))
+
+(def redefine
+  (vau (name value) $e
+    (def result (eval value $e))
+    (eval (list 'def name (list 'quote result)) $e)
+    result))
+
+(def inspect
+  (lambda (val)
+    (print (type-of val))
+    (cond
+      ((lambda? val) (print (source val)))
+      ((operative? val) (print (source val)))
+      ((object? val)
+        (print [val slotNames])
+        (print [val interface]))
+      (else (print val)))
+    val))
