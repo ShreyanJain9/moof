@@ -23,7 +23,10 @@ pub enum Token {
     Keyword(String),    // identifier ending with : (e.g., "at:", "put:")
 
     // Sugar
-    Quote,       // '
+    Quote,          // '
+    Quasiquote,     // `
+    Unquote,        // ,
+    UnquoteSplice,  // ,@
     Colon,       // : alone (for block params like :x)
     Dot,         // . (loose — used for dotted pairs)
     DotAccess,   // . (tight — no preceding whitespace, used for field access)
@@ -70,6 +73,16 @@ impl<'a> Lexer<'a> {
                 '{' => { tokens.push(Token::LBrace); self.pos += 1; }
                 '}' => { tokens.push(Token::RBrace); self.pos += 1; }
                 '\'' => { tokens.push(Token::Quote); self.pos += 1; }
+                '`' => { tokens.push(Token::Quasiquote); self.pos += 1; }
+                ',' => {
+                    self.pos += 1;
+                    if self.pos < self.chars.len() && self.chars[self.pos] == '@' {
+                        self.pos += 1;
+                        tokens.push(Token::UnquoteSplice);
+                    } else {
+                        tokens.push(Token::Unquote);
+                    }
+                }
                 '.' => {
                     // Tight dot (no whitespace before) = field access: obj.x
                     // Loose dot (whitespace before) = dotted pair: (a . b)

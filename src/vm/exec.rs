@@ -397,29 +397,13 @@ impl VM {
                         Value::Object(id) => {
                             match self.heap.get(id).clone() {
                                 HeapObject::Operative { .. } => {
-                                    // Operative: pass raw args + caller env
+                                    // Operative: pass raw args + caller env (fundamental to vau)
                                     self.call_operative(callable, args_list, env_id)?
                                 }
-                                HeapObject::Lambda { params, body, def_env, .. } => {
-                                    // Lambda: eval each arg in caller env, then call
-                                    let raw_args = self.heap.list_to_vec(args_list);
-                                    let mut evaled = Vec::new();
-                                    for arg in raw_args {
-                                        evaled.push(self.eval(arg, env_id)?);
-                                    }
-                                    self.call_lambda(params, body, def_env, &evaled)?
-                                }
-                                HeapObject::NativeFunction { name } => {
-                                    let name = name.clone();
-                                    let raw_args = self.heap.list_to_vec(args_list);
-                                    let mut evaled = Vec::new();
-                                    for arg in raw_args {
-                                        evaled.push(self.eval(arg, env_id)?);
-                                    }
-                                    self.call_native(&name, &evaled)?
-                                }
                                 _ => {
-                                    // General object: eval args, then send call:
+                                    // Everything else: eval args, then dispatch through call:
+                                    // Lambdas, NativeFunctions, GeneralObjects — all use the
+                                    // same message_send path. One mechanism.
                                     let raw_args = self.heap.list_to_vec(args_list);
                                     let mut evaled = Vec::new();
                                     for arg in raw_args {
@@ -443,6 +427,8 @@ impl VM {
                         Value::Object(id) => {
                             match self.heap.get(id).clone() {
                                 HeapObject::Lambda { params, body, def_env, .. } => {
+                                    // TCO optimization: semantically equivalent to
+                                    // [callable call: evaled...] but avoids frame push.
                                     let raw_args = self.heap.list_to_vec(args_list);
                                     let mut evaled = Vec::new();
                                     for arg in raw_args {
@@ -463,6 +449,7 @@ impl VM {
                                     self.stack.push(result);
                                 }
                                 _ => {
+                                    // Everything else: dispatch through call:
                                     let raw_args = self.heap.list_to_vec(args_list);
                                     let mut evaled = Vec::new();
                                     for arg in raw_args {
@@ -1125,6 +1112,13 @@ impl VM {
                     }
                     // Lambda call: needs call_value
                     HeapObject::Lambda { .. } => {
+                        match sel_name {
+                            "call:" => self.call_value(receiver, args).map(Some),
+                            _ => Ok(None),
+                        }
+                    }
+                    // NativeFunction call: dispatch through call_value
+                    HeapObject::NativeFunction { .. } => {
                         match sel_name {
                             "call:" => self.call_value(receiver, args).map(Some),
                             _ => Ok(None),

@@ -90,6 +90,7 @@ fn main() {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let mut buffer = String::new();
+    let mut last_checkpoint_size = vm.heap.len();
 
     loop {
         if buffer.is_empty() {
@@ -150,6 +151,13 @@ fn main() {
                     Err(e) => {
                         println!("!! {}", e);
                     }
+                }
+
+                // Auto-checkpoint: "you never save"
+                if vm.heap.len() > last_checkpoint_size + 5000 {
+                    save_image(&vm);
+                    eprintln!("(auto-saved)");
+                    last_checkpoint_size = vm.heap.len();
                 }
             }
             Err(e) => {

@@ -73,6 +73,24 @@ impl Parser {
             Token::LBracket => self.parse_bracket(heap),
             Token::LBrace => self.parse_brace(heap),
             Token::Quote => self.parse_quote(heap),
+            Token::Quasiquote => {
+                self.pos += 1;
+                let expr = self.parse_expr(heap)?;
+                let qq_sym = Value::Symbol(heap.intern("quasiquote"));
+                Ok(heap.list(&[qq_sym, expr]))
+            }
+            Token::Unquote => {
+                self.pos += 1;
+                let expr = self.parse_expr(heap)?;
+                let uq_sym = Value::Symbol(heap.intern("unquote"));
+                Ok(heap.list(&[uq_sym, expr]))
+            }
+            Token::UnquoteSplice => {
+                self.pos += 1;
+                let expr = self.parse_expr(heap)?;
+                let uqs_sym = Value::Symbol(heap.intern("unquote-splicing"));
+                Ok(heap.list(&[uqs_sym, expr]))
+            }
             Token::Integer(n) => { self.pos += 1; Ok(Value::Integer(n)) }
             Token::Float(f) => { self.pos += 1; Ok(Value::Float(f)) }
             Token::StringLit(s) => { self.pos += 1; Ok(heap.alloc_string(&s)) }

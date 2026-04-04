@@ -152,6 +152,7 @@ impl Compiler {
                 "handle!" => return self.compile_handle(heap, &elements[1..]),
                 "ffi-open" => return self.compile_ffi_open(heap, &elements[1..]),
                 "ffi-bind" => return self.compile_ffi_bind(heap, &elements[1..]),
+                "quasiquote" => return self.compile_quasiquote(heap, &elements[1..]),
                 _ => {}
             }
         }
@@ -628,5 +629,58 @@ impl Compiler {
         self.compile(heap, args[3], false)?; // return type symbol
         self.emit(OP_FFI_BIND);
         Ok(())
+    }
+
+    /// Compile (quasiquote expr) — template with ,x unquoting.
+    fn compile_quasiquote(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
+        if args.len() != 1 {
+            return Err("quasiquote requires exactly one argument".into());
+        }
+        self.compile_qq(heap, args[0])
+    }
+
+    /// Recursively compile a quasiquoted expression.
+    /// - Atoms/immediates: quote them literally
+    /// - (unquote x): compile x (evaluate it)
+    /// - Cons cells: recursively qq car and cdr, then cons
+    fn compile_qq(&mut self, heap: &mut Heap, expr: Value) -> Result<(), String> {
+        match expr {
+            Value::Object(id) => {
+                match heap.get(id).clone() {
+                    HeapObject::Cons { car, cdr } => {
+                        // Check for (unquote x)
+                        if let Value::Symbol(sym) = car {
+                            let name = heap.symbol_name(sym).to_string();
+                            if name == "unquote" {
+                                let arg = heap.car(cdr);
+                                return self.compile(heap, arg, false);
+                            }
+                            if name == "unquote-splicing" {
+                                return Err("unquote-splicing not yet supported in quasiquote".into());
+                            }
+                        }
+                        // Cons cell: recursively quasiquote car and cdr, then cons
+                        self.compile_qq(heap, car)?;
+                        self.compile_qq(heap, cdr)?;
+                        self.emit(OP_CONS);
+                        Ok(())
+                    }
+                    _ => {
+                        // Non-cons heap object (string, etc.) — quote it
+                        let idx = self.add_constant(expr);
+                        self.emit(OP_QUOTE);
+                        self.emit_u16(idx);
+                        Ok(())
+                    }
+                }
+            }
+            // Immediate values (nil, true, false, int, float, symbol) — quote them
+            _ => {
+                let idx = self.add_constant(expr);
+                self.emit(OP_QUOTE);
+                self.emit_u16(idx);
+                Ok(())
+            }
+        }
     }
 }

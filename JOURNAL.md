@@ -210,3 +210,33 @@ pub trait MoofExtension {
 ```
 
 A plugin calls `vm.register_native(name, closure)` to get back a `Value`, then binds it wherever it wants via `vm.heap.env_define()`. No magic, no special-casing. Same mechanism whether you're implementing integer addition or binding a Rust HTTP client.
+
+---
+
+## §9 — call: invariant, quasiquote, orthogonal persistence
+
+### call: invariant (DESIGN.md §3.1/§4.4)
+
+The design doc's most fundamental invariant: `(f a b c)` is `[f call: a b c]`. Removed Lambda and NativeFunction special cases from OP_APPLY — only Operative keeps its special path (fundamental to vau: operatives receive unevaluated args). Everything else goes through `message_send(callable, sym_call, &evaled)`. A user object with a `call:` handler is now callable with applicative syntax:
+
+```lisp
+(def adder (object Object))
+(handle! adder 'call: (fn (self a b) [a + b]))
+(adder 3 4)        ; => 7 — same as [adder call: 3 4]
+```
+
+OP_TAIL_APPLY keeps the Lambda fast path for performance (avoids frame overhead) but semantically it's the same dispatch.
+
+### Quasiquote
+
+`` `(a ,x c) `` where x=42 → `(a 42 c)`. Lexer adds backtick (`` ` ``), comma (`,`), and comma-at (`,@`) tokens. Parser desugars to `(quasiquote ...)` / `(unquote ...)` / `(unquote-splicing ...)` forms. Compiler recursively walks the AST: atoms are quoted, `(unquote x)` compiles x normally (evaluates it), cons cells recursively quasiquote car and cdr then OP_CONS. Unquote-splicing deferred to a follow-up.
+
+Enables real metaprogramming:
+```lisp
+(def make-def (fn (name val) `(def ,name ,val)))
+(make-def 'y 99)  ; => (def y 99)
+```
+
+### "You never save"
+
+Auto-checkpoint every 5000 heap allocations. The WAL catches every mutation between checkpoints. The image persists continuously — users never need to think about saving. Moves toward the design doc's §6.1 vision of true orthogonal persistence.
