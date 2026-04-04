@@ -24,6 +24,7 @@ fn image_dir() -> PathBuf {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let gui_mode = args.iter().any(|a| a == "--gui");
+    let mcp_mode = args.iter().any(|a| a == "--mcp");
 
     let mut vm;
     let root_env;
@@ -90,6 +91,19 @@ fn main() {
         println!("MOOF — launching System Browser...");
         save_image(&vm);
         gui::browser::run_browser(vm, root_env);
+        return;
+    }
+
+    if mcp_mode {
+        // MCP server mode: run the mcp-serve function over stdio
+        match eval_source(&mut vm, root_env, "(mcp-serve)", "<mcp>") {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("!! MCP server failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+        save_image(&vm);
         return;
     }
 
@@ -220,6 +234,7 @@ fn bootstrap_fresh() -> (VM, u32) {
 }
 
 /// Save the heap as a snapshot image, compacting first to remove garbage.
+/// Also projects source files for git diffing.
 fn save_image(vm: &VM) {
     let image = Image {
         objects: vm.heap.objects().to_vec(),
@@ -231,10 +246,17 @@ fn save_image(vm: &VM) {
     let before = image.objects.len();
     let after = compacted.objects.len();
 
-    match snapshot::save_image(&compacted, &image_dir()) {
+    let dir = image_dir();
+    match snapshot::save_image(&compacted, &dir) {
         Ok(hash) => eprintln!("(image saved: {} objects (compacted from {}), hash {}...)",
             after, before, &hash[..12]),
         Err(e) => eprintln!("!! Image save failed: {}", e),
+    }
+
+    // Project source files for git diffing
+    match persistence::source_project::project_source(&vm.heap, root_env, &dir) {
+        Ok(()) => {}
+        Err(e) => eprintln!("!! Source projection failed: {}", e),
     }
 }
 
@@ -357,7 +379,7 @@ fn load_stdlib(vm: &mut VM, root_env: u32) {
         _ => return,
     };
 
-    let libs = ["collections.moof", "membrane.moof", "json.moof"];
+    let libs = ["collections.moof", "membrane.moof", "json.moof", "mcp.moof"];
     for lib in &libs {
         let path = format!("{}/{}", lib_dir, lib);
         match std::fs::read_to_string(&path) {

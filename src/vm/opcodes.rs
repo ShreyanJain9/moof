@@ -101,6 +101,8 @@ pub const OP_LOAD: u8 = 0x55;
 pub const OP_SOURCE: u8 = 0x56;
 /// Append two lists. Stack: [list-a, list-b] → [append(a, b)]
 pub const OP_APPEND: u8 = 0x57;
+/// Evaluate a moof expression from a string. Stack: [string] → [result]
+pub const OP_EVAL_STRING: u8 = 0x58;
 
 // ── Object construction ──
 /// Create a new GeneralObject. Arg: u8 slot_count.

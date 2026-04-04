@@ -635,6 +635,19 @@ impl VM {
                     self.stack.push(source);
                 }
 
+                OP_EVAL_STRING => {
+                    let str_val = self.stack.pop().ok_or("EVAL_STRING: empty stack")?;
+                    let source = match str_val {
+                        Value::Object(id) => match self.heap.get(id).clone() {
+                            HeapObject::MoofString(s) => s,
+                            _ => return Err("eval-string: expected string".into()),
+                        },
+                        _ => return Err("eval-string: expected string".into()),
+                    };
+                    let result = crate::eval_source(self, env_id, &source, "<eval-string>")?;
+                    self.stack.push(result);
+                }
+
                 OP_APPEND => {
                     let b = self.stack.pop().ok_or("APPEND: empty stack")?;
                     let a = self.stack.pop().ok_or("APPEND: empty stack")?;

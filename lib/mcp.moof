@@ -1,0 +1,92 @@
+; mcp.moof — Model Context Protocol server over stdio
+;
+; Usage: moof --mcp
+; Reads JSON-RPC 2.0 from stdin, dispatches to moof objects, writes responses to stdout.
+
+; ── helpers ────────────────────────────────────────────────
+
+(def mcp-json-rpc-response
+  (fn (id result)
+    (def resp { Assoc })
+    [resp set: "jsonrpc" to: "2.0"]
+    [resp set: "id" to: id]
+    [resp set: "result" to: result]
+    resp))
+
+(def mcp-json-rpc-error
+  (fn (id code message)
+    (def err { Assoc })
+    [err set: "code" to: code]
+    [err set: "message" to: message]
+    (def resp { Assoc })
+    [resp set: "jsonrpc" to: "2.0"]
+    [resp set: "id" to: id]
+    [resp set: "error" to: err]
+    resp))
+
+; ── MCP method handlers ────────────────────────────────────
+
+(def mcp-handle-initialize
+  (fn (id params)
+    (let-seq ((caps { Assoc })
+           (_ [caps set: "tools" to: { Assoc }])
+           (info { Assoc })
+           (_ [info set: "name" to: "moof"])
+           (_ [info set: "version" to: "0.1.0"])
+           (result { Assoc })
+           (_ [result set: "protocolVersion" to: "2024-11-05"])
+           (_ [result set: "capabilities" to: caps])
+           (_ [result set: "serverInfo" to: info]))
+      (mcp-json-rpc-response id result))))
+
+(def mcp-handle-tools-list
+  (fn (id params)
+    (mcp-json-rpc-response id
+      [Assoc from: "tools" nil])))
+
+(def mcp-handle-tools-call
+  (fn (id params)
+    (let-seq ((tool-name (if (null? params) nil [params get: "name"]))
+           (args (if (null? params) nil [params get: "arguments"]))
+           (expr (if (null? args) nil [args get: "expression"])))
+      (if (null? expr)
+        (mcp-json-rpc-error id -32602 "Missing arguments.expression")
+        (let-seq ((result-val (eval-string expr))
+               (result-text (str result-val))
+               (content-item { Assoc })
+               (_ [content-item set: "type" to: "text"])
+               (_ [content-item set: "text" to: result-text])
+               (result { Assoc })
+               (_ [result set: "content" to: (list content-item)])
+               (_ [result set: "isError" to: false]))
+          (mcp-json-rpc-response id result))))))
+
+; ── dispatch ───────────────────────────────────────────────
+
+(def mcp-dispatch
+  (fn (request)
+    (let-seq ((method [request get: "method"])
+           (id [request get: "id"])
+           (params [request get: "params"]))
+      (cond
+        ([method = "initialize"]  (mcp-handle-initialize id params))
+        ([method = "tools/list"]  (mcp-handle-tools-list id params))
+        ([method = "tools/call"]  (mcp-handle-tools-call id params))
+        ([method = "notifications/initialized"] nil)
+        (else (mcp-json-rpc-error id -32601 (str "Method not found: " method)))))))
+
+; ── main loop ──────────────────────────────────────────────
+
+(def mcp-serve
+  (fn ()
+    (def running true)
+    (while running
+      (let ((line (read-line)))
+        (if (null? line)
+          (<- running false)
+          (when [[line length] > 0]
+            (let ((request [JSON parse: line]))
+              (when (not (null? request))
+                (let ((response (mcp-dispatch request)))
+                  (when (not (null? response))
+                    (write-line [JSON serialize: response])))))))))))

@@ -147,6 +147,7 @@ impl Compiler {
                 "set!" => return self.compile_set(heap, &elements[1..]),
                 "while" => return self.compile_while(heap, &elements[1..]),
                 "load" => return self.compile_load(heap, &elements[1..]),
+                "eval-string" => return self.compile_eval_string(heap, &elements[1..]),
                 "source" => return self.compile_source(heap, &elements[1..]),
                 "object" => return self.compile_object(heap, &elements[1..]),
                 "handle!" => return self.compile_handle(heap, &elements[1..]),
@@ -602,6 +603,13 @@ impl Compiler {
         if args.len() != 1 { return Err("load requires exactly one argument (path)".into()); }
         self.compile(heap, args[0], false)?;
         self.emit(OP_LOAD);
+        Ok(())
+    }
+
+    fn compile_eval_string(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
+        if args.len() != 1 { return Err("eval-string requires exactly one argument".into()); }
+        self.compile(heap, args[0], false)?;
+        self.emit(OP_EVAL_STRING);
         Ok(())
     }
 

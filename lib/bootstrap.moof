@@ -78,6 +78,17 @@
 (def operative? (fn (x) (eq (type-of x) 'Operative)))
 (def object?    (fn (x) (eq (type-of x) 'Object)))
 
+; ── sequential let ─────────────────────────────────────────
+; let-seq: like Scheme's let* — bindings are evaluated sequentially,
+; each one visible to the next.
+
+(def let-seq
+  (vau (bindings . body) $e
+    (if (null? bindings)
+      (eval `(do ,@body) $e)
+      (eval `(let (,(car bindings))
+               (let-seq ,(cdr bindings) ,@body)) $e))))
+
 ; ── list operations ─────────────────────────────────────────
 
 (def cadr  (fn (x) (car (cdr x))))
@@ -235,6 +246,8 @@
   describe: () "nil"
   isNil: () true
 })
+
+(defmethod Nil join: (sep) "")
 
 (def Symbol { Object
   describe: () [self toString]

@@ -12,3 +12,4 @@
 
 pub mod snapshot;
 pub mod wal;
+pub mod source_project;
