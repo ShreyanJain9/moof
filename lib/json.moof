@@ -1,0 +1,205 @@
+; json.moof — JSON parser and serializer in pure MOOF
+;
+; JSON objects  → assoc lists (from collections.moof)
+; JSON arrays   → cons lists
+; JSON strings  → moof strings
+; JSON numbers  → moof integers or floats
+; JSON booleans → moof true/false
+; JSON null     → moof nil
+;
+; IMPORTANT: use [a = b] for string comparison, not (eq a b).
+; eq is identity (heap pointer), = is content equality.
+
+; ── serializer ──────────────────────────────────────────────
+
+(def json-serialize
+  (fn (val)
+    (cond
+      ((null? val) "null")
+      ((eq val true) "true")
+      ((eq val false) "false")
+      ((integer? val) [val toString])
+      ((eq (type-of val) 'Float) [val toString])
+      ((string? val) (json-serialize-string val))
+      ((pair? val)
+        (if (and (pair? (car val))
+                 (or (symbol? (car (car val)))
+                     (string? (car (car val)))))
+          (json-serialize-object val)
+          (json-serialize-array val)))
+      (else (str "\"" [val toString] "\"")))))
+
+(def json-serialize-string
+  (fn (s)
+    (def escape
+      (fn (s)
+        (let ((s [s replace: "\\" with: "\\\\"]))
+          (let ((s [s replace: "\"" with: "\\\""]))
+            (let ((s [s replace: "\n" with: "\\n"]))
+              (let ((s [s replace: "\t" with: "\\t"]))
+                s))))))
+    (str "\"" (escape s) "\"")))
+
+(def json-serialize-array
+  (fn (lst)
+    (str "[" (join "," (map json-serialize lst)) "]")))
+
+(def json-serialize-object
+  (fn (alist)
+    (def serialize-pair
+      (fn (pair)
+        (let ((key (car pair))
+              (val (cdr pair)))
+          (let ((key-str (if (string? key) key
+                           (if (symbol? key) [key name] [key toString]))))
+            (str (json-serialize-string key-str) ":" (json-serialize val))))))
+    (str "{" (join "," (map serialize-pair alist)) "}")))
+
+; ── parser helpers ──────────────────────────────────────────
+
+(def json-is-digit
+  (fn (ch)
+    (and [[ch length] > 0]
+         (any? (fn (d) [ch = d])
+           (list "0" "1" "2" "3" "4" "5" "6" "7" "8" "9")))))
+
+(def json-skip-ws
+  (fn (s)
+    (if [[s length] = 0] s
+      (let ((ch [s at: 0]))
+        (if (or [ch = " "] (or [ch = "\n"] (or [ch = "\t"] [ch = "\r"])))
+          (json-skip-ws [s substring: 1 to: [s length]])
+          s)))))
+
+; ── parser ──────────────────────────────────────────────────
+
+(def json-parse
+  (fn (s)
+    (let ((result (json-parse-value (json-skip-ws s))))
+      (if (null? result) nil
+        (car result)))))
+
+(def json-parse-value
+  (fn (s)
+    (if [[s length] = 0] nil
+      (let ((ch [s at: 0]))
+        (cond
+          ([ch = "\""] (json-parse-string s))
+          ([ch = "{"] (json-parse-object s))
+          ([ch = "["] (json-parse-array s))
+          ([ch = "t"] (json-parse-literal s "true" true))
+          ([ch = "f"] (json-parse-literal s "false" false))
+          ([ch = "n"] (json-parse-literal s "null" nil))
+          ((or [ch = "-"] (json-is-digit ch))
+            (json-parse-number s))
+          (else nil))))))
+
+(def json-parse-literal
+  (fn (s literal value)
+    (let ((len [literal length]))
+      (if [[s length] >= len]
+        (if [[s substring: 0 to: len] = literal]
+          (cons value [s substring: len to: [s length]])
+          nil)
+        nil))))
+
+(def json-parse-string
+  (fn (s)
+    (def parse-chars
+      (fn (s acc)
+        (if [[s length] = 0] nil
+          (let ((ch [s at: 0])
+                (rest [s substring: 1 to: [s length]]))
+            (cond
+              ([ch = "\""]
+                (cons acc rest))
+              ([ch = "\\"]
+                (if [[rest length] = 0] nil
+                  (let ((esc [rest at: 0])
+                        (rest2 [rest substring: 1 to: [rest length]]))
+                    (cond
+                      ([esc = "\""] (parse-chars rest2 [acc ++ "\""]))
+                      ([esc = "\\"] (parse-chars rest2 [acc ++ "\\"]))
+                      ([esc = "n"] (parse-chars rest2 [acc ++ "\n"]))
+                      ([esc = "t"] (parse-chars rest2 [acc ++ "\t"]))
+                      ([esc = "/"] (parse-chars rest2 [acc ++ "/"]))
+                      (else (parse-chars rest2 [acc ++ esc]))))))
+              (else (parse-chars rest [acc ++ ch])))))))
+    (if [[s length] = 0] nil
+      (if [[s at: 0] = "\""]
+        (parse-chars [s substring: 1 to: [s length]] "")
+        nil))))
+
+(def json-parse-number
+  (fn (s)
+    (def read-digits
+      (fn (s acc)
+        (if [[s length] = 0] (cons acc s)
+          (if (json-is-digit [s at: 0])
+            (read-digits [s substring: 1 to: [s length]] [acc ++ [s at: 0]])
+            (cons acc s)))))
+    (let ((neg [[s at: 0] = "-"])
+          (start (if [[s at: 0] = "-"] [s substring: 1 to: [s length]] s)))
+      (let ((result (read-digits start "")))
+        (if (null? result) nil
+          (let ((digits (car result))
+                (rest (cdr result)))
+            (if (and [[rest length] > 0] [[rest at: 0] = "."])
+              (let ((frac-result (read-digits [rest substring: 1 to: [rest length]] "")))
+                (let ((full-str (str (if neg "-" "") digits "." (car frac-result))))
+                  (cons [full-str toInteger] (cdr frac-result))))
+              (let ((full-str (str (if neg "-" "") digits)))
+                (cons [full-str toInteger] rest)))))))))
+
+(def json-parse-array
+  (fn (s)
+    (let ((s (json-skip-ws [s substring: 1 to: [s length]])))
+      (if [[s at: 0] = "]"]
+        (cons nil [s substring: 1 to: [s length]])
+        (json-parse-array-elements s nil)))))
+
+(def json-parse-array-elements
+  (fn (s acc)
+    (let ((result (json-parse-value (json-skip-ws s))))
+      (if (null? result) nil
+        (let ((val (car result))
+              (rest (json-skip-ws (cdr result))))
+          (let ((new-acc (append acc (list val))))
+            (if [[rest length] = 0] nil
+              (cond
+                ([[rest at: 0] = ","]
+                  (json-parse-array-elements
+                    [rest substring: 1 to: [rest length]] new-acc))
+                ([[rest at: 0] = "]"]
+                  (cons new-acc [rest substring: 1 to: [rest length]]))
+                (else nil)))))))))
+
+(def json-parse-object
+  (fn (s)
+    (let ((s (json-skip-ws [s substring: 1 to: [s length]])))
+      (if [[s at: 0] = "}"]
+        (cons (assoc-new) [s substring: 1 to: [s length]])
+        (json-parse-object-pairs s (assoc-new))))))
+
+(def json-parse-object-pairs
+  (fn (s acc)
+    (let ((key-result (json-parse-string (json-skip-ws s))))
+      (if (null? key-result) nil
+        (let ((key (car key-result))
+              (rest (json-skip-ws (cdr key-result))))
+          (if (and [[rest length] > 0] [[rest at: 0] = ":"])
+            (let ((val-result (json-parse-value
+                    (json-skip-ws [rest substring: 1 to: [rest length]]))))
+              (if (null? val-result) nil
+                (let ((val (car val-result))
+                      (rest2 (json-skip-ws (cdr val-result))))
+                  (let ((new-acc (assoc-set acc key val)))
+                  (if [[rest2 length] = 0] nil
+                    (cond
+                      ([[rest2 at: 0] = ","]
+                        (json-parse-object-pairs
+                          [rest2 substring: 1 to: [rest2 length]] new-acc))
+                      ([[rest2 at: 0] = "}"]
+                        (cons new-acc [rest2 substring: 1 to: [rest2 length]]))
+                      (else nil)))))))
+            nil))))))

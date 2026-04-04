@@ -20,6 +20,7 @@ pub fn register_all_natives(vm: &mut VM, root_env: u32) {
     register_lambda_natives(vm, root_env);
     register_operative_natives(vm, root_env);
     register_environment_natives(vm, root_env);
+    register_io_natives(vm, root_env);
 }
 
 /// Helper: look up a prototype by name in the env, set the VM field, return the proto id.
@@ -315,8 +316,22 @@ fn register_string_natives(vm: &mut VM, root_env: u32) {
     };
 
     add_native(vm, proto_id, "toString", "String.toString", Box::new(|_heap, args| {
-        // String toString returns itself
         Ok(args[0])
+    }));
+
+    // Content equality for strings (eq is identity, = is content)
+    add_native(vm, proto_id, "=", "String.=", Box::new(|heap, args| {
+        let id = args[0].as_object().ok_or("= expects string")?;
+        let s = match heap.get(id) {
+            HeapObject::MoofString(s) => s.clone(),
+            _ => return Err("= expects string".into()),
+        };
+        if let Some(Value::Object(other_id)) = args.get(1) {
+            if let HeapObject::MoofString(other) = heap.get(*other_id) {
+                return Ok(if s == *other { Value::True } else { Value::False });
+            }
+        }
+        Ok(Value::False)
     }));
 
     add_native(vm, proto_id, "describe", "String.describe", Box::new(|_heap, args| {
@@ -807,4 +822,75 @@ fn register_environment_natives(vm: &mut VM, root_env: u32) {
     add_native(vm, proto_id, "describe", "Environment.describe", Box::new(|heap, _args| {
         Ok(heap.alloc_string("<environment>"))
     }));
+}
+
+// ── I/O ──
+// Minimal stdio natives for MCP and general I/O.
+
+fn register_io_natives(vm: &mut VM, root_env: u32) {
+    use std::io::{self, BufRead, Write as IoWrite};
+
+    // read-line: reads a line from stdin, returns string or nil on EOF
+    let val = vm.register_native("io:read-line", Box::new(|heap, _args| {
+        let stdin = io::stdin();
+        let mut line = String::new();
+        match stdin.lock().read_line(&mut line) {
+            Ok(0) => Ok(Value::Nil), // EOF
+            Ok(_) => {
+                // Trim trailing newline
+                if line.ends_with('\n') { line.pop(); }
+                if line.ends_with('\r') { line.pop(); }
+                Ok(heap.alloc_string(&line))
+            }
+            Err(e) => Err(format!("read-line: {}", e)),
+        }
+    }));
+    let sym = vm.heap.intern("read-line");
+    vm.heap.env_define(root_env, sym, val);
+
+    // write: writes a string to stdout (no newline)
+    let val = vm.register_native("io:write", Box::new(|heap, args| {
+        let s = match args.first() {
+            Some(Value::Object(id)) => match heap.get(*id) {
+                HeapObject::MoofString(s) => s.clone(),
+                _ => return Err("write: expected string".into()),
+            },
+            _ => return Err("write: expected string".into()),
+        };
+        print!("{}", s);
+        io::stdout().flush().ok();
+        Ok(Value::Nil)
+    }));
+    let sym = vm.heap.intern("write");
+    vm.heap.env_define(root_env, sym, val);
+
+    // write-line: writes a string to stdout with newline
+    let val = vm.register_native("io:write-line", Box::new(|heap, args| {
+        let s = match args.first() {
+            Some(Value::Object(id)) => match heap.get(*id) {
+                HeapObject::MoofString(s) => s.clone(),
+                _ => return Err("write-line: expected string".into()),
+            },
+            _ => return Err("write-line: expected string".into()),
+        };
+        println!("{}", s);
+        Ok(Value::Nil)
+    }));
+    let sym = vm.heap.intern("write-line");
+    vm.heap.env_define(root_env, sym, val);
+
+    // write-err: writes to stderr (for logging without polluting stdout)
+    let val = vm.register_native("io:write-err", Box::new(|heap, args| {
+        let s = match args.first() {
+            Some(Value::Object(id)) => match heap.get(*id) {
+                HeapObject::MoofString(s) => s.clone(),
+                _ => return Err("write-err: expected string".into()),
+            },
+            _ => return Err("write-err: expected string".into()),
+        };
+        eprintln!("{}", s);
+        Ok(Value::Nil)
+    }));
+    let sym = vm.heap.intern("write-err");
+    vm.heap.env_define(root_env, sym, val);
 }

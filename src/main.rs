@@ -203,6 +203,7 @@ fn bootstrap_fresh() -> (VM, u32) {
 
     vm.root_env = Some(root_env);
     register_type_prototypes(&mut vm, root_env);
+    load_stdlib(&mut vm, root_env);
 
     (vm, root_env)
 }
@@ -329,10 +330,35 @@ impl VM {
 }
 
 /// Look up type prototypes from bootstrap and register all native handlers.
-/// All native operations are NativeFunction closures in the NativeRegistry.
-/// One path. One mechanism.
+/// Then load standard library files.
 fn register_type_prototypes(vm: &mut VM, env_id: u32) {
     vm::natives::register_all_natives(vm, env_id);
+}
+
+/// Load standard library .moof files (after natives are registered).
+fn load_stdlib(vm: &mut VM, root_env: u32) {
+    let lib_sym = vm.heap.intern("*lib-path*");
+    let lib_dir = match vm.env_lookup_helper(root_env, lib_sym) {
+        Ok(Value::Object(id)) => match vm.heap.get(id) {
+            HeapObject::MoofString(s) => s.clone(),
+            _ => return,
+        },
+        _ => return,
+    };
+
+    let libs = ["collections.moof", "membrane.moof", "json.moof"];
+    for lib in &libs {
+        let path = format!("{}/{}", lib_dir, lib);
+        match std::fs::read_to_string(&path) {
+            Ok(source) => {
+                match eval_source(vm, root_env, &source, &path) {
+                    Ok(_) => {}
+                    Err(e) => eprintln!("!! Loading {}: {}", lib, e),
+                }
+            }
+            Err(_) => {} // library not found — skip silently
+        }
+    }
 }
 
 impl VM {

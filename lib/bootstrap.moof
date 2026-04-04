@@ -285,6 +285,14 @@
             (field (eval (car (cdr (cdr target))) $e)))
         [obj slotAt: field put: val]))))
 
+; ── standard library loading ────────────────────────────────
+
+; load additional libraries after bootstrap is complete.
+; these files live alongside bootstrap.moof in the lib/ directory.
+; they're loaded at the end so they can use everything defined above.
+
+; (loaded after type prototypes are registered by the VM)
+
 ; ── self-modification tools ─────────────────────────────────
 
 (def define-handler

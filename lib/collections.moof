@@ -1,0 +1,138 @@
+; collections.moof — data structures beyond cons lists
+;
+; association lists: ordered key-value pairs built on cons.
+; the foundation for JSON objects, configs, lightweight maps.
+
+; ── association lists ───────────────────────────────────────
+;
+; an assoc is a list of (key . value) pairs:
+;   ((name . "alice") (age . 30) (active . true))
+;
+; keys are compared with eq (symbols, integers, booleans).
+
+(def assoc-new (fn () nil))
+
+; assoc-equal? — comparison for assoc keys. uses = for strings, eq for everything else.
+(def assoc-equal?
+  (fn (a b)
+    (if (and (string? a) (string? b))
+      [a = b]
+      (eq a b))))
+
+(def assoc-get
+  (fn (alist key)
+    (if (null? alist) nil
+      (if (assoc-equal? (car (car alist)) key)
+        (cdr (car alist))
+        (assoc-get (cdr alist) key)))))
+
+(def assoc-set
+  (fn (alist key val)
+    (if (null? alist)
+      (list (cons key val))
+      (if (assoc-equal? (car (car alist)) key)
+        (cons (cons key val) (cdr alist))
+        (cons (car alist) (assoc-set (cdr alist) key val))))))
+
+(def assoc-has?
+  (fn (alist key)
+    (if (null? alist) false
+      (if (assoc-equal? (car (car alist)) key) true
+        (assoc-has? (cdr alist) key)))))
+
+(def assoc-remove
+  (fn (alist key)
+    (if (null? alist) nil
+      (if (assoc-equal? (car (car alist)) key)
+        (cdr alist)
+        (cons (car alist) (assoc-remove (cdr alist) key))))))
+
+(def assoc-keys
+  (fn (alist)
+    (map (fn (pair) (car pair)) alist)))
+
+(def assoc-values
+  (fn (alist)
+    (map (fn (pair) (cdr pair)) alist)))
+
+(def assoc-pairs
+  (fn (alist) alist))
+
+(def assoc-merge
+  (fn (a b)
+    (if (null? b) a
+      (let ((pair (car b)))
+        (assoc-merge (assoc-set a (car pair) (cdr pair)) (cdr b))))))
+
+(def assoc-map-values
+  (fn (f alist)
+    (map (fn (pair) (cons (car pair) (f (cdr pair)))) alist)))
+
+; convenience: build an assoc from alternating keys and values
+; (assoc 'name "alice" 'age 30)
+(def assoc
+  (fn args
+    (def build
+      (fn (lst acc)
+        (if (null? lst) acc
+          (if (null? (cdr lst)) acc
+            (build (cdr (cdr lst))
+              (assoc-set acc (car lst) (car (cdr lst))))))))
+    (build args (assoc-new))))
+
+; ── flat-map / concat-map ───────────────────────────────────
+
+(def flat-map
+  (fn (f lst)
+    (if (null? lst) nil
+      (append (f (car lst)) (flat-map f (cdr lst))))))
+
+(def flatten
+  (fn (lst)
+    (flat-map identity lst)))
+
+; ── find / any / every ──────────────────────────────────────
+
+(def find
+  (fn (pred lst)
+    (if (null? lst) nil
+      (if (pred (car lst)) (car lst)
+        (find pred (cdr lst))))))
+
+(def any?
+  (fn (pred lst)
+    (if (null? lst) false
+      (if (pred (car lst)) true
+        (any? pred (cdr lst))))))
+
+(def every?
+  (fn (pred lst)
+    (if (null? lst) true
+      (if (pred (car lst))
+        (every? pred (cdr lst))
+        false))))
+
+; ── sort (insertion sort — fine for small lists) ────────────
+
+(def sort-by
+  (fn (cmp lst)
+    (def insert
+      (fn (x sorted)
+        (if (null? sorted) (list x)
+          (if (cmp x (car sorted))
+            (cons x sorted)
+            (cons (car sorted) (insert x (cdr sorted)))))))
+    (fold insert nil lst)))
+
+(def sort
+  (fn (lst)
+    (sort-by (fn (a b) [a < b]) lst)))
+
+; ── string join ─────────────────────────────────────────────
+
+(def join
+  (fn (sep lst)
+    (if (null? lst) ""
+      (if (null? (cdr lst))
+        [(car lst) toString]
+        [(str (car lst) sep) ++ (join sep (cdr lst))]))))

@@ -1,0 +1,68 @@
+; membrane.moof — capability security primitives
+;
+; Membrane: wraps an object, intercepts every message via doesNotUnderstand:
+; Facet: restricts which selectors pass through
+;
+; these are the design doc's §5.3 and §5.4, implemented in pure moof.
+
+; ── Membrane ────────────────────────────────────────────────
+;
+; a Membrane wraps a target object and intercepts every message.
+; the on-send handler receives (selector, args) and returns either:
+;   - the result (replaces the real send)
+;   - 'proceed (lets the send go through to the target)
+;   - 'deny (blocks the send, returns nil)
+
+(def make-membrane
+  (fn (target on-send)
+    (def wrapper (object Object))
+    (handle! wrapper 'doesNotUnderstand:
+      (fn (self selector args)
+        (let ((decision (on-send selector args)))
+          (cond
+            ((eq decision 'proceed)
+              (apply (fn rest [target doesNotUnderstand: selector rest]) args))
+            ((eq decision 'deny) nil)
+            (else decision)))))
+    ; copy the target's describe for transparency
+    (handle! wrapper 'describe
+      (fn (self) (str "<membrane around " [target describe] ">")))
+    (handle! wrapper 'unwrap (fn (self) target))
+    wrapper))
+
+; ── simple pass-through membrane (for logging, auditing) ───
+
+(def make-logging-membrane
+  (fn (target log)
+    (make-membrane target
+      (fn (selector args)
+        (<- log (append log (list (assoc 'selector selector 'args args))))
+        'proceed))))
+
+; ── Facet ───────────────────────────────────────────────────
+;
+; a Facet exposes only a whitelist of selectors.
+; everything else is denied silently.
+
+(def make-facet
+  (fn (target allowed-selectors)
+    (def wrapper (object Object))
+    (handle! wrapper 'doesNotUnderstand:
+      (fn (self selector args)
+        (if (any? (fn (s) (eq s selector)) allowed-selectors)
+          ; allowed — forward to target
+          (eval (cons 'send (cons target (cons selector args))))
+          ; denied
+          nil)))
+    (handle! wrapper 'describe
+      (fn (self) (str "<facet of " [target describe] " allowing " allowed-selectors ">")))
+    (handle! wrapper 'allowedSelectors (fn (self) allowed-selectors))
+    (handle! wrapper 'unwrap (fn (self) target))
+    wrapper))
+
+; ── convenience: membrane + facet composition ───────────────
+
+(def make-safe-view
+  (fn (target allowed-selectors on-send)
+    (def faceted (make-facet target allowed-selectors))
+    (make-membrane faceted on-send)))
