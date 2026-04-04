@@ -642,7 +642,8 @@ impl Compiler {
     /// Recursively compile a quasiquoted expression.
     /// - Atoms/immediates: quote them literally
     /// - (unquote x): compile x (evaluate it)
-    /// - Cons cells: recursively qq car and cdr, then cons
+    /// - (unquote-splicing x): compile x, splice into list with OP_APPEND
+    /// - Cons cells: check for splicing, else recursively qq + cons
     fn compile_qq(&mut self, heap: &mut Heap, expr: Value) -> Result<(), String> {
         match expr {
             Value::Object(id) => {
@@ -656,14 +657,38 @@ impl Compiler {
                                 return self.compile(heap, arg, false);
                             }
                             if name == "unquote-splicing" {
-                                return Err("unquote-splicing not yet supported in quasiquote".into());
+                                return Err("unquote-splicing at top level (not inside a list)".into());
                             }
                         }
-                        // Cons cell: recursively quasiquote car and cdr, then cons
-                        self.compile_qq(heap, car)?;
-                        self.compile_qq(heap, cdr)?;
-                        self.emit(OP_CONS);
-                        Ok(())
+                        // Check if any element of this list uses splicing
+                        let elements = heap.list_to_vec(expr);
+                        let has_splice = elements.iter().any(|&e| self.is_splice(heap, e));
+
+                        if has_splice {
+                            // Build with segments + OP_APPEND
+                            self.emit(OP_NIL); // start with empty list
+                            for &elem in &elements {
+                                if self.is_splice(heap, elem) {
+                                    // ,@x → compile x, append to accumulator
+                                    let arg = self.get_splice_arg(heap, elem);
+                                    self.compile(heap, arg, false)?;
+                                    self.emit(OP_APPEND);
+                                } else {
+                                    // regular element → qq it, wrap in 1-element list, append
+                                    self.compile_qq(heap, elem)?;
+                                    self.emit(OP_NIL);
+                                    self.emit(OP_CONS); // (elem)
+                                    self.emit(OP_APPEND);
+                                }
+                            }
+                            Ok(())
+                        } else {
+                            // No splicing — simple cons-based build
+                            self.compile_qq(heap, car)?;
+                            self.compile_qq(heap, cdr)?;
+                            self.emit(OP_CONS);
+                            Ok(())
+                        }
                     }
                     _ => {
                         // Non-cons heap object (string, etc.) — quote it
@@ -682,5 +707,20 @@ impl Compiler {
                 Ok(())
             }
         }
+    }
+
+    fn is_splice(&self, heap: &Heap, val: Value) -> bool {
+        if let Value::Object(id) = val {
+            if let HeapObject::Cons { car, .. } = heap.get(id) {
+                if let Value::Symbol(sym) = car {
+                    return heap.symbol_name(*sym) == "unquote-splicing";
+                }
+            }
+        }
+        false
+    }
+
+    fn get_splice_arg(&self, heap: &Heap, val: Value) -> Value {
+        heap.car(heap.cdr(val))
     }
 }

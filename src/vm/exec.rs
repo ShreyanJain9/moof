@@ -635,6 +635,18 @@ impl VM {
                     self.stack.push(source);
                 }
 
+                OP_APPEND => {
+                    let b = self.stack.pop().ok_or("APPEND: empty stack")?;
+                    let a = self.stack.pop().ok_or("APPEND: empty stack")?;
+                    // append(a, b): walk a, cons each element onto b
+                    let a_elems = self.heap.list_to_vec(a);
+                    let mut result = b;
+                    for &elem in a_elems.iter().rev() {
+                        result = self.heap.cons(elem, result);
+                    }
+                    self.stack.push(result);
+                }
+
                 OP_FFI_OPEN => {
                     let name_val = self.stack.pop().ok_or("FFI_OPEN: empty stack")?;
                     let name = match name_val {

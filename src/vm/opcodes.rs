@@ -99,6 +99,8 @@ pub const OP_TYPE_OF: u8 = 0x54;
 pub const OP_LOAD: u8 = 0x55;
 /// Get the source AST of a lambda/operative. Stack: [callable] → [ast_or_nil]
 pub const OP_SOURCE: u8 = 0x56;
+/// Append two lists. Stack: [list-a, list-b] → [append(a, b)]
+pub const OP_APPEND: u8 = 0x57;
 
 // ── Object construction ──
 /// Create a new GeneralObject. Arg: u8 slot_count.

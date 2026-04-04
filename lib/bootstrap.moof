@@ -6,7 +6,7 @@
 ; fn: short lambda — a vau that builds and evals a lambda form
 (def fn
   (vau (params . body) $e
-    (eval (cons 'lambda (cons params body)) $e)))
+    (eval `(lambda ,params ,@body) $e)))
 
 ; wrap: takes an operative, returns one that evaluates its args
 (def wrap
@@ -15,12 +15,6 @@
       (eval (cons (eval operative $e) args)))))
 
 ; ── control flow ────────────────────────────────────────────
-
-(def my-if
-  (vau (condition then-branch else-branch) $e
-    (if (eval condition $e)
-      (eval then-branch $e)
-      (eval else-branch $e))))
 
 (def cond
   (vau clauses $e
@@ -41,14 +35,14 @@
 (def when
   (vau (condition . body) $e
     (if (eval condition $e)
-      (eval (cons 'do body) $e)
+      (eval `(do ,@body) $e)
       nil)))
 
 (def unless
   (vau (condition . body) $e
     (if (eval condition $e)
       nil
-      (eval (cons 'do body) $e))))
+      (eval `(do ,@body) $e))))
 
 (def do
   (vau body $e
@@ -166,7 +160,6 @@
 
 ; ── string helpers ──────────────────────────────────────────
 
-; str: concatenate any number of values into a string
 (def str
   (fn args
     (fold (fn (acc x) [acc ++ [x toString]]) "" args)))
@@ -181,10 +174,11 @@
 (def Object (object nil))
 
 ; defmethod: easy method definition with implicit self
+; uses quasiquote to build the handler form cleanly
 (def defmethod
   (vau (obj name params . body) $e
-    (eval (list 'handle! obj (list 'quote name)
-      (cons 'lambda (cons (cons 'self params) body))) $e)))
+    (eval `(handle! ,obj ',name
+      (lambda ,(cons 'self params) ,@body)) $e)))
 
 (defmethod Object describe () "<object>")
 (defmethod Object clone () (object self))
@@ -216,11 +210,6 @@
     (if (null? handler) nil (source handler))))
 
 ; ── type prototypes ─────────────────────────────────────────
-;
-; Every primitive type gets a real prototype object. Non-arithmetic
-; handlers are fn lambdas defined here. Arithmetic is registered as
-; NativeHandler entries by the VM after bootstrap (for fast path),
-; but they show up in introspection.
 
 (def Integer { Object
   describe: () [self toString]
@@ -263,35 +252,20 @@
   operative?: () true
 })
 
-
 (def Environment { Object
   describe: () "<environment>"
 })
 
 ; ── mutation ─────────────────────────────────────────────────
 
-; <-: unified mutation operator (vau — inspects the target form)
-;   (<- x 42)      rebind x in enclosing scope
-;   (<- obj.x 42)  set slot on object
-;   (<- @x 42)     set own slot in method
 (def <-
   (vau (target value) $e
     (def val (eval value $e))
     (if (symbol? target)
-      ; simple variable — walk the env chain
       [$e set: target to: val]
-      ; must be a %dot form — slot mutation
       (let ((obj (eval (car (cdr target)) $e))
             (field (eval (car (cdr (cdr target))) $e)))
         [obj slotAt: field put: val]))))
-
-; ── standard library loading ────────────────────────────────
-
-; load additional libraries after bootstrap is complete.
-; these files live alongside bootstrap.moof in the lib/ directory.
-; they're loaded at the end so they can use everything defined above.
-
-; (loaded after type prototypes are registered by the VM)
 
 ; ── self-modification tools ─────────────────────────────────
 
@@ -302,7 +276,7 @@
 (def redefine
   (vau (name value) $e
     (def result (eval value $e))
-    (eval (list 'def name (list 'quote result)) $e)
+    (eval `(def ,name ',result) $e)
     result))
 
 (def inspect
