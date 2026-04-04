@@ -99,13 +99,6 @@ pub enum HeapObject {
     /// A first-class environment (§7.3)
     Environment(super::env::Environment),
 
-    /// A block: { :x [x * 2] } — anonymous closure with call: handler
-    Block {
-        params: Value,
-        body: u32,
-        def_env: u32,
-        source: Value,
-    },
 }
 
 /// A compiled bytecode chunk.

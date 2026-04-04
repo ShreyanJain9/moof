@@ -180,12 +180,99 @@
       (cons 'lambda (cons (cons 'self params) body))) $e)))
 
 (defmethod Object describe () "<object>")
-(defmethod Object interface () [self handlerNames])
 (defmethod Object clone () (object self))
+
+; interface: collect handler names from the whole delegation chain (deduplicated)
+(defmethod Object interface ()
+  (def member?
+    (fn (x lst)
+      (if (null? lst) false
+        (if (eq x (car lst)) true
+          (member? x (cdr lst))))))
+  (def merge
+    (fn (new acc)
+      (if (null? new) acc
+        (if (member? (car new) acc)
+          (merge (cdr new) acc)
+          (merge (cdr new) (append acc (list (car new))))))))
+  (def collect
+    (fn (obj acc)
+      (let ((names [obj handlerNames])
+            (p [obj parent]))
+        (let ((merged (merge names acc)))
+          (if (null? p) merged
+            (collect p merged))))))
+  (collect self nil))
 
 (defmethod Object sourceOf: (selector)
   (let ((handler [self handlerAt: selector]))
     (if (null? handler) nil (source handler))))
+
+; ── type prototypes ─────────────────────────────────────────
+;
+; Every primitive type gets a real prototype object. Non-arithmetic
+; handlers are fn lambdas defined here. Arithmetic is registered as
+; NativeHandler entries by the VM after bootstrap (for fast path),
+; but they show up in introspection.
+
+(def Integer { Object
+  describe: () [self toString]
+})
+
+(def Boolean { Object
+  describe: () (if self "true" "false")
+})
+
+(def String { Object
+  describe: () self
+})
+
+(def Cons { Object
+  describe: () [self toString]
+})
+
+(def Nil { Object
+  describe: () "nil"
+  isNil: () true
+})
+
+(def Symbol { Object
+  describe: () [self toString]
+})
+
+(def Lambda { Object
+  describe: () "<lambda>"
+  applicative?: () true
+  operative?: () false
+})
+
+(def Operative { Object
+  describe: () "<operative>"
+  applicative?: () false
+  operative?: () true
+})
+
+
+(def Environment { Object
+  describe: () "<environment>"
+})
+
+; ── mutation ─────────────────────────────────────────────────
+
+; <-: unified mutation operator (vau — inspects the target form)
+;   (<- x 42)      rebind x in enclosing scope
+;   (<- obj.x 42)  set slot on object
+;   (<- @x 42)     set own slot in method
+(def <-
+  (vau (target value) $e
+    (def val (eval value $e))
+    (if (symbol? target)
+      ; simple variable — walk the env chain
+      [$e set: target to: val]
+      ; must be a %dot form — slot mutation
+      (let ((obj (eval (car (cdr target)) $e))
+            (field (eval (car (cdr (cdr target))) $e)))
+        [obj slotAt: field put: val]))))
 
 ; ── self-modification tools ─────────────────────────────────
 

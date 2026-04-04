@@ -136,9 +136,7 @@ DESIGN.md              Full design & philosophy document
 See `JOURNAL.md` for implementation history. Upcoming:
 
 - **Persistence** — WAL + content-addressed image snapshots
-- **Tail call optimization** — deep recursion without blowing the stack
-- **set! that walks the env chain** — proper mutation semantics
-- **String operations** — `++`, `substring:`, format, symbol conversion
+- **String operations** — `substring:`, format, symbol conversion
 - **TUI inspector** — browse the live object graph
 - **FFI** — call into native libraries via libffi
 - **MCP server** — expose the objectspace as AI-native tools

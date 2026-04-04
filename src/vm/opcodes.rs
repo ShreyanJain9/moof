@@ -79,6 +79,12 @@ pub const OP_CALL_OPERATIVE: u8 = 0x40;
 /// Stack: [callable, quoted_args_list] → [result]
 pub const OP_APPLY: u8 = 0x41;
 
+/// Tail-call variant of OP_APPLY. Replaces current frame instead of pushing new one.
+pub const OP_TAIL_APPLY: u8 = 0x42;
+
+/// Tail-call variant of OP_CALL. Replaces current frame for known-lambda calls.
+pub const OP_TAIL_CALL: u8 = 0x35;
+
 // ── Built-in operations ──
 /// Evaluate an expression in the current environment.
 pub const OP_EVAL: u8 = 0x50;
@@ -110,6 +116,11 @@ pub const OP_SLOT_GET: u8 = 0x62;
 /// Direct slot mutation on an object.
 /// Stack: [object, symbol, value] → [value]
 pub const OP_SLOT_SET: u8 = 0x63;
+
+/// Primitive-only send — bypasses handler lookup, goes directly to fast path.
+/// Used by native handler lambdas to avoid infinite recursion.
+/// Same encoding as OP_SEND: u16 selector constant, u8 argc.
+pub const OP_PRIM_SEND: u8 = 0x64;
 
 /// Read a u16 from bytecode at the given offset (big-endian).
 pub fn read_u16(code: &[u8], offset: usize) -> u16 {

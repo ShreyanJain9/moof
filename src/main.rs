@@ -47,6 +47,9 @@ fn main() {
     // Store the root env id so the VM can access it for load
     vm.root_env = Some(root_env);
 
+    // Register type prototypes (defined in bootstrap.moof)
+    register_type_prototypes(&mut vm, root_env);
+
     println!("MOOF — Moof Open Objectspace Fabric");
     println!("clarus the dogcow lives again");
     println!("Type expressions to evaluate. Ctrl-D to exit.\n");
@@ -206,5 +209,70 @@ impl VM {
             HeapObject::Environment(env) => { env.define(sym, val); }
             _ => panic!("Not an environment"),
         }
+    }
+}
+
+/// Look up type prototypes from bootstrap and register native handlers.
+fn register_type_prototypes(vm: &mut VM, env_id: u32) {
+    // (name, setter, native_handlers as (selector, argc_excluding_self))
+    let protos: &[(&str, fn(&mut VM) -> &mut Option<u32>, &[(&str, u8)])] = &[
+        ("Integer", |vm| &mut vm.proto_integer, &[
+            ("+",1), ("-",1), ("*",1), ("/",1), ("%",1),
+            ("<",1), (">",1), ("=",1), ("<=",1), (">=",1),
+            ("negate",0), ("abs",0), ("toString",0),
+        ]),
+        ("Boolean", |vm| &mut vm.proto_boolean, &[
+            ("not",0), ("and:",1), ("or:",1),
+            ("ifTrue:",1), ("ifTrue:ifFalse:",2), ("ifFalse:",1),
+            ("toString",0),
+        ]),
+        ("String", |vm| &mut vm.proto_string, &[
+            ("length",0), ("++",1), ("toString",0),
+        ]),
+        ("Cons", |vm| &mut vm.proto_cons, &[
+            ("car",0), ("cdr",0), ("toString",0),
+        ]),
+        ("Nil", |vm| &mut vm.proto_nil, &[
+            ("isNil",0), ("toString",0),
+        ]),
+        ("Symbol", |vm| &mut vm.proto_symbol, &[("toString",0)]),
+        ("Lambda", |vm| &mut vm.proto_lambda, &[
+            ("source",0), ("params",0), ("arity",0), ("toString",0),
+        ]),
+        ("Operative", |vm| &mut vm.proto_operative, &[
+            ("source",0), ("params",0), ("envParam",0), ("toString",0),
+        ]),
+        // Block is gone — blocks are just lambdas now
+        ("Environment", |vm| &mut vm.proto_environment, &[
+            ("eval:",1), ("lookup:",1), ("set:to:",2), ("toString",0),
+        ]),
+    ];
+
+    for &(name, ref setter, native_sels) in protos {
+        let sym = vm.heap.intern(name);
+        if let Ok(Value::Object(id)) = vm.env_lookup_helper(env_id, sym) {
+            *setter(vm) = Some(id);
+            if !native_sels.is_empty() {
+                vm.register_native_handlers(id, env_id, name, native_sels);
+            }
+        }
+    }
+}
+
+impl VM {
+    fn env_lookup_helper(&self, env_id: u32, sym: u32) -> Result<Value, String> {
+        let mut current = Some(env_id);
+        while let Some(eid) = current {
+            match self.heap.get(eid) {
+                HeapObject::Environment(env) => {
+                    if let Some(val) = env.lookup_local(sym) {
+                        return Ok(val);
+                    }
+                    current = env.parent;
+                }
+                _ => return Err("not an env".into()),
+            }
+        }
+        Err("not found".into())
     }
 }

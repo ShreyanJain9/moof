@@ -4,6 +4,58 @@ A record of what was built, why, and what changed along the way.
 
 ---
 
+## Day 3 — TCO, mutation, and the honest object model
+
+Three big changes that make MOOF a real system instead of a toy.
+
+### Tail call optimization
+
+Added `OP_TAIL_APPLY` and `OP_TAIL_CALL` opcodes. The compiler threads a `tail` flag through compilation — the last expression in a body, branches of `if`, last expression in `do`, and the final call in `let` all propagate tail position. When a function call is in tail position, the VM replaces the current frame instead of pushing a new one.
+
+Result: `(sum-tc 100000 0)` computes without stack overflow. Tail-recursive list operations are now practical.
+
+### The `<-` operator
+
+Replaced `set!` with `<-` — a vau operative that inspects its target form at macro-expansion time:
+- `(<- x 42)` — symbol target → walks the env chain via `[env set: target to: val]`
+- `(<- obj.x 42)` — dot-access target → slot mutation via `[obj slotAt: field put: val]`
+- `(<- @x 42)` — self-field target → same as dot-access on self
+
+All three forms in one vau, purely in bootstrap.moof. The only VM addition was `set:to:` on environments (walks the parent chain to find and mutate the binding).
+
+### Type prototypes: the honest object model
+
+The old `primitive_send` was a lie — a giant match statement in Rust that pretended to be message dispatch. You couldn't see it, override it, or introspect it.
+
+**Now every primitive type has a real prototype object:** Integer, Boolean, String, Cons, Nil, Symbol, Lambda, Operative, Environment. They're defined in bootstrap.moof, inherit from Object, and have real handlers.
+
+Non-arithmetic handlers (`describe`, `applicative?`, etc.) are fn lambdas written in MOOF. Arithmetic and other performance-critical operations are **native handler lambdas** — real callable Lambda objects whose body is a single `OP_PRIM_SEND` instruction that goes directly to the VM fast path.
+
+```
+(def plus [Integer handlerAt: '+])
+(type-of plus)    => 'Lambda
+[plus params]     => (self a)
+(plus 3 4)        => 7
+```
+
+Native handlers are real values. You can extract them, pass them around, call them. They show up in `[Integer interface]`. The fast path is an implementation detail, not a semantic difference.
+
+**Dispatch order in `message_send`:**
+1. User handlers on GeneralObjects (delegation chain)
+2. Type prototype handlers (real lambdas — native or moof-defined)
+3. VM fast path fallback (only during bootstrap, before prototypes are registered)
+4. `doesNotUnderstand:`
+
+### Killed: Block
+
+Block was a separate HeapObject variant for `{ :x body }` syntax. But `{}` became object literals, and blocks were semantically identical to lambdas. Removed Block from the heap, compiler, VM, and bootstrap. One less concept, zero expressiveness lost.
+
+### Killed: NativeHandler marker
+
+The first attempt at integrating arithmetic used `NativeHandler` — a non-callable marker type that `message_send` would intercept and route to the fast path. It worked for introspection but was a lie: you couldn't call it, compose it, or pass it to `map`. Replaced with real lambdas using `OP_PRIM_SEND`, which bypasses handler lookup to avoid infinite recursion while being fully callable.
+
+---
+
 ## Day 1 — The kernel lives
 
 Built the entire runtime from scratch in one session: lexer, parser, compiler, bytecode VM, and a bootstrap library written in MOOF itself.

@@ -3,6 +3,7 @@
 /// Compiles cons-cell ASTs into BytecodeChunks. The compiler handles
 /// the 6 kernel forms and the syntactic desugaring (%send, %dot, %object-literal, %do).
 ///
+/// Tail position is tracked to emit OP_TAIL_APPLY for tail call optimization.
 /// The bytecode is the canonical form (§9.2) — what gets serialized.
 
 use crate::runtime::value::{Value, HeapObject, BytecodeChunk};
@@ -22,7 +23,6 @@ impl Compiler {
         }
     }
 
-    /// Add a constant to the pool, return its index.
     fn add_constant(&mut self, val: Value) -> u16 {
         for (i, c) in self.constants.iter().enumerate() {
             if *c == val {
@@ -43,9 +43,9 @@ impl Compiler {
         self.code.push((val & 0xFF) as u8);
     }
 
-    /// Compile a single expression AST into a bytecode chunk.
+    /// Compile a single expression AST into a bytecode chunk (not in tail position).
     pub fn compile_expr(&mut self, heap: &mut Heap, expr: Value) -> Result<BytecodeChunk, String> {
-        self.compile(heap, expr)?;
+        self.compile(heap, expr, false)?;
         self.emit(OP_RETURN);
         Ok(BytecodeChunk {
             code: std::mem::take(&mut self.code),
@@ -53,11 +53,12 @@ impl Compiler {
         })
     }
 
-    /// Compile a sequence of expressions (for %do or top-level), keeping only the last value.
+    /// Compile a sequence of expressions. Last expression is in tail position.
     pub fn compile_body(&mut self, heap: &mut Heap, exprs: &[Value]) -> Result<BytecodeChunk, String> {
         for (i, &expr) in exprs.iter().enumerate() {
-            self.compile(heap, expr)?;
-            if i < exprs.len() - 1 {
+            let is_last = i == exprs.len() - 1;
+            self.compile(heap, expr, is_last)?;
+            if !is_last {
                 self.emit(OP_POP);
             }
         }
@@ -71,8 +72,9 @@ impl Compiler {
         })
     }
 
-    /// Compile a value/expression to bytecode (appending to self.code).
-    fn compile(&mut self, heap: &mut Heap, expr: Value) -> Result<(), String> {
+    /// Compile a value/expression. `tail` = true if this is the last expression
+    /// before a return (enables tail call optimization).
+    fn compile(&mut self, heap: &mut Heap, expr: Value, tail: bool) -> Result<(), String> {
         match expr {
             Value::Nil => { self.emit(OP_NIL); Ok(()) }
             Value::True => { self.emit(OP_TRUE); Ok(()) }
@@ -92,7 +94,7 @@ impl Compiler {
             Value::Object(id) => {
                 match heap.get(id).clone() {
                     HeapObject::Cons { .. } => {
-                        self.compile_list(heap, expr)
+                        self.compile_list(heap, expr, tail)
                     }
                     HeapObject::MoofString(_) => {
                         let idx = self.add_constant(expr);
@@ -111,8 +113,8 @@ impl Compiler {
         }
     }
 
-    /// Compile a list form (could be a special form or a function call).
-    fn compile_list(&mut self, heap: &mut Heap, list: Value) -> Result<(), String> {
+    /// Compile a list form. `tail` propagates to the call instruction.
+    fn compile_list(&mut self, heap: &mut Heap, list: Value, tail: bool) -> Result<(), String> {
         let elements = heap.list_to_vec(list);
         if elements.is_empty() {
             self.emit(OP_NIL);
@@ -124,23 +126,18 @@ impl Compiler {
         if let Value::Symbol(sym) = head {
             let name = heap.symbol_name(sym).to_string();
             match name.as_str() {
-                // Kernel primitives
                 "vau" => return self.compile_vau(heap, &elements[1..]),
                 "def" => return self.compile_def(heap, &elements[1..]),
                 "quote" => return self.compile_quote(heap, &elements[1..]),
                 "cons" => return self.compile_cons(heap, &elements[1..]),
                 "eq" => return self.compile_eq(heap, &elements[1..]),
-                // Syntax desugaring
                 "%send" => return self.compile_send(heap, &elements[1..]),
-                "%block" => return self.compile_block(heap, &elements[1..]),
-                "%do" => return self.compile_do(heap, &elements[1..]),
+                "%do" => return self.compile_do(heap, &elements[1..], tail),
                 "%dot" => return self.compile_dot(heap, &elements[1..]),
                 "%object-literal" => return self.compile_object_literal(heap, &elements[1..]),
-                // Derived forms
-                "if" => return self.compile_if(heap, &elements[1..]),
+                "if" => return self.compile_if(heap, &elements[1..], tail),
                 "lambda" => return self.compile_lambda(heap, &elements[1..]),
-                "let" => return self.compile_let(heap, &elements[1..]),
-                // Built-in operations
+                "let" => return self.compile_let(heap, &elements[1..], tail),
                 "eval" => return self.compile_eval(heap, &elements[1..]),
                 "print" => return self.compile_print(heap, &elements[1..]),
                 "car" => return self.compile_car(heap, &elements[1..]),
@@ -158,27 +155,29 @@ impl Compiler {
         }
 
         // Generic call: (f a b c)
-        self.compile(heap, head)?;
+        self.compile(heap, head, false)?;
         let args_list = heap.list(&elements[1..]);
         let args_idx = self.add_constant(args_list);
         self.emit(OP_QUOTE);
         self.emit_u16(args_idx);
-        self.emit(OP_APPLY);
+        if tail {
+            self.emit(OP_TAIL_APPLY);
+        } else {
+            self.emit(OP_APPLY);
+        }
         Ok(())
     }
 
-    /// Compile (%dot obj 'field) — direct slot access
     fn compile_dot(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
         if args.len() != 2 {
             return Err("%dot requires object and field".into());
         }
-        self.compile(heap, args[0])?; // object
-        self.compile(heap, args[1])?; // quoted field symbol
+        self.compile(heap, args[0], false)?;
+        self.compile(heap, args[1], false)?;
         self.emit(OP_SLOT_GET);
         Ok(())
     }
 
-    /// Compile (%object-literal parent (%slot key val) ... (%method sel params body...) ...)
     fn compile_object_literal(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
         if args.is_empty() {
             return Err("%object-literal requires at least a parent".into());
@@ -187,22 +186,19 @@ impl Compiler {
         let parent = args[0];
         let entries = &args[1..];
 
-        // Separate slots and methods
         let slot_tag = heap.intern("%slot");
         let method_tag = heap.intern("%method");
 
-        let mut slots: Vec<(Value, Value)> = Vec::new(); // (key_sym, value_expr)
-        let mut methods: Vec<(Value, Value, Vec<Value>)> = Vec::new(); // (sel_sym, params, body_exprs)
+        let mut slots: Vec<(Value, Value)> = Vec::new();
+        let mut methods: Vec<(Value, Value, Vec<Value>)> = Vec::new();
 
         for &entry in entries {
             let parts = heap.list_to_vec(entry);
             if parts.is_empty() { continue; }
             if let Value::Symbol(tag) = parts[0] {
                 if tag == slot_tag && parts.len() == 3 {
-                    // (%slot key value)
                     slots.push((parts[1], parts[2]));
                 } else if tag == method_tag && parts.len() >= 3 {
-                    // (%method selector params body...)
                     let sel = parts[1];
                     let params = parts[2];
                     let body = parts[3..].to_vec();
@@ -211,35 +207,28 @@ impl Compiler {
             }
         }
 
-        // Compile parent
-        self.compile(heap, parent)?;
+        self.compile(heap, parent, false)?;
 
-        // Compile slots as key-value pairs for OP_MAKE_OBJECT
         for (key, val) in &slots {
-            // key is already a symbol value, quote it
             let key_idx = self.add_constant(*key);
             self.emit(OP_QUOTE);
             self.emit_u16(key_idx);
-            self.compile(heap, *val)?;
+            self.compile(heap, *val, false)?;
         }
         self.emit(OP_MAKE_OBJECT);
         self.emit(slots.len() as u8);
 
-        // For each method, compile a lambda (with self prepended) and OP_HANDLE
         for (sel, params, body_exprs) in &methods {
-            // Push quoted selector symbol
             let sel_idx = self.add_constant(*sel);
             self.emit(OP_QUOTE);
             self.emit_u16(sel_idx);
 
-            // Build lambda with self prepended to params
             let self_sym = Value::Symbol(heap.intern("self"));
             let param_vec = heap.list_to_vec(*params);
             let mut full_params = vec![self_sym];
             full_params.extend(param_vec);
             let param_list = heap.list(&full_params);
 
-            // Compile as lambda
             let mut lambda_args = vec![param_list];
             lambda_args.extend(body_exprs.iter().copied());
             self.compile_lambda(heap, &lambda_args)?;
@@ -250,7 +239,6 @@ impl Compiler {
         Ok(())
     }
 
-    /// Compile (vau (params) $env body...)
     fn compile_vau(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
         self.compile_vau_with_source(heap, args, Value::Nil)
     }
@@ -294,19 +282,17 @@ impl Compiler {
         Ok(())
     }
 
-    /// Compile (def name value)
     fn compile_def(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
         if args.len() != 2 {
             return Err("def requires name and value".into());
         }
-        self.compile(heap, args[1])?;
+        self.compile(heap, args[1], false)?;
         let name_idx = self.add_constant(args[0]);
         self.emit(OP_DEF);
         self.emit_u16(name_idx);
         Ok(())
     }
 
-    /// Compile (quote x)
     fn compile_quote(&mut self, _heap: &mut Heap, args: &[Value]) -> Result<(), String> {
         if args.len() != 1 {
             return Err("quote requires exactly one argument".into());
@@ -317,29 +303,26 @@ impl Compiler {
         Ok(())
     }
 
-    /// Compile (cons a b)
     fn compile_cons(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
         if args.len() != 2 {
             return Err("cons requires exactly two arguments".into());
         }
-        self.compile(heap, args[0])?;
-        self.compile(heap, args[1])?;
+        self.compile(heap, args[0], false)?;
+        self.compile(heap, args[1], false)?;
         self.emit(OP_CONS);
         Ok(())
     }
 
-    /// Compile (eq a b)
     fn compile_eq(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
         if args.len() != 2 {
             return Err("eq requires exactly two arguments".into());
         }
-        self.compile(heap, args[0])?;
-        self.compile(heap, args[1])?;
+        self.compile(heap, args[0], false)?;
+        self.compile(heap, args[1], false)?;
         self.emit(OP_EQ);
         Ok(())
     }
 
-    /// Compile (%send receiver selector arg1 arg2 ...)
     fn compile_send(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
         if args.len() < 2 {
             return Err("%send requires receiver and selector".into());
@@ -348,9 +331,9 @@ impl Compiler {
         let selector = args[1];
         let msg_args = &args[2..];
 
-        self.compile(heap, receiver)?;
+        self.compile(heap, receiver, false)?;
         for &arg in msg_args {
-            self.compile(heap, arg)?;
+            self.compile(heap, arg, false)?;
         }
         let sel_idx = self.add_constant(selector);
         self.emit(OP_SEND);
@@ -359,40 +342,13 @@ impl Compiler {
         Ok(())
     }
 
-    /// Compile (%block (params) body)
-    fn compile_block(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
-        if args.len() != 2 {
-            return Err("%block requires params and body".into());
-        }
-        let params = args[0];
-        let body_expr = args[1];
 
-        let block_sym = Value::Symbol(heap.intern("block"));
-        let source = heap.list(&[block_sym, params, body_expr]);
-
-        let mut body_compiler = Compiler::new();
-        let body_chunk = body_compiler.compile_expr(heap, body_expr)?;
-        let body_id = heap.alloc_chunk(body_chunk);
-
-        let params_idx = self.add_constant(params);
-        let env_param_sym = heap.intern("$_block_env");
-        let env_param_idx = self.add_constant(Value::Symbol(env_param_sym));
-        let body_idx = self.add_constant(Value::Object(body_id));
-        let source_idx = self.add_constant(source);
-
-        self.emit(OP_VAU);
-        self.emit_u16(params_idx);
-        self.emit_u16(env_param_idx);
-        self.emit_u16(body_idx);
-        self.emit_u16(source_idx);
-        Ok(())
-    }
-
-    /// Compile (%do expr1 expr2 ... exprN) — sequence, returns last value.
-    fn compile_do(&mut self, heap: &mut Heap, exprs: &[Value]) -> Result<(), String> {
+    /// Compile (%do expr1 ... exprN). Last expression inherits tail position.
+    fn compile_do(&mut self, heap: &mut Heap, exprs: &[Value], tail: bool) -> Result<(), String> {
         for (i, &expr) in exprs.iter().enumerate() {
-            self.compile(heap, expr)?;
-            if i < exprs.len() - 1 {
+            let is_last = i == exprs.len() - 1;
+            self.compile(heap, expr, is_last && tail)?;
+            if !is_last {
                 self.emit(OP_POP);
             }
         }
@@ -402,8 +358,8 @@ impl Compiler {
         Ok(())
     }
 
-    /// Compile (if cond then-expr else-expr)
-    fn compile_if(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
+    /// Compile (if cond then else). Branches inherit tail position.
+    fn compile_if(&mut self, heap: &mut Heap, args: &[Value], tail: bool) -> Result<(), String> {
         if args.len() < 2 {
             return Err("if requires condition and then-branch".into());
         }
@@ -411,13 +367,13 @@ impl Compiler {
         let then_branch = args[1];
         let else_branch = if args.len() > 2 { args[2] } else { Value::Nil };
 
-        self.compile(heap, condition)?;
+        self.compile(heap, condition, false)?;
 
         self.emit(OP_JUMP_IF_FALSE);
         let jump_to_else = self.code.len();
         self.emit_u16(0);
 
-        self.compile(heap, then_branch)?;
+        self.compile(heap, then_branch, tail)?;
 
         self.emit(OP_JUMP);
         let jump_to_end = self.code.len();
@@ -429,7 +385,7 @@ impl Compiler {
 
         match else_branch {
             Value::Nil if args.len() <= 2 => self.emit(OP_NIL),
-            _ => self.compile(heap, else_branch)?,
+            _ => self.compile(heap, else_branch, tail)?,
         }
 
         let end_offset = self.code.len() - (jump_to_end + 2);
@@ -439,7 +395,6 @@ impl Compiler {
         Ok(())
     }
 
-    /// Compile (lambda (params) body...) or (fn (params) body...)
     fn compile_lambda(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
         if args.len() < 2 {
             return Err("lambda/fn requires (params) and body".into());
@@ -452,6 +407,7 @@ impl Compiler {
         src_elems.extend_from_slice(args);
         let source = heap.list(&src_elems);
 
+        // Body gets its own tail position context — compile_body handles it
         let mut body_compiler = Compiler::new();
         let body_chunk = body_compiler.compile_body(heap, body_exprs)?;
         let body_id = heap.alloc_chunk(body_chunk);
@@ -470,8 +426,8 @@ impl Compiler {
         Ok(())
     }
 
-    /// Compile (let ((name1 val1) (name2 val2)) body...)
-    fn compile_let(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
+    /// Compile (let bindings body...). The final OP_CALL inherits tail position.
+    fn compile_let(&mut self, heap: &mut Heap, args: &[Value], tail: bool) -> Result<(), String> {
         if args.len() < 2 {
             return Err("let requires bindings and body".into());
         }
@@ -498,24 +454,27 @@ impl Compiler {
 
         let argc = values.len();
         for val in values {
-            self.compile(heap, val)?;
+            self.compile(heap, val, false)?;
         }
-        self.emit(OP_CALL);
+        if tail {
+            self.emit(OP_TAIL_CALL);
+        } else {
+            self.emit(OP_CALL);
+        }
         self.emit(argc as u8);
         Ok(())
     }
 
-    /// Compile (eval expr) or (eval expr env)
     fn compile_eval(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
         match args.len() {
             1 => {
-                self.compile(heap, args[0])?;
+                self.compile(heap, args[0], false)?;
                 self.emit(OP_EVAL);
                 Ok(())
             }
             2 => {
-                self.compile(heap, args[1])?;
-                self.compile(heap, args[0])?;
+                self.compile(heap, args[1], false)?;
+                self.compile(heap, args[0], false)?;
                 let sel = self.add_constant(Value::Symbol(heap.intern("eval:")));
                 self.emit(OP_SEND);
                 self.emit_u16(sel);
@@ -527,45 +486,36 @@ impl Compiler {
     }
 
     fn compile_print(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
-        if args.len() != 1 {
-            return Err("print requires exactly one argument".into());
-        }
-        self.compile(heap, args[0])?;
+        if args.len() != 1 { return Err("print requires exactly one argument".into()); }
+        self.compile(heap, args[0], false)?;
         self.emit(OP_PRINT);
         Ok(())
     }
 
     fn compile_car(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
-        if args.len() != 1 {
-            return Err("car requires exactly one argument".into());
-        }
-        self.compile(heap, args[0])?;
+        if args.len() != 1 { return Err("car requires exactly one argument".into()); }
+        self.compile(heap, args[0], false)?;
         self.emit(OP_CAR);
         Ok(())
     }
 
     fn compile_cdr(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
-        if args.len() != 1 {
-            return Err("cdr requires exactly one argument".into());
-        }
-        self.compile(heap, args[0])?;
+        if args.len() != 1 { return Err("cdr requires exactly one argument".into()); }
+        self.compile(heap, args[0], false)?;
         self.emit(OP_CDR);
         Ok(())
     }
 
     fn compile_type_of(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
-        if args.len() != 1 {
-            return Err("type-of requires exactly one argument".into());
-        }
-        self.compile(heap, args[0])?;
+        if args.len() != 1 { return Err("type-of requires exactly one argument".into()); }
+        self.compile(heap, args[0], false)?;
         self.emit(OP_TYPE_OF);
         Ok(())
     }
 
-    /// Compile (list a b c ...) → nested cons
     fn compile_list_form(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
         for &arg in args.iter() {
-            self.compile(heap, arg)?;
+            self.compile(heap, arg, false)?;
         }
         self.emit(OP_NIL);
         for _ in 0..args.len() {
@@ -574,7 +524,6 @@ impl Compiler {
         Ok(())
     }
 
-    /// Compile (object) or (object parent) or (object parent 'slot1 val1 'slot2 val2)
     fn compile_object(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
         if args.is_empty() {
             self.emit(OP_NIL);
@@ -583,7 +532,7 @@ impl Compiler {
             return Ok(());
         }
 
-        self.compile(heap, args[0])?;
+        self.compile(heap, args[0], false)?;
 
         let slot_args = &args[1..];
         if slot_args.len() % 2 != 0 {
@@ -591,56 +540,46 @@ impl Compiler {
         }
         let slot_count = slot_args.len() / 2;
         for pair in slot_args.chunks(2) {
-            self.compile(heap, pair[0])?;
-            self.compile(heap, pair[1])?;
+            self.compile(heap, pair[0], false)?;
+            self.compile(heap, pair[1], false)?;
         }
         self.emit(OP_MAKE_OBJECT);
         self.emit(slot_count as u8);
         Ok(())
     }
 
-    /// Compile (handle! obj selector handler)
     fn compile_handle(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
-        if args.len() != 3 {
-            return Err("handle! requires object, selector, and handler".into());
-        }
-        self.compile(heap, args[0])?;
-        self.compile(heap, args[1])?;
-        self.compile(heap, args[2])?;
+        if args.len() != 3 { return Err("handle! requires object, selector, and handler".into()); }
+        self.compile(heap, args[0], false)?;
+        self.compile(heap, args[1], false)?;
+        self.compile(heap, args[2], false)?;
         self.emit(OP_HANDLE);
         Ok(())
     }
 
-    /// Compile (set! name value) — mutate an existing binding
     fn compile_set(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
-        if args.len() != 2 {
-            return Err("set! requires name and value".into());
-        }
-        self.compile(heap, args[1])?;
+        if args.len() != 2 { return Err("set! requires name and value".into()); }
+        self.compile(heap, args[1], false)?;
         let name_idx = self.add_constant(args[0]);
         self.emit(OP_DEF);
         self.emit_u16(name_idx);
         Ok(())
     }
 
-    /// Compile (while cond body...)
     fn compile_while(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
-        if args.len() < 2 {
-            return Err("while requires condition and body".into());
-        }
+        if args.len() < 2 { return Err("while requires condition and body".into()); }
         let condition = args[0];
         let body_exprs = &args[1..];
 
         let loop_start = self.code.len();
-
-        self.compile(heap, condition)?;
+        self.compile(heap, condition, false)?;
 
         self.emit(OP_JUMP_IF_FALSE);
         let exit_jump = self.code.len();
         self.emit_u16(0);
 
         for &expr in body_exprs {
-            self.compile(heap, expr)?;
+            self.compile(heap, expr, false)?;
             self.emit(OP_POP);
         }
 
@@ -657,19 +596,15 @@ impl Compiler {
     }
 
     fn compile_load(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
-        if args.len() != 1 {
-            return Err("load requires exactly one argument (path)".into());
-        }
-        self.compile(heap, args[0])?;
+        if args.len() != 1 { return Err("load requires exactly one argument (path)".into()); }
+        self.compile(heap, args[0], false)?;
         self.emit(OP_LOAD);
         Ok(())
     }
 
     fn compile_source(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
-        if args.len() != 1 {
-            return Err("source requires exactly one argument".into());
-        }
-        self.compile(heap, args[0])?;
+        if args.len() != 1 { return Err("source requires exactly one argument".into()); }
+        self.compile(heap, args[0], false)?;
         self.emit(OP_SOURCE);
         Ok(())
     }

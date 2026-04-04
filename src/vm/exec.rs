@@ -33,6 +33,17 @@ pub struct VM {
     pub sym_does_not_understand: u32,
     /// The root environment (set after bootstrap)
     pub root_env: Option<u32>,
+    /// Type prototypes — maps primitive types to their prototype object ids.
+    /// Set after bootstrap defines them.
+    pub proto_integer: Option<u32>,
+    pub proto_boolean: Option<u32>,
+    pub proto_string: Option<u32>,
+    pub proto_cons: Option<u32>,
+    pub proto_nil: Option<u32>,
+    pub proto_symbol: Option<u32>,
+    pub proto_lambda: Option<u32>,
+    pub proto_operative: Option<u32>,
+    pub proto_environment: Option<u32>,
 }
 
 /// Result of VM execution.
@@ -53,7 +64,109 @@ impl VM {
             sym_parent,
             sym_does_not_understand: sym_dnu,
             root_env: None,
+            proto_integer: None,
+            proto_boolean: None,
+            proto_string: None,
+            proto_cons: None,
+            proto_nil: None,
+            proto_symbol: None,
+            proto_lambda: None,
+            proto_operative: None,
+            proto_environment: None,
         }
+    }
+
+    /// Get the type prototype for a value (if registered).
+    fn type_prototype(&self, val: Value) -> Option<u32> {
+        match val {
+            Value::Integer(_) => self.proto_integer,
+            Value::True | Value::False => self.proto_boolean,
+            Value::Nil => self.proto_nil,
+            Value::Symbol(_) => self.proto_symbol,
+            Value::Object(id) => match self.heap.get(id) {
+                HeapObject::MoofString(_) => self.proto_string,
+                HeapObject::Cons { .. } => self.proto_cons,
+                HeapObject::Lambda { .. } => self.proto_lambda,
+                HeapObject::Operative { .. } => self.proto_operative,
+                HeapObject::Environment(_) => self.proto_environment,
+                _ => None,
+            },
+        }
+    }
+
+    /// Register native handler lambdas on a type prototype.
+    /// Each handler is a real callable lambda whose body uses OP_PRIM_SEND.
+    pub fn register_native_handlers(&mut self, proto_id: u32, root_env: u32, type_name: &str, selectors: &[(&str, u8)]) {
+        for &(sel, argc) in selectors {
+            let handler = self.make_native_lambda(root_env, type_name, sel, argc);
+            let sel_sym = self.heap.intern(sel);
+            match self.heap.get_mut(proto_id) {
+                HeapObject::GeneralObject { handlers, .. } => {
+                    if let Some(entry) = handlers.iter_mut().find(|(k, _)| *k == sel_sym) {
+                        entry.1 = handler;
+                    } else {
+                        handlers.push((sel_sym, handler));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Create a real lambda that wraps a primitive operation via OP_PRIM_SEND.
+    fn make_native_lambda(&mut self, def_env: u32, type_name: &str, selector: &str, argc: u8) -> Value {
+        use crate::runtime::value::BytecodeChunk;
+
+        let mut code = Vec::new();
+        let mut constants: Vec<Value> = Vec::new();
+
+        // OP_LOOKUP self
+        let self_sym = self.heap.intern("self");
+        let self_idx = constants.len() as u16;
+        constants.push(Value::Symbol(self_sym));
+        code.push(OP_LOOKUP);
+        code.push((self_idx >> 8) as u8);
+        code.push((self_idx & 0xFF) as u8);
+
+        // Build param list: (self) or (self a) or (self a b)
+        let param_names = ["a", "b", "c"];
+        let mut param_syms = vec![Value::Symbol(self_sym)];
+        for i in 0..argc as usize {
+            let arg_sym = self.heap.intern(param_names[i]);
+            param_syms.push(Value::Symbol(arg_sym));
+            // OP_LOOKUP arg
+            let arg_idx = constants.len() as u16;
+            constants.push(Value::Symbol(arg_sym));
+            code.push(OP_LOOKUP);
+            code.push((arg_idx >> 8) as u8);
+            code.push((arg_idx & 0xFF) as u8);
+        }
+
+        // OP_PRIM_SEND selector argc
+        let sel_sym = self.heap.intern(selector);
+        let sel_idx = constants.len() as u16;
+        constants.push(Value::Symbol(sel_sym));
+        code.push(OP_PRIM_SEND);
+        code.push((sel_idx >> 8) as u8);
+        code.push((sel_idx & 0xFF) as u8);
+        code.push(argc);
+
+        code.push(OP_RETURN);
+
+        let chunk = BytecodeChunk { code, constants };
+        let body_id = self.heap.alloc_chunk(chunk);
+
+        let params = self.heap.list(&param_syms);
+        let source_str = format!("<native {}.{}>", type_name, selector);
+        let source = self.heap.alloc_string(&source_str);
+
+        let lambda = HeapObject::Lambda {
+            params,
+            body: body_id,
+            def_env,
+            source,
+        };
+        Value::Object(self.heap.alloc(lambda))
     }
 
     /// Execute a bytecode chunk in a given environment. Returns the final value.
@@ -160,6 +273,28 @@ impl VM {
                     self.stack.push(result);
                 }
 
+                OP_PRIM_SEND => {
+                    // Like OP_SEND but bypasses handler lookup — goes directly to primitive_send.
+                    // Used by native handler lambdas to avoid infinite recursion.
+                    let sel_idx = read_u16(&code, ip + 1) as usize;
+                    let argc = code[ip + 3] as usize;
+                    self.frames.last_mut().unwrap().ip = ip + 4;
+                    let selector = match constants[sel_idx] {
+                        Value::Symbol(s) => s,
+                        _ => return Err("PRIM_SEND: expected symbol selector".into()),
+                    };
+                    let stack_start = self.stack.len() - argc - 1;
+                    let receiver = self.stack[stack_start];
+                    let args: Vec<Value> = self.stack[stack_start + 1..].to_vec();
+                    self.stack.truncate(stack_start);
+                    let result = self.primitive_send(receiver, selector, &args)?
+                        .ok_or_else(|| {
+                            let sel_name = self.heap.symbol_name(selector).to_string();
+                            format!("No primitive handler for {} on {:?}", sel_name, receiver)
+                        })?;
+                    self.stack.push(result);
+                }
+
                 OP_CONS => {
                     let cdr = self.stack.pop().ok_or("CONS: empty stack")?;
                     let car = self.stack.pop().ok_or("CONS: empty stack")?;
@@ -199,7 +334,7 @@ impl VM {
 
                     // Convention: $_ means "lambda" (wrapped operative that evals args)
                     let name = self.heap.symbol_name(env_param_sym).to_string();
-                    let obj = if name == "$_" || name == "$_block_env" {
+                    let obj = if name == "$_" {
                         HeapObject::Lambda {
                             params,
                             body: body_chunk,
@@ -299,14 +434,6 @@ impl VM {
                                     }
                                     self.call_lambda(params, body, def_env, &evaled)?
                                 }
-                                HeapObject::Block { params, body, def_env, .. } => {
-                                    let raw_args = self.heap.list_to_vec(args_list);
-                                    let mut evaled = Vec::new();
-                                    for arg in raw_args {
-                                        evaled.push(self.eval(arg, env_id)?);
-                                    }
-                                    self.call_lambda(params, body, def_env, &evaled)?
-                                }
                                 _ => {
                                     // General object: eval args, then send call:
                                     let raw_args = self.heap.list_to_vec(args_list);
@@ -321,6 +448,94 @@ impl VM {
                         _ => return Err(format!("Cannot apply {:?}", callable)),
                     };
                     self.stack.push(result);
+                }
+
+                OP_TAIL_APPLY => {
+                    // Tail-call variant: replaces current frame for lambdas/blocks
+                    let args_list = self.stack.pop().ok_or("TAIL_APPLY: empty stack")?;
+                    let callable = self.stack.pop().ok_or("TAIL_APPLY: empty stack")?;
+
+                    match callable {
+                        Value::Object(id) => {
+                            match self.heap.get(id).clone() {
+                                HeapObject::Lambda { params, body, def_env, .. } => {
+                                    // Eval args in current env
+                                    let raw_args = self.heap.list_to_vec(args_list);
+                                    let mut evaled = Vec::new();
+                                    for arg in raw_args {
+                                        evaled.push(self.eval(arg, env_id)?);
+                                    }
+                                    // Create new env, bind params
+                                    let new_env_id = self.heap.alloc_env(Some(def_env));
+                                    let param_syms = self.heap.list_to_vec(params);
+                                    for (i, &p) in param_syms.iter().enumerate() {
+                                        if let Value::Symbol(sym) = p {
+                                            let val = evaled.get(i).copied().unwrap_or(Value::Nil);
+                                            self.env_define(new_env_id, sym, val);
+                                        }
+                                    }
+                                    // Replace current frame — no new frame pushed
+                                    let frame = self.frames.last_mut().unwrap();
+                                    self.stack.truncate(frame.stack_base);
+                                    frame.chunk_id = body;
+                                    frame.ip = 0;
+                                    frame.env_id = new_env_id;
+                                }
+                                HeapObject::Operative { .. } => {
+                                    // Can't TCO operatives — fall back to regular call
+                                    let result = self.call_operative(callable, args_list, env_id)?;
+                                    self.stack.push(result);
+                                }
+                                _ => {
+                                    let raw_args = self.heap.list_to_vec(args_list);
+                                    let mut evaled = Vec::new();
+                                    for arg in raw_args {
+                                        evaled.push(self.eval(arg, env_id)?);
+                                    }
+                                    let result = self.message_send(callable, self.sym_call, &evaled)?;
+                                    self.stack.push(result);
+                                }
+                            }
+                        }
+                        _ => return Err(format!("Cannot apply {:?}", callable)),
+                    }
+                }
+
+                OP_TAIL_CALL => {
+                    // Tail-call variant of OP_CALL for known-lambda contexts (let)
+                    let argc = code[ip + 1] as usize;
+                    self.frames.last_mut().unwrap().ip = ip + 2;
+                    let stack_start = self.stack.len() - argc - 1;
+                    let callable = self.stack[stack_start];
+                    let args: Vec<Value> = self.stack[stack_start + 1..].to_vec();
+                    self.stack.truncate(stack_start);
+
+                    match callable {
+                        Value::Object(id) => {
+                            match self.heap.get(id).clone() {
+                                HeapObject::Lambda { params, body, def_env, .. } => {
+                                    let new_env_id = self.heap.alloc_env(Some(def_env));
+                                    let param_syms = self.heap.list_to_vec(params);
+                                    for (i, &p) in param_syms.iter().enumerate() {
+                                        if let Value::Symbol(sym) = p {
+                                            let val = args.get(i).copied().unwrap_or(Value::Nil);
+                                            self.env_define(new_env_id, sym, val);
+                                        }
+                                    }
+                                    let frame = self.frames.last_mut().unwrap();
+                                    self.stack.truncate(frame.stack_base);
+                                    frame.chunk_id = body;
+                                    frame.ip = 0;
+                                    frame.env_id = new_env_id;
+                                }
+                                _ => {
+                                    let result = self.call_value(callable, &args)?;
+                                    self.stack.push(result);
+                                }
+                            }
+                        }
+                        _ => return Err(format!("Cannot call {:?}", callable)),
+                    }
                 }
 
                 OP_EVAL => {
@@ -442,7 +657,6 @@ impl VM {
                             HeapObject::Operative { .. } => "Operative",
                             HeapObject::Lambda { .. } => "Lambda",
                             HeapObject::Environment(_) => "Environment",
-                            HeapObject::Block { .. } => "Block",
                         },
                     };
                     let sym = self.heap.intern(type_name);
@@ -472,7 +686,6 @@ impl VM {
                         Value::Object(id) => match self.heap.get(id) {
                             HeapObject::Lambda { source, .. } => *source,
                             HeapObject::Operative { source, .. } => *source,
-                            HeapObject::Block { source, .. } => *source,
                             _ => Value::Nil,
                         },
                         _ => Value::Nil,
@@ -513,15 +726,35 @@ impl VM {
         }
     }
 
+    /// Set a binding by walking the environment chain. Errors if not found.
+    fn env_set(&mut self, env_id: u32, sym: u32, val: Value) -> Result<(), String> {
+        let mut current = Some(env_id);
+        while let Some(eid) = current {
+            let (found, parent) = match self.heap.get(eid) {
+                HeapObject::Environment(env) => {
+                    (env.lookup_local(sym).is_some(), env.parent)
+                }
+                _ => return Err("env_set: not an environment".into()),
+            };
+            if found {
+                match self.heap.get_mut(eid) {
+                    HeapObject::Environment(env) => { env.define(sym, val); }
+                    _ => unreachable!(),
+                }
+                return Ok(());
+            }
+            current = parent;
+        }
+        let name = self.heap.symbol_name(sym);
+        Err(format!("Cannot set unbound symbol: {}", name))
+    }
+
     /// Call a value as a function: [callable call: args...]
     fn call_value(&mut self, callable: Value, args: &[Value]) -> VMResult {
         match callable {
             Value::Object(id) => {
                 match self.heap.get(id).clone() {
                     HeapObject::Lambda { params, body, def_env, .. } => {
-                        self.call_lambda(params, body, def_env, args)
-                    }
-                    HeapObject::Block { params, body, def_env, .. } => {
                         self.call_lambda(params, body, def_env, args)
                     }
                     HeapObject::Operative { .. } => {
@@ -596,25 +829,51 @@ impl VM {
 
     /// The core message send: look up a handler and invoke it.
     /// "the vm's single privileged operation is `send`" (§0)
+    ///
+    /// Dispatch order:
+    /// 1. User-defined handlers on the object itself (GeneralObject delegation chain)
+    /// 2. Type prototype handlers (Integer, Boolean, String, etc.)
+    /// 3. VM fast path (arithmetic — NativeHandler markers route here)
+    /// 4. doesNotUnderstand:
     pub fn message_send(&mut self, receiver: Value, selector: u32, args: &[Value]) -> VMResult {
-        // For general objects, check user-defined handlers FIRST (§4.2)
+        // 1. For GeneralObjects, check user-defined handlers (§4.2)
         if let Value::Object(id) = receiver {
-            if let Some(handler) = self.lookup_handler(id, selector) {
+            if let HeapObject::GeneralObject { .. } = self.heap.get(id) {
+                if let Some(handler) = self.lookup_handler(id, selector) {
+                    let mut full_args = vec![receiver];
+                    full_args.extend_from_slice(args);
+                    return self.call_value(handler, &full_args);
+                }
+            }
+        }
+
+        // 2. Check type prototype handlers (real callable lambdas)
+        if let Some(proto_id) = self.type_prototype(receiver) {
+            if let Some(handler) = self.lookup_handler(proto_id, selector) {
                 let mut full_args = vec![receiver];
                 full_args.extend_from_slice(args);
                 return self.call_value(handler, &full_args);
             }
         }
 
-        // Then try built-in handlers for primitive types
+        // 3. VM fast path fallback (for unregistered prototypes during bootstrap)
         if let Some(result) = self.primitive_send(receiver, selector, args)? {
             return Ok(result);
         }
 
-        // doesNotUnderstand: — fire if the object has a handler for it (§4.2)
+        // 4. doesNotUnderstand:
         if selector != self.sym_does_not_understand {
             if let Value::Object(id) = receiver {
                 if let Some(dnu_handler) = self.lookup_handler(id, self.sym_does_not_understand) {
+                    let sel_sym = Value::Symbol(selector);
+                    let args_list = self.heap.list(args);
+                    let full_args = vec![receiver, sel_sym, args_list];
+                    return self.call_value(dnu_handler, &full_args);
+                }
+            }
+            // Also check type prototype for doesNotUnderstand:
+            if let Some(proto_id) = self.type_prototype(receiver) {
+                if let Some(dnu_handler) = self.lookup_handler(proto_id, self.sym_does_not_understand) {
                     let sel_sym = Value::Symbol(selector);
                     let args_list = self.heap.list(args);
                     let full_args = vec![receiver, sel_sym, args_list];
@@ -655,6 +914,43 @@ impl VM {
     /// message dispatch, but the VM handles these directly.
     fn primitive_send(&mut self, receiver: Value, selector: u32, args: &[Value]) -> Result<Option<Value>, String> {
         let sel_name = self.heap.symbol_name(selector);
+
+        // Universal object protocol: handlerNames, parent, handlerAt:
+        // These make primitive types behave as full objects via type prototypes.
+        if let Some(proto_id) = self.type_prototype(receiver) {
+            match sel_name {
+                "handlerNames" => {
+                    match self.heap.get(proto_id) {
+                        HeapObject::GeneralObject { handlers, .. } => {
+                            let names: Vec<Value> = handlers.iter()
+                                .map(|(k, _)| Value::Symbol(*k))
+                                .collect();
+                            return Ok(Some(self.heap.list(&names)));
+                        }
+                        _ => return Ok(Some(Value::Nil)),
+                    }
+                }
+                "parent" => {
+                    return Ok(Some(Value::Object(proto_id)));
+                }
+                "handlerAt:" => {
+                    let key = args.first()
+                        .and_then(|v| v.as_symbol())
+                        .ok_or("handlerAt: expects a symbol")?;
+                    match self.heap.get(proto_id) {
+                        HeapObject::GeneralObject { handlers, .. } => {
+                            let handler = handlers.iter()
+                                .find(|(k, _)| *k == key)
+                                .map(|(_, v)| *v)
+                                .unwrap_or(Value::Nil);
+                            return Ok(Some(handler));
+                        }
+                        _ => return Ok(Some(Value::Nil)),
+                    }
+                }
+                _ => {}
+            }
+        }
 
         match receiver {
             Value::Integer(a) => {
@@ -713,9 +1009,8 @@ impl VM {
                     }
                     "negate" => Ok(Some(Value::Integer(-a))),
                     "abs" => Ok(Some(Value::Integer(a.abs()))),
-                    "describe" => {
-                        let s = self.heap.alloc_string(&format!("{}", a));
-                        Ok(Some(s))
+                    "toString" | "describe" => {
+                        Ok(Some(self.heap.alloc_string(&format!("{}", a))))
                     }
                     _ => Ok(None),
                 }
@@ -734,7 +1029,7 @@ impl VM {
                         self.call_value(block, &[]).map(Some)
                     }
                     "or:" => Ok(Some(Value::True)),
-                    "describe" => Ok(Some(self.heap.alloc_string("true"))),
+                    "toString" | "describe" => Ok(Some(self.heap.alloc_string("true"))),
                     _ => Ok(None),
                 }
             }
@@ -756,14 +1051,14 @@ impl VM {
                         let block = args.first().copied().ok_or("or: expects a block")?;
                         self.call_value(block, &[]).map(Some)
                     }
-                    "describe" => Ok(Some(self.heap.alloc_string("false"))),
+                    "toString" | "describe" => Ok(Some(self.heap.alloc_string("false"))),
                     _ => Ok(None),
                 }
             }
 
             Value::Nil => {
                 match sel_name {
-                    "describe" => Ok(Some(self.heap.alloc_string("nil"))),
+                    "toString" | "describe" => Ok(Some(self.heap.alloc_string("nil"))),
                     "isNil" => Ok(Some(Value::True)),
                     _ => Ok(None),
                 }
@@ -775,7 +1070,7 @@ impl VM {
                         match sel_name {
                             "car" => Ok(Some(car)),
                             "cdr" => Ok(Some(cdr)),
-                            "describe" => {
+                            "toString" | "describe" => {
                                 let s = self.format_value(Value::Object(id));
                                 Ok(Some(self.heap.alloc_string(&s)))
                             }
@@ -784,7 +1079,7 @@ impl VM {
                     }
                     HeapObject::MoofString(ref s) => {
                         match sel_name {
-                            "describe" => Ok(Some(Value::Object(id))),
+                            "toString" | "describe" => Ok(Some(Value::Object(id))),
                             "length" => Ok(Some(Value::Integer(s.len() as i64))),
                             "++" => {
                                 // String concatenation
@@ -878,6 +1173,31 @@ impl VM {
                             _ => Ok(None), // fall through to handler lookup
                         }
                     }
+                    HeapObject::Lambda { params, source, .. } => {
+                        match sel_name {
+                            "source" => Ok(Some(source)),
+                            "params" => Ok(Some(params)),
+                            "arity" => {
+                                let n = self.heap.list_to_vec(params).len();
+                                Ok(Some(Value::Integer(n as i64)))
+                            }
+                            "call:" => {
+                                // [f call: args...] — invoke the lambda
+                                self.call_value(receiver, args).map(Some)
+                            }
+                            "toString" | "describe" => Ok(Some(self.heap.alloc_string("<lambda>"))),
+                            _ => Ok(None),
+                        }
+                    }
+                    HeapObject::Operative { params, source, env_param, .. } => {
+                        match sel_name {
+                            "source" => Ok(Some(source)),
+                            "params" => Ok(Some(params)),
+                            "envParam" => Ok(Some(Value::Symbol(env_param))),
+                            "toString" | "describe" => Ok(Some(self.heap.alloc_string("<operative>"))),
+                            _ => Ok(None),
+                        }
+                    }
                     HeapObject::Environment(ref env) => {
                         match sel_name {
                             "eval:" => {
@@ -892,6 +1212,16 @@ impl VM {
                                     .ok_or("lookup: expects a symbol")?;
                                 self.env_lookup(id, sym).map(Some)
                             }
+                            "set:to:" => {
+                                // Walk the env chain, set where found
+                                let sym = args.first()
+                                    .and_then(|v| v.as_symbol())
+                                    .ok_or("set:to: expects a symbol")?;
+                                let val = args.get(1).copied().unwrap_or(Value::Nil);
+                                let _ = env;
+                                self.env_set(id, sym, val)?;
+                                Ok(Some(val))
+                            }
                             "describe" => Ok(Some(self.heap.alloc_string("<environment>"))),
                             _ => Ok(None),
                         }
@@ -902,7 +1232,7 @@ impl VM {
 
             Value::Symbol(_) => {
                 match sel_name {
-                    "describe" => {
+                    "toString" | "describe" => {
                         let s = self.format_value(receiver);
                         Ok(Some(self.heap.alloc_string(&s)))
                     }
@@ -939,7 +1269,6 @@ impl VM {
                     HeapObject::Operative { .. } => "<operative>".to_string(),
                     HeapObject::Lambda { .. } => "<lambda>".to_string(),
                     HeapObject::Environment(_) => "<environment>".to_string(),
-                    HeapObject::Block { .. } => "<block>".to_string(),
                 }
             }
         }
