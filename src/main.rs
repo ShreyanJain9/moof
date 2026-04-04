@@ -2,6 +2,7 @@ mod runtime;
 mod vm;
 mod reader;
 mod compiler;
+mod persistence;
 
 use std::io::{self, Write, BufRead};
 use std::path::PathBuf;
@@ -10,45 +11,74 @@ use reader::lexer::Lexer;
 use reader::parser::Parser;
 use compiler::compile::Compiler;
 use runtime::value::{Value, HeapObject};
+use persistence::snapshot::{self, Image};
+use persistence::wal;
+
+fn image_dir() -> PathBuf {
+    PathBuf::from(".moof")
+}
 
 fn main() {
-    let mut vm = VM::new();
+    let mut vm;
+    let root_env;
 
-    // Create the root environment
-    let root_env = vm.heap.alloc_env(None);
+    let img_dir = image_dir();
 
-    // Bootstrap: bind kernel primitives, then load the MOOF standard library
-    bootstrap_env(&mut vm, root_env);
+    if snapshot::image_exists(&img_dir) {
+        // ── Load from saved image ──
+        match snapshot::load_image(&img_dir) {
+            Ok(image) => {
+                vm = VM::new();
+                vm.heap = runtime::heap::Heap::from_image(image.objects, image.symbol_names);
 
-    // Find and load bootstrap.moof from the lib/ directory
-    let bootstrap_path = find_bootstrap();
-    match std::fs::read_to_string(&bootstrap_path) {
-        Ok(source) => {
-            match eval_source(&mut vm, root_env, &source, &bootstrap_path.display().to_string()) {
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("!! Bootstrap failed: {}", e);
-                    std::process::exit(1);
+                // Replay WAL entries
+                match wal::replay_wal(&img_dir) {
+                    Ok(entries) => {
+                        if !entries.is_empty() {
+                            eprintln!("(replaying {} WAL entries)", entries.len());
+                            vm.heap.replay_wal(&entries);
+                        }
+                    }
+                    Err(e) => eprintln!("!! WAL replay warning: {}", e),
                 }
+
+                // Recover root_env from well-known symbol
+                let root_sym = vm.heap.intern("*root-env*");
+                root_env = match vm.env_lookup_helper(0, root_sym) {
+                    Ok(Value::Object(id)) => id,
+                    _ => {
+                        // Fallback: env 0 is usually the root
+                        0
+                    }
+                };
+                vm.root_env = Some(root_env);
+
+                // Re-register type prototypes
+                register_type_prototypes(&mut vm, root_env);
+
+                eprintln!("(image loaded: {} objects, {} symbols)",
+                    vm.heap.len(), vm.heap.symbol_count());
+            }
+            Err(e) => {
+                eprintln!("!! Image load failed: {}", e);
+                eprintln!("!! Falling back to bootstrap");
+                let (v, r) = bootstrap_fresh();
+                vm = v;
+                root_env = r;
             }
         }
-        Err(e) => {
-            eprintln!("!! Cannot read {}: {}", bootstrap_path.display(), e);
-            std::process::exit(1);
-        }
+    } else {
+        // ── Fresh bootstrap ──
+        let (v, r) = bootstrap_fresh();
+        vm = v;
+        root_env = r;
     }
 
-    // Store the lib path in the environment so (load) can find files
-    let lib_dir = bootstrap_path.parent().unwrap().to_string_lossy().to_string();
-    let lib_dir_sym = vm.heap.intern("*lib-path*");
-    let lib_dir_val = vm.heap.alloc_string(&lib_dir);
-    vm.env_define_helper(root_env, lib_dir_sym, lib_dir_val);
-
-    // Store the root env id so the VM can access it for load
-    vm.root_env = Some(root_env);
-
-    // Register type prototypes (defined in bootstrap.moof)
-    register_type_prototypes(&mut vm, root_env);
+    // Attach WAL for durability
+    match wal::WalWriter::open(&img_dir) {
+        Ok(wal_writer) => vm.heap.set_wal(wal_writer),
+        Err(e) => eprintln!("!! WAL init warning: {}", e),
+    }
 
     println!("MOOF — Moof Open Objectspace Fabric");
     println!("clarus the dogcow lives again");
@@ -70,6 +100,8 @@ fn main() {
         let mut line = String::new();
         match stdin.lock().read_line(&mut line) {
             Ok(0) => {
+                // Save image on clean exit
+                save_image(&vm);
                 println!("\nmoof.");
                 break;
             }
@@ -89,6 +121,12 @@ fn main() {
 
                 if input.is_empty() { continue; }
 
+                // REPL-level commands
+                if input == "(checkpoint)" || input == "(save)" {
+                    save_image(&vm);
+                    continue;
+                }
+
                 match eval_line(&mut vm, root_env, &input) {
                     Ok(val) => {
                         let formatted = vm.format_value(val);
@@ -104,6 +142,58 @@ fn main() {
                 break;
             }
         }
+    }
+}
+
+/// Run a fresh bootstrap: create VM, load bootstrap.moof, register prototypes.
+fn bootstrap_fresh() -> (VM, u32) {
+    let mut vm = VM::new();
+    let root_env = vm.heap.alloc_env(None);
+
+    bootstrap_env(&mut vm, root_env);
+
+    let bootstrap_path = find_bootstrap();
+    match std::fs::read_to_string(&bootstrap_path) {
+        Ok(source) => {
+            match eval_source(&mut vm, root_env, &source, &bootstrap_path.display().to_string()) {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("!! Bootstrap failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("!! Cannot read {}: {}", bootstrap_path.display(), e);
+            std::process::exit(1);
+        }
+    }
+
+    let lib_dir = bootstrap_path.parent().unwrap().to_string_lossy().to_string();
+    let lib_dir_sym = vm.heap.intern("*lib-path*");
+    let lib_dir_val = vm.heap.alloc_string(&lib_dir);
+    vm.env_define_helper(root_env, lib_dir_sym, lib_dir_val);
+
+    // Store root env reference for image recovery
+    let root_sym = vm.heap.intern("*root-env*");
+    vm.env_define_helper(root_env, root_sym, Value::Object(root_env));
+
+    vm.root_env = Some(root_env);
+    register_type_prototypes(&mut vm, root_env);
+
+    (vm, root_env)
+}
+
+/// Save the heap as a snapshot image.
+fn save_image(vm: &VM) {
+    let image = Image {
+        objects: vm.heap.objects().to_vec(),
+        symbol_names: vm.heap.symbol_names_ref().to_vec(),
+    };
+    match snapshot::save_image(&image, &image_dir()) {
+        Ok(hash) => eprintln!("(image saved: {} objects, hash {}…)",
+            vm.heap.len(), &hash[..12]),
+        Err(e) => eprintln!("!! Image save failed: {}", e),
     }
 }
 
@@ -205,10 +295,7 @@ fn bootstrap_env(vm: &mut VM, env_id: u32) {
 impl VM {
     /// Helper to define in an environment (used by bootstrap).
     pub fn env_define_helper(&mut self, env_id: u32, sym: u32, val: Value) {
-        match self.heap.get_mut(env_id) {
-            HeapObject::Environment(env) => { env.define(sym, val); }
-            _ => panic!("Not an environment"),
-        }
+        self.heap.env_define(env_id, sym, val);
     }
 }
 

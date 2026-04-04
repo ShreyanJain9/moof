@@ -100,16 +100,7 @@ impl VM {
         for &(sel, argc) in selectors {
             let handler = self.make_native_lambda(root_env, type_name, sel, argc);
             let sel_sym = self.heap.intern(sel);
-            match self.heap.get_mut(proto_id) {
-                HeapObject::GeneralObject { handlers, .. } => {
-                    if let Some(entry) = handlers.iter_mut().find(|(k, _)| *k == sel_sym) {
-                        entry.1 = handler;
-                    } else {
-                        handlers.push((sel_sym, handler));
-                    }
-                }
-                _ => {}
-            }
+            self.heap.add_handler(proto_id, sel_sym, handler);
         }
     }
 
@@ -576,16 +567,7 @@ impl VM {
                     let obj_val = self.stack.pop().ok_or("HANDLE: empty stack")?;
                     let sel_sym = selector.as_symbol().ok_or("HANDLE: selector must be symbol")?;
                     let obj_id = obj_val.as_object().ok_or("HANDLE: expected object")?;
-                    match self.heap.get_mut(obj_id) {
-                        HeapObject::GeneralObject { handlers, .. } => {
-                            if let Some(entry) = handlers.iter_mut().find(|(k, _)| *k == sel_sym) {
-                                entry.1 = handler;
-                            } else {
-                                handlers.push((sel_sym, handler));
-                            }
-                        }
-                        _ => return Err("HANDLE: target must be a GeneralObject".into()),
-                    }
+                    self.heap.add_handler(obj_id, sel_sym, handler);
                     self.stack.push(obj_val);
                 }
 
@@ -616,16 +598,7 @@ impl VM {
                     let obj_val = self.stack.pop().ok_or("SLOT_SET: empty stack")?;
                     let sym_id = field_sym.as_symbol().ok_or("SLOT_SET: field must be symbol")?;
                     let obj_id = obj_val.as_object().ok_or("SLOT_SET: expected object")?;
-                    match self.heap.get_mut(obj_id) {
-                        HeapObject::GeneralObject { slots, .. } => {
-                            if let Some(entry) = slots.iter_mut().find(|(k, _)| *k == sym_id) {
-                                entry.1 = val;
-                            } else {
-                                slots.push((sym_id, val));
-                            }
-                        }
-                        _ => return Err("SLOT_SET: not an object with slots".into()),
-                    }
+                    self.heap.set_slot(obj_id, sym_id, val);
                     self.stack.push(val);
                 }
 
@@ -705,12 +678,7 @@ impl VM {
 
     /// Define a binding in an environment.
     fn env_define(&mut self, env_id: u32, sym: u32, val: Value) {
-        match self.heap.get_mut(env_id) {
-            HeapObject::Environment(env) => {
-                env.define(sym, val);
-            }
-            _ => panic!("env_define: not an environment"),
-        }
+        self.heap.env_define(env_id, sym, val);
     }
 
     /// Set a binding by walking the environment chain. Errors if not found.
@@ -724,10 +692,7 @@ impl VM {
                 _ => return Err("env_set: not an environment".into()),
             };
             if found {
-                match self.heap.get_mut(eid) {
-                    HeapObject::Environment(env) => { env.define(sym, val); }
-                    _ => unreachable!(),
-                }
+                self.heap.env_define(eid, sym, val);
                 return Ok(());
             }
             current = parent;
@@ -1213,16 +1178,7 @@ impl VM {
                                     .ok_or("slotAt:put: expects a symbol key")?;
                                 let val = args.get(1).copied().unwrap_or(Value::Nil);
                                 let _ = slots;
-                                match self.heap.get_mut(id) {
-                                    HeapObject::GeneralObject { slots, .. } => {
-                                        if let Some(entry) = slots.iter_mut().find(|(k, _)| *k == key) {
-                                            entry.1 = val;
-                                        } else {
-                                            slots.push((key, val));
-                                        }
-                                    }
-                                    _ => unreachable!(),
-                                }
+                                self.heap.set_slot(id, key, val);
                                 Ok(Some(val))
                             }
                             "slotNames" => {

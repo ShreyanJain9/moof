@@ -5,9 +5,10 @@
 /// Cons cells are the AST. Symbols are interned. The object model has slots + handlers.
 
 use std::fmt;
+use serde::{Serialize, Deserialize};
 
 /// A MOOF value. 64 bits. Either an immediate or an index into the heap.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Value {
     /// The nil singleton
     Nil,
@@ -54,7 +55,7 @@ impl fmt::Debug for Value {
 }
 
 /// The kind of heap-allocated object.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HeapObject {
     /// A cons cell — the fundamental building block of lists and ASTs.
     Cons { car: Value, cdr: Value },
@@ -102,7 +103,7 @@ pub enum HeapObject {
 }
 
 /// A compiled bytecode chunk.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BytecodeChunk {
     /// The bytecode instructions
     pub code: Vec<u8>,

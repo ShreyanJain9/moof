@@ -74,6 +74,39 @@ Built the entire runtime from scratch in one session: lexer, parser, compiler, b
 - `(load "file.moof")` for loading code from files
 - ~200 lines of standard library written in MOOF itself
 
+## Day 5 — Persistence: the image lives
+
+The most transformative change yet. MOOF is now a **living environment** — the heap persists between sessions.
+
+### Architecture
+
+The persistence layer has three components:
+
+1. **Snapshot** (`persistence/snapshot.rs`) — serialize the entire heap (`Vec<HeapObject>` + `Vec<String>` symbol table) to disk via serde + bincode. Content-addressed with SHA-256. Stored in `.moof/image.bin`.
+
+2. **WAL** (`persistence/wal.rs`) — every heap mutation (alloc, replace, symbol intern) is appended to `.moof/wal.bin` in real time. On startup: load snapshot, replay WAL, resume. On clean exit: save snapshot, clear WAL. Handles truncated entries gracefully (crash mid-write → partial entry skipped).
+
+3. **Heap mutation refactor** — replaced all 7 `heap.get_mut()` call sites with specific WAL-safe methods: `heap.env_define()`, `heap.add_handler()`, `heap.set_slot()`, `heap.mutate()`. The heap now has a single mutation interface that logs everything.
+
+### Startup flow
+
+```
+if .moof/image.bin exists:
+  load snapshot → replay WAL → register type prototypes → run REPL
+else:
+  bootstrap from scratch → register prototypes → run REPL
+on exit:
+  save snapshot → clear WAL
+```
+
+Bootstrap only runs once. After that, the image IS the truth.
+
+### `(checkpoint)` / `(save)`
+
+REPL commands that force a snapshot save without exiting.
+
+---
+
 ## Day 4 — String operations and the rest-param fix
 
 ### String ops

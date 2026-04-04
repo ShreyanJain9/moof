@@ -7,8 +7,9 @@
 
 use super::value::Value;
 use std::collections::HashMap;
+use serde::{Serialize, Deserialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Environment {
     /// Parent environment (heap id), or None for the root.
     pub parent: Option<u32>,
