@@ -199,15 +199,21 @@ fn bootstrap_fresh() -> (VM, u32) {
     (vm, root_env)
 }
 
-/// Save the heap as a snapshot image.
+/// Save the heap as a snapshot image, compacting first to remove garbage.
 fn save_image(vm: &VM) {
     let image = Image {
         objects: vm.heap.objects().to_vec(),
         symbol_names: vm.heap.symbol_names_ref().to_vec(),
     };
-    match snapshot::save_image(&image, &image_dir()) {
-        Ok(hash) => eprintln!("(image saved: {} objects, hash {}…)",
-            vm.heap.len(), &hash[..12]),
+
+    let root_env = vm.root_env.unwrap_or(0);
+    let (compacted, _new_root) = snapshot::compact_image(&image, root_env);
+    let before = image.objects.len();
+    let after = compacted.objects.len();
+
+    match snapshot::save_image(&compacted, &image_dir()) {
+        Ok(hash) => eprintln!("(image saved: {} objects (compacted from {}), hash {}...)",
+            after, before, &hash[..12]),
         Err(e) => eprintln!("!! Image save failed: {}", e),
     }
 }

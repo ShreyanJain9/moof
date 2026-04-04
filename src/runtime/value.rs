@@ -141,12 +141,10 @@ pub enum HeapObject {
     /// A first-class environment (§7.3)
     Environment(super::env::Environment),
 
-    /// A bound foreign function (FFI). Stores type info for serialization.
-    ForeignFunction {
-        lib_name: String,
-        func_name: String,
-        arg_types: Vec<String>,
-        ret_type: String,
+    /// A native function registered in the VM's NativeRegistry.
+    /// The name is used to look up the closure at call time.
+    NativeFunction {
+        name: String,
     },
 }
 

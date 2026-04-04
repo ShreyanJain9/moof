@@ -74,6 +74,29 @@ Built the entire runtime from scratch in one session: lexer, parser, compiler, b
 - `(load "file.moof")` for loading code from files
 - ~200 lines of standard library written in MOOF itself
 
+## Day 7 — Native extension interface, compacting GC
+
+### The native extension interface
+
+Replaced the FFI-specific HeapObject::ForeignFunction with a general NativeRegistry. Any Rust code can register a native function:
+
+```rust
+vm.register_native("math:sin", Box::new(|heap, args| {
+    let x = args[0].as_float().ok_or("expected float")?;
+    Ok(Value::Float(x.sin()))
+}));
+```
+
+The function becomes a callable NativeFunction heap object, dispatched through the same call_value / OP_APPLY paths as lambdas. FFI is rebuilt on top: `ffi-bind` now registers a NativeFn closure that captures the C function pointer. Same interface whether you're binding libm via dlopen or exposing a Rust HTTP client.
+
+### Compacting GC via snapshot
+
+The heap grows freely during a session (no GC pauses). On save, a mark-and-compact pass traces from the root environment, builds a forwarding table, and serializes only the live set with remapped ids.
+
+In practice: 142,646 objects in memory → 1,692 saved to disk (99% garbage). The image file is 42KB. The persistence layer IS the GC — garbage never hits disk.
+
+---
+
 ## Day 6 — TUI inspector, floats, and FFI
 
 ### TUI Inspector

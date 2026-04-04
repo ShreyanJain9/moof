@@ -124,10 +124,8 @@ pub const OP_PRIM_SEND: u8 = 0x64;
 
 /// Open a native library. Stack: [name_string] → [library_object]
 pub const OP_FFI_OPEN: u8 = 0x70;
-/// Bind a foreign function. Stack: [lib, name_string, arg_types_list, ret_type_sym] → [foreign_fn]
+/// Bind a foreign function via the native registry. Stack: [lib, name_string, arg_types_list, ret_type_sym] → [native_fn]
 pub const OP_FFI_BIND: u8 = 0x71;
-/// Call a foreign function. Arg: u8 argc. Stack: [foreign_fn, args...] → [result]
-pub const OP_FFI_CALL: u8 = 0x72;
 
 /// Read a u16 from bytecode at the given offset (big-endian).
 pub fn read_u16(code: &[u8], offset: usize) -> u16 {

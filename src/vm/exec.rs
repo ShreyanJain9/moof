@@ -5,9 +5,48 @@
 
 use crate::runtime::value::{Value, HeapObject, BytecodeChunk};
 use crate::runtime::heap::Heap;
-use crate::ffi::bridge::{self, NativeLibrary, ForeignFunction, FfiType};
+use crate::ffi::bridge::{self, NativeLibrary, FfiType};
 use super::opcodes::*;
 use std::collections::HashMap;
+
+/// A native function callable from MOOF. Receives a mutable heap and args.
+pub type NativeFn = Box<dyn Fn(&mut Heap, &[Value]) -> Result<Value, String>>;
+
+/// Registry of native functions. Functions are looked up by name.
+pub struct NativeRegistry {
+    functions: Vec<NativeFn>,
+    names: Vec<String>,
+    name_to_id: HashMap<String, usize>,
+}
+
+impl NativeRegistry {
+    pub fn new() -> Self {
+        NativeRegistry {
+            functions: Vec::new(),
+            names: Vec::new(),
+            name_to_id: HashMap::new(),
+        }
+    }
+
+    /// Register a native function. Returns its index.
+    pub fn register(&mut self, name: String, func: NativeFn) -> usize {
+        if let Some(&id) = self.name_to_id.get(&name) {
+            // Replace existing registration
+            self.functions[id] = func;
+            return id;
+        }
+        let id = self.functions.len();
+        self.functions.push(func);
+        self.names.push(name.clone());
+        self.name_to_id.insert(name, id);
+        id
+    }
+
+    /// Look up a native function by name.
+    pub fn get(&self, name: &str) -> Option<&NativeFn> {
+        self.name_to_id.get(name).map(|&id| &self.functions[id])
+    }
+}
 
 /// A call frame on the VM's call stack.
 #[derive(Debug)]
@@ -46,10 +85,10 @@ pub struct VM {
     pub proto_lambda: Option<u32>,
     pub proto_operative: Option<u32>,
     pub proto_environment: Option<u32>,
-    /// FFI: open native libraries (keyed by name)
+    /// Native extension registry — all native functions live here
+    pub native_registry: NativeRegistry,
+    /// FFI: open native libraries (keyed by name, kept for symbol lookup)
     pub ffi_libs: HashMap<String, NativeLibrary>,
-    /// FFI: bound foreign functions (keyed by heap id of the ForeignFunction object)
-    pub ffi_fns: HashMap<u32, ForeignFunction>,
 }
 
 /// Result of VM execution.
@@ -79,9 +118,27 @@ impl VM {
             proto_lambda: None,
             proto_operative: None,
             proto_environment: None,
+            native_registry: NativeRegistry::new(),
             ffi_libs: HashMap::new(),
-            ffi_fns: HashMap::new(),
         }
+    }
+
+    /// Register a native function and return a Value::Object pointing to a NativeFunction.
+    pub fn register_native(&mut self, name: &str, func: NativeFn) -> Value {
+        self.native_registry.register(name.to_string(), func);
+        let obj = HeapObject::NativeFunction { name: name.to_string() };
+        Value::Object(self.heap.alloc(obj))
+    }
+
+    /// Call a native function by name, temporarily taking the registry to avoid borrow conflicts.
+    fn call_native(&mut self, name: &str, args: &[Value]) -> Result<Value, String> {
+        let registry = std::mem::replace(&mut self.native_registry, NativeRegistry::new());
+        let result = match registry.get(name) {
+            Some(func) => func(&mut self.heap, args),
+            None => Err(format!("Native function '{}' not found in registry", name)),
+        };
+        self.native_registry = registry;
+        result
     }
 
     /// Get the type prototype for a value (if registered).
@@ -434,15 +491,14 @@ impl VM {
                                     }
                                     self.call_lambda(params, body, def_env, &evaled)?
                                 }
-                                HeapObject::ForeignFunction { .. } => {
+                                HeapObject::NativeFunction { name } => {
+                                    let name = name.clone();
                                     let raw_args = self.heap.list_to_vec(args_list);
                                     let mut evaled = Vec::new();
                                     for arg in raw_args {
                                         evaled.push(self.eval(arg, env_id)?);
                                     }
-                                    let ff = self.ffi_fns.get(&id)
-                                        .ok_or("Not a bound foreign function")?;
-                                    bridge::call_foreign(ff, &evaled, &mut self.heap)?
+                                    self.call_native(&name, &evaled)?
                                 }
                                 _ => {
                                     // General object: eval args, then send call:
@@ -637,7 +693,7 @@ impl VM {
                             HeapObject::Operative { .. } => "Operative",
                             HeapObject::Lambda { .. } => "Lambda",
                             HeapObject::Environment(_) => "Environment",
-                            HeapObject::ForeignFunction { .. } => "ForeignFunction",
+                            HeapObject::NativeFunction { .. } => "NativeFunction",
                         },
                     };
                     let sym = self.heap.intern(type_name);
@@ -716,14 +772,12 @@ impl VM {
                     // Parse arg types from a list of symbols
                     let arg_type_syms = self.heap.list_to_vec(arg_types_val);
                     let mut arg_types = Vec::new();
-                    let mut arg_type_names = Vec::new();
                     for sym_val in &arg_type_syms {
                         if let Value::Symbol(sid) = sym_val {
                             let name = self.heap.symbol_name(*sid).to_string();
                             let ftype = FfiType::from_symbol_name(&name)
                                 .ok_or_else(|| format!("ffi-bind: unknown type '{}'", name))?;
                             arg_types.push(ftype);
-                            arg_type_names.push(name);
                         } else {
                             return Err("ffi-bind: arg types must be symbols".into());
                         }
@@ -736,37 +790,23 @@ impl VM {
                     let ret_type = FfiType::from_symbol_name(&ret_type_name)
                         .ok_or_else(|| format!("ffi-bind: unknown return type '{}'", ret_type_name))?;
 
-                    // Bind the function
+                    // Bind the function via FFI bridge
                     let lib = self.ffi_libs.get(&lib_name)
                         .ok_or_else(|| format!("ffi-bind: library '{}' not open", lib_name))?;
                     let ff = bridge::bind_function(lib, &func_name, arg_types, ret_type)?;
 
-                    // Store as a ForeignFunction heap object + keep the runtime handle
-                    let ff_obj = HeapObject::ForeignFunction {
-                        lib_name: lib_name.clone(),
-                        func_name: func_name.clone(),
-                        arg_types: arg_type_names,
-                        ret_type: ret_type_name,
-                    };
-                    let ff_id = self.heap.alloc(ff_obj);
-                    self.ffi_fns.insert(ff_id, ff);
-                    self.stack.push(Value::Object(ff_id));
-                }
+                    // Wrap the bound FFI function as a NativeFn closure and register it
+                    let native_name = format!("ffi:{}:{}", lib_name, func_name);
+                    // The ForeignFunction is moved into the closure
+                    let ff_closure: NativeFn = Box::new(move |heap, args| {
+                        bridge::call_foreign(&ff, args, heap)
+                    });
+                    self.native_registry.register(native_name.clone(), ff_closure);
 
-                OP_FFI_CALL => {
-                    let argc = code[ip + 1] as usize;
-                    self.frames.last_mut().unwrap().ip = ip + 2;
-                    let stack_start = self.stack.len() - argc - 1;
-                    let callable = self.stack[stack_start];
-                    let args: Vec<Value> = self.stack[stack_start + 1..].to_vec();
-                    self.stack.truncate(stack_start);
-
-                    let ff_id = callable.as_object()
-                        .ok_or("FFI_CALL: expected foreign function")?;
-                    let ff = self.ffi_fns.get(&ff_id)
-                        .ok_or("FFI_CALL: not a bound foreign function")?;
-                    let result = bridge::call_foreign(ff, &args, &mut self.heap)?;
-                    self.stack.push(result);
+                    // Create a NativeFunction heap object
+                    let nf_obj = HeapObject::NativeFunction { name: native_name };
+                    let nf_id = self.heap.alloc(nf_obj);
+                    self.stack.push(Value::Object(nf_id));
                 }
 
                 _ => return Err(format!("Unknown opcode: 0x{:02x}", op)),
@@ -828,10 +868,9 @@ impl VM {
                     HeapObject::Operative { .. } => {
                         Err("Cannot call an operative with evaluated arguments — use vau syntax".into())
                     }
-                    HeapObject::ForeignFunction { .. } => {
-                        let ff = self.ffi_fns.get(&id)
-                            .ok_or("Not a bound foreign function (library may need re-opening)")?;
-                        bridge::call_foreign(ff, args, &mut self.heap)
+                    HeapObject::NativeFunction { name } => {
+                        let name = name.clone();
+                        self.call_native(&name, args)
                     }
                     _ => {
                         // Try message send: [callable call: args...]
@@ -1476,8 +1515,8 @@ impl VM {
                     HeapObject::Operative { .. } => "<operative>".to_string(),
                     HeapObject::Lambda { .. } => "<lambda>".to_string(),
                     HeapObject::Environment(_) => "<environment>".to_string(),
-                    HeapObject::ForeignFunction { lib_name, func_name, .. } => {
-                        format!("<ffi {}:{}>", lib_name, func_name)
+                    HeapObject::NativeFunction { name } => {
+                        format!("<native {}>", name)
                     }
                 }
             }

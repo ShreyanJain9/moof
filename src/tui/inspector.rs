@@ -264,13 +264,12 @@ fn render_value_view(frame: &mut Frame, area: Rect, heap: &Heap, val: Value) {
                         Span::raw(format_value_short(heap, *source)),
                     ]));
                 }
-                HeapObject::ForeignFunction { lib_name, func_name, arg_types, ret_type } => {
+                HeapObject::NativeFunction { name } => {
                     lines.push(Line::from(vec![
-                        Span::styled("ForeignFunction", Style::default().fg(Color::Red).bold()),
+                        Span::styled("NativeFunction", Style::default().fg(Color::Red).bold()),
                         Span::raw(format!("  #{}", id)),
                     ]));
-                    lines.push(Line::from(format!("  {}:{}", lib_name, func_name)));
-                    lines.push(Line::from(format!("  ({}) -> {}", arg_types.join(", "), ret_type)));
+                    lines.push(Line::from(format!("  {}", name)));
                 }
                 HeapObject::Environment(env) => {
                     lines.push(Line::from(vec![
@@ -315,7 +314,7 @@ fn render_heap_list(frame: &mut Frame, area: Rect, heap: &Heap, offset: usize, s
             HeapObject::Operative { .. } => "Operative",
             HeapObject::Lambda { .. } => "Lambda",
             HeapObject::Environment(_) => "Env",
-            HeapObject::ForeignFunction { .. } => "FFI",
+            HeapObject::NativeFunction { .. } => "Native",
         };
         let summary = match obj {
             HeapObject::MoofString(s) => {
@@ -406,8 +405,8 @@ fn format_value_short(heap: &Heap, val: Value) -> String {
                 HeapObject::Lambda { .. } => format!("<lambda #{}>", id),
                 HeapObject::Operative { .. } => format!("<operative #{}>", id),
                 HeapObject::Environment(_) => format!("<env #{}>", id),
-                HeapObject::ForeignFunction { lib_name, func_name, .. } => {
-                    format!("<ffi {}:{}>", lib_name, func_name)
+                HeapObject::NativeFunction { name } => {
+                    format!("<native {}>", name)
                 }
             }
         }
