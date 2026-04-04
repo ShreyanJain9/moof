@@ -240,3 +240,54 @@ Enables real metaprogramming:
 ### "You never save"
 
 Auto-checkpoint every 5000 heap allocations. The WAL catches every mutation between checkpoints. The image persists continuously — users never need to think about saving. Moves toward the design doc's §6.1 vision of true orthogonal persistence.
+
+---
+
+## §10 — OO standard library (`acb41e5`, `3aadae7`)
+
+### OO rewrite
+
+Rewrote the standard library as proper moof objects:
+
+- **Assoc** — wraps a key-value pair list. `[m get: key]`, `[m set: key to: val]`, `[m has: key]`, `[m keys]`, `[m values]`, `[Assoc from: k1 v1 k2 v2]`. Multi-keyword methods via `handle!` with `["set:to:" toSymbol]` pattern (the `{}` literal parser can't concatenate multiple keywords into one selector).
+
+- **JSON** — singleton object. `[JSON parse: str]` returns Assocs for objects, lists for arrays. `[JSON serialize: val]` produces JSON strings. Full round-trip including nested structures. Parser is recursive descent in pure moof using string `=` for content comparison (not `eq` which is identity).
+
+- **Membrane/Facet/LoggingMembrane** — capability wrappers as objects. `[Membrane wrap: target on-send: handler]`, `[Facet wrap: target allowing: selectors]`.
+
+- **List methods on Cons** — `any:`, `every:`, `find:`, `flatMap:`, `sortBy:`, `sort`, `join:`. All nil-safe (check cdr before recursing).
+
+### Unquote-splicing
+
+Added `OP_APPEND` opcode. Compiler detects `,@` in quasiquoted lists, builds with segments + append instead of simple cons. Bootstrap rewritten to use quasiquote everywhere — `defmethod` went from a 3-line cons/list nightmare to a readable one-liner.
+
+### Bugs found
+
+- `eq` is identity, not content equality. `(eq "a" "a")` is false for separately allocated strings. Added `String.=` for content comparison. All string-comparing code (Assoc keys, JSON parser) must use `[a = b]`, not `(eq a b)`.
+- Cons methods that recurse via `[(cdr self) method: arg]` crash on nil (nil isn't a Cons). Fixed by checking `(null? (cdr self))` before recursing.
+- `{}` object literals can't handle multi-keyword selectors (`set:to:` becomes two separate keywords). Multi-keyword methods must use `handle!` with `["sel:name:" toSymbol]`.
+
+---
+
+## §11 — Source projection, MCP server, eval-string (`4761f23`)
+
+### Source projection (design doc §6)
+
+On every checkpoint, walks the root environment and dumps one `.moof` file per named definition into `.moof/source/`. Objects reconstructed as `{ Parent slot: val ... }` with handler source ASTs. Lambdas use their stored source. Simple values get literals.
+
+The source directory is committable — `git diff` shows exactly which objects changed and how. The binary `image.bin` is a fast-load cache. Source is the diffable truth. `.gitignore` updated to only exclude `.moof/wal.bin`.
+
+### MCP server (design doc §8)
+
+`cargo run -- --mcp` launches a JSON-RPC 2.0 server over stdio. Built on the JSON and Assoc libraries in pure moof (`lib/mcp.moof`). Handles:
+- `initialize` → protocol version, capabilities, server info
+- `tools/list` → tool registry (extensible)
+- `tools/call` → evaluates moof expressions via `eval-string`, returns results
+
+### eval-string
+
+New compiler form + `OP_EVAL_STRING` opcode. Parses and evaluates a moof expression from a runtime string. Needed for MCP's tools/call (receives expression as JSON string, needs to eval it in the live image).
+
+### let-seq
+
+Sequential let bindings (Scheme's `let*`). Named `let-seq` because `*` is an operator character in the lexer. Each binding visible to the next. Implemented as a quasiquote-powered vau that nests `let` forms.
