@@ -164,6 +164,13 @@
 (def constantly (fn (x) (fn args x)))
 (def apply      (fn (f args) (eval (cons f args))))
 
+; ── string helpers ──────────────────────────────────────────
+
+; str: concatenate any number of values into a string
+(def str
+  (fn args
+    (fold (fn (acc x) [acc ++ [x toString]]) "" args)))
+
 ; ── printing ────────────────────────────────────────────────
 
 (def println (fn (x) (print x)))

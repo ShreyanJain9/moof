@@ -459,22 +459,14 @@ impl VM {
                         Value::Object(id) => {
                             match self.heap.get(id).clone() {
                                 HeapObject::Lambda { params, body, def_env, .. } => {
-                                    // Eval args in current env
                                     let raw_args = self.heap.list_to_vec(args_list);
                                     let mut evaled = Vec::new();
                                     for arg in raw_args {
                                         evaled.push(self.eval(arg, env_id)?);
                                     }
-                                    // Create new env, bind params
                                     let new_env_id = self.heap.alloc_env(Some(def_env));
-                                    let param_syms = self.heap.list_to_vec(params);
-                                    for (i, &p) in param_syms.iter().enumerate() {
-                                        if let Value::Symbol(sym) = p {
-                                            let val = evaled.get(i).copied().unwrap_or(Value::Nil);
-                                            self.env_define(new_env_id, sym, val);
-                                        }
-                                    }
-                                    // Replace current frame — no new frame pushed
+                                    let evaled_list = self.heap.list(&evaled);
+                                    self.bind_params(new_env_id, params, evaled_list);
                                     let frame = self.frames.last_mut().unwrap();
                                     self.stack.truncate(frame.stack_base);
                                     frame.chunk_id = body;
@@ -515,13 +507,8 @@ impl VM {
                             match self.heap.get(id).clone() {
                                 HeapObject::Lambda { params, body, def_env, .. } => {
                                     let new_env_id = self.heap.alloc_env(Some(def_env));
-                                    let param_syms = self.heap.list_to_vec(params);
-                                    for (i, &p) in param_syms.iter().enumerate() {
-                                        if let Value::Symbol(sym) = p {
-                                            let val = args.get(i).copied().unwrap_or(Value::Nil);
-                                            self.env_define(new_env_id, sym, val);
-                                        }
-                                    }
+                                    let args_list = self.heap.list(&args);
+                                    self.bind_params(new_env_id, params, args_list);
                                     let frame = self.frames.last_mut().unwrap();
                                     self.stack.truncate(frame.stack_base);
                                     frame.chunk_id = body;
@@ -770,17 +757,14 @@ impl VM {
         }
     }
 
-    /// Call a lambda/block: create a new environment, bind params, execute body.
+    /// Call a lambda: create a new environment, bind params, execute body.
+    /// Handles both positional params (a b c) and rest params (args) and
+    /// dotted rest (a b . rest).
     fn call_lambda(&mut self, params: Value, body: u32, def_env: u32, args: &[Value]) -> VMResult {
         let new_env_id = self.heap.alloc_env(Some(def_env));
-        // Bind parameters
-        let param_syms = self.heap.list_to_vec(params);
-        for (i, &p) in param_syms.iter().enumerate() {
-            if let Value::Symbol(sym) = p {
-                let val = args.get(i).copied().unwrap_or(Value::Nil);
-                self.env_define(new_env_id, sym, val);
-            }
-        }
+        // Use bind_params for proper destructuring (handles rest params)
+        let args_list = self.heap.list(args);
+        self.bind_params(new_env_id, params, args_list);
         self.execute(body, new_env_id)
     }
 
@@ -1012,6 +996,13 @@ impl VM {
                     "toString" | "describe" => {
                         Ok(Some(self.heap.alloc_string(&format!("{}", a))))
                     }
+                    "asString" => {
+                        Ok(Some(self.heap.alloc_string(&format!("{}", a))))
+                    }
+                    "toFloat" => {
+                        // Placeholder — no float type yet, return as string
+                        Ok(Some(self.heap.alloc_string(&format!("{}.0", a))))
+                    }
                     _ => Ok(None),
                 }
             }
@@ -1078,15 +1069,125 @@ impl VM {
                         }
                     }
                     HeapObject::MoofString(ref s) => {
+                        let s = s.clone(); // clone to release borrow
                         match sel_name {
                             "toString" | "describe" => Ok(Some(Value::Object(id))),
-                            "length" => Ok(Some(Value::Integer(s.len() as i64))),
+                            "length" => Ok(Some(Value::Integer(s.chars().count() as i64))),
                             "++" => {
-                                // String concatenation
                                 if let Some(Value::Object(other_id)) = args.first() {
                                     if let HeapObject::MoofString(other) = self.heap.get(*other_id) {
                                         let new_s = format!("{}{}", s, other);
                                         return Ok(Some(self.heap.alloc_string(&new_s)));
+                                    }
+                                }
+                                // Also allow ++ with integers, symbols via toString
+                                if let Some(&arg) = args.first() {
+                                    let other_s = self.format_value(arg);
+                                    let new_s = format!("{}{}", s, other_s);
+                                    return Ok(Some(self.heap.alloc_string(&new_s)));
+                                }
+                                Ok(None)
+                            }
+                            "substring:to:" => {
+                                let start = args.first().and_then(|v| v.as_integer())
+                                    .ok_or("substring:to: expects integer start")? as usize;
+                                let end = args.get(1).and_then(|v| v.as_integer())
+                                    .ok_or("substring:to: expects integer end")? as usize;
+                                let chars: Vec<char> = s.chars().collect();
+                                let end = end.min(chars.len());
+                                let start = start.min(end);
+                                let sub: String = chars[start..end].iter().collect();
+                                Ok(Some(self.heap.alloc_string(&sub)))
+                            }
+                            "at:" => {
+                                let idx = args.first().and_then(|v| v.as_integer())
+                                    .ok_or("at: expects integer index")? as usize;
+                                let chars: Vec<char> = s.chars().collect();
+                                if idx < chars.len() {
+                                    let ch: String = chars[idx..idx+1].iter().collect();
+                                    Ok(Some(self.heap.alloc_string(&ch)))
+                                } else {
+                                    Ok(Some(Value::Nil))
+                                }
+                            }
+                            "indexOf:" => {
+                                if let Some(Value::Object(other_id)) = args.first() {
+                                    if let HeapObject::MoofString(needle) = self.heap.get(*other_id) {
+                                        if let Some(pos) = s.find(needle.as_str()) {
+                                            // Convert byte offset to char offset
+                                            let char_pos = s[..pos].chars().count();
+                                            return Ok(Some(Value::Integer(char_pos as i64)));
+                                        }
+                                    }
+                                }
+                                Ok(Some(Value::Nil))
+                            }
+                            "split:" => {
+                                if let Some(Value::Object(other_id)) = args.first() {
+                                    if let HeapObject::MoofString(delim) = self.heap.get(*other_id) {
+                                        let delim = delim.clone();
+                                        let parts: Vec<Value> = s.split(&delim)
+                                            .map(|part| self.heap.alloc_string(part))
+                                            .collect();
+                                        return Ok(Some(self.heap.list(&parts)));
+                                    }
+                                }
+                                Ok(None)
+                            }
+                            "trim" => {
+                                Ok(Some(self.heap.alloc_string(s.trim())))
+                            }
+                            "startsWith:" => {
+                                if let Some(Value::Object(other_id)) = args.first() {
+                                    if let HeapObject::MoofString(prefix) = self.heap.get(*other_id) {
+                                        return Ok(Some(if s.starts_with(prefix.as_str()) { Value::True } else { Value::False }));
+                                    }
+                                }
+                                Ok(Some(Value::False))
+                            }
+                            "endsWith:" => {
+                                if let Some(Value::Object(other_id)) = args.first() {
+                                    if let HeapObject::MoofString(suffix) = self.heap.get(*other_id) {
+                                        return Ok(Some(if s.ends_with(suffix.as_str()) { Value::True } else { Value::False }));
+                                    }
+                                }
+                                Ok(Some(Value::False))
+                            }
+                            "contains:" => {
+                                if let Some(Value::Object(other_id)) = args.first() {
+                                    if let HeapObject::MoofString(needle) = self.heap.get(*other_id) {
+                                        return Ok(Some(if s.contains(needle.as_str()) { Value::True } else { Value::False }));
+                                    }
+                                }
+                                Ok(Some(Value::False))
+                            }
+                            "toUpper" => Ok(Some(self.heap.alloc_string(&s.to_uppercase()))),
+                            "toLower" => Ok(Some(self.heap.alloc_string(&s.to_lowercase()))),
+                            "toSymbol" => {
+                                let sym = self.heap.intern(&s);
+                                Ok(Some(Value::Symbol(sym)))
+                            }
+                            "toInteger" => {
+                                match s.trim().parse::<i64>() {
+                                    Ok(n) => Ok(Some(Value::Integer(n))),
+                                    Err(_) => Ok(Some(Value::Nil)),
+                                }
+                            }
+                            "chars" => {
+                                let chars: Vec<Value> = s.chars()
+                                    .map(|c| self.heap.alloc_string(&c.to_string()))
+                                    .collect();
+                                Ok(Some(self.heap.list(&chars)))
+                            }
+                            "replace:with:" => {
+                                if let (Some(Value::Object(from_id)), Some(Value::Object(to_id))) =
+                                    (args.first(), args.get(1))
+                                {
+                                    if let (HeapObject::MoofString(from), HeapObject::MoofString(to)) =
+                                        (self.heap.get(*from_id), self.heap.get(*to_id))
+                                    {
+                                        let result = s.replace(from.as_str(), to.as_str());
+                                        return Ok(Some(self.heap.alloc_string(&result)));
                                     }
                                 }
                                 Ok(None)
@@ -1230,11 +1331,16 @@ impl VM {
                 }
             }
 
-            Value::Symbol(_) => {
+            Value::Symbol(sym_id) => {
                 match sel_name {
                     "toString" | "describe" => {
                         let s = self.format_value(receiver);
                         Ok(Some(self.heap.alloc_string(&s)))
+                    }
+                    "asString" | "name" => {
+                        // Raw symbol name without the leading quote
+                        let name = self.heap.symbol_name(sym_id).to_string();
+                        Ok(Some(self.heap.alloc_string(&name)))
                     }
                     _ => Ok(None),
                 }

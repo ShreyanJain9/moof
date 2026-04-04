@@ -228,6 +228,12 @@ fn register_type_prototypes(vm: &mut VM, env_id: u32) {
         ]),
         ("String", |vm| &mut vm.proto_string, &[
             ("length",0), ("++",1), ("toString",0),
+            ("substring:to:",2), ("at:",1), ("indexOf:",1),
+            ("split:",1), ("trim",0),
+            ("startsWith:",1), ("endsWith:",1), ("contains:",1),
+            ("toUpper",0), ("toLower",0),
+            ("toSymbol",0), ("toInteger",0),
+            ("chars",0), ("replace:with:",2),
         ]),
         ("Cons", |vm| &mut vm.proto_cons, &[
             ("car",0), ("cdr",0), ("toString",0),
@@ -235,7 +241,9 @@ fn register_type_prototypes(vm: &mut VM, env_id: u32) {
         ("Nil", |vm| &mut vm.proto_nil, &[
             ("isNil",0), ("toString",0),
         ]),
-        ("Symbol", |vm| &mut vm.proto_symbol, &[("toString",0)]),
+        ("Symbol", |vm| &mut vm.proto_symbol, &[
+            ("toString",0), ("asString",0), ("name",0),
+        ]),
         ("Lambda", |vm| &mut vm.proto_lambda, &[
             ("source",0), ("params",0), ("arity",0), ("toString",0),
         ]),

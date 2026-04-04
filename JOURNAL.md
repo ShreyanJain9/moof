@@ -74,6 +74,22 @@ Built the entire runtime from scratch in one session: lexer, parser, compiler, b
 - `(load "file.moof")` for loading code from files
 - ~200 lines of standard library written in MOOF itself
 
+## Day 4 — String operations and the rest-param fix
+
+### String ops
+
+Full string manipulation suite on the String prototype: `substring:to:`, `at:`, `indexOf:`, `split:`, `trim`, `startsWith:`, `endsWith:`, `contains:`, `toUpper`, `toLower`, `toSymbol`, `toInteger`, `chars`, `replace:with:`. All registered as native handler lambdas, all introspectable via `[String interface]`.
+
+Symbol gets `asString`/`name` for extracting the raw name without the `'` prefix. Integer gets `asString`. Concatenation (`++`) now works with any type, not just strings — falls back to `toString`.
+
+Added `str` helper to bootstrap: `(str "count: " 42 " done")` → `"count: 42 done"`. Variadic, clean.
+
+### The rest-param fix
+
+Found that `call_lambda` was using `list_to_vec` + positional indexing for param binding, which broke rest params. `(fn args body)` (bare symbol = capture all args) was silently only binding the first arg. Fixed all three call paths (call_lambda, OP_TAIL_APPLY, OP_TAIL_CALL) to use `bind_params`, which correctly handles positional, rest, and destructuring patterns.
+
+This also fixed dotted-rest params like `(fn (a b . rest) ...)` in the TCO paths.
+
 ---
 
 ## Day 2 — The great syntax reform
