@@ -74,6 +74,23 @@ Built the entire runtime from scratch in one session: lexer, parser, compiler, b
 - `(load "file.moof")` for loading code from files
 - ~200 lines of standard library written in MOOF itself
 
+## Day 8 — One path for all native code
+
+### The unification
+
+Killed the three separate native code paths:
+- `primitive_send` match arms (hardcoded Rust for arithmetic, strings, etc)
+- `make_native_lambda` (fake Lambda bytecode wrappers with OP_PRIM_SEND)
+- `NativeRegistry` (Rust closures for FFI only)
+
+Now there's ONE path: everything is a NativeFunction closure in the NativeRegistry. `[3 + 4]` and `(ffi-sin 1.0)` dispatch through the exact same mechanism.
+
+The new `src/vm/natives.rs` (~500 lines) registers all primitive operations — integer arithmetic, float math, string ops, list ops, symbol conversion, introspection — as NativeFunction closures. Each gets added as a handler on the corresponding type prototype. `make_native_lambda` and `OP_PRIM_SEND` are deleted.
+
+Float got its own prototype (was sharing Integer's). `MoofExtension` trait added for external Rust code to hook in cleanly. `primitive_send` shrunk from ~470 lines to ~150 (only bootstrap fallback and VM-dependent ops like eval:/call:).
+
+---
+
 ## Day 7 — Native extension interface, compacting GC
 
 ### The native extension interface

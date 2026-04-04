@@ -320,59 +320,11 @@ impl VM {
     }
 }
 
-/// Look up type prototypes from bootstrap and register native handlers.
+/// Look up type prototypes from bootstrap and register all native handlers.
+/// All native operations are NativeFunction closures in the NativeRegistry.
+/// One path. One mechanism.
 fn register_type_prototypes(vm: &mut VM, env_id: u32) {
-    // (name, setter, native_handlers as (selector, argc_excluding_self))
-    let protos: &[(&str, fn(&mut VM) -> &mut Option<u32>, &[(&str, u8)])] = &[
-        ("Integer", |vm| &mut vm.proto_integer, &[
-            ("+",1), ("-",1), ("*",1), ("/",1), ("%",1),
-            ("<",1), (">",1), ("=",1), ("<=",1), (">=",1),
-            ("negate",0), ("abs",0), ("toString",0),
-        ]),
-        ("Boolean", |vm| &mut vm.proto_boolean, &[
-            ("not",0), ("and:",1), ("or:",1),
-            ("ifTrue:",1), ("ifTrue:ifFalse:",2), ("ifFalse:",1),
-            ("toString",0),
-        ]),
-        ("String", |vm| &mut vm.proto_string, &[
-            ("length",0), ("++",1), ("toString",0),
-            ("substring:to:",2), ("at:",1), ("indexOf:",1),
-            ("split:",1), ("trim",0),
-            ("startsWith:",1), ("endsWith:",1), ("contains:",1),
-            ("toUpper",0), ("toLower",0),
-            ("toSymbol",0), ("toInteger",0),
-            ("chars",0), ("replace:with:",2),
-        ]),
-        ("Cons", |vm| &mut vm.proto_cons, &[
-            ("car",0), ("cdr",0), ("toString",0),
-        ]),
-        ("Nil", |vm| &mut vm.proto_nil, &[
-            ("isNil",0), ("toString",0),
-        ]),
-        ("Symbol", |vm| &mut vm.proto_symbol, &[
-            ("toString",0), ("asString",0), ("name",0),
-        ]),
-        ("Lambda", |vm| &mut vm.proto_lambda, &[
-            ("source",0), ("params",0), ("arity",0), ("toString",0),
-        ]),
-        ("Operative", |vm| &mut vm.proto_operative, &[
-            ("source",0), ("params",0), ("envParam",0), ("toString",0),
-        ]),
-        // Block is gone — blocks are just lambdas now
-        ("Environment", |vm| &mut vm.proto_environment, &[
-            ("eval:",1), ("lookup:",1), ("set:to:",2), ("toString",0),
-        ]),
-    ];
-
-    for &(name, ref setter, native_sels) in protos {
-        let sym = vm.heap.intern(name);
-        if let Ok(Value::Object(id)) = vm.env_lookup_helper(env_id, sym) {
-            *setter(vm) = Some(id);
-            if !native_sels.is_empty() {
-                vm.register_native_handlers(id, env_id, name, native_sels);
-            }
-        }
-    }
+    vm::natives::register_all_natives(vm, env_id);
 }
 
 impl VM {

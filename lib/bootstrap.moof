@@ -226,6 +226,10 @@
   describe: () [self toString]
 })
 
+(def Float { Object
+  describe: () [self toString]
+})
+
 (def Boolean { Object
   describe: () (if self "true" "false")
 })

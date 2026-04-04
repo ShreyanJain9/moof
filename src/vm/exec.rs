@@ -3,7 +3,7 @@
 /// Stack-based bytecode interpreter. "send" is the single privileged operation (§2).
 /// The bytecode is the truth layer (§9.2).
 
-use crate::runtime::value::{Value, HeapObject, BytecodeChunk};
+use crate::runtime::value::{Value, HeapObject};
 use crate::runtime::heap::Heap;
 use crate::ffi::bridge::{self, NativeLibrary, FfiType};
 use super::opcodes::*;
@@ -77,6 +77,7 @@ pub struct VM {
     /// Type prototypes — maps primitive types to their prototype object ids.
     /// Set after bootstrap defines them.
     pub proto_integer: Option<u32>,
+    pub proto_float: Option<u32>,
     pub proto_boolean: Option<u32>,
     pub proto_string: Option<u32>,
     pub proto_cons: Option<u32>,
@@ -110,6 +111,7 @@ impl VM {
             sym_does_not_understand: sym_dnu,
             root_env: None,
             proto_integer: None,
+            proto_float: None,
             proto_boolean: None,
             proto_string: None,
             proto_cons: None,
@@ -145,7 +147,7 @@ impl VM {
     fn type_prototype(&self, val: Value) -> Option<u32> {
         match val {
             Value::Integer(_) => self.proto_integer,
-            Value::Float(_) => self.proto_integer, // floats share Integer's prototype for now
+            Value::Float(_) => self.proto_float.or(self.proto_integer), // prefer Float proto, fall back to Integer
             Value::True | Value::False => self.proto_boolean,
             Value::Nil => self.proto_nil,
             Value::Symbol(_) => self.proto_symbol,
@@ -160,71 +162,9 @@ impl VM {
         }
     }
 
-    /// Register native handler lambdas on a type prototype.
-    /// Each handler is a real callable lambda whose body uses OP_PRIM_SEND.
-    pub fn register_native_handlers(&mut self, proto_id: u32, root_env: u32, type_name: &str, selectors: &[(&str, u8)]) {
-        for &(sel, argc) in selectors {
-            let handler = self.make_native_lambda(root_env, type_name, sel, argc);
-            let sel_sym = self.heap.intern(sel);
-            self.heap.add_handler(proto_id, sel_sym, handler);
-        }
-    }
-
-    /// Create a real lambda that wraps a primitive operation via OP_PRIM_SEND.
-    fn make_native_lambda(&mut self, def_env: u32, type_name: &str, selector: &str, argc: u8) -> Value {
-        use crate::runtime::value::BytecodeChunk;
-
-        let mut code = Vec::new();
-        let mut constants: Vec<Value> = Vec::new();
-
-        // OP_LOOKUP self
-        let self_sym = self.heap.intern("self");
-        let self_idx = constants.len() as u16;
-        constants.push(Value::Symbol(self_sym));
-        code.push(OP_LOOKUP);
-        code.push((self_idx >> 8) as u8);
-        code.push((self_idx & 0xFF) as u8);
-
-        // Build param list: (self) or (self a) or (self a b)
-        let param_names = ["a", "b", "c"];
-        let mut param_syms = vec![Value::Symbol(self_sym)];
-        for i in 0..argc as usize {
-            let arg_sym = self.heap.intern(param_names[i]);
-            param_syms.push(Value::Symbol(arg_sym));
-            // OP_LOOKUP arg
-            let arg_idx = constants.len() as u16;
-            constants.push(Value::Symbol(arg_sym));
-            code.push(OP_LOOKUP);
-            code.push((arg_idx >> 8) as u8);
-            code.push((arg_idx & 0xFF) as u8);
-        }
-
-        // OP_PRIM_SEND selector argc
-        let sel_sym = self.heap.intern(selector);
-        let sel_idx = constants.len() as u16;
-        constants.push(Value::Symbol(sel_sym));
-        code.push(OP_PRIM_SEND);
-        code.push((sel_idx >> 8) as u8);
-        code.push((sel_idx & 0xFF) as u8);
-        code.push(argc);
-
-        code.push(OP_RETURN);
-
-        let chunk = BytecodeChunk { code, constants };
-        let body_id = self.heap.alloc_chunk(chunk);
-
-        let params = self.heap.list(&param_syms);
-        let source_str = format!("<native {}.{}>", type_name, selector);
-        let source = self.heap.alloc_string(&source_str);
-
-        let lambda = HeapObject::Lambda {
-            params,
-            body: body_id,
-            def_env,
-            source,
-        };
-        Value::Object(self.heap.alloc(lambda))
-    }
+    // Native handler registration has moved to vm::natives::register_all_natives.
+    // All native operations are NativeFunction closures in the NativeRegistry.
+    // One path. One mechanism.
 
     /// Execute a bytecode chunk in a given environment. Returns the final value.
     pub fn execute(&mut self, chunk_id: u32, env_id: u32) -> VMResult {
@@ -327,28 +267,6 @@ impl VM {
                     let args: Vec<Value> = self.stack[stack_start + 1..].to_vec();
                     self.stack.truncate(stack_start);
                     let result = self.message_send(receiver, selector, &args)?;
-                    self.stack.push(result);
-                }
-
-                OP_PRIM_SEND => {
-                    // Like OP_SEND but bypasses handler lookup — goes directly to primitive_send.
-                    // Used by native handler lambdas to avoid infinite recursion.
-                    let sel_idx = read_u16(&code, ip + 1) as usize;
-                    let argc = code[ip + 3] as usize;
-                    self.frames.last_mut().unwrap().ip = ip + 4;
-                    let selector = match constants[sel_idx] {
-                        Value::Symbol(s) => s,
-                        _ => return Err("PRIM_SEND: expected symbol selector".into()),
-                    };
-                    let stack_start = self.stack.len() - argc - 1;
-                    let receiver = self.stack[stack_start];
-                    let args: Vec<Value> = self.stack[stack_start + 1..].to_vec();
-                    self.stack.truncate(stack_start);
-                    let result = self.primitive_send(receiver, selector, &args)?
-                        .ok_or_else(|| {
-                            let sel_name = self.heap.symbol_name(selector).to_string();
-                            format!("No primitive handler for {} on {:?}", sel_name, receiver)
-                        })?;
                     self.stack.push(result);
                 }
 
@@ -1018,9 +936,15 @@ impl VM {
         None
     }
 
-    /// Built-in message handlers for primitive types.
-    /// These are the "fast paths" mentioned in §9.2 — semantically it's all
-    /// message dispatch, but the VM handles these directly.
+    /// Fallback message handlers for primitive types.
+    ///
+    /// Most native operations are now NativeFunction closures found via type
+    /// prototype handler lookup in message_send. This fallback handles:
+    /// - Universal object protocol (handlerNames, parent, handlerAt:)
+    /// - Operations that need VM-level dispatch (boolean conditionals, env eval/lookup/set)
+    /// - Float arithmetic (floats share Integer's prototype, so Float-specific ops live here)
+    /// - GeneralObject introspection (slotAt:, slotNames, etc.)
+    /// - Lambda call: (needs call_value)
     fn primitive_send(&mut self, receiver: Value, selector: u32, args: &[Value]) -> Result<Option<Value>, String> {
         let sel_name = self.heap.symbol_name(selector);
 
@@ -1062,73 +986,8 @@ impl VM {
         }
 
         match receiver {
-            Value::Integer(a) => {
-                match sel_name {
-                    "+" => {
-                        let b = args.first().and_then(|v| v.as_integer())
-                            .ok_or("+ expects integer argument")?;
-                        Ok(Some(Value::Integer(a + b)))
-                    }
-                    "-" => {
-                        let b = args.first().and_then(|v| v.as_integer())
-                            .ok_or("- expects integer argument")?;
-                        Ok(Some(Value::Integer(a - b)))
-                    }
-                    "*" => {
-                        let b = args.first().and_then(|v| v.as_integer())
-                            .ok_or("* expects integer argument")?;
-                        Ok(Some(Value::Integer(a * b)))
-                    }
-                    "/" => {
-                        let b = args.first().and_then(|v| v.as_integer())
-                            .ok_or("/ expects integer argument")?;
-                        if b == 0 { return Err("Division by zero".into()); }
-                        Ok(Some(Value::Integer(a / b)))
-                    }
-                    "%" => {
-                        let b = args.first().and_then(|v| v.as_integer())
-                            .ok_or("% expects integer argument")?;
-                        if b == 0 { return Err("Modulo by zero".into()); }
-                        Ok(Some(Value::Integer(a % b)))
-                    }
-                    "<" => {
-                        let b = args.first().and_then(|v| v.as_integer())
-                            .ok_or("< expects integer argument")?;
-                        Ok(Some(if a < b { Value::True } else { Value::False }))
-                    }
-                    ">" => {
-                        let b = args.first().and_then(|v| v.as_integer())
-                            .ok_or("> expects integer argument")?;
-                        Ok(Some(if a > b { Value::True } else { Value::False }))
-                    }
-                    "=" => {
-                        let b = args.first().and_then(|v| v.as_integer())
-                            .ok_or("= expects integer argument")?;
-                        Ok(Some(if a == b { Value::True } else { Value::False }))
-                    }
-                    "<=" => {
-                        let b = args.first().and_then(|v| v.as_integer())
-                            .ok_or("<= expects integer argument")?;
-                        Ok(Some(if a <= b { Value::True } else { Value::False }))
-                    }
-                    ">=" => {
-                        let b = args.first().and_then(|v| v.as_integer())
-                            .ok_or(">= expects integer argument")?;
-                        Ok(Some(if a >= b { Value::True } else { Value::False }))
-                    }
-                    "negate" => Ok(Some(Value::Integer(-a))),
-                    "abs" => Ok(Some(Value::Integer(a.abs()))),
-                    "toString" | "describe" => {
-                        Ok(Some(self.heap.alloc_string(&format!("{}", a))))
-                    }
-                    "asString" => {
-                        Ok(Some(self.heap.alloc_string(&format!("{}", a))))
-                    }
-                    "toFloat" => Ok(Some(Value::Float(a as f64))),
-                    _ => Ok(None),
-                }
-            }
-
+            // Float arithmetic — floats share proto_integer, so Integer NativeFunction
+            // handlers won't match (as_integer returns None for Float). This fallback catches them.
             Value::Float(a) => {
                 match sel_name {
                     "+" => { let b = args.first().and_then(|v| v.as_float()).ok_or("+ expects number")?; Ok(Some(Value::Float(a + b))) }
@@ -1155,20 +1014,19 @@ impl VM {
                 }
             }
 
+            // Boolean conditionals need call_value — can't be heap-only closures.
             Value::True => {
                 match sel_name {
                     "ifTrue:ifFalse:" | "ifTrue:" => {
                         let block = args.first().copied().ok_or("ifTrue: expects a block")?;
                         self.call_value(block, &[]).map(Some)
                     }
-                    "not" => Ok(Some(Value::False)),
                     "and:" => {
-                        // true and: block → evaluate block
                         let block = args.first().copied().ok_or("and: expects a block")?;
                         self.call_value(block, &[]).map(Some)
                     }
                     "or:" => Ok(Some(Value::True)),
-                    "toString" | "describe" => Ok(Some(self.heap.alloc_string("true"))),
+                    "ifFalse:" => Ok(Some(Value::Nil)),
                     _ => Ok(None),
                 }
             }
@@ -1184,165 +1042,18 @@ impl VM {
                         let block = args.first().copied().ok_or("ifFalse: expects a block")?;
                         self.call_value(block, &[]).map(Some)
                     }
-                    "not" => Ok(Some(Value::True)),
                     "and:" => Ok(Some(Value::False)),
                     "or:" => {
                         let block = args.first().copied().ok_or("or: expects a block")?;
                         self.call_value(block, &[]).map(Some)
                     }
-                    "toString" | "describe" => Ok(Some(self.heap.alloc_string("false"))),
-                    _ => Ok(None),
-                }
-            }
-
-            Value::Nil => {
-                match sel_name {
-                    "toString" | "describe" => Ok(Some(self.heap.alloc_string("nil"))),
-                    "isNil" => Ok(Some(Value::True)),
                     _ => Ok(None),
                 }
             }
 
             Value::Object(id) => {
                 match self.heap.get(id).clone() {
-                    HeapObject::Cons { car, cdr } => {
-                        match sel_name {
-                            "car" => Ok(Some(car)),
-                            "cdr" => Ok(Some(cdr)),
-                            "toString" | "describe" => {
-                                let s = self.format_value(Value::Object(id));
-                                Ok(Some(self.heap.alloc_string(&s)))
-                            }
-                            _ => Ok(None),
-                        }
-                    }
-                    HeapObject::MoofString(ref s) => {
-                        let s = s.clone(); // clone to release borrow
-                        match sel_name {
-                            "toString" | "describe" => Ok(Some(Value::Object(id))),
-                            "length" => Ok(Some(Value::Integer(s.chars().count() as i64))),
-                            "++" => {
-                                if let Some(Value::Object(other_id)) = args.first() {
-                                    if let HeapObject::MoofString(other) = self.heap.get(*other_id) {
-                                        let new_s = format!("{}{}", s, other);
-                                        return Ok(Some(self.heap.alloc_string(&new_s)));
-                                    }
-                                }
-                                // Also allow ++ with integers, symbols via toString
-                                if let Some(&arg) = args.first() {
-                                    let other_s = self.format_value(arg);
-                                    let new_s = format!("{}{}", s, other_s);
-                                    return Ok(Some(self.heap.alloc_string(&new_s)));
-                                }
-                                Ok(None)
-                            }
-                            "substring:to:" => {
-                                let start = args.first().and_then(|v| v.as_integer())
-                                    .ok_or("substring:to: expects integer start")? as usize;
-                                let end = args.get(1).and_then(|v| v.as_integer())
-                                    .ok_or("substring:to: expects integer end")? as usize;
-                                let chars: Vec<char> = s.chars().collect();
-                                let end = end.min(chars.len());
-                                let start = start.min(end);
-                                let sub: String = chars[start..end].iter().collect();
-                                Ok(Some(self.heap.alloc_string(&sub)))
-                            }
-                            "at:" => {
-                                let idx = args.first().and_then(|v| v.as_integer())
-                                    .ok_or("at: expects integer index")? as usize;
-                                let chars: Vec<char> = s.chars().collect();
-                                if idx < chars.len() {
-                                    let ch: String = chars[idx..idx+1].iter().collect();
-                                    Ok(Some(self.heap.alloc_string(&ch)))
-                                } else {
-                                    Ok(Some(Value::Nil))
-                                }
-                            }
-                            "indexOf:" => {
-                                if let Some(Value::Object(other_id)) = args.first() {
-                                    if let HeapObject::MoofString(needle) = self.heap.get(*other_id) {
-                                        if let Some(pos) = s.find(needle.as_str()) {
-                                            // Convert byte offset to char offset
-                                            let char_pos = s[..pos].chars().count();
-                                            return Ok(Some(Value::Integer(char_pos as i64)));
-                                        }
-                                    }
-                                }
-                                Ok(Some(Value::Nil))
-                            }
-                            "split:" => {
-                                if let Some(Value::Object(other_id)) = args.first() {
-                                    if let HeapObject::MoofString(delim) = self.heap.get(*other_id) {
-                                        let delim = delim.clone();
-                                        let parts: Vec<Value> = s.split(&delim)
-                                            .map(|part| self.heap.alloc_string(part))
-                                            .collect();
-                                        return Ok(Some(self.heap.list(&parts)));
-                                    }
-                                }
-                                Ok(None)
-                            }
-                            "trim" => {
-                                Ok(Some(self.heap.alloc_string(s.trim())))
-                            }
-                            "startsWith:" => {
-                                if let Some(Value::Object(other_id)) = args.first() {
-                                    if let HeapObject::MoofString(prefix) = self.heap.get(*other_id) {
-                                        return Ok(Some(if s.starts_with(prefix.as_str()) { Value::True } else { Value::False }));
-                                    }
-                                }
-                                Ok(Some(Value::False))
-                            }
-                            "endsWith:" => {
-                                if let Some(Value::Object(other_id)) = args.first() {
-                                    if let HeapObject::MoofString(suffix) = self.heap.get(*other_id) {
-                                        return Ok(Some(if s.ends_with(suffix.as_str()) { Value::True } else { Value::False }));
-                                    }
-                                }
-                                Ok(Some(Value::False))
-                            }
-                            "contains:" => {
-                                if let Some(Value::Object(other_id)) = args.first() {
-                                    if let HeapObject::MoofString(needle) = self.heap.get(*other_id) {
-                                        return Ok(Some(if s.contains(needle.as_str()) { Value::True } else { Value::False }));
-                                    }
-                                }
-                                Ok(Some(Value::False))
-                            }
-                            "toUpper" => Ok(Some(self.heap.alloc_string(&s.to_uppercase()))),
-                            "toLower" => Ok(Some(self.heap.alloc_string(&s.to_lowercase()))),
-                            "toSymbol" => {
-                                let sym = self.heap.intern(&s);
-                                Ok(Some(Value::Symbol(sym)))
-                            }
-                            "toInteger" => {
-                                match s.trim().parse::<i64>() {
-                                    Ok(n) => Ok(Some(Value::Integer(n))),
-                                    Err(_) => Ok(Some(Value::Nil)),
-                                }
-                            }
-                            "chars" => {
-                                let chars: Vec<Value> = s.chars()
-                                    .map(|c| self.heap.alloc_string(&c.to_string()))
-                                    .collect();
-                                Ok(Some(self.heap.list(&chars)))
-                            }
-                            "replace:with:" => {
-                                if let (Some(Value::Object(from_id)), Some(Value::Object(to_id))) =
-                                    (args.first(), args.get(1))
-                                {
-                                    if let (HeapObject::MoofString(from), HeapObject::MoofString(to)) =
-                                        (self.heap.get(*from_id), self.heap.get(*to_id))
-                                    {
-                                        let result = s.replace(from.as_str(), to.as_str());
-                                        return Ok(Some(self.heap.alloc_string(&result)));
-                                    }
-                                }
-                                Ok(None)
-                            }
-                            _ => Ok(None),
-                        }
-                    }
+                    // GeneralObject introspection — needs VM for slot mutation
                     HeapObject::GeneralObject { ref slots, .. } => {
                         match sel_name {
                             "slotAt:" => {
@@ -1372,7 +1083,6 @@ impl VM {
                                 Ok(Some(list))
                             }
                             "handlerNames" => {
-                                // Need to get handlers from the actual object
                                 drop(slots);
                                 match self.heap.get(id) {
                                     HeapObject::GeneralObject { handlers, .. } => {
@@ -1410,38 +1120,20 @@ impl VM {
                             "describe" => {
                                 Ok(Some(self.heap.alloc_string(&format!("<object #{}>", id))))
                             }
-                            _ => Ok(None), // fall through to handler lookup
-                        }
-                    }
-                    HeapObject::Lambda { params, source, .. } => {
-                        match sel_name {
-                            "source" => Ok(Some(source)),
-                            "params" => Ok(Some(params)),
-                            "arity" => {
-                                let n = self.heap.list_to_vec(params).len();
-                                Ok(Some(Value::Integer(n as i64)))
-                            }
-                            "call:" => {
-                                // [f call: args...] — invoke the lambda
-                                self.call_value(receiver, args).map(Some)
-                            }
-                            "toString" | "describe" => Ok(Some(self.heap.alloc_string("<lambda>"))),
                             _ => Ok(None),
                         }
                     }
-                    HeapObject::Operative { params, source, env_param, .. } => {
+                    // Lambda call: needs call_value
+                    HeapObject::Lambda { .. } => {
                         match sel_name {
-                            "source" => Ok(Some(source)),
-                            "params" => Ok(Some(params)),
-                            "envParam" => Ok(Some(Value::Symbol(env_param))),
-                            "toString" | "describe" => Ok(Some(self.heap.alloc_string("<operative>"))),
+                            "call:" => self.call_value(receiver, args).map(Some),
                             _ => Ok(None),
                         }
                     }
+                    // Environment operations need VM-level eval/lookup/set
                     HeapObject::Environment(ref env) => {
                         match sel_name {
                             "eval:" => {
-                                // [env eval: expr] — the reflective tower hook (§7.3)
                                 let expr = args.first().copied().ok_or("eval: expects an expression")?;
                                 let _ = env;
                                 self.eval(expr, id).map(Some)
@@ -1453,7 +1145,6 @@ impl VM {
                                 self.env_lookup(id, sym).map(Some)
                             }
                             "set:to:" => {
-                                // Walk the env chain, set where found
                                 let sym = args.first()
                                     .and_then(|v| v.as_symbol())
                                     .ok_or("set:to: expects a symbol")?;
@@ -1462,7 +1153,6 @@ impl VM {
                                 self.env_set(id, sym, val)?;
                                 Ok(Some(val))
                             }
-                            "describe" => Ok(Some(self.heap.alloc_string("<environment>"))),
                             _ => Ok(None),
                         }
                     }
@@ -1470,20 +1160,7 @@ impl VM {
                 }
             }
 
-            Value::Symbol(sym_id) => {
-                match sel_name {
-                    "toString" | "describe" => {
-                        let s = self.format_value(receiver);
-                        Ok(Some(self.heap.alloc_string(&s)))
-                    }
-                    "asString" | "name" => {
-                        // Raw symbol name without the leading quote
-                        let name = self.heap.symbol_name(sym_id).to_string();
-                        Ok(Some(self.heap.alloc_string(&name)))
-                    }
-                    _ => Ok(None),
-                }
-            }
+            _ => Ok(None),
         }
     }
 

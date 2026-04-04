@@ -117,10 +117,7 @@ pub const OP_SLOT_GET: u8 = 0x62;
 /// Stack: [object, symbol, value] → [value]
 pub const OP_SLOT_SET: u8 = 0x63;
 
-/// Primitive-only send — bypasses handler lookup, goes directly to fast path.
-/// Used by native handler lambdas to avoid infinite recursion.
-/// Same encoding as OP_SEND: u16 selector constant, u8 argc.
-pub const OP_PRIM_SEND: u8 = 0x64;
+// 0x64 formerly OP_PRIM_SEND — removed. All native ops are NativeFunction closures now.
 
 /// Open a native library. Stack: [name_string] → [library_object]
 pub const OP_FFI_OPEN: u8 = 0x70;
