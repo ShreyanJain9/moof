@@ -5,6 +5,7 @@ mod compiler;
 mod persistence;
 mod tui;
 mod ffi;
+mod gui;
 
 use std::io::{self, Write, BufRead};
 use std::path::PathBuf;
@@ -21,6 +22,9 @@ fn image_dir() -> PathBuf {
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let gui_mode = args.iter().any(|a| a == "--gui");
+
     let mut vm;
     let root_env;
 
@@ -80,6 +84,13 @@ fn main() {
     match wal::WalWriter::open(&img_dir) {
         Ok(wal_writer) => vm.heap.set_wal(wal_writer),
         Err(e) => eprintln!("!! WAL init warning: {}", e),
+    }
+
+    if gui_mode {
+        println!("MOOF — launching System Browser...");
+        save_image(&vm);
+        gui::browser::run_browser(vm, root_env);
+        return;
     }
 
     println!("MOOF — Moof Open Objectspace Fabric");
