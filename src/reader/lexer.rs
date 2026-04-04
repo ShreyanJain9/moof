@@ -17,6 +17,7 @@ pub enum Token {
 
     // Literals
     Integer(i64),
+    Float(f64),
     StringLit(String),
     Symbol(String),     // regular identifier
     Keyword(String),    // identifier ending with : (e.g., "at:", "put:")
@@ -179,6 +180,18 @@ impl<'a> Lexer<'a> {
         if self.chars[self.pos] == '-' { self.pos += 1; }
         while self.pos < self.chars.len() && self.chars[self.pos].is_ascii_digit() {
             self.pos += 1;
+        }
+        // Check for decimal point → float
+        if self.pos < self.chars.len() && self.chars[self.pos] == '.'
+            && self.pos + 1 < self.chars.len() && self.chars[self.pos + 1].is_ascii_digit()
+        {
+            self.pos += 1; // skip .
+            while self.pos < self.chars.len() && self.chars[self.pos].is_ascii_digit() {
+                self.pos += 1;
+            }
+            let s: String = self.chars[start..self.pos].iter().collect();
+            let f: f64 = s.parse().map_err(|_| format!("Invalid float: {}", s))?;
+            return Ok(Token::Float(f));
         }
         let s: String = self.chars[start..self.pos].iter().collect();
         let n: i64 = s.parse().map_err(|_| format!("Invalid number: {}", s))?;

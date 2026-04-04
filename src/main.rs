@@ -3,6 +3,8 @@ mod vm;
 mod reader;
 mod compiler;
 mod persistence;
+mod tui;
+mod ffi;
 
 use std::io::{self, Write, BufRead};
 use std::path::PathBuf;
@@ -124,6 +126,19 @@ fn main() {
                 // REPL-level commands
                 if input == "(checkpoint)" || input == "(save)" {
                     save_image(&vm);
+                    continue;
+                }
+                if input == "(browse)" {
+                    let _ = tui::inspector::run_inspector(&vm.heap, None);
+                    continue;
+                }
+                if input.starts_with("(browse ") {
+                    // Evaluate the argument, then browse it
+                    let arg_source = &input[8..input.len()-1];
+                    match eval_line(&mut vm, root_env, arg_source) {
+                        Ok(val) => { let _ = tui::inspector::run_inspector(&vm.heap, Some(val)); }
+                        Err(e) => println!("!! {}", e),
+                    }
                     continue;
                 }
 

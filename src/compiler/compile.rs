@@ -79,7 +79,7 @@ impl Compiler {
             Value::Nil => { self.emit(OP_NIL); Ok(()) }
             Value::True => { self.emit(OP_TRUE); Ok(()) }
             Value::False => { self.emit(OP_FALSE); Ok(()) }
-            Value::Integer(_) => {
+            Value::Integer(_) | Value::Float(_) => {
                 let idx = self.add_constant(expr);
                 self.emit(OP_CONST);
                 self.emit_u16(idx);
@@ -150,6 +150,8 @@ impl Compiler {
                 "source" => return self.compile_source(heap, &elements[1..]),
                 "object" => return self.compile_object(heap, &elements[1..]),
                 "handle!" => return self.compile_handle(heap, &elements[1..]),
+                "ffi-open" => return self.compile_ffi_open(heap, &elements[1..]),
+                "ffi-bind" => return self.compile_ffi_bind(heap, &elements[1..]),
                 _ => {}
             }
         }
@@ -606,6 +608,25 @@ impl Compiler {
         if args.len() != 1 { return Err("source requires exactly one argument".into()); }
         self.compile(heap, args[0], false)?;
         self.emit(OP_SOURCE);
+        Ok(())
+    }
+
+    /// Compile (ffi-open "libname")
+    fn compile_ffi_open(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
+        if args.len() != 1 { return Err("ffi-open requires library name".into()); }
+        self.compile(heap, args[0], false)?;
+        self.emit(OP_FFI_OPEN);
+        Ok(())
+    }
+
+    /// Compile (ffi-bind lib "funcname" '(f64) 'f64)
+    fn compile_ffi_bind(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
+        if args.len() != 4 { return Err("ffi-bind requires lib, name, arg-types, ret-type".into()); }
+        self.compile(heap, args[0], false)?; // lib
+        self.compile(heap, args[1], false)?; // func name string
+        self.compile(heap, args[2], false)?; // arg types list
+        self.compile(heap, args[3], false)?; // return type symbol
+        self.emit(OP_FFI_BIND);
         Ok(())
     }
 }

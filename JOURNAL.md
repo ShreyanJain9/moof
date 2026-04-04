@@ -74,6 +74,32 @@ Built the entire runtime from scratch in one session: lexer, parser, compiler, b
 - `(load "file.moof")` for loading code from files
 - ~200 lines of standard library written in MOOF itself
 
+## Day 6 — TUI inspector, floats, and FFI
+
+### TUI Inspector
+
+Built with ratatui + crossterm. `(browse)` opens a heap browser, `(browse obj)` inspects a specific value. Navigate with arrow keys, Enter to drill into references, Backspace to go back, q to quit. Shows objects with their slots/handlers, environments with bindings, lambdas with source/params, cons lists, bytecode chunks, and foreign functions.
+
+### Floats (f64)
+
+Added `Value::Float(f64)` to the value representation. Custom `Eq`/`Hash` using bit representation (so NaN == NaN). Float literals in the lexer: `3.14` parses as Float when a `.` is followed by digits. Full arithmetic (+, -, *, /, %, comparisons), plus math builtins: `sqrt`, `sin`, `cos`, `floor`, `ceil`, `round`. Auto-promotion: `as_float()` accepts both Float and Integer.
+
+### FFI — Dynamic C library binding
+
+Load any C library and call its functions from MOOF:
+
+```
+(def libm (ffi-open "m"))
+(def sin (ffi-bind libm "sin" '(f64) 'f64))
+(sin 1.5707963)  => ~1.0
+```
+
+Uses `libloading` for dlopen/dlsym. Supports common calling signatures via unsafe transmute dispatch: `() -> T`, `(T) -> T`, `(T, T) -> T` for T in {i64, f64, string}. No libffi dependency — just pattern-matching on type signatures.
+
+Foreign functions are real heap objects (`HeapObject::ForeignFunction`). They're callable through the normal `(f args)` path — OP_APPLY recognizes them and dispatches to the FFI bridge. Type signatures are stored for serialization, so FFI bindings survive in the image (libraries need re-opening on load).
+
+---
+
 ## Day 5 — Persistence: the image lives
 
 The most transformative change yet. MOOF is now a **living environment** — the heap persists between sessions.

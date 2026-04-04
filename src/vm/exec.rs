@@ -5,7 +5,9 @@
 
 use crate::runtime::value::{Value, HeapObject, BytecodeChunk};
 use crate::runtime::heap::Heap;
+use crate::ffi::bridge::{self, NativeLibrary, ForeignFunction, FfiType};
 use super::opcodes::*;
+use std::collections::HashMap;
 
 /// A call frame on the VM's call stack.
 #[derive(Debug)]
@@ -44,6 +46,10 @@ pub struct VM {
     pub proto_lambda: Option<u32>,
     pub proto_operative: Option<u32>,
     pub proto_environment: Option<u32>,
+    /// FFI: open native libraries (keyed by name)
+    pub ffi_libs: HashMap<String, NativeLibrary>,
+    /// FFI: bound foreign functions (keyed by heap id of the ForeignFunction object)
+    pub ffi_fns: HashMap<u32, ForeignFunction>,
 }
 
 /// Result of VM execution.
@@ -73,6 +79,8 @@ impl VM {
             proto_lambda: None,
             proto_operative: None,
             proto_environment: None,
+            ffi_libs: HashMap::new(),
+            ffi_fns: HashMap::new(),
         }
     }
 
@@ -80,6 +88,7 @@ impl VM {
     fn type_prototype(&self, val: Value) -> Option<u32> {
         match val {
             Value::Integer(_) => self.proto_integer,
+            Value::Float(_) => self.proto_integer, // floats share Integer's prototype for now
             Value::True | Value::False => self.proto_boolean,
             Value::Nil => self.proto_nil,
             Value::Symbol(_) => self.proto_symbol,
@@ -425,6 +434,16 @@ impl VM {
                                     }
                                     self.call_lambda(params, body, def_env, &evaled)?
                                 }
+                                HeapObject::ForeignFunction { .. } => {
+                                    let raw_args = self.heap.list_to_vec(args_list);
+                                    let mut evaled = Vec::new();
+                                    for arg in raw_args {
+                                        evaled.push(self.eval(arg, env_id)?);
+                                    }
+                                    let ff = self.ffi_fns.get(&id)
+                                        .ok_or("Not a bound foreign function")?;
+                                    bridge::call_foreign(ff, &evaled, &mut self.heap)?
+                                }
                                 _ => {
                                     // General object: eval args, then send call:
                                     let raw_args = self.heap.list_to_vec(args_list);
@@ -608,6 +627,7 @@ impl VM {
                         Value::Nil => "Nil",
                         Value::True | Value::False => "Boolean",
                         Value::Integer(_) => "Integer",
+                        Value::Float(_) => "Float",
                         Value::Symbol(_) => "Symbol",
                         Value::Object(id) => match self.heap.get(id) {
                             HeapObject::Cons { .. } => "Cons",
@@ -617,6 +637,7 @@ impl VM {
                             HeapObject::Operative { .. } => "Operative",
                             HeapObject::Lambda { .. } => "Lambda",
                             HeapObject::Environment(_) => "Environment",
+                            HeapObject::ForeignFunction { .. } => "ForeignFunction",
                         },
                     };
                     let sym = self.heap.intern(type_name);
@@ -651,6 +672,101 @@ impl VM {
                         _ => Value::Nil,
                     };
                     self.stack.push(source);
+                }
+
+                OP_FFI_OPEN => {
+                    let name_val = self.stack.pop().ok_or("FFI_OPEN: empty stack")?;
+                    let name = match name_val {
+                        Value::Object(id) => match self.heap.get(id).clone() {
+                            HeapObject::MoofString(s) => s,
+                            _ => return Err("ffi-open: expected string name".into()),
+                        },
+                        _ => return Err("ffi-open: expected string name".into()),
+                    };
+                    let lib = bridge::open_library(&name)?;
+                    self.ffi_libs.insert(name.clone(), lib);
+                    // Return a symbol representing the library
+                    let lib_sym = self.heap.intern(&format!("ffi:{}", name));
+                    self.stack.push(Value::Symbol(lib_sym));
+                }
+
+                OP_FFI_BIND => {
+                    let ret_type_val = self.stack.pop().ok_or("FFI_BIND: empty stack")?;
+                    let arg_types_val = self.stack.pop().ok_or("FFI_BIND: empty stack")?;
+                    let func_name_val = self.stack.pop().ok_or("FFI_BIND: empty stack")?;
+                    let lib_val = self.stack.pop().ok_or("FFI_BIND: empty stack")?;
+
+                    // Get library name from the symbol
+                    let lib_name = match lib_val {
+                        Value::Symbol(id) => {
+                            let full = self.heap.symbol_name(id).to_string();
+                            full.strip_prefix("ffi:").unwrap_or(&full).to_string()
+                        }
+                        _ => return Err("ffi-bind: first arg must be a library handle".into()),
+                    };
+
+                    let func_name = match func_name_val {
+                        Value::Object(id) => match self.heap.get(id).clone() {
+                            HeapObject::MoofString(s) => s,
+                            _ => return Err("ffi-bind: expected string function name".into()),
+                        },
+                        _ => return Err("ffi-bind: expected string function name".into()),
+                    };
+
+                    // Parse arg types from a list of symbols
+                    let arg_type_syms = self.heap.list_to_vec(arg_types_val);
+                    let mut arg_types = Vec::new();
+                    let mut arg_type_names = Vec::new();
+                    for sym_val in &arg_type_syms {
+                        if let Value::Symbol(sid) = sym_val {
+                            let name = self.heap.symbol_name(*sid).to_string();
+                            let ftype = FfiType::from_symbol_name(&name)
+                                .ok_or_else(|| format!("ffi-bind: unknown type '{}'", name))?;
+                            arg_types.push(ftype);
+                            arg_type_names.push(name);
+                        } else {
+                            return Err("ffi-bind: arg types must be symbols".into());
+                        }
+                    }
+
+                    let ret_type_name = match ret_type_val {
+                        Value::Symbol(sid) => self.heap.symbol_name(sid).to_string(),
+                        _ => return Err("ffi-bind: return type must be a symbol".into()),
+                    };
+                    let ret_type = FfiType::from_symbol_name(&ret_type_name)
+                        .ok_or_else(|| format!("ffi-bind: unknown return type '{}'", ret_type_name))?;
+
+                    // Bind the function
+                    let lib = self.ffi_libs.get(&lib_name)
+                        .ok_or_else(|| format!("ffi-bind: library '{}' not open", lib_name))?;
+                    let ff = bridge::bind_function(lib, &func_name, arg_types, ret_type)?;
+
+                    // Store as a ForeignFunction heap object + keep the runtime handle
+                    let ff_obj = HeapObject::ForeignFunction {
+                        lib_name: lib_name.clone(),
+                        func_name: func_name.clone(),
+                        arg_types: arg_type_names,
+                        ret_type: ret_type_name,
+                    };
+                    let ff_id = self.heap.alloc(ff_obj);
+                    self.ffi_fns.insert(ff_id, ff);
+                    self.stack.push(Value::Object(ff_id));
+                }
+
+                OP_FFI_CALL => {
+                    let argc = code[ip + 1] as usize;
+                    self.frames.last_mut().unwrap().ip = ip + 2;
+                    let stack_start = self.stack.len() - argc - 1;
+                    let callable = self.stack[stack_start];
+                    let args: Vec<Value> = self.stack[stack_start + 1..].to_vec();
+                    self.stack.truncate(stack_start);
+
+                    let ff_id = callable.as_object()
+                        .ok_or("FFI_CALL: expected foreign function")?;
+                    let ff = self.ffi_fns.get(&ff_id)
+                        .ok_or("FFI_CALL: not a bound foreign function")?;
+                    let result = bridge::call_foreign(ff, &args, &mut self.heap)?;
+                    self.stack.push(result);
                 }
 
                 _ => return Err(format!("Unknown opcode: 0x{:02x}", op)),
@@ -711,6 +827,11 @@ impl VM {
                     }
                     HeapObject::Operative { .. } => {
                         Err("Cannot call an operative with evaluated arguments — use vau syntax".into())
+                    }
+                    HeapObject::ForeignFunction { .. } => {
+                        let ff = self.ffi_fns.get(&id)
+                            .ok_or("Not a bound foreign function (library may need re-opening)")?;
+                        bridge::call_foreign(ff, args, &mut self.heap)
                     }
                     _ => {
                         // Try message send: [callable call: args...]
@@ -964,10 +1085,33 @@ impl VM {
                     "asString" => {
                         Ok(Some(self.heap.alloc_string(&format!("{}", a))))
                     }
-                    "toFloat" => {
-                        // Placeholder — no float type yet, return as string
-                        Ok(Some(self.heap.alloc_string(&format!("{}.0", a))))
-                    }
+                    "toFloat" => Ok(Some(Value::Float(a as f64))),
+                    _ => Ok(None),
+                }
+            }
+
+            Value::Float(a) => {
+                match sel_name {
+                    "+" => { let b = args.first().and_then(|v| v.as_float()).ok_or("+ expects number")?; Ok(Some(Value::Float(a + b))) }
+                    "-" => { let b = args.first().and_then(|v| v.as_float()).ok_or("- expects number")?; Ok(Some(Value::Float(a - b))) }
+                    "*" => { let b = args.first().and_then(|v| v.as_float()).ok_or("* expects number")?; Ok(Some(Value::Float(a * b))) }
+                    "/" => { let b = args.first().and_then(|v| v.as_float()).ok_or("/ expects number")?; Ok(Some(Value::Float(a / b))) }
+                    "%" => { let b = args.first().and_then(|v| v.as_float()).ok_or("% expects number")?; Ok(Some(Value::Float(a % b))) }
+                    "<" => { let b = args.first().and_then(|v| v.as_float()).ok_or("< expects number")?; Ok(Some(if a < b { Value::True } else { Value::False })) }
+                    ">" => { let b = args.first().and_then(|v| v.as_float()).ok_or("> expects number")?; Ok(Some(if a > b { Value::True } else { Value::False })) }
+                    "=" => { let b = args.first().and_then(|v| v.as_float()).ok_or("= expects number")?; Ok(Some(if a == b { Value::True } else { Value::False })) }
+                    "<=" => { let b = args.first().and_then(|v| v.as_float()).ok_or("<= expects number")?; Ok(Some(if a <= b { Value::True } else { Value::False })) }
+                    ">=" => { let b = args.first().and_then(|v| v.as_float()).ok_or(">= expects number")?; Ok(Some(if a >= b { Value::True } else { Value::False })) }
+                    "negate" => Ok(Some(Value::Float(-a))),
+                    "abs" => Ok(Some(Value::Float(a.abs()))),
+                    "floor" => Ok(Some(Value::Integer(a.floor() as i64))),
+                    "ceil" => Ok(Some(Value::Integer(a.ceil() as i64))),
+                    "round" => Ok(Some(Value::Integer(a.round() as i64))),
+                    "sqrt" => Ok(Some(Value::Float(a.sqrt()))),
+                    "sin" => Ok(Some(Value::Float(a.sin()))),
+                    "cos" => Ok(Some(Value::Float(a.cos()))),
+                    "toInteger" => Ok(Some(Value::Integer(a as i64))),
+                    "toString" | "describe" | "asString" => Ok(Some(self.heap.alloc_string(&format!("{}", a)))),
                     _ => Ok(None),
                 }
             }
@@ -1321,6 +1465,7 @@ impl VM {
             Value::True => "true".to_string(),
             Value::False => "false".to_string(),
             Value::Integer(n) => n.to_string(),
+            Value::Float(f) => format!("{}", f),
             Value::Symbol(id) => format!("'{}", self.heap.symbol_name(id)),
             Value::Object(id) => {
                 match self.heap.get(id) {
@@ -1331,6 +1476,9 @@ impl VM {
                     HeapObject::Operative { .. } => "<operative>".to_string(),
                     HeapObject::Lambda { .. } => "<lambda>".to_string(),
                     HeapObject::Environment(_) => "<environment>".to_string(),
+                    HeapObject::ForeignFunction { lib_name, func_name, .. } => {
+                        format!("<ffi {}:{}>", lib_name, func_name)
+                    }
                 }
             }
         }

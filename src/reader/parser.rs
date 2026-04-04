@@ -74,6 +74,7 @@ impl Parser {
             Token::LBrace => self.parse_brace(heap),
             Token::Quote => self.parse_quote(heap),
             Token::Integer(n) => { self.pos += 1; Ok(Value::Integer(n)) }
+            Token::Float(f) => { self.pos += 1; Ok(Value::Float(f)) }
             Token::StringLit(s) => { self.pos += 1; Ok(heap.alloc_string(&s)) }
             Token::Symbol(ref name) => {
                 let name = name.clone();

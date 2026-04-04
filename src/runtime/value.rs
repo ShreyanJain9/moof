@@ -8,7 +8,7 @@ use std::fmt;
 use serde::{Serialize, Deserialize};
 
 /// A MOOF value. 64 bits. Either an immediate or an index into the heap.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub enum Value {
     /// The nil singleton
     Nil,
@@ -18,10 +18,42 @@ pub enum Value {
     False,
     /// Small integer (i64)
     Integer(i64),
+    /// IEEE 754 double
+    Float(f64),
     /// Interned symbol — index into the symbol table
     Symbol(u32),
     /// Heap-allocated object — index into the heap arena
     Object(u32),
+}
+
+// Manual Eq/Hash: float comparison uses bit representation so NaN == NaN
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Nil, Value::Nil) => true,
+            (Value::True, Value::True) => true,
+            (Value::False, Value::False) => true,
+            (Value::Integer(a), Value::Integer(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a.to_bits() == b.to_bits(),
+            (Value::Symbol(a), Value::Symbol(b)) => a == b,
+            (Value::Object(a), Value::Object(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Value {}
+
+impl std::hash::Hash for Value {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Value::Integer(n) => n.hash(state),
+            Value::Float(f) => f.to_bits().hash(state),
+            Value::Symbol(id) | Value::Object(id) => id.hash(state),
+            _ => {}
+        }
+    }
 }
 
 impl Value {
@@ -30,6 +62,14 @@ impl Value {
 
     pub fn as_integer(self) -> Option<i64> {
         match self { Value::Integer(n) => Some(n), _ => None }
+    }
+
+    pub fn as_float(self) -> Option<f64> {
+        match self {
+            Value::Float(f) => Some(f),
+            Value::Integer(n) => Some(n as f64), // auto-promote
+            _ => None,
+        }
     }
 
     pub fn as_symbol(self) -> Option<u32> {
@@ -48,6 +88,7 @@ impl fmt::Debug for Value {
             Value::True => write!(f, "true"),
             Value::False => write!(f, "false"),
             Value::Integer(n) => write!(f, "{n}"),
+            Value::Float(x) => write!(f, "{x}"),
             Value::Symbol(id) => write!(f, "sym#{id}"),
             Value::Object(id) => write!(f, "obj#{id}"),
         }
@@ -100,6 +141,13 @@ pub enum HeapObject {
     /// A first-class environment (§7.3)
     Environment(super::env::Environment),
 
+    /// A bound foreign function (FFI). Stores type info for serialization.
+    ForeignFunction {
+        lib_name: String,
+        func_name: String,
+        arg_types: Vec<String>,
+        ret_type: String,
+    },
 }
 
 /// A compiled bytecode chunk.

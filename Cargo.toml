@@ -7,3 +7,6 @@ edition = "2024"
 serde = { version = "1", features = ["derive"] }
 bincode = "1"
 sha2 = "0.10"
+ratatui = "0.29"
+crossterm = "0.28"
+libloading = "0.8"
