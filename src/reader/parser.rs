@@ -1,9 +1,14 @@
 /// The MOOF parser — turns tokens into cons-cell ASTs.
 ///
 /// Three bracket species (§3.1):
-///   (f a b c)       → applicative call: (f a b c) as a list
-///   [obj sel: a]    → message send: (%send obj sel: a) — tagged with %send
-///   { :x [x * 2] } → block: (%block (x) body)
+///   (f a b c)           → applicative call: list in cons cells
+///   [obj sel: a]        → message send: (%send obj sel: a)
+///   { Parent x: 10 }   → object literal: (%object-literal ...)
+///
+/// Sugar:
+///   obj.field           → (%dot obj 'field)
+///   @field              → (%dot self 'field)
+///   'x                  → (quote x)
 ///
 /// The AST is just cons cells. Code is data.
 
@@ -30,8 +35,35 @@ impl Parser {
         Ok(exprs)
     }
 
-    /// Parse a single expression.
+    /// Parse an expression, then check for postfix dot-access chains.
     pub fn parse_expr(&mut self, heap: &mut Heap) -> Result<Value, String> {
+        let mut expr = self.parse_primary(heap)?;
+
+        // Check for dot-access chains: obj.x.y.z (tight dots only)
+        while self.pos < self.tokens.len() && self.tokens[self.pos] == Token::DotAccess {
+            self.pos += 1; // skip .
+            if self.pos < self.tokens.len() {
+                if let Token::Symbol(ref name) = self.tokens[self.pos] {
+                    let name = name.clone();
+                    self.pos += 1;
+                    let dot_sym = Value::Symbol(heap.intern("%dot"));
+                    let quote_sym = Value::Symbol(heap.intern("quote"));
+                    let field_sym = Value::Symbol(heap.intern(&name));
+                    let quoted_field = heap.list(&[quote_sym, field_sym]);
+                    expr = heap.list(&[dot_sym, expr, quoted_field]);
+                } else {
+                    return Err("Expected field name after '.'".into());
+                }
+            } else {
+                return Err("Expected field name after '.'".into());
+            }
+        }
+
+        Ok(expr)
+    }
+
+    /// Parse a primary expression (atom, list, bracket, brace, quote, etc).
+    fn parse_primary(&mut self, heap: &mut Heap) -> Result<Value, String> {
         if self.pos >= self.tokens.len() {
             return Err("Unexpected end of input".into());
         }
@@ -53,13 +85,16 @@ impl Parser {
                     _ => Ok(Value::Symbol(heap.intern(&name))),
                 }
             }
-            Token::HashSymbol(ref name) => {
-                // #foo → (quote foo) — a literal symbol value, not a variable lookup
+            Token::AtField(ref name) => {
+                // @field → (%dot self 'field)
                 let name = name.clone();
                 self.pos += 1;
+                let dot_sym = Value::Symbol(heap.intern("%dot"));
+                let self_sym = Value::Symbol(heap.intern("self"));
                 let quote_sym = Value::Symbol(heap.intern("quote"));
-                let sym_val = Value::Symbol(heap.intern(&name));
-                Ok(heap.list(&[quote_sym, sym_val]))
+                let field_sym = Value::Symbol(heap.intern(&name));
+                let quoted_field = heap.list(&[quote_sym, field_sym]);
+                Ok(heap.list(&[dot_sym, self_sym, quoted_field]))
             }
             Token::DollarSymbol(ref name) => {
                 let name = name.clone();
@@ -72,7 +107,6 @@ impl Parser {
                 Ok(Value::Symbol(heap.intern(&kw)))
             }
             Token::Colon => {
-                // Standalone colon — shouldn't appear here
                 Err("Unexpected ':'".into())
             }
             t => Err(format!("Unexpected token: {:?}", t)),
@@ -109,7 +143,6 @@ impl Parser {
 
     /// Parse [obj sel: a sel2: b] — message send
     /// Produces: (%send obj selector arg1 arg2 ...)
-    /// where selector is the concatenated keyword string "sel:sel2:"
     fn parse_bracket(&mut self, heap: &mut Heap) -> Result<Value, String> {
         self.pos += 1; // skip [
         if self.pos >= self.tokens.len() {
@@ -119,14 +152,7 @@ impl Parser {
         // Parse receiver
         let receiver = self.parse_expr(heap)?;
 
-        // Now parse the message
-        // Could be:
-        //   [obj slot]                — unary
-        //   [obj + 5]                 — binary
-        //   [obj at: k]              — keyword
-        //   [obj at: k put: v]       — multi-keyword
         if self.pos < self.tokens.len() && self.tokens[self.pos] == Token::RBracket {
-            // No message — just return the receiver (parenthesized expression)
             self.pos += 1;
             return Ok(receiver);
         }
@@ -134,10 +160,8 @@ impl Parser {
         let mut selector_parts = Vec::new();
         let mut args = Vec::new();
 
-        // Check what kind of message this is
         match &self.tokens[self.pos] {
             Token::Keyword(_kw) => {
-                // Keyword message: [obj at: k put: v]
                 while self.pos < self.tokens.len() {
                     match &self.tokens[self.pos] {
                         Token::Keyword(kw) => {
@@ -147,24 +171,20 @@ impl Parser {
                         }
                         Token::RBracket => break,
                         _ => {
-                            // Could be more args for the current keyword
                             args.push(self.parse_expr(heap)?);
                         }
                     }
                 }
             }
             Token::Symbol(name) if is_binary_operator(name) => {
-                // Binary message: [obj + 5]
                 let op = name.clone();
                 self.pos += 1;
                 selector_parts.push(op);
-                // Parse all args until ]
                 while self.pos < self.tokens.len() && self.tokens[self.pos] != Token::RBracket {
                     args.push(self.parse_expr(heap)?);
                 }
             }
             _ => {
-                // Unary message: [obj negate]
                 let sel = self.parse_expr(heap)?;
                 match sel {
                     Value::Symbol(sym_id) => {
@@ -180,7 +200,6 @@ impl Parser {
         }
         self.pos += 1; // skip ]
 
-        // Build the AST: (%send receiver selector arg1 arg2 ...)
         let send_sym = Value::Symbol(heap.intern("%send"));
         let selector_str = selector_parts.join("");
         let selector = Value::Symbol(heap.intern(&selector_str));
@@ -190,51 +209,100 @@ impl Parser {
         Ok(heap.list(&elements))
     }
 
-    /// Parse { :x :y [x + y] } — block / object literal
-    /// Produces: (%block (x y) body)
+    /// Parse { ... } — object literal
+    ///
+    /// Syntax:
+    ///   { Parent key: value key: (params) body... }
+    ///
+    /// If the first token is a Keyword, there's no parent (defaults to nil).
+    /// key: value             → slot (single expression after keyword)
+    /// key: (params) body...  → method (param list + body expressions)
+    ///
+    /// Produces: (%object-literal parent (%slot key val) ... (%method sel params body...) ...)
     fn parse_brace(&mut self, heap: &mut Heap) -> Result<Value, String> {
         self.pos += 1; // skip {
 
-        // Collect block parameters (:x :y etc.)
-        let mut params = Vec::new();
-        while self.pos < self.tokens.len() {
-            if self.tokens[self.pos] == Token::Colon {
-                self.pos += 1; // skip :
-                match &self.tokens[self.pos] {
-                    Token::Symbol(name) => {
-                        params.push(Value::Symbol(heap.intern(name)));
-                        self.pos += 1;
-                    }
-                    _ => return Err("Expected parameter name after ':'".into()),
+        if self.pos >= self.tokens.len() {
+            return Err("Unclosed '{'".into());
+        }
+
+        // Check for empty object
+        if self.tokens[self.pos] == Token::RBrace {
+            self.pos += 1;
+            let tag = Value::Symbol(heap.intern("%object-literal"));
+            return Ok(heap.list(&[tag, Value::Nil]));
+        }
+
+        // Determine parent: if first token is not a Keyword, parse as parent expression
+        let parent = if !matches!(self.tokens[self.pos], Token::Keyword(_)) {
+            self.parse_expr(heap)?
+        } else {
+            Value::Nil
+        };
+
+        let slot_sym = Value::Symbol(heap.intern("%slot"));
+        let method_sym = Value::Symbol(heap.intern("%method"));
+        let mut entries = Vec::new();
+
+        while self.pos < self.tokens.len() && self.tokens[self.pos] != Token::RBrace {
+            // Expect a keyword
+            let keyword = match &self.tokens[self.pos] {
+                Token::Keyword(kw) => {
+                    let kw = kw.clone();
+                    self.pos += 1;
+                    kw
                 }
+                t => return Err(format!("Expected keyword in object literal, got {:?}", t)),
+            };
+
+            // Parse the first expression after the keyword
+            let first_expr = self.parse_expr(heap)?;
+
+            // Peek: if next is Keyword or RBrace, this was a slot.
+            // Otherwise, first_expr is params and remaining exprs are the method body.
+            let next_is_boundary = self.pos >= self.tokens.len()
+                || self.tokens[self.pos] == Token::RBrace
+                || matches!(self.tokens[self.pos], Token::Keyword(_));
+
+            if next_is_boundary {
+                // Slot: key (without trailing colon) → value
+                let key_name = keyword.trim_end_matches(':');
+                let key_sym = Value::Symbol(heap.intern(key_name));
+                entries.push(heap.list(&[slot_sym, key_sym, first_expr]));
             } else {
-                break;
+                // Method: first_expr is the param list, collect body expressions
+                let mut body_exprs = Vec::new();
+                while self.pos < self.tokens.len()
+                    && self.tokens[self.pos] != Token::RBrace
+                    && !matches!(self.tokens[self.pos], Token::Keyword(_))
+                {
+                    body_exprs.push(self.parse_expr(heap)?);
+                }
+
+                // Determine selector: if params is empty (Nil), strip colon (unary).
+                // Otherwise keep keyword as-is (it has the colon).
+                let params_vec = heap.list_to_vec(first_expr);
+                let selector_name = if params_vec.is_empty() {
+                    keyword.trim_end_matches(':').to_string()
+                } else {
+                    keyword.clone()
+                };
+
+                let sel_sym = Value::Symbol(heap.intern(&selector_name));
+                let mut method_entry = vec![method_sym, sel_sym, first_expr];
+                method_entry.extend(body_exprs);
+                entries.push(heap.list(&method_entry));
             }
         }
 
-        // Parse body expressions
-        let mut body_exprs = Vec::new();
-        while self.pos < self.tokens.len() && self.tokens[self.pos] != Token::RBrace {
-            body_exprs.push(self.parse_expr(heap)?);
-        }
-        if self.pos >= self.tokens.len() {
+        if self.pos >= self.tokens.len() || self.tokens[self.pos] != Token::RBrace {
             return Err("Unclosed '{'".into());
         }
         self.pos += 1; // skip }
 
-        // Body: if multiple expressions, wrap in (%do expr1 expr2 ...)
-        let body = if body_exprs.len() == 1 {
-            body_exprs.into_iter().next().unwrap()
-        } else {
-            let do_sym = Value::Symbol(heap.intern("%do"));
-            let mut elems = vec![do_sym];
-            elems.extend(body_exprs);
-            heap.list(&elems)
-        };
-
-        let block_sym = Value::Symbol(heap.intern("%block"));
-        let param_list = heap.list(&params);
-        let elements = vec![block_sym, param_list, body];
+        let tag = Value::Symbol(heap.intern("%object-literal"));
+        let mut elements = vec![tag, parent];
+        elements.extend(entries);
         Ok(heap.list(&elements))
     }
 

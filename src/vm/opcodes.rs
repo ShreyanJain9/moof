@@ -55,8 +55,6 @@ pub const OP_VAU: u8 = 0x24;
 // ── Control flow ──
 /// Call a callable. Arg: u8 arg count.
 /// Stack: [callable, arg1, ...argN] → [result]
-/// This is what (f a b c) compiles to — desugars to [f call: a b c]
-/// but we optimize it to a direct call instruction.
 pub const OP_CALL: u8 = 0x30;
 
 /// Return from the current frame. Pops the return value.
@@ -68,40 +66,33 @@ pub const OP_JUMP: u8 = 0x32;
 /// Jump forward if top of stack is falsey. Arg: u16 offset. Pops condition.
 pub const OP_JUMP_IF_FALSE: u8 = 0x33;
 
+/// Backward jump for loops. Arg: u16 distance to subtract from current ip.
+pub const OP_LOOP_BACK: u8 = 0x34;
+
 // ── Operatives: raw (unevaluated) call ──
 /// Call an operative with unevaluated arguments.
 /// Arg: u8 arg count.
-/// Stack: [operative, raw_arg1, ...raw_argN] → [result]
-/// The args are quote-wrapped AST values, not evaluated.
 pub const OP_CALL_OPERATIVE: u8 = 0x40;
 
 // ── Generic apply ──
 /// Generic apply: checks at runtime whether target is operative or applicative.
 /// Stack: [callable, quoted_args_list] → [result]
-/// If operative: pass raw args + caller env
-/// If lambda/block: eval each arg in caller env, then call
-/// This is what (f a b c) compiles to when f might be an operative.
 pub const OP_APPLY: u8 = 0x41;
 
 // ── Built-in operations ──
 /// Evaluate an expression in the current environment.
-/// Stack: [expr] → [result]
 pub const OP_EVAL: u8 = 0x50;
-
 /// Print a value to the transcript.
-/// Stack: [value] → [nil]
 pub const OP_PRINT: u8 = 0x51;
-
 /// List operations (car, cdr) as opcodes for efficiency.
 pub const OP_CAR: u8 = 0x52;
 pub const OP_CDR: u8 = 0x53;
-
-/// Type checking
-/// Stack: [value] → [symbol]
+/// Type checking. Stack: [value] → [symbol]
 pub const OP_TYPE_OF: u8 = 0x54;
-
-/// Backward jump for loops. Arg: u16 distance to subtract from current ip.
-pub const OP_LOOP_BACK: u8 = 0x34;
+/// Load and evaluate a file. Stack: [path_string] → [result]
+pub const OP_LOAD: u8 = 0x55;
+/// Get the source AST of a lambda/operative. Stack: [callable] → [ast_or_nil]
+pub const OP_SOURCE: u8 = 0x56;
 
 // ── Object construction ──
 /// Create a new GeneralObject. Arg: u8 slot_count.
@@ -112,13 +103,13 @@ pub const OP_MAKE_OBJECT: u8 = 0x60;
 /// Stack: [object, selector_symbol, handler_lambda] → [object]
 pub const OP_HANDLE: u8 = 0x61;
 
-/// Load and evaluate a file.
-/// Stack: [path_string] → [result]
-pub const OP_LOAD: u8 = 0x55;
+/// Direct slot access on an object.
+/// Stack: [object, symbol] → [value]
+pub const OP_SLOT_GET: u8 = 0x62;
 
-/// Get the source AST of a lambda/operative.
-/// Stack: [callable] → [ast_or_nil]
-pub const OP_SOURCE: u8 = 0x56;
+/// Direct slot mutation on an object.
+/// Stack: [object, symbol, value] → [value]
+pub const OP_SLOT_SET: u8 = 0x63;
 
 /// Read a u16 from bytecode at the given offset (big-endian).
 pub fn read_u16(code: &[u8], offset: usize) -> u16 {

@@ -47,7 +47,7 @@ fn main() {
     // Store the root env id so the VM can access it for load
     vm.root_env = Some(root_env);
 
-    println!("MOOF — Moof's Open Objectspace Fabric");
+    println!("MOOF — Moof Open Objectspace Fabric");
     println!("clarus the dogcow lives again");
     println!("Type expressions to evaluate. Ctrl-D to exit.\n");
 

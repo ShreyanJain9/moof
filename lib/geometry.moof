@@ -1,21 +1,15 @@
-; geometry.moof -- loaded from MOOF itself
+; geometry.moof -- the new syntax showcase
 
-(def Point (object Object))
+(def Point { Object
+  describe: () "a Point"
+  distanceTo: (other)
+    (let ((dx [@x - other.x])
+          (dy [@y - other.y]))
+      [[dx * dx] + [dy * dy]])
+})
 
-(handle! Point #x (lambda (self) [self slotAt: #x]))
-(handle! Point #y (lambda (self) [self slotAt: #y]))
-
-(handle! Point #describe
-  (lambda (self)
-    "a Point"))
-
-(handle! Point #distanceTo:
-  (lambda (self other)
-    (let ((dx [[self x] - [other x]])
-          (dy [[self y] - [other y]]))
-      ; return dx*dx + dy*dy (no sqrt yet)
-      [[dx * dx] + [dy * dy]])))
-
-(def make-point
-  (lambda (x y)
-    (object Point #x x #y y)))
+; no make-point needed — just use object literals:
+;   (def pt { Point x: 3 y: 4 })
+;   pt.x        => 3
+;   [pt describe] => "a Point"
+;   [pt distanceTo: { Point x: 0 y: 0 }] => 25

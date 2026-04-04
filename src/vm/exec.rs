@@ -376,7 +376,6 @@ impl VM {
                     let obj_id = obj_val.as_object().ok_or("HANDLE: expected object")?;
                     match self.heap.get_mut(obj_id) {
                         HeapObject::GeneralObject { handlers, .. } => {
-                            // Replace existing handler or add new one
                             if let Some(entry) = handlers.iter_mut().find(|(k, _)| *k == sel_sym) {
                                 entry.1 = handler;
                             } else {
@@ -385,7 +384,47 @@ impl VM {
                         }
                         _ => return Err("HANDLE: target must be a GeneralObject".into()),
                     }
-                    self.stack.push(obj_val); // return the object
+                    self.stack.push(obj_val);
+                }
+
+                OP_SLOT_GET => {
+                    let field_sym = self.stack.pop().ok_or("SLOT_GET: empty stack")?;
+                    let obj_val = self.stack.pop().ok_or("SLOT_GET: empty stack")?;
+                    let sym_id = field_sym.as_symbol().ok_or("SLOT_GET: field must be symbol")?;
+                    let result = match obj_val {
+                        Value::Object(id) => {
+                            match self.heap.get(id) {
+                                HeapObject::GeneralObject { slots, .. } => {
+                                    slots.iter()
+                                        .find(|(k, _)| *k == sym_id)
+                                        .map(|(_, v)| *v)
+                                        .unwrap_or(Value::Nil)
+                                }
+                                _ => return Err("SLOT_GET: not an object with slots".into()),
+                            }
+                        }
+                        _ => return Err(format!("SLOT_GET: cannot access field on {:?}", obj_val)),
+                    };
+                    self.stack.push(result);
+                }
+
+                OP_SLOT_SET => {
+                    let val = self.stack.pop().ok_or("SLOT_SET: empty stack")?;
+                    let field_sym = self.stack.pop().ok_or("SLOT_SET: empty stack")?;
+                    let obj_val = self.stack.pop().ok_or("SLOT_SET: empty stack")?;
+                    let sym_id = field_sym.as_symbol().ok_or("SLOT_SET: field must be symbol")?;
+                    let obj_id = obj_val.as_object().ok_or("SLOT_SET: expected object")?;
+                    match self.heap.get_mut(obj_id) {
+                        HeapObject::GeneralObject { slots, .. } => {
+                            if let Some(entry) = slots.iter_mut().find(|(k, _)| *k == sym_id) {
+                                entry.1 = val;
+                            } else {
+                                slots.push((sym_id, val));
+                            }
+                        }
+                        _ => return Err("SLOT_SET: not an object with slots".into()),
+                    }
+                    self.stack.push(val);
                 }
 
                 OP_TYPE_OF => {
@@ -890,7 +929,7 @@ impl VM {
             Value::True => "true".to_string(),
             Value::False => "false".to_string(),
             Value::Integer(n) => n.to_string(),
-            Value::Symbol(id) => format!("#{}", self.heap.symbol_name(id)),
+            Value::Symbol(id) => format!("'{}", self.heap.symbol_name(id)),
             Value::Object(id) => {
                 match self.heap.get(id) {
                     HeapObject::Cons { .. } => self.format_list(val),

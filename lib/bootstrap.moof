@@ -1,24 +1,31 @@
-; MOOF Bootstrap -- derived forms from the six kernel primitives
-; Everything here is built on: vau, send, def, quote, cons, eq
+; MOOF Bootstrap — derived forms from the six kernel primitives
+; everything here is built on: vau, send, def, quote, cons, eq
+
+; ── meta ────────────────────────────────────────────────────
+
+; fn: short lambda — a vau that builds and evals a lambda form
+(def fn
+  (vau (params . body) $e
+    (eval (cons 'lambda (cons params body)) $e)))
 
 ; wrap: takes an operative, returns one that evaluates its args
 (def wrap
   (vau (operative) $e
-    (lambda args
+    (fn args
       (eval (cons (eval operative $e) args)))))
 
-; my-if: if defined as a library function using vau
+; ── control flow ────────────────────────────────────────────
+
 (def my-if
   (vau (condition then-branch else-branch) $e
     (if (eval condition $e)
       (eval then-branch $e)
       (eval else-branch $e))))
 
-; cond: multi-branch conditional
 (def cond
   (vau clauses $e
     (def cond-helper
-      (lambda (cls)
+      (fn (cls)
         (if (eq cls nil) nil
           (let ((clause (car cls))
                 (rest (cdr cls)))
@@ -31,7 +38,6 @@
                   (cond-helper rest))))))))
     (cond-helper clauses)))
 
-; when/unless
 (def when
   (vau (condition . body) $e
     (if (eval condition $e)
@@ -44,11 +50,10 @@
       nil
       (eval (cons 'do body) $e))))
 
-; do: sequence of expressions
 (def do
   (vau body $e
     (def do-helper
-      (lambda (exprs)
+      (fn (exprs)
         (if (eq (cdr exprs) nil)
           (eval (car exprs) $e)
           (let ((_ (eval (car exprs) $e)))
@@ -56,8 +61,9 @@
     (if (eq body nil) nil
       (do-helper body))))
 
-; -- logic --
-(def not (lambda (x) (if x false true)))
+; ── logic ───────────────────────────────────────────────────
+
+(def not (fn (x) (if x false true)))
 
 (def and
   (vau (a b) $e
@@ -67,114 +73,122 @@
   (vau (a b) $e
     (if (eval a $e) true (if (eval b $e) true false))))
 
-; -- type predicates --
-(def null? (lambda (x) (eq x nil)))
-(def pair? (lambda (x) (eq (type-of x) 'Cons)))
-(def symbol? (lambda (x) (eq (type-of x) 'Symbol)))
-(def integer? (lambda (x) (eq (type-of x) 'Integer)))
-(def string? (lambda (x) (eq (type-of x) 'String)))
-(def lambda? (lambda (x) (eq (type-of x) 'Lambda)))
-(def operative? (lambda (x) (eq (type-of x) 'Operative)))
-(def object? (lambda (x) (eq (type-of x) 'Object)))
+; ── type predicates ─────────────────────────────────────────
 
-; -- list operations --
-(def cadr (lambda (x) (car (cdr x))))
-(def caddr (lambda (x) (car (cdr (cdr x)))))
-(def cddr (lambda (x) (cdr (cdr x))))
+(def null?      (fn (x) (eq x nil)))
+(def pair?      (fn (x) (eq (type-of x) 'Cons)))
+(def symbol?    (fn (x) (eq (type-of x) 'Symbol)))
+(def integer?   (fn (x) (eq (type-of x) 'Integer)))
+(def string?    (fn (x) (eq (type-of x) 'String)))
+(def lambda?    (fn (x) (eq (type-of x) 'Lambda)))
+(def operative? (fn (x) (eq (type-of x) 'Operative)))
+(def object?    (fn (x) (eq (type-of x) 'Object)))
+
+; ── list operations ─────────────────────────────────────────
+
+(def cadr  (fn (x) (car (cdr x))))
+(def caddr (fn (x) (car (cdr (cdr x)))))
+(def cddr  (fn (x) (cdr (cdr x))))
 
 (def length
-  (lambda (lst)
+  (fn (lst)
     (if (null? lst) 0 [1 + (length (cdr lst))])))
 
 (def append
-  (lambda (a b)
+  (fn (a b)
     (if (null? a) b
       (cons (car a) (append (cdr a) b)))))
 
 (def reverse
-  (lambda (lst)
+  (fn (lst)
     (def rev-helper
-      (lambda (remaining acc)
+      (fn (remaining acc)
         (if (null? remaining) acc
           (rev-helper (cdr remaining) (cons (car remaining) acc)))))
     (rev-helper lst nil)))
 
 (def map
-  (lambda (f lst)
+  (fn (f lst)
     (if (null? lst) nil
       (cons (f (car lst)) (map f (cdr lst))))))
 
 (def filter
-  (lambda (pred lst)
+  (fn (pred lst)
     (if (null? lst) nil
       (if (pred (car lst))
         (cons (car lst) (filter pred (cdr lst)))
         (filter pred (cdr lst))))))
 
 (def fold
-  (lambda (f init lst)
+  (fn (f init lst)
     (if (null? lst) init
       (fold f (f init (car lst)) (cdr lst)))))
 
 (def for-each
-  (lambda (f lst)
+  (fn (f lst)
     (if (null? lst) nil
       (do (f (car lst)) (for-each f (cdr lst))))))
 
 (def nth
-  (lambda (lst n)
+  (fn (lst n)
     (if [n = 0] (car lst) (nth (cdr lst) [n - 1]))))
 
 (def range
-  (lambda (start end)
+  (fn (start end)
     (if [start >= end] nil
       (cons start (range [start + 1] end)))))
 
 (def last
-  (lambda (lst)
+  (fn (lst)
     (if (null? (cdr lst)) (car lst) (last (cdr lst)))))
 
 (def take
-  (lambda (n lst)
+  (fn (n lst)
     (if (or [n <= 0] (null? lst)) nil
       (cons (car lst) (take [n - 1] (cdr lst))))))
 
 (def drop
-  (lambda (n lst)
+  (fn (n lst)
     (if (or [n <= 0] (null? lst)) lst
       (drop [n - 1] (cdr lst)))))
 
 (def zip
-  (lambda (a b)
+  (fn (a b)
     (if (or (null? a) (null? b)) nil
       (cons (list (car a) (car b)) (zip (cdr a) (cdr b))))))
 
-; -- higher-order --
-(def compose (lambda (f g) (lambda (x) (f (g x)))))
-(def identity (lambda (x) x))
-(def constantly (lambda (x) (lambda args x)))
-(def apply (lambda (f args) (eval (cons f args))))
+; ── higher-order ────────────────────────────────────────────
 
-; -- printing --
-(def println (lambda (x) (print x)))
-(def display (lambda (x) (print x)))
+(def compose    (fn (f g) (fn (x) (f (g x)))))
+(def identity   (fn (x) x))
+(def constantly (fn (x) (fn args x)))
+(def apply      (fn (f args) (eval (cons f args))))
 
-; -- Object model: the root Object prototype --
+; ── printing ────────────────────────────────────────────────
+
+(def println (fn (x) (print x)))
+(def display (fn (x) (print x)))
+
+; ── object model ────────────────────────────────────────────
+
 (def Object (object nil))
 
-(handle! Object #describe (lambda (self) "<object>"))
+; defmethod: easy method definition with implicit self
+(def defmethod
+  (vau (obj name params . body) $e
+    (eval (list 'handle! obj (list 'quote name)
+      (cons 'lambda (cons (cons 'self params) body))) $e)))
 
-(handle! Object #interface
-  (lambda (self) [self handlerNames]))
+(defmethod Object describe () "<object>")
+(defmethod Object interface () [self handlerNames])
+(defmethod Object clone () (object self))
 
-(handle! Object #sourceOf:
-  (lambda (self selector)
-    (let ((handler [self handlerAt: selector]))
-      (if (null? handler) nil (source handler)))))
+(defmethod Object sourceOf: (selector)
+  (let ((handler [self handlerAt: selector]))
+    (if (null? handler) nil (source handler))))
 
-(handle! Object #clone (lambda (self) (object self)))
+; ── self-modification tools ─────────────────────────────────
 
-; -- Self-modification tools --
 (def define-handler
   (vau (obj selector handler) $e
     (handle! (eval obj $e) (eval selector $e) (eval handler $e))))
@@ -186,7 +200,7 @@
     result))
 
 (def inspect
-  (lambda (val)
+  (fn (val)
     (print (type-of val))
     (cond
       ((lambda? val) (print (source val)))

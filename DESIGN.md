@@ -1,4 +1,4 @@
-# MOOF: Moof's Open Objectspace Fabric
+# MOOF: Moof Open Objectspace Fabric
 ## Design & Philosophy Document
 
 > *"clarus the dogcow lives again"*
@@ -19,7 +19,7 @@ three governing principles underpin every design decision:
 
 ## 1. the name
 
-**MOOF: Moof's Open Objectspace Fabric** — recursive backronym, in the tradition of GNU. named after Clarus the dogcow, the beloved Apple mascot. "moof" was her sound. she was always half one thing and half another. so is this environment.
+**MOOF: Moof Open Objectspace Fabric** — recursive backronym, in the tradition of GNU. named after Clarus the dogcow, the beloved Apple mascot. "moof" was her sound. she was always half one thing and half another. so is this environment.
 
 ---
 

@@ -3,7 +3,7 @@
 /// Three structural forms (§3.1):
 ///   (f a b c)        — applicative call
 ///   [obj sel: a]     — message send
-///   { x: 10 y: 20 } — object literal / block
+///   { Parent x: 10 } — object literal
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
@@ -20,12 +20,13 @@ pub enum Token {
     StringLit(String),
     Symbol(String),     // regular identifier
     Keyword(String),    // identifier ending with : (e.g., "at:", "put:")
-    HashSymbol(String), // #name — quoted symbol literal
 
     // Sugar
     Quote,       // '
     Colon,       // : alone (for block params like :x)
-    Dot,         // .
+    Dot,         // . (loose — used for dotted pairs)
+    DotAccess,   // . (tight — no preceding whitespace, used for field access)
+    AtField(String), // @name — self-field access sugar
 
     // Special
     DollarSymbol(String), // $e — environment parameter for vau
@@ -68,25 +69,25 @@ impl<'a> Lexer<'a> {
                 '{' => { tokens.push(Token::LBrace); self.pos += 1; }
                 '}' => { tokens.push(Token::RBrace); self.pos += 1; }
                 '\'' => { tokens.push(Token::Quote); self.pos += 1; }
-                '.' => { tokens.push(Token::Dot); self.pos += 1; }
-
-                '#' => {
+                '.' => {
+                    // Tight dot (no whitespace before) = field access: obj.x
+                    // Loose dot (whitespace before) = dotted pair: (a . b)
+                    let tight = self.pos > 0 && !self.chars[self.pos - 1].is_whitespace();
+                    if tight {
+                        tokens.push(Token::DotAccess);
+                    } else {
+                        tokens.push(Token::Dot);
+                    }
                     self.pos += 1;
-                    let mut name = self.read_symbol_chars();
+                }
+
+                '@' => {
+                    self.pos += 1;
+                    let name = self.read_symbol_chars();
                     if name.is_empty() {
-                        return Err("Expected symbol name after #".to_string());
+                        return Err("Expected field name after @".to_string());
                     }
-                    // Allow trailing : for keyword selectors like #sourceOf:
-                    // and multi-keyword like #at:put:
-                    while self.pos < self.chars.len() && self.chars[self.pos] == ':' {
-                        name.push(':');
-                        self.pos += 1;
-                        // Check for multi-keyword: at:put:
-                        if self.pos < self.chars.len() && is_symbol_char(self.chars[self.pos]) {
-                            name.push_str(&self.read_symbol_chars());
-                        }
-                    }
-                    tokens.push(Token::HashSymbol(name));
+                    tokens.push(Token::AtField(name));
                 }
 
                 '$' => {
