@@ -1,208 +1,654 @@
-# Plan: Real Image Persistence (v3)
+# Plan: Image v3, Source/State Correspondence, and Getting MOOF Back On-Model
 
-## The Problem
+## Why this plan exists
 
-We don't have an image. We have a build system. Every startup parses, compiles, and evaluates all source from scratch. Live object mutations are lost. The design doc says "things just survive" — we have the opposite.
+The current system is off the design doc's axis in a fundamental way.
 
-### Specific failures
+We have:
 
-1. **No orthogonal persistence** — `[point slotAt: 'x put: 42]` vanishes on restart. Only text-appended `(def ...)` forms survive.
-2. **Startup is O(parse+compile+eval)** — rebuilds the world from source every time. A real image deserializes the heap in milliseconds.
-3. **Workspace autosave is string hackery** — appending/deduplicating source text is fragile. A real image just has the objects.
-4. **The heap/source split** — the heap is truth at runtime, source files are truth at rest. Mutations live in one world, definitions in another.
-5. **No GC** — heap grows unbounded. Compaction was removed with the binary image.
-6. **Modules conflate organization with persistence** — modules handle deps/sandboxing but shouldn't be the only path to persistence. Runtime-created objects need to persist too.
+- a bytecode VM
+- a source loader
+- a directory-backed module store
+- a bit of source introspection
 
-## The Fix: Two Layers
+What we do **not** have is the thing the design doc is actually about:
 
-The binary image for the live heap. Source-level modules for code organization. Both, together.
+- a living image that is the canonical runtime truth
+- source as a projection of image-resident program objects
+- objects that carry their own provenance and explanation
+- a coherent answer to "what survives?" and "where does this come from?"
 
-### Layer 1: The Image (binary, canonical for runtime state)
+The hard problem is not heap serialization.
 
-```
-.moof/
-  image.bin              — serialized heap + symbol table + module registry
-  image.sha256           — integrity hash
-```
+The hard problem is maintaining a principled relationship between:
 
-The image contains:
-- **The full heap** — every object, every binding, every environment, exactly as it was
-- **The symbol table** — all interned symbols
-- **Module registry** — per-module metadata: name, requires, provides, source_hash, env_id
-- **Module source texts** — the original authored source for each module, stored as MoofString objects in the heap (not as separate fields — the source IS a heap object)
-- **Root env ID** — for recovery
+- authored source text
+- compiled definitions
+- live object identity
+- mutable runtime state
+- module organization
+- reload and evolution over time
 
-On startup:
-1. Deserialize `image.bin` → heap is immediately ready
-2. Register native functions (always re-registered from Rust)
-3. Reconstruct `ModuleLoader` from the registry metadata
-4. REPL — instant
+If we do not solve that relationship, adding `image.bin` only makes the system faster, not truer.
 
-On checkpoint:
-1. Compact GC (mark from root_env + all module envs)
-2. Serialize heap + symbols + module registry
-3. SHA-256 hash
-4. Write `image.bin`
+---
 
-**Orthogonal persistence**: every heap mutation survives. `[point slotAt: 'x put: 42]` is in the heap, the heap is in the image, the image persists. No special "save" logic for individual operations.
+## The actual problem
 
-### Layer 2: Source Modules (text, canonical for code organization)
+Right now MOOF still behaves like a source-first language runtime. The design doc calls for an image-first objectspace.
 
-```
-.moof/
-  modules/
-    bootstrap.moof       — full source with comments
-    collections.moof
-    ...
-```
+### Current mismatches
 
-The source files serve three purposes:
-1. **Git diffing** — `git diff .moof/modules/` shows what code changed
-2. **Human readability** — you can read the source in any editor
-3. **Seeding** — first boot (no image.bin) evaluates from source
+1. **Truth is split**
+   - Runtime truth lives in the heap.
+   - Resting truth lives in `.moof/modules/*.moof`.
+   - Some REPL truth is smuggled back into source by text append/dedup.
+   - These can drift.
 
-Source is **projected** from the image on checkpoint, not the other way around. The image is truth. Source is a view.
+2. **Environment is carrying too much semantic weight**
+   - Environments currently mix imports, definitions, transient locals, persistent bindings, and accidental runtime junk.
+   - That makes "module = environment = source file" unstable and underspecified.
 
-Each Module object in the heap has a `source` slot containing the original authored text. On checkpoint, these are written to `.moof/modules/` as a side effect. On fresh boot (no image), source files are read and compiled to build the initial image.
+3. **Definitions lose provenance**
+   - After evaluating `(def foo ...)`, we get a binding and maybe a source string somewhere, but not a durable first-class Definition object that owns the meaning of `foo`.
 
-### The Startup Flow
+4. **Runtime mutation has no principled home**
+   - Slot mutation, method redefinition, and runtime-created objects are real state changes.
+   - Today some of them are exported to source, some are not, and the rule is not structural.
 
-```
-if image.bin exists:
-    deserialize → heap ready → register natives → REPL      [fast path, ~10ms]
-else if .moof/modules/ exists:
-    parse + compile + eval → register natives → checkpoint → REPL  [rebuild]
-else if lib/ exists:
-    seed → parse + compile + eval → register natives → checkpoint → REPL [first boot]
-else:
-    error: no image and no source
-```
+5. **Modules conflate multiple roles**
+   - They currently serve as dependency units, persistence units, source files, and partial runtime compartments.
+   - These should be related, but not identical.
 
-### What Changes
+6. **Reload has no identity model**
+   - Re-evaluating source is not the same thing as evolving a living object graph.
+   - The system needs a story for preserving object identity while changing definitions.
 
-#### Bring back: `src/persistence/snapshot.rs`
+---
 
-New `Image` struct:
+## The core design move
+
+Stop treating raw environments as the unit of authorship.
+
+They are not rich enough, stable enough, or structured enough.
+
+Instead, make three layers explicit and first-class:
+
+### 1. Definition layer
+
+This is the canonical source-level meaning of the system.
+
+A Definition object should represent a durable, named program element:
+
+- owner module
+- exported name
+- canonical source
+- parsed AST
+- compiled chunk or compiled artifact
+- referenced definitions
+- doc / metadata / provenance
+- patch history or generation
+
+This is what projects to source text.
+
+### 2. State layer
+
+This is the live object graph:
+
+- instances
+- mutable slots
+- runtime-created objects
+- module singletons
+- environments
+- caches
+- tool state
+
+This is image state.
+
+This is what `image.bin` should capture.
+
+### 3. Projection layer
+
+These are views of the image:
+
+- `.moof/modules/*.moof`
+- manifest metadata
+- browser/editor views
+- inspector output
+- export-to-lib
+- git diffs
+
+These are not canonical truth. They are deterministic projections from image-resident objects.
+
+---
+
+## The new invariants
+
+Image v3 should enforce these invariants:
+
+1. **The image is canonical for runtime state**
+   - If the runtime can observe it, the image can persist it.
+
+2. **Definition objects are canonical for source meaning**
+   - Every durable top-level definition has a stable heap identity and source provenance.
+
+3. **Source files are deterministic projections of Definition objects**
+   - Not handwritten append logs.
+   - Not the primary truth layer.
+
+4. **Modules are objectspace objects first, files second**
+   - Files are exports of module state, not the only place modules "exist."
+
+5. **Environments are execution contexts, not persistence units**
+   - We may persist them, but we do not confuse them with authored structure.
+
+6. **Not all persistent state must be source-projectable**
+   - Only source-backed definitions must round-trip to text.
+   - Arbitrary runtime objects may remain image-only unless explicitly projected.
+
+7. **Reload is identity-preserving where possible**
+   - Updating a prototype or module should patch living objects when semantically appropriate, not blindly replace everything.
+
+---
+
+## The key architectural trick
+
+Do **not** attempt a naive 1:1 mapping between "source file" and "entire environment contents."
+
+That is the wrong unit.
+
+Instead, define a `ModuleImage` as the persistence/authorship unit.
+
+## `ModuleImage`
+
+Each module in the image should have a first-class representation that separates code from state:
 
 ```rust
-#[derive(Serialize, Deserialize)]
-pub struct Image {
-    pub version: u32,  // 3
-    pub objects: Vec<HeapObject>,
-    pub symbol_names: Vec<String>,
-    pub root_env_id: u32,
-    pub module_registry: ModuleRegistry,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct ModuleRegistry {
-    /// Modules in topo load order
-    pub modules: Vec<ModuleEntry>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct ModuleEntry {
+pub struct ModuleImage {
     pub name: String,
     pub requires: Vec<String>,
     pub provides: Vec<String>,
-    pub source_obj_id: u32,  // heap ID of MoofString holding source text
-    pub env_id: u32,         // heap ID of module's sandbox environment
+
+    // Canonical code objects
+    pub definitions: Vec<DefinitionId>,
+
+    // Persistent module-owned runtime objects
+    pub durable_objects: Vec<ObjectId>,
+
+    // Execution context
+    pub env_id: u32,
+
+    // Projection metadata
+    pub source_projection: ModuleSourceProjection,
     pub unrestricted: bool,
 }
 ```
 
-Source text is stored as a regular MoofString on the heap, referenced by `source_obj_id`. It participates in GC normally — if a module is removed, its source string becomes garbage and gets collected.
+This lets us say:
 
-#### Bring back: compacting GC
+- The **module file** corresponds to the module's `definitions`.
+- The **image** corresponds to the module's full runtime state.
+- The **environment** is just the module's execution context.
 
-`compact_image()` returns, but module-aware:
-- Mark from root_env + every module env_id + every module source_obj_id
-- Forward table for all Value::Object references
-- Rewrite env_ids and source_obj_ids in the registry through forwarding table
+That is the missing separation.
 
-#### Modify: `src/modules/loader.rs`
+---
 
-Add `from_image_registry()`:
-- Reconstruct `ModuleGraph` from `ModuleRegistry` entries
-- Populate `loaded_envs` from stored env_ids
-- Populate `exports` by reading provides symbols from stored envs
-- Populate `source_texts` by reading MoofStrings from heap
-- **No re-parsing, no re-compiling, no re-executing**
+## Definition objects
 
-Add `to_image_registry()`:
-- Pack current loader state into `ModuleRegistry`
-- Source text stored as heap objects
+Every durable top-level `def`, `defmethod`, class/prototype declaration, and module-level handler install should become a Definition object.
 
-#### Modify: `src/main.rs`
+### A Definition should know:
 
-Unified startup:
-1. Try `image.bin` → fast path (deserialize, register natives, reconstruct loader)
-2. Try `.moof/modules/` → rebuild path (discover, compile, eval, checkpoint)
-3. Try `lib/` with `--seed` → first boot
+- `id`
+- `module`
+- `kind`
+  - value binding
+  - method definition
+  - object/prototype definition
+  - import/export declaration
+- `name`
+- `selector` for methods when applicable
+- `source`
+- `ast`
+- `compiled_artifact`
+- `dependencies`
+- `target object identity` if this definition patches an existing object
+- `last_applied_generation`
 
-Checkpoint saves: image.bin + projects source to .moof/modules/
+### Why this matters
 
-#### Modify: `src/runtime/heap.rs`
+Once definitions have stable identity:
 
-- Bring back `from_image()` (already exists but unused)
-- No WAL (not needed — checkpoint is the persistence boundary)
+- introspection can point to a real owner
+- `source` becomes authoritative
+- reload can update specific definitions instead of smashing whole modules
+- file projection is structural, not heuristic
 
-#### Keep: `src/persistence/image.rs`
+---
 
-The directory-based manifest/module system stays for source projection and seeding. It's the rebuild/export path, not the primary persistence.
+## Source-backed vs image-only objects
 
-#### Keep: `modules.moof`, workspace, Modules object
+MOOF needs to stop pretending every persistent object must have pretty source.
 
-The moof-level module API stays. Module objects get their `source` slot from the heap (where it's a real MoofString) rather than from disk reads.
+Instead, define two categories explicitly:
 
-### What About the WAL?
+### Source-backed objects
 
-No WAL in v3. Rationale:
-- The WAL existed to provide crash recovery between checkpoints
-- With auto-checkpoint on exit and periodic checkpoints, the window of loss is small
-- The WAL adds complexity (append-only file, replay logic, WAL-aware mutations)
-- If crash safety becomes critical, add it back as a targeted feature
+These are objects whose durable identity is tied to source definitions:
 
-Alternative: auto-checkpoint more aggressively (every N seconds, or every N allocations). The directory-based source projection provides a second safety net — even if image.bin is corrupted, `.moof/modules/` has the source.
+- module prototypes
+- classes
+- methods
+- named singletons
+- explicitly declared persistent module objects
 
-### What About Workspace?
+These must support deterministic source projection.
 
-Workspace becomes simpler. Currently it's text-append hackery. With a real image:
+### Image-only objects
 
-- REPL definitions go into the workspace environment (a real heap environment)
-- The workspace Module object's `source` slot accumulates the text (for readability/export)
-- But the REAL persistence is the heap — the bindings are in the environment, the environment is in the image
-- On restart from image, workspace bindings are just... there. No re-parsing needed.
+These are persistent but not necessarily source-projected:
 
-Workspace autosave becomes: "checkpoint periodically" rather than "append text to a file and re-save."
+- ad hoc REPL objects
+- caches
+- runtime-generated data structures
+- temporary graphs users still want persisted
 
-### Migration Path
+These survive in `image.bin` but may have no textual projection beyond inspector/export tooling.
 
-Phase 1: Bring back binary image serialization alongside the directory format. Both coexist. `--no-image` flag to force source-only mode.
+This is not a compromise. It is the correct model for an image system.
 
-Phase 2: Make image.bin the default startup path. Source files projected on checkpoint.
+---
 
-Phase 3: Auto-checkpoint (on exit + periodic). Remove explicit `(checkpoint)` requirement.
+## How source projection should work
 
-Phase 4: Aggressive testing — verify mutations persist, verify GC correctness, verify source projection round-trips.
+Source should be regenerated from Definition objects, not patched textually.
 
-### Verification
+### Current bad model
 
-- Delete image.bin, start from source → builds image → restart loads from image instantly
-- Modify a slot at REPL → checkpoint → restart → slot value persisted
-- Create objects, add handlers interactively → checkpoint → restart → all there
-- `(export-modules lib)` → files identical to pre-image source
-- GC: create garbage, checkpoint, image is smaller
-- Module reload: edit a .moof file, `[module reload]`, changes take effect
+- Append raw source text to `workspace.moof`
+- Dedup by pattern matching on `(def name ...)`
+- Rewrite `(provides ...)`
 
-### Files to Change
+This is brittle and semantically weak.
+
+### Target model
+
+Each module file is rendered from:
+
+- module header object
+- ordered Definition objects
+- source formatting policy
+
+Projection should be:
+
+- deterministic
+- stable enough for git diff
+- reversible enough to preserve authored intent where reasonable
+
+### Important clarification
+
+We do **not** need perfect token-for-token source preservation as the main invariant.
+
+We need:
+
+- semantic fidelity
+- stable structure
+- preserved comments/docs when possible
+- durable definition identity
+
+If exact text preservation is desired later, add concrete syntax trees or source spans. It should not block the architecture.
+
+---
+
+## What reload should mean
+
+Reload should no longer mean "reparse file and re-eval module body into an env."
+
+That is still compiler-runner thinking.
+
+### Reload should become:
+
+1. Parse projected source into candidate Definition objects
+2. Diff against existing module definitions by stable identity / name / selector
+3. Recompile only changed definitions
+4. Reapply them to the live image
+5. Preserve object identity when patching existing prototypes or module singletons
+6. Recompute exports
+7. Regenerate source projection
+
+### Identity-preserving patch rules
+
+These are the important cases:
+
+- **Value definitions**
+  - may replace binding value directly
+
+- **Prototype/class definitions**
+  - patch slots/handlers in place when possible
+  - preserve the prototype object's identity
+
+- **Method definitions**
+  - replace handler implementation on the target object/prototype
+
+- **Durable instances**
+  - preserve identity
+  - optionally migrate shape if their prototype changed
+
+This is the real "living system" behavior the design doc is gesturing toward.
+
+---
+
+## Workspace should change meaning
+
+The workspace should stop being a text append file with special treatment.
+
+### Current workspace
+
+- a module file
+- REPL autosave target
+- append-only-ish source sink
+
+### Better workspace
+
+The workspace is a first-class module with:
+
+- its own `ModuleImage`
+- Definition objects for every durable top-level REPL definition
+- optional durable objects the user chooses to keep
+- a projected `workspace.moof` as a readable view
+
+Then REPL evaluation splits into two cases:
+
+- **durable top-level forms**
+  - create/update Definition objects
+  - update module source projection
+
+- **ephemeral expressions**
+  - just evaluate
+  - no source projection required
+
+That gives a principled answer to "what from the REPL becomes part of the image?"
+
+---
+
+## Image v3 storage design
+
+The binary image should persist the runtime truth and the definition/source metadata needed to reconstruct projections.
+
+```text
+.moof/
+  image.bin
+  image.sha256
+  manifest.moof          ; optional projected metadata
+  modules/
+    *.moof               ; projected source view
+```
+
+### `Image` should contain
+
+```rust
+pub struct Image {
+    pub version: u32,
+    pub objects: Vec<HeapObject>,
+    pub symbol_names: Vec<String>,
+    pub root_env_id: u32,
+    pub module_registry: ModuleRegistry,
+    pub definition_registry: DefinitionRegistry,
+}
+```
+
+### `ModuleRegistry` should contain
+
+- module identity
+- dependency metadata
+- env id
+- exported symbols
+- definition ids in projection order
+- durable object ids
+- unrestricted flag
+
+### `DefinitionRegistry` should contain
+
+- all durable definition objects
+- source text
+- AST or compiled references
+- ownership metadata
+
+We do not have to fully normalize this on day one, but the model should point this way.
+
+---
+
+## Startup model
+
+### Fast path
+
+If `image.bin` exists:
+
+1. deserialize image
+2. reconstruct heap and symbol table
+3. restore root env
+4. re-register native functions
+5. restore prototype caches
+6. reconstruct `ModuleLoader` / module registry from image metadata
+7. project source files only if needed
+8. enter REPL immediately
+
+### Rebuild path
+
+If `image.bin` does not exist:
+
+1. read `.moof/modules/*.moof`
+2. parse into module headers plus definitions
+3. build initial image objects
+4. compile/apply definitions
+5. create `image.bin`
+6. continue from image model afterward
+
+### Seed path
+
+Only for first boot:
+
+1. seed `.moof/modules/` from `lib/`
+2. rebuild initial image
+3. never treat `lib/` as canonical runtime truth again
+
+---
+
+## What to keep from the current system
+
+Not everything should be thrown away.
+
+### Keep
+
+- the current parser/compiler/vm core
+- `.moof/modules/` as a human-readable projection directory
+- `ModuleLoader` as the shell around discovery / dependency order / exports
+- `Modules` and `Module` moof-level objects
+- current introspection surfaces where they work
+
+### Replace or demote
+
+- directory image as canonical persistence
+- append-and-dedup workspace persistence
+- "module environment = durable source truth" assumption
+- full-module reload as the only update granularity
+
+---
+
+## Concrete implementation phases
+
+## Phase 0: Make the target model explicit
+
+Before coding heavily:
+
+- document invariants from this file in `DESIGN.md` or a follow-up architecture doc
+- decide what counts as a Definition in v1 of this design
+- decide what counts as a durable module-owned object
+
+Without this, implementation will drift back into ad hoc persistence.
+
+## Phase 1: Bring back binary image persistence
+
+Goal:
+
+- make runtime state persist in one binary artifact
+- leave current source module flow operational as fallback
+
+Work:
+
+- add `src/persistence/snapshot.rs`
+- implement `Image { objects, symbol_names, root_env_id, module_registry }`
+- add `Heap::from_image(...)` and read-only heap export helpers
+- update `main.rs` to try image fast path first
+- on checkpoint, write `image.bin` and project source
+
+This phase fixes canonical runtime persistence, but not full source/state correspondence.
+
+## Phase 2: Introduce first-class ModuleImage records
+
+Goal:
+
+- stop using raw environments as the persistence boundary
+
+Work:
+
+- extend module metadata in Rust to include durable module records
+- track module-owned source text as heap objects
+- track persistent module-owned objects separately from env bindings
+- reconstruct module loader directly from image records
+
+This phase gives modules a stable image identity.
+
+## Phase 3: Introduce Definition objects
+
+Goal:
+
+- make top-level authored program elements first-class
+
+Work:
+
+- create a definition registry
+- record top-level `def`, `defmethod`, and similar durable forms structurally
+- store source and ownership on definitions
+- update introspection to point at definitions rather than ad hoc source
+
+This phase is the turning point.
+
+## Phase 4: Replace text-append workspace persistence
+
+Goal:
+
+- eliminate heuristic source mutation
+
+Work:
+
+- REPL durable forms create/update Definition objects in the workspace module
+- `workspace.moof` is rendered from those definitions
+- ephemeral expressions remain image-only unless promoted
+
+## Phase 5: Structural projection
+
+Goal:
+
+- generate source files deterministically from module/definition objects
+
+Work:
+
+- build a renderer for module headers and definitions
+- preserve comments/docs where feasible
+- remove `dedup_defs` / text surgery from the write path
+
+## Phase 6: Identity-preserving reload and live patching
+
+Goal:
+
+- make the system feel like a living image, not a rebuild machine
+
+Work:
+
+- diff old/new definitions
+- patch methods/prototypes in place
+- preserve durable object identities
+- add shape migration hooks for instances when needed
+
+## Phase 7: Compacting GC for images
+
+Goal:
+
+- stop persisting garbage
+
+Work:
+
+- mark from root env, module records, definition registry, durable objects
+- compact heap
+- rewrite ids in image metadata
+
+Do this after the metadata model is correct, not before.
+
+---
+
+## Verification criteria
+
+Image v3 is only successful if these hold:
+
+1. **Cold restart preserves live state**
+   - mutate a slot
+   - restart
+   - state survives
+
+2. **Definitions retain provenance**
+   - ask where a binding came from
+   - the system can point to a Definition object and its module
+
+3. **Source projection is deterministic**
+   - repeated checkpoints produce stable `.moof/modules/*.moof`
+
+4. **Workspace is principled**
+   - durable REPL definitions become workspace definitions
+   - ephemeral computations do not pollute source projection
+
+5. **Reload preserves identity**
+   - editing a prototype updates its behavior without replacing every instance
+
+6. **Image and source are recoverable from each other in the intended direction**
+   - no image: rebuild from projected source
+   - image present: startup from image without source re-eval
+
+---
+
+## Immediate code implications
+
+### New or heavily changed files
 
 | File | Change |
 |------|--------|
-| `src/persistence/snapshot.rs` | **NEW** — Image v3 struct, serialize/deserialize, compact_image |
-| `src/persistence/image.rs` | Keep — source projection + seeding |
-| `src/modules/loader.rs` | Add `from_image_registry`, `to_image_registry` |
-| `src/main.rs` | Unified 3-tier startup, checkpoint on exit |
-| `src/runtime/heap.rs` | Re-add `from_image()`, `objects()`, `symbol_names_ref()` |
-| `.moof/modules/*.moof` | Unchanged — still the source files |
-| `modules.moof` | Minor — source slot reads from heap instead of disk |
+| `src/persistence/snapshot.rs` | new binary image format and load/save path |
+| `src/persistence/mod.rs` | expose both `image` and `snapshot` layers |
+| `src/runtime/heap.rs` | image import/export helpers |
+| `src/modules/loader.rs` | move toward image-backed module reconstruction |
+| `src/main.rs` | image-first startup and checkpoint flow |
+
+### Later-phase files
+
+| File | Change |
+|------|--------|
+| `src/compiler/compile.rs` | optionally emit durable definition metadata for top-level forms |
+| `src/vm/exec.rs` | support live patch / reload semantics where needed |
+| `.moof/modules/modules.moof` | align moof-level module API with image-backed module objects |
+| workspace handling in `src/main.rs` and `src/modules/loader.rs` | replace append-and-dedup with definition objects |
+
+---
+
+## Final position
+
+The right answer is:
+
+- **binary image as canonical runtime truth**
+- **Definition objects as canonical source truth**
+- **source files as projections**
+- **environments as runtime scopes, not authorship units**
+
+If we do only "serialize the heap + keep the current module/source model", we will get faster startup and better persistence, but we will still be philosophically off.
+
+If we add Definition objects and ModuleImage records, the system starts to line up with the design doc's actual worldview.

@@ -2,15 +2,19 @@
 
 > *"clarus the dogcow lives again"*
 
-MOOF is a living computational environment — a persistent, introspectable objectspace where usage and programming are the same activity. It's a lisp-shaped language with Smalltalk's object model, built on a bytecode VM with six kernel primitives.
+MOOF is a persistent, introspectable objectspace with a Lisp-shaped surface syntax and a Smalltalk-shaped object model. It runs on a bytecode VM in Rust, with most higher-level behavior defined in MOOF itself.
+
+Current persistence is module-oriented: the live source image lives under `.moof/`, and startup reloads modules from `.moof/modules/*.moof` in dependency order.
 
 ## Quick start
 
-```
+```bash
 cargo run
 ```
 
-```
+On first boot, MOOF seeds `.moof/modules/` from `lib/` if present or uses the checked-in `.moof/` image if it already exists. After that, it reloads modules from `.moof/modules/` and rebuilds `.moof/manifest.moof`.
+
+```text
 MOOF — Moof Open Objectspace Fabric
 clarus the dogcow lives again
 Type expressions to evaluate. Ctrl-D to exit.
@@ -23,22 +27,22 @@ moof> (greet "clarus")
 => "clarus says moof"
 ```
 
-## The six kernel primitives
+## Kernel
 
-Everything in MOOF is built on exactly six forms, implemented in the VM. Nothing else gets bytecode privilege.
+The VM has six privileged primitives:
 
 | Primitive | Purpose |
-|-----------|---------|
-| `vau`     | Create an operative (receives unevaluated args + caller's environment) |
-| `send`    | Message dispatch — the VM's single privileged operation |
-| `def`     | Bind a name in the current environment |
-| `quote`   | Return an expression as literal data |
-| `cons`    | Construct a pair |
-| `eq`      | Identity comparison |
+|---|---|
+| `vau` | Create an operative that receives unevaluated args plus caller env |
+| `send` | Message dispatch |
+| `def` | Bind a name in the current environment |
+| `quote` | Return literal data |
+| `cons` | Construct a pair |
+| `eq` | Identity comparison |
 
-Everything else — `fn`, `if`, `let`, `cond`, `defmethod`, the entire object model — is derived from these six in `lib/bootstrap.moof`.
+Everything else is derived in MOOF code, primarily in `.moof/modules/bootstrap.moof`.
 
-## Three bracket species
+## Surface syntax
 
 ```lisp
 (f a b c)          ; applicative call
@@ -46,21 +50,20 @@ Everything else — `fn`, `if`, `let`, `cond`, `defmethod`, the entire object mo
 { Parent x: 10 }   ; object literal
 ```
 
-## Syntax sugar
+Additional sugar:
 
 ```lisp
-'name              ; symbol literal (quote name)
-obj.x              ; field access (direct slot read)
-@x                 ; self-field access (inside methods)
-(fn (x) [x + 1])  ; short lambda (defined as a vau operative)
+'name              ; symbol literal
+obj.x              ; slot access
+@x                 ; self slot access inside methods
+(fn (x) [x + 1])   ; short lambda
 ```
 
 ## Object model
 
-Objects have **slots** (public data) and **handlers** (behavior, inherited through prototype delegation).
+Objects have slots and handlers, with prototype delegation through `parent`.
 
 ```lisp
-; define a prototype with methods
 (def Point { Object
   describe: () "a Point"
   distanceTo: (other)
@@ -69,77 +72,116 @@ Objects have **slots** (public data) and **handlers** (behavior, inherited throu
       [[dx * dx] + [dy * dy]])
 })
 
-; create instances with object literals
 (def pt { Point x: 3 y: 4 })
 
-pt.x                                 ; => 3
-[pt describe]                        ; => "a Point"
-[pt distanceTo: { Point x: 0 y: 0 }] ; => 25
+pt.x
+[pt describe]
+[pt distanceTo: { Point x: 0 y: 0 }]
+```
 
-; add methods after the fact
+You can also attach methods after the fact:
+
+```lisp
 (defmethod Point magnitude ()
-  [[[@x * @x] + [@y * @y]]])
+  [[@x * @x] + [@y * @y]])
 ```
 
-## Operatives (vau)
+## Persistence and modules
 
-The real power: `vau` creates operatives that receive their arguments **unevaluated**, plus the caller's environment. This means user code has compiler-level power.
+Today, MOOF persists source modules, not a binary heap image.
 
-```lisp
-; 'when' is defined in bootstrap.moof as a vau operative:
-(def when
-  (vau (condition . body) $e
-    (if (eval condition $e)
-      (eval (cons 'do body) $e)
-      nil)))
+The live image directory is:
 
-; fn itself is a vau that constructs and evals a lambda:
-(def fn
-  (vau (params . body) $e
-    (eval (cons 'lambda (cons params body)) $e)))
+```text
+.moof/
+  manifest.moof
+  modules/
+    bootstrap.moof
+    collections.moof
+    classes.moof
+    geometry.moof
+    json.moof
+    mcp.moof
+    membrane.moof
+    modules.moof
+    workspace.moof
 ```
 
-## Introspection
+What persists now:
 
-```lisp
-(source fn)             ; see the AST of any function
-[Object interface]      ; list an object's handlers
-[pt sourceOf: 'describe] ; see the source of a specific method
-(inspect pt)            ; print type, slots, handlers
+- Module source files in `.moof/modules/`
+- REPL `def` and `defmethod` forms, autosaved into `workspace.moof`
+- Manifest metadata and per-module source hashes in `.moof/manifest.moof`
+
+What does not persist yet:
+
+- Arbitrary heap mutation that is not reflected back into module source
+- A binary object image with instant heap restore
+- GC/compaction at checkpoint time
+
+## REPL and module commands
+
+Built-in commands exposed by `main.rs` include:
+
+- `(save)` or `(checkpoint)` to write the current source image
+- `(browse)` or `(browse expr)` to open the TUI inspector
+- `(modules)` to list loaded modules
+- `(module-source name)` to print a module's source
+- `(module-edit name)` to edit a module in `$EDITOR`, reload, and save
+- `(module-reload name)` to reread a module from disk and reload it
+- `(module-remove name)` to delete a module
+- `(module-exports name)` to list exported symbols
+- `(module-create name (requires dep1 dep2))` to create a new module
+- `(define-in module-name (def ...))` to define directly into a module
+- `(which-module symbol-name)` to find the owning module
+- `(export-modules)` to copy `.moof/modules/` out to `lib/`
+- `(import-modules)` to seed `.moof/modules/` from `lib/`
+
+## Other runtime modes
+
+```bash
+cargo run -- --gui
+cargo run -- --mcp
+cargo run -- --seed
 ```
+
+- `--gui` launches the egui system browser
+- `--mcp` starts the MCP stdio server defined in `.moof/modules/mcp.moof`
+- `--seed` re-seeds `.moof/modules/` from `lib/`
 
 ## Project structure
 
-```
+```text
 src/
-  main.rs              REPL, bootstrap loading, eval entrypoint
-  reader/
-    lexer.rs           Tokenizer (three bracket species + sugar)
-    parser.rs          Tokens -> cons-cell AST
-  compiler/
-    compile.rs         AST -> bytecode
-  vm/
-    opcodes.rs         Bytecode instruction set
-    exec.rs            Stack-based VM, message dispatch
-  runtime/
-    value.rs           Value representation (immediates + heap refs)
-    heap.rs            Arena allocator, symbol interning
-    env.rs             First-class environments
-lib/
-  bootstrap.moof       Standard library, written in MOOF itself
-  geometry.moof        Example: Point prototype
-DESIGN.md              Full design & philosophy document
+  main.rs              startup, REPL, module commands
+  reader/              lexer and parser
+  compiler/            AST to bytecode
+  vm/                  VM, opcodes, native registrations
+  runtime/             values, heap, environments
+  modules/             discovery, dependency graph, sandboxing
+  persistence/         directory-image manifest and module storage
+  tui/                 terminal inspector
+  gui/                 egui system browser
+  ffi/                 native library binding
+.moof/modules/         current live source image
+DESIGN.md              design goals and longer-term architecture
+JOURNAL.md             implementation history by phase
+PLAN-image-v3.md       binary image persistence plan
 ```
 
-## What's next
+## Current status
 
-See `JOURNAL.md` for implementation history. Upcoming:
+Implemented now:
 
-- **Persistence** — WAL + content-addressed image snapshots
-- **String operations** — `substring:`, format, symbol conversion
-- **TUI inspector** — browse the live object graph
-- **FFI** — call into native libraries via libffi
-- **MCP server** — expose the objectspace as AI-native tools
+- Bytecode VM with operatives, lambdas, tail calls, objects, strings, floats, and FFI
+- Source-backed module system with dependency ordering and sandboxed loading
+- TUI inspector and egui browser
+- MCP server module
+- Workspace autosave into `.moof/modules/workspace.moof`
+
+Planned next major shift:
+
+- Real heap image persistence as described in `PLAN-image-v3.md`
 
 ## License
 
