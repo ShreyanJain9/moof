@@ -291,40 +291,94 @@ an AI agent lives in its own Vat. it receives Facets of image objects, wrapped i
 
 ## 6. persistence
 
-### 6.1 orthogonal persistence
+### 6.1 the image is a directory
 
-things just survive. you never "save." the image is the truth. programs do not distinguish between memory and storage.
+the image is not a binary blob. it is a directory of `.moof` source files — the exact text the programmer wrote, comments and sugar intact — plus a manifest for integrity and ordering.
 
-### 6.2 the four-layer stack
+```
+.moof/
+  manifest.moof              ; load order, per-module SHA-256 hashes, global hash
+  modules/
+    bootstrap.moof           ; the kernel — derived forms from 6 primitives
+    collections.moof         ; Assoc, list methods
+    classes.moof             ; Stack, Queue, Set, Counter, Range, Pair, Box, EventEmitter
+    geometry.moof            ; Point
+    json.moof                ; JSON parser/serializer
+    mcp.moof                 ; MCP server
+    membrane.moof            ; capability security
+    modules.moof             ; the module system itself (Module, Modules)
+    workspace.moof           ; REPL definitions (autosaved)
+```
 
-**layer 1 — write-ahead log (WAL)**
-every slot mutation is logged before it happens. crash recovery is WAL replay from the last snapshot.
+source files are the canonical representation. there is no binary serialization, no WAL, no compaction. the filesystem IS the persistence layer. `git diff` on `.moof/modules/` shows exactly what changed.
 
-**layer 2 — content-addressed object store**
-each snapshot is hashed (like a git object). provides:
-- time travel: `[obj history]` is a lazy stream of past snapshots
-- cheap diffing: `[obj diff: otherSnapshot]`
-- structural sharing: unchanged subgraphs share storage
+### 6.2 the module system
 
-**layer 3 — per-object durability policy**
-set via a slot on every object:
-- `ephemeral` — in-memory only, gone on restart
-- `durable` — WAL-protected (default)
-- `versioned` — full history in the content store
-- `synced` — mirrors to an external store (sqlite, s3, etc.)
-
-**layer 4 — CRDTs for federation**
-objects marked `shared` use CRDT semantics for merge. `Counter`, `GrowSet`, `ObservedRemoveSet`, `LastWriteWinsMap`. not a day-one concern but the slot model must not preclude it.
-
-### 6.3 key persistence API
+each source file declares a module with explicit dependencies and exports:
 
 ```scheme
-[Image checkpoint]               ; manual snapshot
-[Image rollback-to: timestamp]   ; restore
-[obj history]                    ; lazy stream of past states
-[obj diff: other]                ; changeset object
-[ChangeLog on-change: obj do: h] ; live subscription
+(module collections
+  (requires bootstrap)
+  (provides Assoc assoc-equal? flat-map flatten find any? every? sort sort-by join))
 ```
+
+modules load in topological order. each evaluates in a sandboxed environment that contains only its declared dependencies — no IO, no FFI, no `eval-string` unless the module is marked `(unrestricted)`. the compiler enforces this at compile time.
+
+the manifest stores a SHA-256 hash per module and a global hash (SHA-256 of all module hashes concatenated in order). verified on load to detect external tampering.
+
+### 6.3 the module system as moof objects
+
+the module system is implemented in moof itself (`modules.moof`), following the principle that everything is objects and messages:
+
+```scheme
+[Modules list]                          ; => ("bootstrap" "collections" ...)
+[Modules which: "Stack"]                ; => "classes"
+[Modules named: "geometry"]             ; => <Module geometry>
+[[Modules named: "geometry"] source]    ; => full source text with comments
+[[Modules named: "geometry"] exports]   ; => ("Point")
+[Modules create: "my-lib" requires: (list "bootstrap")]
+```
+
+only two Rust-level I/O primitives are needed: `read-file` and `write-file`. everything else — the Module prototype, the Modules registry, source management, persistence — is pure moof.
+
+### 6.4 workspace and autosave
+
+REPL definitions automatically persist to `workspace.moof`. every `(def ...)` form entered at the REPL is appended to workspace's source, deduplicated, and saved. the workspace module depends on all other modules and loads last.
+
+```scheme
+moof> (def my-thing 42)
+=> 42
+; autosaved to .moof/modules/workspace.moof
+
+moof> ; restart moof
+
+moof> my-thing
+=> 42
+; still here — workspace loaded from disk
+```
+
+### 6.5 seeding and exporting
+
+the `--seed` flag initializes a fresh image from a `lib/` directory:
+
+```
+cargo run -- --seed
+```
+
+the `(export-modules dir)` command writes all module sources to a target directory — a perfect round-trip:
+
+```scheme
+(export-modules "lib")   ; write .moof files for git/sharing
+```
+
+### 6.6 future directions
+
+the current model is deliberately simple: source files, no binary cache, no WAL. future layers may add:
+
+- **compiled bytecode cache** — per-module `.bin` files validated by source hash, for faster startup without re-parsing
+- **per-object durability policies** — ephemeral, durable, versioned, synced
+- **CRDTs for federation** — objects marked `shared` use CRDT merge semantics
+- **time travel** — `[obj history]` as a lazy stream of past states (git-backed)
 
 ---
 

@@ -269,6 +269,127 @@ Added `OP_APPEND` opcode. Compiler detects `,@` in quasiquoted lists, builds wit
 
 ---
 
+## §12 — The module system and the death of image.bin (`8cb3db2` → `54c43db`)
+
+Five commits in one session. The biggest architectural change since §1. Moof got a module system, lost its binary image, and the persistence model was rewritten three times before settling.
+
+### The standard class library (`8cb3db2`)
+
+Added `lib/classes.moof` with eight reusable prototypes: Stack, Queue, Set, Counter, Range, Pair, Box, EventEmitter. These exercise the prototype-delegation object model and provide genuine utility. Added to the stdlib load list, checkpointed into the binary image.
+
+### Attempt 1: source files as truth (`b7f2d99`)
+
+The original image.bin serialized the heap as a bincode blob with SHA-256 hashing and a WAL for crash recovery. The problem: serialization destroyed comments, sugar, and documentation. The image could never replace raw source — it was lossy.
+
+**Solution: a source-level module system.** Each `.moof` file declares a module header:
+
+```scheme
+(module collections
+  (requires bootstrap)
+  (provides Assoc assoc-equal? flat-map flatten find any? every? sort sort-by join))
+```
+
+Modules load in topological order (Kahn's algorithm with BTreeSet for deterministic tie-breaking). Each module evaluates in a sandboxed environment that has only its declared dependencies. The compiler gained `CompilerMode::Sandboxed` which rejects `print`, `load`, `eval-string`, `ffi-open`, `ffi-bind` at compile time.
+
+**Architecture:**
+- `src/modules/mod.rs` — `ModuleDescriptor` struct
+- `src/modules/graph.rs` — `ModuleGraph` with topo sort, cycle detection (DFS), removal safety checks, transitive dependent queries
+- `src/modules/loader.rs` — `ModuleLoader` with discover, load, reload, merge
+- `src/modules/sandbox.rs` — isolated env construction
+- `src/compiler/compile.rs` — `CompilerMode` enum gates restricted forms
+
+**Bootstrap ordering problem:** after bootstrap loads, native handlers (toSymbol, +, -, etc.) must be registered before other modules can run. Fixed by splitting `load_all` into per-module `load_one`, with `register_type_prototypes` called between bootstrap and everything else.
+
+**lib/ was declared canonical.** Binary image removed from git. `.moof/` gitignored. All REPL commands were string-parsed: `(modules)`, `(module-source name)`, `(module-reload name)`, etc.
+
+### Attempt 2: directory-based image (`f6309d3`)
+
+The user pointed out that the serialized image should canonically replace lib/, not the other way around. But the image must preserve source text.
+
+**Key insight: the "image" isn't a binary blob — it's a directory.**
+
+```
+.moof/
+  manifest.moof          ; load order, per-module SHA-256 hashes, global hash
+  modules/
+    bootstrap.moof       ; full source, comments and all
+    collections.moof
+    ...
+```
+
+The manifest is the integrity anchor. Global hash = SHA-256 of all source hashes concatenated in order. Verified on load. Each module file IS the source code — comments, sugar, whitespace preserved perfectly.
+
+**Gutted:** `snapshot.rs` (binary serialization), `wal.rs` (write-ahead log), `source_project.rs` (one-way projection), WAL from `heap.rs`. The heap became a clean arena — no more WAL logging in `alloc`, `mutate`, `intern`.
+
+**Gutted:** `lib/` directory. Everything lives in `.moof/modules/`. The `--seed` flag reads from `lib/` as a one-time bootstrap. `(export-modules lib)` writes back for git.
+
+Startup is robust: always re-discovers from `.moof/modules/` regardless of manifest state. Stale manifests, missing manifests, external edits — all handled. Manifest rebuilt on every save.
+
+**Bug found and fixed (`1441bac`):** `module-remove` wasn't saving the manifest, leaving stale entries that prevented startup. Fixed by having `remove()` delete the .moof file, clean the graph, and re-save.
+
+### Attempt 3: in-image development (`c521181`)
+
+Added `(define-in module (def name ...))` for defining into modules from the REPL. Source-level append + dedup: redefining a symbol removes the old `(def name ...)` form, keeps the last. Provides header auto-updated.
+
+Also: `(module-create name (requires ...))`, `(which-module symbol)`.
+
+### The moof philosophy turn (`54c43db`)
+
+String-parsed REPL commands aren't moof philosophy. Everything should be objects and messages.
+
+Added two general-purpose I/O natives: `read-file` and `write-file`. With those, the entire module API can be written in moof itself.
+
+**`modules.moof`** defines `Module` and `Modules` prototypes:
+
+```scheme
+[Modules list]                          ; => ("bootstrap" "collections" ...)
+[Modules which: "Stack"]                ; => "classes"
+[Modules named: "geometry"]             ; => <Module geometry>
+[[Modules named: "geometry"] source]    ; => full source with comments
+[[Modules named: "geometry"] exports]   ; => ("Point")
+[Modules create: "my-lib" requires: (list "bootstrap")]
+```
+
+**Workspace autosave:** every `(def ...)` at the REPL is automatically appended to `workspace.moof`. Survives restart. `[Modules which: "my-thing"]` → `"workspace"`.
+
+**Registration bridge:** after all modules load, Rust populates `Modules._modules` by eval'ing registration calls, then sets source text directly on each Module object's slot (too large for inline eval). This is the only Rust→moof bridge; everything else is pure moof.
+
+### What went wrong
+
+- **Symlink self-copy disaster:** during testing, created a symlink `lib → .moof/modules` and ran `--seed`, which copied each file over itself. All module files zeroed. Recovered from git. Added robustness: startup always re-discovers rather than trusting the manifest.
+
+- **Sandbox env mismatch:** early version loaded all modules, then registered type prototypes. But `collections.moof` uses `["set:to:" toSymbol]` which sends `toSymbol` to a String — a native handler. Fixed by registering prototypes between bootstrap and subsequent modules.
+
+- **Rust→moof dispatch mismatch:** initial attempt called `vm.message_send` directly from Rust to register modules with the Modules object. The arguments didn't dispatch correctly (types showed as Object instead of String). Fixed by using `eval_source` to eval moof expressions, then setting large source texts via direct heap slot manipulation.
+
+- **Workspace creation timing:** workspace.moof was initially created before the `modules` module existed, so its requires list didn't include `modules`. REPL defs that referenced `Modules` failed with "Unbound symbol" when autosaved to workspace. Fixed by regenerating workspace after `modules` loads.
+
+### Current architecture
+
+```
+Startup:
+  VM::new() → bootstrap_env(nil/true/false)
+  → discover .moof/modules/*.moof
+  → parse headers, build dependency graph
+  → topo sort → load each in sandboxed env
+  → register natives after bootstrap
+  → merge exports into root
+  → populate Modules registry
+  → create workspace (if missing)
+  → REPL
+
+Persistence:
+  .moof/manifest.moof — integrity hash + load order
+  .moof/modules/*.moof — source files (canonical)
+  autosave on define-in, module-create, module-remove
+  workspace autosave on every (def ...) at REPL
+
+No binary image. No WAL. No compaction.
+Source files are the image. The directory IS the objectspace.
+```
+
+---
+
 ## §11 — Source projection, MCP server, eval-string (`4761f23`)
 
 ### Source projection (design doc §6)
