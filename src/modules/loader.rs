@@ -14,7 +14,7 @@ use std::collections::{HashMap, BTreeMap};
 use crate::reader::lexer::Lexer;
 use crate::reader::parser::Parser;
 use crate::compiler::compile::Compiler;
-use crate::runtime::value::Value;
+use crate::runtime::value::{Value, HeapObject};
 use crate::runtime::heap::Heap;
 use crate::vm::exec::VM;
 use crate::persistence::image;
@@ -383,6 +383,51 @@ impl ModuleLoader {
         // Autosave
         if let Err(e) = self.save_module(module_name) {
             eprintln!("!! autosave failed: {}", e);
+        }
+
+        // ── Phase 2/3: Create Definition object on the heap ──
+        if let Some(mod_id) = vm.find_module(module_name) {
+            let sym_definition = vm.heap.intern("Definition");
+            let def_proto = match vm.env_lookup(root_env, sym_definition) {
+                Ok(Value::Object(id)) => id,
+                _ => 0,
+            };
+
+            if def_proto != 0 {
+                let mod_name_sym = vm.heap.intern("module-name");
+                let mod_name_val = vm.heap.alloc_string(module_name);
+                let name_sym = vm.heap.intern("name");
+                let name_val = vm.heap.alloc_string(def_name);
+                let source_sym_attr = vm.heap.intern("source");
+                let source_val = vm.heap.alloc_string(def_source);
+                let kind_sym = vm.heap.intern("kind");
+                let kind_val = Value::Symbol(vm.heap.intern(if def_source.contains("(defmethod ") { "method" } else { "value" }));
+
+                let def_id = vm.heap.alloc(HeapObject::GeneralObject {
+                    parent: Value::Object(def_proto),
+                    slots: vec![
+                        (mod_name_sym, mod_name_val),
+                        (name_sym, name_val),
+                        (source_sym_attr, source_val),
+                        (kind_sym, kind_val),
+                    ],
+                    handlers: Vec::new(),
+                });
+
+                // Link to ModuleImage.definitions list
+                let sym_definitions = vm.heap.intern("definitions");
+                let current_defs = match vm.heap.get(mod_id) {
+                    HeapObject::GeneralObject { slots, .. } => {
+                        slots.iter().find(|(k, _)| *k == sym_definitions).map(|(_, v)| *v).unwrap_or(Value::Nil)
+                    }
+                    _ => Value::Nil,
+                };
+                
+                // Append or replace? For now, just append.
+                // In a real system, we'd replace existing definitions of the same name.
+                let new_defs = vm.heap.cons(Value::Object(def_id), current_defs);
+                vm.heap.set_slot(mod_id, sym_definitions, new_defs);
+            }
         }
 
         Ok(result)

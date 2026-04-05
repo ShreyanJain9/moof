@@ -1,8 +1,8 @@
 ; MOOF image manifest — do not edit by hand
-; global hash: 48cfd4c2ee9feab087f3c236e54cfb73499238c1e14779106b1794b1e919719d
+; global hash: d8ab683d7e21d2af6ab4ecdd0c35f42fffb35d5cae5ed19daeb966a5dcda5bbc
 
 (image
-  (hash "48cfd4c2ee9feab087f3c236e54cfb73499238c1e14779106b1794b1e919719d")
+  (hash "d8ab683d7e21d2af6ab4ecdd0c35f42fffb35d5cae5ed19daeb966a5dcda5bbc")
   (modules
     (bootstrap hash: "bf36101586cb7b4bfb1ccad7689fe1fc97740c2205550cc36a6ec5e0ad752c57" provides: 57)
     (collections hash: "4b0919f6e06a80a750f4678e85be6e25c127306e1c2d9745c37e0db4c9985ee0" provides: 10)
@@ -12,5 +12,5 @@
     (mcp hash: "8ba3b86ad1c2703a622b537d813c3ba67c64a0e73c46ac0c866ce56743d95c87" provides: 15)
     (membrane hash: "a2c1839ed1316185bba444f4cd1ae9d25e5394a9015042c6e77f7d5bb5f7b760" provides: 3)
     (modules hash: "615fb3b3e9a087ef2a39dcade9be68a352bd3626a1a7457cfbc6b3f1797a2981" provides: 2)
-    (workspace hash: "b3a61d394f0d853588cd9696b3ad1b82f1fcecf2540dab8a3f7b097d9f069ff3" provides: 1)
+    (workspace hash: "89cbe1476987cf8fc1a7d2f6007a3b9927df9a8bd3b4493371acb48d29f79f7e" provides: 0)
   ))

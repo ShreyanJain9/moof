@@ -231,6 +231,39 @@
   (let ((handler [self handlerAt: selector]))
     (if (null? handler) nil (source handler))))
 
+; ── image model ─────────────────────────────────────────────
+
+; Definition: a durable, named program element (§2 of PLAN-image-v3)
+(def Definition { Object
+  id: nil
+  module-name: nil
+  kind: 'value ; 'value, 'method, 'prototype, 'import
+  name: nil
+  selector: nil ; for methods
+  source: nil
+  ast: nil
+  compiled: nil
+  doc: nil
+  metadata: nil
+  
+  describe: ()
+    (str "<Definition " @module-name ":" @name ">")
+})
+
+; ModuleImage: persistent module-owned state (§1 of PLAN-image-v3)
+(def ModuleImage { Object
+  name: nil
+  requires: nil
+  provides: nil
+  definitions: nil ; list of Definition objects
+  durable-objects: nil ; list of module-owned objects
+  env: nil
+  unrestricted: false
+  
+  describe: ()
+    (str "<ModuleImage " @name ">")
+})
+
 ; ── type prototypes ─────────────────────────────────────────
 
 (def Integer { Object

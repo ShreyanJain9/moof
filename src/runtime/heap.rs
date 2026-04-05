@@ -74,6 +74,29 @@ impl Heap {
         self.symbol_names.len()
     }
 
+    /// Clone all heap objects (for serialization).
+    pub fn objects_clone(&self) -> Vec<HeapObject> {
+        self.objects.clone()
+    }
+
+    /// Clone all symbol names (for serialization).
+    pub fn symbol_names_clone(&self) -> Vec<String> {
+        self.symbol_names.clone()
+    }
+
+    /// Reconstruct a heap from a binary image.
+    pub fn from_image(objects: Vec<HeapObject>, symbol_names: Vec<String>) -> Self {
+        let mut symbol_lookup = HashMap::new();
+        for (id, name) in symbol_names.iter().enumerate() {
+            symbol_lookup.insert(name.clone(), id as u32);
+        }
+        Heap {
+            objects,
+            symbol_names,
+            symbol_lookup,
+        }
+    }
+
     // ── Specific mutation methods ──
 
     /// Define a binding in an environment.

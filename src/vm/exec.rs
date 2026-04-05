@@ -166,6 +166,66 @@ impl VM {
     // All native operations are NativeFunction closures in the NativeRegistry.
     // One path. One mechanism.
 
+    /// Get all registered prototypes as a Vec of (name, id).
+    pub fn get_protos(&self) -> Vec<(String, u32)> {
+        let mut result = Vec::new();
+        let list = [
+            ("integer", self.proto_integer),
+            ("float", self.proto_float),
+            ("boolean", self.proto_boolean),
+            ("string", self.proto_string),
+            ("cons", self.proto_cons),
+            ("nil", self.proto_nil),
+            ("symbol", self.proto_symbol),
+            ("lambda", self.proto_lambda),
+            ("operative", self.proto_operative),
+            ("environment", self.proto_environment),
+        ];
+        for (name, opt) in list {
+            if let Some(id) = opt {
+                result.push((name.to_string(), id));
+            }
+        }
+        result
+    }
+
+    /// Restore prototypes from a Vec of (name, id).
+    pub fn set_protos(&mut self, protos: Vec<(String, u32)>) {
+        for (name, id) in protos {
+            match name.as_str() {
+                "integer" => self.proto_integer = Some(id),
+                "float" => self.proto_float = Some(id),
+                "boolean" => self.proto_boolean = Some(id),
+                "string" => self.proto_string = Some(id),
+                "cons" => self.proto_cons = Some(id),
+                "nil" => self.proto_nil = Some(id),
+                "symbol" => self.proto_symbol = Some(id),
+                "lambda" => self.proto_lambda = Some(id),
+                "operative" => self.proto_operative = Some(id),
+                "environment" => self.proto_environment = Some(id),
+                _ => {}
+            }
+        }
+    }
+
+    /// Find a ModuleImage object by name.
+    pub fn find_module(&mut self, name: &str) -> Option<u32> {
+        let root = self.root_env?;
+        let sym_modules = self.heap.intern("Modules");
+        let modules_obj = match self.env_lookup(root, sym_modules) {
+            Ok(Value::Object(id)) => id,
+            _ => return None,
+        };
+
+        // Send 'named: name' to Modules
+        let sel_named = self.heap.intern("named:");
+        let name_val = self.heap.alloc_string(name);
+        match self.message_send(Value::Object(modules_obj), sel_named, &[name_val]) {
+            Ok(Value::Object(id)) => Some(id),
+            _ => None,
+        }
+    }
+
     /// Execute a bytecode chunk in a given environment. Returns the final value.
     pub fn execute(&mut self, chunk_id: u32, env_id: u32) -> VMResult {
         let frame_depth = self.frames.len();
