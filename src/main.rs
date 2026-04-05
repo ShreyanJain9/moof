@@ -325,6 +325,60 @@ fn main() {
                     continue;
                 }
 
+                // (define-in module-name def-source...)
+                // e.g. (define-in collections (def my-fn (fn (x) [x + 1])))
+                if input.starts_with("(define-in ") {
+                    if let Some(ref mut loader) = module_loader {
+                        match parse_define_in(&input) {
+                            Ok((module_name, def_name, def_source)) => {
+                                match loader.define_in(
+                                    &module_name, &def_name, &def_source,
+                                    &mut vm, root_env,
+                                ) {
+                                    Ok(val) => {
+                                        let formatted = vm.format_value(val);
+                                        println!("=> {}", formatted);
+                                        eprintln!("(defined {} in {})", def_name, module_name);
+                                    }
+                                    Err(e) => eprintln!("!! {}", e),
+                                }
+                            }
+                            Err(e) => eprintln!("!! {}", e),
+                        }
+                    }
+                    continue;
+                }
+
+                // (module-create name (requires dep1 dep2))
+                if input.starts_with("(module-create ") {
+                    if let Some(ref mut loader) = module_loader {
+                        match parse_module_create(&input, &mut vm.heap) {
+                            Ok((name, requires, unrestricted)) => {
+                                match loader.create_module(
+                                    &name, &requires, unrestricted, &mut vm, root_env,
+                                ) {
+                                    Ok(()) => eprintln!("(created module: {})", name),
+                                    Err(e) => eprintln!("!! {}", e),
+                                }
+                            }
+                            Err(e) => eprintln!("!! {}", e),
+                        }
+                    }
+                    continue;
+                }
+
+                // (which-module symbol-name)
+                if input.starts_with("(which-module ") {
+                    let sym_name = input[14..input.len()-1].trim();
+                    if let Some(ref loader) = module_loader {
+                        match loader.which_module(sym_name) {
+                            Some(module_name) => eprintln!("  {} is defined in {}", sym_name, module_name),
+                            None => eprintln!("  {} is not in any module", sym_name),
+                        }
+                    }
+                    continue;
+                }
+
                 // ── Evaluate expression ──
                 match eval_line(&mut vm, root_env, &input) {
                     Ok(val) => {
@@ -508,6 +562,110 @@ impl VM {
         }
         Err("not found".into())
     }
+}
+
+/// Parse (define-in module-name (def name ...)) or (define-in module-name (defmethod ...))
+/// Returns (module_name, def_name, full_def_source)
+fn parse_define_in(input: &str) -> Result<(String, String, String), String> {
+    // (define-in MODULE_NAME REST...)
+    // Strip outer parens: "define-in MODULE_NAME REST..."
+    let inner = &input[1..input.len()-1]; // strip ( and )
+    let inner = inner.strip_prefix("define-in ").ok_or("expected (define-in ...)")?;
+    let inner = inner.trim_start();
+
+    // Find module name (first token)
+    let space = inner.find(|c: char| c.is_whitespace())
+        .ok_or("expected module name and definition")?;
+    let module_name = inner[..space].to_string();
+    let def_source = inner[space..].trim().to_string();
+
+    // Extract the defined name from the def source
+    let def_name = extract_def_name(&def_source)?;
+
+    Ok((module_name, def_name, def_source))
+}
+
+/// Extract the name being defined from a (def NAME ...) or (defmethod OBJ NAME ...) form.
+fn extract_def_name(source: &str) -> Result<String, String> {
+    let trimmed = source.trim();
+    if trimmed.starts_with("(def ") && !trimmed.starts_with("(defmethod ") {
+        // (def NAME ...)
+        let after = &trimmed[5..];
+        let end = after.find(|c: char| c.is_whitespace() || c == ')')
+            .unwrap_or(after.len());
+        Ok(after[..end].to_string())
+    } else if trimmed.starts_with("(defmethod ") {
+        // (defmethod OBJ NAME ...)
+        let after = &trimmed[11..];
+        let first_space = after.find(|c: char| c.is_whitespace())
+            .ok_or("expected (defmethod OBJ NAME ...)")?;
+        let rest = after[first_space..].trim_start();
+        let end = rest.find(|c: char| c.is_whitespace() || c == ')')
+            .unwrap_or(rest.len());
+        Ok(rest[..end].to_string())
+    } else if trimmed.starts_with("(handle! ") {
+        // (handle! OBJ 'SELECTOR ...) — use the selector as the name
+        // This is trickier; just use a generic name
+        Ok("_handler_".to_string())
+    } else {
+        Err(format!("cannot extract name from: {}", &trimmed[..trimmed.len().min(40)]))
+    }
+}
+
+/// Parse (module-create name (requires dep1 dep2))
+fn parse_module_create(input: &str, heap: &mut crate::runtime::heap::Heap) -> Result<(String, Vec<String>, bool), String> {
+    let inner = &input[1..input.len()-1]; // strip outer parens
+    let inner = inner.strip_prefix("module-create ").ok_or("expected (module-create ...)")?;
+    let inner = inner.trim_start();
+
+    // Parse as a moof expression for clean handling
+    let full = format!("(module-create {})", inner);
+    let mut lexer = Lexer::new(&full);
+    let tokens = lexer.tokenize().map_err(|e| format!("lex error: {}", e))?;
+    let mut parser = Parser::new(tokens);
+    let exprs = parser.parse_all(heap).map_err(|e| format!("parse error: {}", e))?;
+
+    if exprs.is_empty() {
+        return Err("empty module-create".into());
+    }
+
+    let elements = heap.list_to_vec(exprs[0]);
+    // elements[0] = module-create, elements[1] = name, elements[2..] = clauses
+
+    if elements.len() < 2 {
+        return Err("(module-create) missing name".into());
+    }
+
+    let name = match elements[1] {
+        Value::Symbol(sym) => heap.symbol_name(sym).to_string(),
+        _ => return Err("module name must be a symbol".into()),
+    };
+
+    let mut requires = Vec::new();
+    let mut unrestricted = false;
+
+    for &element in &elements[2..] {
+        if let Value::Symbol(sym) = element {
+            if heap.symbol_name(sym) == "unrestricted" {
+                unrestricted = true;
+                continue;
+            }
+        }
+        let sub = heap.list_to_vec(element);
+        if sub.is_empty() { continue; }
+        if let Value::Symbol(sym) = sub[0] {
+            let kw = heap.symbol_name(sym).to_string();
+            if kw == "requires" {
+                for &item in &sub[1..] {
+                    if let Value::Symbol(s) = item {
+                        requires.push(heap.symbol_name(s).to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    Ok((name, requires, unrestricted))
 }
 
 /// Find the lib/ directory for seeding.

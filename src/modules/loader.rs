@@ -274,14 +274,275 @@ impl ModuleLoader {
 
     /// Save just one module's source and update the manifest.
     pub fn save_module(&self, name: &str) -> Result<String, String> {
-        // Save the individual module source
         let source = self.source_texts.get(name)
             .ok_or_else(|| format!("no source text for module '{}'", name))?;
         image::save_module_source(&self.image_dir, name, source)?;
-
-        // Rebuild and save the full manifest
         self.save_image()
     }
+
+    /// Define a binding in a module: eval the expression, append to source,
+    /// update provides, and autosave.
+    ///
+    /// `def_source` is the raw source text, e.g. "(def foo (fn (x) [x + 1]))"
+    /// `def_name` is the symbol being defined, e.g. "foo"
+    pub fn define_in(
+        &mut self,
+        module_name: &str,
+        def_name: &str,
+        def_source: &str,
+        vm: &mut VM,
+        root_env: u32,
+    ) -> Result<Value, String> {
+        let env_id = *self.loaded_envs.get(module_name)
+            .ok_or_else(|| format!("unknown module: {}", module_name))?;
+
+        // Determine compiler mode
+        let is_unrestricted = module_name == "bootstrap"
+            || self.graph.modules.get(module_name)
+                .map(|d| d.unrestricted).unwrap_or(false);
+
+        // Compile and eval the expression in the module's env
+        let mut lexer = Lexer::new(def_source);
+        let tokens = lexer.tokenize()
+            .map_err(|e| format!("lex error: {}", e))?;
+        let mut parser = Parser::new(tokens);
+        let exprs = parser.parse_all(&mut vm.heap)
+            .map_err(|e| format!("parse error: {}", e))?;
+
+        let mut result = Value::Nil;
+        for expr in exprs {
+            let mut compiler = if is_unrestricted {
+                Compiler::new()
+            } else {
+                Compiler::new_sandboxed()
+            };
+            let chunk = compiler.compile_expr(&mut vm.heap, expr)
+                .map_err(|e| format!("compile error: {}", e))?;
+            let chunk_id = vm.heap.alloc_chunk(chunk);
+            result = vm.execute(chunk_id, env_id)
+                .map_err(|e| format!("runtime error: {}", e))?;
+        }
+
+        // Update provides if this is a new symbol
+        if let Some(desc) = self.graph.modules.get_mut(module_name) {
+            if !desc.provides.contains(&def_name.to_string()) {
+                desc.provides.push(def_name.to_string());
+            }
+        }
+
+        // Update exports
+        let sym = vm.heap.intern(def_name);
+        if let Ok(val) = vm.env_lookup(env_id, sym) {
+            let exports = self.exports.entry(module_name.to_string()).or_default();
+            if let Some(entry) = exports.iter_mut().find(|(n, _)| n == def_name) {
+                entry.1 = val;
+            } else {
+                exports.push((def_name.to_string(), val));
+            }
+            // Also update root env
+            vm.env_define_helper(root_env, sym, val);
+        }
+
+        // Append to source text and dedup
+        if let Some(source) = self.source_texts.get_mut(module_name) {
+            // Append the new definition
+            if !source.ends_with('\n') {
+                source.push('\n');
+            }
+            source.push('\n');
+            source.push_str(def_source);
+            source.push('\n');
+
+            // Dedup: remove earlier (def name ...) forms, keep last
+            *source = dedup_defs(source, def_name);
+
+            // Update the header's provides list
+            if let Some(desc) = self.graph.modules.get(module_name) {
+                *source = update_header_provides(source, &desc.provides);
+            }
+        }
+
+        // Autosave
+        if let Err(e) = self.save_module(module_name) {
+            eprintln!("!! autosave failed: {}", e);
+        }
+
+        Ok(result)
+    }
+
+    /// Create a new module with the given name, dependencies, and initial source.
+    pub fn create_module(
+        &mut self,
+        name: &str,
+        requires: &[String],
+        unrestricted: bool,
+        vm: &mut VM,
+        root_env: u32,
+    ) -> Result<(), String> {
+        if self.graph.modules.contains_key(name) {
+            return Err(format!("module '{}' already exists", name));
+        }
+
+        // Validate requires
+        for req in requires {
+            if !self.graph.modules.contains_key(req.as_str()) {
+                return Err(format!("unknown required module: {}", req));
+            }
+        }
+
+        // Build the source text
+        let mut header = format!("(module {}\n  (requires {})\n  (provides))",
+            name,
+            if requires.is_empty() { String::new() }
+            else { requires.join(" ") });
+
+        if unrestricted {
+            header = header.replace("(provides)", "(unrestricted)\n  (provides)");
+        }
+
+        let source = format!("{}\n\n; — {} —\n", header, name);
+
+        // Parse the header to get a descriptor
+        let dummy_path = PathBuf::from(format!("{}.moof", name));
+        let desc = parse_header(&source, &dummy_path, &mut vm.heap)?;
+
+        // Add to graph (rebuild to validate no cycles)
+        let mut all_descs: Vec<ModuleDescriptor> = self.graph.modules.values().cloned().collect();
+        all_descs.push(desc);
+        self.graph = ModuleGraph::build(all_descs)?;
+
+        // Store source
+        self.source_texts.insert(name.to_string(), source);
+
+        // Create sandbox env
+        let mut imports: HashMap<String, Value> = HashMap::new();
+        for req in requires {
+            if let Some(req_exports) = self.exports.get(req.as_str()) {
+                for (sym_name, val) in req_exports {
+                    imports.insert(sym_name.clone(), *val);
+                }
+            }
+        }
+        let env_id = sandbox::create_sandbox_env(vm, &imports);
+        self.loaded_envs.insert(name.to_string(), env_id);
+        self.exports.insert(name.to_string(), Vec::new());
+
+        // Autosave
+        self.save_module(name)?;
+
+        Ok(())
+    }
+
+    /// Find which module defines a given symbol.
+    pub fn which_module(&self, symbol: &str) -> Option<&str> {
+        // Check in topo order so we get the "real" owner (not re-exports)
+        if let Ok(order) = self.graph.topo_sort() {
+            for name in &order {
+                if let Some(desc) = self.graph.modules.get(name) {
+                    if desc.provides.contains(&symbol.to_string()) {
+                        return Some(&desc.name);
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Remove duplicate (def NAME ...) forms from source, keeping the last occurrence.
+fn dedup_defs(source: &str, def_name: &str) -> String {
+    let pattern = format!("(def {} ", def_name);
+    let alt_pattern = format!("(def {}\n", def_name);
+
+    // Find all occurrences of this def
+    let mut occurrences: Vec<(usize, usize)> = Vec::new(); // (start, end) byte ranges
+
+    let mut search_from = 0;
+    while search_from < source.len() {
+        let found = source[search_from..].find(&pattern)
+            .or_else(|| source[search_from..].find(&alt_pattern));
+
+        if let Some(rel_pos) = found {
+            let start = search_from + rel_pos;
+            // Find the end of this form by matching parens
+            if let Some(end) = find_form_end(&source[start..]) {
+                occurrences.push((start, start + end));
+                search_from = start + end;
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    // If 0 or 1 occurrences, nothing to dedup
+    if occurrences.len() <= 1 {
+        return source.to_string();
+    }
+
+    // Remove all but the last occurrence
+    let mut result = source.to_string();
+    for &(start, end) in occurrences[..occurrences.len() - 1].iter().rev() {
+        // Also eat trailing whitespace
+        let mut trim_end = end;
+        while trim_end < result.len() && result.as_bytes()[trim_end] == b'\n' {
+            trim_end += 1;
+        }
+        result.replace_range(start..trim_end, "");
+    }
+
+    result
+}
+
+/// Find the byte offset of the end of a top-level form starting at the beginning of `s`.
+fn find_form_end(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() || bytes[0] != b'(' { return None; }
+
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        let ch = bytes[i];
+        if escape { escape = false; i += 1; continue; }
+        if in_string {
+            if ch == b'\\' { escape = true; }
+            else if ch == b'"' { in_string = false; }
+            i += 1;
+            continue;
+        }
+        match ch {
+            b'"' => in_string = true,
+            b';' => { while i < bytes.len() && bytes[i] != b'\n' { i += 1; } continue; }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth -= 1;
+                if depth == 0 { return Some(i + 1); }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Update the (provides ...) clause in a module header.
+fn update_header_provides(source: &str, provides: &[String]) -> String {
+    // Find the (provides ...) form in the header
+    if let Some(prov_start) = source.find("(provides") {
+        // Find the matching close paren
+        if let Some(rel_end) = find_form_end(&source[prov_start..]) {
+            let prov_end = prov_start + rel_end;
+            let new_provides = format!("(provides {})", provides.join(" "));
+            let mut result = source.to_string();
+            result.replace_range(prov_start..prov_end, &new_provides);
+            return result;
+        }
+    }
+    source.to_string()
 }
 
 /// Parse the module header from a .moof file's source text.
