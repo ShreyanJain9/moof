@@ -38,51 +38,17 @@ fn main() {
     let img_dir = image_dir();
     let mut module_loader: Option<modules::loader::ModuleLoader> = None;
 
-    if !seed_mode && image::image_exists(&img_dir) {
-        // ── Load from image directory ──
-        match image::load_manifest(&img_dir) {
-            Ok(manifest) => {
-                let mod_dir = image::modules_dir(&img_dir);
-                match modules::loader::ModuleLoader::discover(&mod_dir, &mut vm.heap) {
-                    Ok(mut loader) => {
-                        loader.image_dir = img_dir.clone();
-                        match load_modules_sequenced(&mut loader, &mut vm, root_env) {
-                            Ok(()) => {
-                                loader.merge_into_root(&mut vm, root_env);
-                                let n = loader.graph.modules.len();
-                                eprintln!("(image loaded: {} modules, hash {}...)",
-                                    n, &manifest.global_hash[..12]);
-                                module_loader = Some(loader);
-                            }
-                            Err(e) => {
-                                eprintln!("!! Module loading failed: {}", e);
-                                std::process::exit(1);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("!! Module discovery failed: {}", e);
-                        std::process::exit(1);
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("!! Manifest error: {}", e);
-                eprintln!("!! Try --seed to re-initialize from lib/");
-                std::process::exit(1);
-            }
-        }
-    } else {
-        // ── Seed from lib/ ──
+    let mod_dir = image::modules_dir(&img_dir);
+    let need_seed = seed_mode || !mod_dir.exists();
+
+    if need_seed {
+        // ── Seed from lib/ into .moof/modules/ ──
         let lib_dir = find_lib_dir();
         if !lib_dir.exists() {
             eprintln!("!! No image found and no lib/ directory to seed from");
             std::process::exit(1);
         }
-
         eprintln!("(seeding image from {})", lib_dir.display());
-
-        // Copy lib/ files into .moof/modules/
         match image::seed_from_directory(&lib_dir, &img_dir) {
             Ok(files) => eprintln!("(copied {} files)", files.len()),
             Err(e) => {
@@ -90,9 +56,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+    }
 
-        // Now discover from the image directory
-        let mod_dir = image::modules_dir(&img_dir);
+    // ── Discover and load modules from .moof/modules/ ──
+    // Always re-discover from disk (manifest is rebuilt on save).
+    // This is robust: stale manifests, missing manifests, external edits — all handled.
+    {
         match modules::loader::ModuleLoader::discover(&mod_dir, &mut vm.heap) {
             Ok(mut loader) => {
                 loader.image_dir = img_dir.clone();
@@ -100,11 +69,17 @@ fn main() {
                     Ok(()) => {
                         loader.merge_into_root(&mut vm, root_env);
 
-                        // Auto-checkpoint after seed
+                        // Save manifest (rebuild from current state)
                         match loader.save_image() {
-                            Ok(hash) => eprintln!("(seeded image: {} modules, hash {}...)",
-                                loader.graph.modules.len(), &hash[..12]),
-                            Err(e) => eprintln!("!! Save failed: {}", e),
+                            Ok(hash) => {
+                                let n = loader.graph.modules.len();
+                                if need_seed {
+                                    eprintln!("(seeded image: {} modules, hash {}...)", n, &hash[..12]);
+                                } else {
+                                    eprintln!("(loaded {} modules, hash {}...)", n, &hash[..12]);
+                                }
+                            }
+                            Err(e) => eprintln!("!! manifest save: {}", e),
                         }
 
                         module_loader = Some(loader);

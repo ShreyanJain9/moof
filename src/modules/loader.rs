@@ -217,6 +217,7 @@ impl ModuleLoader {
     }
 
     /// Remove a module. Returns the symbols that were unbound.
+    /// Removes from graph, disk, and manifest.
     pub fn remove(&mut self, name: &str) -> Result<Vec<String>, String> {
         self.graph.can_remove(name).map_err(|deps| {
             format!("cannot remove '{}': depended on by {}", name, deps.join(", "))
@@ -230,6 +231,23 @@ impl ModuleLoader {
 
         self.loaded_envs.remove(name);
         self.source_texts.remove(name);
+        self.graph.modules.remove(name);
+        self.graph.edges.remove(name);
+        self.graph.reverse_edges.remove(name);
+        // Clean reverse edges that point to the removed module
+        for deps in self.graph.reverse_edges.values_mut() {
+            deps.remove(name);
+        }
+
+        // Delete the .moof file
+        let mod_path = image::modules_dir(&self.image_dir)
+            .join(format!("{}.moof", name));
+        let _ = std::fs::remove_file(&mod_path);
+
+        // Re-save manifest
+        if let Err(e) = self.save_image() {
+            eprintln!("!! manifest save failed: {}", e);
+        }
 
         Ok(provides)
     }
