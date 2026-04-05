@@ -69,6 +69,12 @@ fn main() {
                     Ok(()) => {
                         loader.merge_into_root(&mut vm, root_env);
 
+                        // Populate Modules registry with loaded module info
+                        populate_modules_registry(&loader, &mut vm, root_env);
+
+                        // Set up workspace
+                        setup_workspace(&mut loader, &mut vm, root_env);
+
                         // Save manifest (rebuild from current state)
                         match loader.save_image() {
                             Ok(hash) => {
@@ -359,6 +365,21 @@ fn main() {
                     Ok(val) => {
                         let formatted = vm.format_value(val);
                         println!("=> {}", formatted);
+
+                        // Autosave (def ...) and (defmethod ...) forms to workspace
+                        let trimmed_input = input.trim();
+                        if trimmed_input.starts_with("(def ") || trimmed_input.starts_with("(defmethod ") {
+                            if let Some(ref mut loader) = module_loader {
+                                if loader.graph.modules.contains_key("workspace") {
+                                    if let Ok(def_name) = extract_def_name(trimmed_input) {
+                                        match loader.define_in("workspace", &def_name, trimmed_input, &mut vm, root_env) {
+                                            Ok(_) => {}
+                                            Err(e) => eprintln!("!! workspace autosave: {}", e),
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         println!("!! {}", e);
@@ -418,6 +439,127 @@ fn handle_module_edit(
         .map_err(|e| format!("save failed: {}", e))?;
 
     Ok(())
+}
+
+/// Populate the Modules object with info about all loaded modules.
+fn populate_modules_registry(
+    loader: &modules::loader::ModuleLoader,
+    vm: &mut VM,
+    root_env: u32,
+) {
+    if let Ok(order) = loader.load_order() {
+        for name in &order {
+            if name == "modules" { continue; }
+
+            let desc = match loader.graph.modules.get(name) {
+                Some(d) => d,
+                None => continue,
+            };
+            let env_id = loader.loaded_envs.get(name).copied().unwrap_or(0);
+
+            // Build provides and requires as moof list expressions
+            let provides_str = desc.provides.iter()
+                .map(|p| format!("\"{}\"", p.replace('"', "\\\"")))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let requires_str = desc.requires.iter()
+                .map(|r| format!("\"{}\"", r))
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            // Register via eval — source text is placeholder, set directly after
+            let expr = format!(
+                "[Modules register: \"{}\" source: \"\" provides: (list {}) requires: (list {}) env: {}]",
+                name.replace('"', "\\\""),
+                provides_str,
+                requires_str,
+                env_id,
+            );
+
+            match eval_source(vm, root_env, &expr, "<register>") {
+                Ok(module_val) => {
+                    // Set the actual source text directly via heap slot
+                    if let Value::Object(mod_id) = module_val {
+                        if let Some(source) = loader.source_texts.get(name) {
+                            let source_sym = vm.heap.intern("source");
+                            let source_val = vm.heap.alloc_string(source);
+                            vm.heap.set_slot(mod_id, source_sym, source_val);
+                        }
+                    }
+                }
+                Err(e) => eprintln!("!! register {}: {}", name, e),
+            }
+        }
+    }
+}
+
+/// Set up the workspace module for REPL autosave.
+fn setup_workspace(
+    loader: &mut modules::loader::ModuleLoader,
+    vm: &mut VM,
+    root_env: u32,
+) {
+    // Check if workspace already exists
+    if loader.graph.modules.contains_key("workspace") {
+        return;
+    }
+
+    // If there's a workspace.moof file, it'll be loaded by the module system.
+    // If not, we create one dynamically.
+    let workspace_path = image::modules_dir(&image_dir())
+        .join("workspace.moof");
+
+    if !workspace_path.exists() {
+        // Get all module names for the requires list
+        let all_modules: Vec<String> = loader.graph.modules.keys()
+            .filter(|n| n.as_str() != "workspace")
+            .cloned()
+            .collect();
+
+        let requires_str = all_modules.join(" ");
+        let source = format!(
+            "(module workspace\n  (requires {})\n  (unrestricted)\n  (provides))\n\n; workspace — REPL definitions autosave here\n",
+            requires_str
+        );
+
+        if let Err(e) = std::fs::write(&workspace_path, &source) {
+            eprintln!("!! workspace create failed: {}", e);
+            return;
+        }
+    }
+
+    // Load the workspace module
+    let workspace_source = match std::fs::read_to_string(&workspace_path) {
+        Ok(s) => s,
+        Err(e) => { eprintln!("!! workspace read failed: {}", e); return; }
+    };
+
+    match modules::loader::parse_header(&workspace_source, &workspace_path, &mut vm.heap) {
+        Ok(desc) => {
+            // Add to graph (need to rebuild)
+            let mut all_descs: Vec<modules::ModuleDescriptor> = loader.graph.modules.values().cloned().collect();
+            all_descs.push(desc);
+            match modules::graph::ModuleGraph::build(all_descs) {
+                Ok(new_graph) => loader.graph = new_graph,
+                Err(e) => { eprintln!("!! workspace graph: {}", e); return; }
+            }
+
+            // Load it
+            if let Err(e) = loader.load_one("workspace", vm) {
+                eprintln!("!! workspace load: {}", e);
+                return;
+            }
+
+            // Merge workspace exports into root
+            if let Some(exports) = loader.exports.get("workspace") {
+                for (sym_name, val) in exports {
+                    let sym = vm.heap.intern(sym_name);
+                    vm.env_define_helper(root_env, sym, *val);
+                }
+            }
+        }
+        Err(e) => eprintln!("!! workspace parse: {}", e),
+    }
 }
 
 /// Load modules in topo order, registering type prototypes after bootstrap.

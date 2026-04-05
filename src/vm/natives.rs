@@ -893,4 +893,48 @@ fn register_io_natives(vm: &mut VM, root_env: u32) {
     }));
     let sym = vm.heap.intern("write-err");
     vm.heap.env_define(root_env, sym, val);
+
+    // read-file: reads a file to a string
+    let val = vm.register_native("io:read-file", Box::new(|heap, args| {
+        let path = match args.first() {
+            Some(Value::Object(id)) => match heap.get(*id) {
+                HeapObject::MoofString(s) => s.clone(),
+                _ => return Err("read-file: expected string path".into()),
+            },
+            _ => return Err("read-file: expected string path".into()),
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(content) => Ok(heap.alloc_string(&content)),
+            Err(e) => Err(format!("read-file: {}", e)),
+        }
+    }));
+    let sym = vm.heap.intern("read-file");
+    vm.heap.env_define(root_env, sym, val);
+
+    // write-file: writes a string to a file
+    let val = vm.register_native("io:write-file", Box::new(|_heap, args| {
+        let path = match args.first() {
+            Some(Value::Object(id)) => match _heap.get(*id) {
+                HeapObject::MoofString(s) => s.clone(),
+                _ => return Err("write-file: expected string path".into()),
+            },
+            _ => return Err("write-file: expected string path".into()),
+        };
+        let content = match args.get(1) {
+            Some(Value::Object(id)) => match _heap.get(*id) {
+                HeapObject::MoofString(s) => s.clone(),
+                _ => return Err("write-file: expected string content".into()),
+            },
+            _ => return Err("write-file: expected string content".into()),
+        };
+        // Create parent directories if needed
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(&path, &content)
+            .map_err(|e| format!("write-file: {}", e))?;
+        Ok(Value::Nil)
+    }));
+    let sym = vm.heap.intern("write-file");
+    vm.heap.env_define(root_env, sym, val);
 }

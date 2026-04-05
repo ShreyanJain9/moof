@@ -1,0 +1,96 @@
+(module modules
+  (requires bootstrap collections)
+  (unrestricted)
+  (provides Module Modules))
+
+; modules.moof — the module system as moof objects
+;
+;   [Modules list]                      => list of module names
+;   [Modules named: "collections"]      => a Module object
+;   [Modules which: "Stack"]            => "classes"
+;
+;   (def m [Modules named: "geometry"])
+;   [m source]                          => full source text
+;   [m exports]                         => provides list
+;   [m path]                            => ".moof/modules/geometry.moof"
+;   [m save]                            => write source to disk
+
+; ── Module prototype ───────────────────────────────────────
+
+(def Module { Object
+  name: nil
+  source: nil
+  provides-list: nil
+  requires-list: nil
+  env: nil
+
+  exports: () @provides-list
+  source: () @source
+
+  describe: () (str "<Module " @name ">")
+
+  path: () (str ".moof/modules/" @name ".moof")
+
+  reload: ()
+    (<- @source (read-file [self path]))
+    self
+
+  save: ()
+    (write-file [self path] @source)
+    self
+})
+
+; ── Modules registry ───────────────────────────────────────
+
+(def Modules { Object
+  _modules: nil
+
+  list: ()
+    (map (fn (m) [m slotAt: 'name]) @_modules)
+
+  named: (name)
+    (find (fn (m) [[m slotAt: 'name] = name]) @_modules)
+
+  which: (sym-name)
+    (let ((found (find
+        (fn (m)
+          (let ((provs [m exports]))
+            (if (null? provs) false
+              [provs any: (fn (p) [p = sym-name])])))
+        @_modules)))
+      (if (null? found) nil [found slotAt: 'name]))
+
+  describe: ()
+    (str "<Modules " (length @_modules) " loaded>")
+})
+
+; ── multi-keyword: register:source:provides:requires:env: ──
+
+(handle! Modules ["register:source:provides:requires:env:" toSymbol]
+  (fn (self name source provides requires env)
+    (let ((m { Module
+      name: name
+      source: source
+      provides-list: provides
+      requires-list: requires
+      env: env }))
+      [self slotAt: '_modules put:
+        (append [self slotAt: '_modules] (list m))]
+      m)))
+
+; ── multi-keyword: create:requires: ──
+
+(handle! Modules ["create:requires:" toSymbol]
+  (fn (self name requires-list)
+    (let ((req-str (if (null? requires-list) ""
+                     [(map (fn (r) [r toString]) requires-list) join: " "]))
+          (header (str "(module " name "\n  (requires " req-str ")\n  (provides))\n\n; — " name " —\n"))
+          (m { Module
+            name: [name toString]
+            source: header
+            provides-list: nil
+            requires-list: requires-list }))
+      (write-file (str ".moof/modules/" name ".moof") header)
+      [self slotAt: '_modules put:
+        (append [self slotAt: '_modules] (list m))]
+      m)))
