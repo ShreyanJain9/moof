@@ -1,0 +1,1 @@
+(def any? (lambda (pred lst) (if (null? lst) false (%send lst any: pred))))

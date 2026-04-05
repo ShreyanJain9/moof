@@ -1,0 +1,1 @@
+(def wrap (vau (operative) $e (fn args (eval (cons (eval operative $e) args)))))

@@ -1,0 +1,1 @@
+(def flatten (lambda (lst) (flat-map identity lst)))

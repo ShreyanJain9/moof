@@ -1,0 +1,1 @@
+(def when (vau (condition . body) $e (if (eval condition $e) (eval (cons (quote do) body) $e) nil)))

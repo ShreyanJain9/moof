@@ -1,0 +1,1 @@
+(def map (lambda (f lst) (if (null? lst) nil (cons (f (car lst)) (map f (cdr lst))))))

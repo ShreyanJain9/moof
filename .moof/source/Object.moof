@@ -1,0 +1,10 @@
+(def Object { Object
+  describe: (self)
+    "<object>"
+  clone: (self)
+    (object self)
+  interface: (self)
+    (def member? (fn (x lst) (if (null? lst) false (if (eq x (car lst)) true (member? x (cdr lst)))))) (def merge (fn (new acc) (if (null? new) acc (if (member? (car new) acc) (merge (cdr new) acc) (merge (cdr new) (append acc (list (car new)))))))) (def collect (fn (obj acc) (let ((names (%send obj handlerNames)) (p (%send obj parent))) (let ((merged (merge names acc))) (if (null? p) merged (collect p merged)))))) (collect self nil)
+})
+
+(handle! Object ["sourceOf:" toSymbol] (lambda (self selector) (let ((handler (%send self handlerAt: selector))) (if (null? handler) nil (source handler)))))

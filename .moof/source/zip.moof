@@ -1,0 +1,1 @@
+(def zip (lambda (a b) (if (or (null? a) (null? b)) nil (cons (list (car a) (car b)) (zip (cdr a) (cdr b))))))

@@ -1,0 +1,1 @@
+(def str (lambda args (fold (fn (acc x) (%send acc ++ (%send x toString))) "" args)))

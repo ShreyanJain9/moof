@@ -1,0 +1,1 @@
+(def drop (lambda (n lst) (if (or (%send n <= 0) (null? lst)) lst (drop (%send n - 1) (cdr lst)))))

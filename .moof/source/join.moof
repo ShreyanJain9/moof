@@ -1,0 +1,1 @@
+(def join (lambda (sep lst) (if (null? lst) "" (%send lst join: sep))))

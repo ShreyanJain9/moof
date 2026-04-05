@@ -1,0 +1,1 @@
+(def cddr (lambda (x) (cdr (cdr x))))

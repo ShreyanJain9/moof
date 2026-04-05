@@ -1,0 +1,1 @@
+(def fold (lambda (f init lst) (if (null? lst) init (fold f (f init (car lst)) (cdr lst)))))

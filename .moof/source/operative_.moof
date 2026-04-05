@@ -1,0 +1,1 @@
+(def operative? (lambda (x) (eq (type-of x) (quote Operative))))

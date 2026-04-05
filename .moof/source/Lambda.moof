@@ -1,0 +1,6 @@
+(def Lambda { Object
+  applicative?: (self)
+    true
+  operative?: (self)
+    false
+})

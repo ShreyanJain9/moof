@@ -1,0 +1,1 @@
+(def object? (lambda (x) (eq (type-of x) (quote Object))))

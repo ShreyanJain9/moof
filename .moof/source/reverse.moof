@@ -1,0 +1,1 @@
+(def reverse (lambda (lst) (def rev-helper (fn (remaining acc) (if (null? remaining) acc (rev-helper (cdr remaining) (cons (car remaining) acc))))) (rev-helper lst nil)))

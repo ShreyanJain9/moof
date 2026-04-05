@@ -379,7 +379,7 @@ fn load_stdlib(vm: &mut VM, root_env: u32) {
         _ => return,
     };
 
-    let libs = ["collections.moof", "membrane.moof", "json.moof", "mcp.moof"];
+    let libs = ["collections.moof", "classes.moof", "membrane.moof", "json.moof", "mcp.moof"];
     for lib in &libs {
         let path = format!("{}/{}", lib_dir, lib);
         match std::fs::read_to_string(&path) {

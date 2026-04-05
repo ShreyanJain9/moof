@@ -1,0 +1,1 @@
+(def nth (lambda (lst n) (if (%send n = 0) (car lst) (nth (cdr lst) (%send n - 1)))))

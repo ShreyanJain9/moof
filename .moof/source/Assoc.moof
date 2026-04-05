@@ -1,0 +1,25 @@
+(def Assoc { Object
+  data: nil
+  keys: (self)
+    (map (fn (pair) (car pair)) (%dot self (quote data)))
+  values: (self)
+    (map (fn (pair) (cdr pair)) (%dot self (quote data)))
+  pairs: (self)
+    (%dot self (quote data))
+  size: (self)
+    (length (%dot self (quote data)))
+  describe: (self)
+    (str "<Assoc " (%dot self (quote data)) ">")
+})
+
+(handle! Assoc ["get:" toSymbol] (lambda (self key) (def walk (fn (lst) (if (null? lst) nil (if (assoc-equal? (car (car lst)) key) (cdr (car lst)) (walk (cdr lst)))))) (walk (%dot self (quote data)))))
+
+(handle! Assoc ["has:" toSymbol] (lambda (self key) (def walk (fn (lst) (if (null? lst) false (if (assoc-equal? (car (car lst)) key) true (walk (cdr lst)))))) (walk (%dot self (quote data)))))
+
+(handle! Assoc ["remove:" toSymbol] (lambda (self key) (<- (%dot self (quote data)) (filter (fn (pair) (not (assoc-equal? (car pair) key))) (%dot self (quote data)))) self))
+
+(handle! Assoc ["set:to:" toSymbol] (lambda (self key val) (def update (fn (lst) (if (null? lst) (list (cons key val)) (if (assoc-equal? (car (car lst)) key) (cons (cons key val) (cdr lst)) (cons (car lst) (update (cdr lst))))))) (<- (%dot self (quote data)) (update (%dot self (quote data)))) self))
+
+(handle! Assoc ["merge:" toSymbol] (lambda (self other) (for-each (fn (pair) (%send self set:to: (car pair) (cdr pair))) (%dot other (quote data))) self))
+
+(handle! Assoc ["from:" toSymbol] (lambda (self . args) (def build (fn (lst acc) (if (null? lst) acc (if (null? (cdr lst)) acc (build (cdr (cdr lst)) (cons (cons (car lst) (car (cdr lst))) acc)))))) (def result (%object-literal Assoc)) (<- (%dot result (quote data)) (reverse (build args nil))) result))

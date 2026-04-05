@@ -1,0 +1,16 @@
+(def Cons { Object
+  sort: (self)
+    (%send self sortBy: (fn (a b) (%send a < b)))
+})
+
+(handle! Cons ["flatMap:" toSymbol] (lambda (self f) (if (null? (cdr self)) (f (car self)) (append (f (car self)) (%send (cdr self) flatMap: f)))))
+
+(handle! Cons ["find:" toSymbol] (lambda (self pred) (if (pred (car self)) (car self) (if (null? (cdr self)) nil (%send (cdr self) find: pred)))))
+
+(handle! Cons ["any:" toSymbol] (lambda (self pred) (if (pred (car self)) true (if (null? (cdr self)) false (%send (cdr self) any: pred)))))
+
+(handle! Cons ["every:" toSymbol] (lambda (self pred) (if (pred (car self)) (if (null? (cdr self)) true (%send (cdr self) every: pred)) false)))
+
+(handle! Cons ["sortBy:" toSymbol] (lambda (self cmp) (def insert (fn (x sorted) (if (null? sorted) (list x) (if (cmp x (car sorted)) (cons x sorted) (cons (car sorted) (insert x (cdr sorted))))))) (fold insert nil self)))
+
+(handle! Cons ["join:" toSymbol] (lambda (self sep) (if (null? self) "" (if (null? (cdr self)) (%send (car self) toString) (%send (str (car self) sep) ++ (%send (cdr self) join: sep))))))

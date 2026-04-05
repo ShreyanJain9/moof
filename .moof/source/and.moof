@@ -1,0 +1,1 @@
+(def and (vau (a b) $e (if (eval a $e) (if (eval b $e) true false) false)))

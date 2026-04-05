@@ -1,0 +1,1 @@
+(def find (lambda (pred lst) (if (null? lst) nil (%send lst find: pred))))

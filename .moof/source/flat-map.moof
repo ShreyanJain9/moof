@@ -1,0 +1,1 @@
+(def flat-map (lambda (f lst) (if (null? lst) nil (%send lst flatMap: f))))

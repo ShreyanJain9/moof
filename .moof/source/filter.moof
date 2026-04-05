@@ -1,0 +1,1 @@
+(def filter (lambda (pred lst) (if (null? lst) nil (if (pred (car lst)) (cons (car lst) (filter pred (cdr lst))) (filter pred (cdr lst))))))

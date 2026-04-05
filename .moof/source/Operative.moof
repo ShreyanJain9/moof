@@ -1,0 +1,6 @@
+(def Operative { Object
+  applicative?: (self)
+    false
+  operative?: (self)
+    true
+})

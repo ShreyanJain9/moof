@@ -1,0 +1,1 @@
+(def compose (lambda (f g) (fn (x) (f (g x)))))
