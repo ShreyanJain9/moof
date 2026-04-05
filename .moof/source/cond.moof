@@ -1,1 +1,0 @@
-(def cond (vau clauses $e (def cond-helper (fn (cls) (if (eq cls nil) nil (let ((clause (car cls)) (rest (cdr cls))) (let ((test (car clause)) (body (car (cdr clause)))) (if (eq test (quote else)) (eval body $e) (if (eval test $e) (eval body $e) (cond-helper rest)))))))) (cond-helper clauses)))

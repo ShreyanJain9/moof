@@ -1,1 +1,0 @@
-(def every? (lambda (pred lst) (if (null? lst) true (%send lst every: pred))))

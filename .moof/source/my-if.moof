@@ -1,1 +1,0 @@
-(def my-if (vau (condition then-branch else-branch) $e (if (eval condition $e) (eval then-branch $e) (eval else-branch $e))))

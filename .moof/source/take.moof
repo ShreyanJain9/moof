@@ -1,1 +1,0 @@
-(def take (lambda (n lst) (if (or (%send n <= 0) (null? lst)) nil (cons (car lst) (take (%send n - 1) (cdr lst))))))

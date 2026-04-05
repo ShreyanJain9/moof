@@ -1,4 +1,0 @@
-(def q { Queue
-  back: nil
-  front: (20)
-})

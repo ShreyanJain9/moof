@@ -1,3 +1,14 @@
+(module bootstrap
+  (requires)
+  (provides fn wrap cond when unless do not and or
+            null? pair? symbol? integer? string? lambda? operative? object?
+            let-seq cadr caddr cddr length append reverse
+            map filter fold for-each nth range last take drop zip
+            compose identity constantly apply str println display
+            Object defmethod
+            Integer Float Boolean String Cons Nil Symbol Lambda Operative Environment
+            <- define-handler redefine inspect))
+
 ; MOOF Bootstrap — derived forms from the six kernel primitives
 ; everything here is built on: vau, send, def, quote, cons, eq
 

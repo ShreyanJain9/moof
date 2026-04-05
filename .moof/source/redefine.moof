@@ -1,1 +1,0 @@
-(def redefine (vau (name value) $e (def result (eval value $e)) (eval (list (quote def) name (list (quote quote) result)) $e) result))

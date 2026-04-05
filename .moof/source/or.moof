@@ -1,1 +1,0 @@
-(def or (vau (a b) $e (if (eval a $e) true (if (eval b $e) true false))))

@@ -1,1 +1,0 @@
-(def <- (vau (target value) $e (def val (eval value $e)) (if (symbol? target) (%send $e set:to: target val) (let ((obj (eval (car (cdr target)) $e)) (field (eval (car (cdr (cdr target))) $e))) (%send obj slotAt:put: field val)))))

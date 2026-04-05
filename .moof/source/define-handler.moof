@@ -1,1 +1,0 @@
-(def define-handler (vau (obj selector handler) $e (handle! (eval obj $e) (eval selector $e) (eval handler $e))))

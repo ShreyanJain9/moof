@@ -1,1 +1,0 @@
-(def constantly (lambda (x) (fn args x)))

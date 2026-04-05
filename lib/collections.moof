@@ -1,3 +1,8 @@
+(module collections
+  (requires bootstrap)
+  (provides Assoc assoc-equal?
+            flat-map flatten find any? every? sort sort-by join))
+
 ; collections.moof — data structures as proper MOOF objects
 
 ; ── Assoc: ordered key-value map ────────────────────────────

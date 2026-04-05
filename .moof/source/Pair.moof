@@ -1,6 +1,0 @@
-(def Pair { Object
-  first: nil
-  second: nil
-  describe: (self)
-    (str "(" (%dot self (quote first)) " . " (%dot self (quote second)) ")")
-})

@@ -745,7 +745,7 @@ impl VM {
     }
 
     /// Look up a symbol in the environment chain.
-    fn env_lookup(&self, env_id: u32, sym: u32) -> VMResult {
+    pub fn env_lookup(&self, env_id: u32, sym: u32) -> VMResult {
         let mut current = Some(env_id);
         while let Some(eid) = current {
             match self.heap.get(eid) {

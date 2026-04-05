@@ -3,6 +3,7 @@ mod vm;
 mod reader;
 mod compiler;
 mod persistence;
+mod modules;
 mod tui;
 mod ffi;
 mod gui;
@@ -25,71 +26,119 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let gui_mode = args.iter().any(|a| a == "--gui");
     let mcp_mode = args.iter().any(|a| a == "--mcp");
+    let image_mode = args.iter().any(|a| a == "--image");
 
     let mut vm;
     let root_env;
+    let mut module_loader: Option<modules::loader::ModuleLoader> = None;
 
-    let img_dir = image_dir();
+    if image_mode {
+        // ── Legacy: load from binary image ──
+        let img_dir = image_dir();
+        if snapshot::image_exists(&img_dir) {
+            match snapshot::load_image(&img_dir) {
+                Ok(image) => {
+                    vm = VM::new();
+                    vm.heap = runtime::heap::Heap::from_image(image.objects, image.symbol_names);
 
-    if snapshot::image_exists(&img_dir) {
-        // ── Load from saved image ──
-        match snapshot::load_image(&img_dir) {
-            Ok(image) => {
-                vm = VM::new();
-                vm.heap = runtime::heap::Heap::from_image(image.objects, image.symbol_names);
-
-                // Replay WAL entries
-                match wal::replay_wal(&img_dir) {
-                    Ok(entries) => {
-                        if !entries.is_empty() {
-                            eprintln!("(replaying {} WAL entries)", entries.len());
-                            vm.heap.replay_wal(&entries);
+                    match wal::replay_wal(&img_dir) {
+                        Ok(entries) => {
+                            if !entries.is_empty() {
+                                eprintln!("(replaying {} WAL entries)", entries.len());
+                                vm.heap.replay_wal(&entries);
+                            }
                         }
+                        Err(e) => eprintln!("!! WAL replay warning: {}", e),
                     }
-                    Err(e) => eprintln!("!! WAL replay warning: {}", e),
+
+                    let root_sym = vm.heap.intern("*root-env*");
+                    root_env = match vm.env_lookup_helper(0, root_sym) {
+                        Ok(Value::Object(id)) => id,
+                        _ => 0,
+                    };
+                    vm.root_env = Some(root_env);
+                    register_type_prototypes(&mut vm, root_env);
+
+                    eprintln!("(image loaded: {} objects, {} symbols)",
+                        vm.heap.len(), vm.heap.symbol_count());
                 }
-
-                // Recover root_env from well-known symbol
-                let root_sym = vm.heap.intern("*root-env*");
-                root_env = match vm.env_lookup_helper(0, root_sym) {
-                    Ok(Value::Object(id)) => id,
-                    _ => {
-                        // Fallback: env 0 is usually the root
-                        0
-                    }
-                };
-                vm.root_env = Some(root_env);
-
-                // Re-register type prototypes
-                register_type_prototypes(&mut vm, root_env);
-
-                eprintln!("(image loaded: {} objects, {} symbols)",
-                    vm.heap.len(), vm.heap.symbol_count());
+                Err(e) => {
+                    eprintln!("!! Image load failed: {}", e);
+                    eprintln!("!! Falling back to bootstrap");
+                    let (v, r) = bootstrap_fresh();
+                    vm = v;
+                    root_env = r;
+                }
             }
-            Err(e) => {
-                eprintln!("!! Image load failed: {}", e);
-                eprintln!("!! Falling back to bootstrap");
-                let (v, r) = bootstrap_fresh();
-                vm = v;
-                root_env = r;
-            }
+        } else {
+            let (v, r) = bootstrap_fresh();
+            vm = v;
+            root_env = r;
+        }
+
+        // Attach WAL for durability in image mode
+        match wal::WalWriter::open(&img_dir) {
+            Ok(wal_writer) => vm.heap.set_wal(wal_writer),
+            Err(e) => eprintln!("!! WAL init warning: {}", e),
         }
     } else {
-        // ── Fresh bootstrap ──
-        let (v, r) = bootstrap_fresh();
-        vm = v;
-        root_env = r;
-    }
+        // ── Default: source-level module system ──
+        vm = VM::new();
+        root_env = vm.heap.alloc_env(None);
+        bootstrap_env(&mut vm, root_env);
 
-    // Attach WAL for durability
-    match wal::WalWriter::open(&img_dir) {
-        Ok(wal_writer) => vm.heap.set_wal(wal_writer),
-        Err(e) => eprintln!("!! WAL init warning: {}", e),
+        let lib_dir = find_bootstrap().parent().unwrap().to_path_buf();
+
+        // Store root env reference
+        let root_sym = vm.heap.intern("*root-env*");
+        vm.env_define_helper(root_env, root_sym, Value::Object(root_env));
+        vm.root_env = Some(root_env);
+
+        // Discover and load modules
+        match modules::loader::ModuleLoader::discover(&lib_dir, &mut vm.heap) {
+            Ok(mut loader) => {
+                match load_modules_sequenced(&mut loader, &mut vm, root_env) {
+                    Ok(()) => {
+                        loader.merge_into_root(&mut vm, root_env);
+
+                        let module_count = loader.graph.modules.len();
+                        eprintln!("(loaded {} modules, {} objects, {} symbols)",
+                            module_count, vm.heap.len(), vm.heap.symbol_count());
+
+                        module_loader = Some(loader);
+                    }
+                    Err(e) => {
+                        eprintln!("!! Module loading failed: {}", e);
+                        eprintln!("!! Falling back to legacy bootstrap");
+                        let bootstrap_path = find_bootstrap();
+                        if let Ok(source) = std::fs::read_to_string(&bootstrap_path) {
+                            let body = strip_module_header(&source);
+                            let _ = eval_source(&mut vm, root_env, body,
+                                &bootstrap_path.display().to_string());
+                        }
+                        register_type_prototypes(&mut vm, root_env);
+                        load_stdlib(&mut vm, root_env);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("!! Module discovery failed: {}", e);
+                eprintln!("!! Falling back to legacy bootstrap");
+                let bootstrap_path = find_bootstrap();
+                if let Ok(source) = std::fs::read_to_string(&bootstrap_path) {
+                    let body = strip_module_header(&source);
+                    let _ = eval_source(&mut vm, root_env, body,
+                        &bootstrap_path.display().to_string());
+                }
+                register_type_prototypes(&mut vm, root_env);
+                load_stdlib(&mut vm, root_env);
+            }
+        }
     }
 
     if gui_mode {
         println!("MOOF — launching System Browser...");
-        save_image(&vm);
+        if image_mode { save_image(&vm); }
         gui::browser::run_browser(vm, root_env);
         return;
     }
@@ -103,7 +152,7 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        save_image(&vm);
+        if image_mode { save_image(&vm); }
         return;
     }
 
@@ -128,8 +177,7 @@ fn main() {
         let mut line = String::new();
         match stdin.lock().read_line(&mut line) {
             Ok(0) => {
-                // Save image on clean exit
-                save_image(&vm);
+                if image_mode { save_image(&vm); }
                 println!("\nmoof.");
                 break;
             }
@@ -151,7 +199,12 @@ fn main() {
 
                 // REPL-level commands
                 if input == "(checkpoint)" || input == "(save)" {
-                    save_image(&vm);
+                    if image_mode {
+                        save_image(&vm);
+                    } else {
+                        eprintln!("(source is truth — no binary image to save)");
+                        eprintln!("(your .moof files ARE the canonical state)");
+                    }
                     continue;
                 }
                 if input == "(browse)" {
@@ -159,11 +212,75 @@ fn main() {
                     continue;
                 }
                 if input.starts_with("(browse ") {
-                    // Evaluate the argument, then browse it
                     let arg_source = &input[8..input.len()-1];
                     match eval_line(&mut vm, root_env, arg_source) {
                         Ok(val) => { let _ = tui::inspector::run_inspector(&vm.heap, Some(val)); }
                         Err(e) => println!("!! {}", e),
+                    }
+                    continue;
+                }
+
+                // Module system commands
+                if input == "(modules)" {
+                    if let Some(ref loader) = module_loader {
+                        let mods = loader.list_modules();
+                        for (name, requires, provides) in mods {
+                            let req_str = if requires.is_empty() {
+                                "(kernel)".to_string()
+                            } else {
+                                requires.join(", ")
+                            };
+                            eprintln!("  {} [requires: {}] [provides: {} symbols]",
+                                name, req_str, provides.len());
+                        }
+                    } else {
+                        eprintln!("(module system not active — use without --image)");
+                    }
+                    continue;
+                }
+                if input.starts_with("(module-reload ") {
+                    let name = input[15..input.len()-1].trim();
+                    if let Some(ref mut loader) = module_loader {
+                        match loader.reload(name, &mut vm, root_env) {
+                            Ok(()) => eprintln!("(reloaded {})", name),
+                            Err(e) => eprintln!("!! {}", e),
+                        }
+                    } else {
+                        eprintln!("(module system not active)");
+                    }
+                    continue;
+                }
+                if input.starts_with("(module-remove ") {
+                    let name = input[15..input.len()-1].trim();
+                    if let Some(ref mut loader) = module_loader {
+                        match loader.remove(name) {
+                            Ok(removed_symbols) => {
+                                // Unbind removed symbols from root env
+                                for sym_name in &removed_symbols {
+                                    let sym = vm.heap.intern(sym_name);
+                                    vm.env_define_helper(root_env, sym, Value::Nil);
+                                }
+                                eprintln!("(removed {} — unbound {} symbols)", name, removed_symbols.len());
+                            }
+                            Err(e) => eprintln!("!! {}", e),
+                        }
+                    } else {
+                        eprintln!("(module system not active)");
+                    }
+                    continue;
+                }
+                if input.starts_with("(module-exports ") {
+                    let name = input[16..input.len()-1].trim();
+                    if let Some(ref loader) = module_loader {
+                        if let Some(exports) = loader.exports.get(name) {
+                            for (sym, _val) in exports {
+                                eprintln!("  {}", sym);
+                            }
+                        } else {
+                            eprintln!("!! unknown module: {}", name);
+                        }
+                    } else {
+                        eprintln!("(module system not active)");
                     }
                     continue;
                 }
@@ -178,8 +295,8 @@ fn main() {
                     }
                 }
 
-                // Auto-checkpoint: "you never save"
-                if vm.heap.len() > last_checkpoint_size + 5000 {
+                // Auto-checkpoint only in image mode
+                if image_mode && vm.heap.len() > last_checkpoint_size + 5000 {
                     save_image(&vm);
                     eprintln!("(auto-saved)");
                     last_checkpoint_size = vm.heap.len();
@@ -203,7 +320,9 @@ fn bootstrap_fresh() -> (VM, u32) {
     let bootstrap_path = find_bootstrap();
     match std::fs::read_to_string(&bootstrap_path) {
         Ok(source) => {
-            match eval_source(&mut vm, root_env, &source, &bootstrap_path.display().to_string()) {
+            // Skip module header if present
+            let body = strip_module_header(&source);
+            match eval_source(&mut vm, root_env, body, &bootstrap_path.display().to_string()) {
                 Ok(_) => {}
                 Err(e) => {
                     eprintln!("!! Bootstrap failed: {}", e);
@@ -384,7 +503,9 @@ fn load_stdlib(vm: &mut VM, root_env: u32) {
         let path = format!("{}/{}", lib_dir, lib);
         match std::fs::read_to_string(&path) {
             Ok(source) => {
-                match eval_source(vm, root_env, &source, &path) {
+                // Skip module header if present
+                let body = strip_module_header(&source);
+                match eval_source(vm, root_env, body, &path) {
                     Ok(_) => {}
                     Err(e) => eprintln!("!! Loading {}: {}", lib, e),
                 }
@@ -410,4 +531,69 @@ impl VM {
         }
         Err("not found".into())
     }
+}
+
+/// Load modules in topo order, registering type prototypes after bootstrap.
+fn load_modules_sequenced(
+    loader: &mut modules::loader::ModuleLoader,
+    vm: &mut VM,
+    root_env: u32,
+) -> Result<(), String> {
+    let order = loader.load_order()?;
+
+    for name in &order {
+        loader.load_one(name, vm)?;
+
+        // After bootstrap: merge its exports into root env and register
+        // native handlers so subsequent modules can use toSymbol, +, etc.
+        if name == "bootstrap" {
+            if let Some(exports) = loader.exports.get("bootstrap") {
+                for (sym_name, val) in exports {
+                    let sym = vm.heap.intern(sym_name);
+                    vm.env_define_helper(root_env, sym, *val);
+                }
+            }
+            register_type_prototypes(vm, root_env);
+        }
+    }
+
+    Ok(())
+}
+
+/// Strip a (module ...) header from source if present, returning the body.
+fn strip_module_header(source: &str) -> &str {
+    let trimmed = source.trim_start();
+    if !trimmed.starts_with("(module ") {
+        return source;
+    }
+    // Find the matching close paren
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    let offset = source.len() - trimmed.len();
+    for (i, ch) in trimmed.char_indices() {
+        if escape { escape = false; continue; }
+        if in_string {
+            if ch == '\\' { escape = true; }
+            else if ch == '"' { in_string = false; }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            ';' => {
+                // skip to end of line — but char_indices doesn't let us skip,
+                // so we just ignore ; in this simple scanner (module headers
+                // shouldn't contain comments)
+            }
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &source[offset + i + 1..];
+                }
+            }
+            _ => {}
+        }
+    }
+    source
 }

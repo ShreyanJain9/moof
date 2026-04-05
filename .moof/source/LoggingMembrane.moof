@@ -1,6 +1,0 @@
-(def LoggingMembrane { Object
-  describe: (self)
-    "<LoggingMembrane>"
-})
-
-(handle! LoggingMembrane ["wrap:" toSymbol] (lambda (self target) (def log nil) (def wrapper (%send Membrane wrap:on-send: target (fn (sel args) (<- log (append log (list (cons sel args)))) (quote proceed)))) (handle! wrapper (quote log) (fn (self) log)) (handle! wrapper (quote clearLog) (fn (self) (<- log nil))) wrapper))

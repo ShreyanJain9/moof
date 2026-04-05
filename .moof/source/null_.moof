@@ -1,1 +1,0 @@
-(def null? (lambda (x) (eq x nil)))

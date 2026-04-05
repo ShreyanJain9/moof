@@ -1,1 +1,0 @@
-(def assoc-equal? (lambda (a b) (if (and (string? a) (string? b)) (%send a = b) (eq a b))))

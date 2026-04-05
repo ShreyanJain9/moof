@@ -1,1 +1,0 @@
-(def for-each (lambda (f lst) (if (null? lst) nil (do (f (car lst)) (for-each f (cdr lst))))))

@@ -1,6 +1,0 @@
-(def Point { Object
-  describe: (self)
-    "a Point"
-})
-
-(handle! Point ["distanceTo:" toSymbol] (lambda (self other) (let ((dx (%send (%dot self (quote x)) - (%dot other (quote x)))) (dy (%send (%dot self (quote y)) - (%dot other (quote y))))) (%send (%send dx * dx) + (%send dy * dy)))))

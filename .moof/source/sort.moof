@@ -1,1 +1,0 @@
-(def sort (lambda (lst) (if (null? lst) nil (%send lst sort))))

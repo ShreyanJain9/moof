@@ -1,3 +1,7 @@
+(module classes
+  (requires bootstrap collections)
+  (provides Stack Queue Set Counter Range Pair Box EventEmitter))
+
 ; classes.moof -- useful class definitions for the objectspace
 
 ; ── Stack: LIFO on cons cells ──────────────────────────────

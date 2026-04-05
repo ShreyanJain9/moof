@@ -1,1 +1,0 @@
-(def caddr (lambda (x) (car (cdr (cdr x)))))

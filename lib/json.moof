@@ -1,3 +1,7 @@
+(module json
+  (requires bootstrap collections)
+  (provides JSON))
+
 ; json.moof — JSON as an object
 ;
 ;   [JSON parse: "{\"x\":1}"]       => Assoc with x=1

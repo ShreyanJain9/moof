@@ -1,1 +1,0 @@
-(def do (vau body $e (def do-helper (fn (exprs) (if (eq (cdr exprs) nil) (eval (car exprs) $e) (let ((_ (eval (car exprs) $e))) (do-helper (cdr exprs)))))) (if (eq body nil) nil (do-helper body))))

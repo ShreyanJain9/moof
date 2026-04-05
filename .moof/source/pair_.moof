@@ -1,1 +1,0 @@
-(def pair? (lambda (x) (eq (type-of x) (quote Cons))))

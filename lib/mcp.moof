@@ -1,3 +1,13 @@
+(module mcp
+  (requires bootstrap json collections)
+  (unrestricted)
+  (provides mcp-json-rpc-response mcp-json-rpc-error
+            mcp-text-result mcp-error-result
+            mcp-make-tool mcp-make-schema mcp-string-prop
+            mcp-tools mcp-handle-initialize mcp-handle-tools-list
+            mcp-handle-tools-call mcp-format-inspect mcp-format-object-list
+            mcp-dispatch mcp-serve))
+
 ; mcp.moof — Model Context Protocol server over stdio
 ;
 ; Usage: moof --mcp

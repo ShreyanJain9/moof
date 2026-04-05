@@ -1,1 +1,0 @@
-(def fn (vau (params . body) $e (eval (cons (quote lambda) (cons params body)) $e)))

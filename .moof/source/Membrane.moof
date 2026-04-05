@@ -1,6 +1,0 @@
-(def Membrane { Object
-  describe: (self)
-    "<Membrane>"
-})
-
-(handle! Membrane ["wrap:" toSymbol] (lambda (self on-send:) (target on-send) (def wrapper (%object-literal Object)) (handle! wrapper (quote doesNotUnderstand:) (fn (self selector args) (let ((decision (on-send selector args))) (cond ((eq decision (quote proceed)) (eval (cons target (cons selector args)))) ((eq decision (quote deny)) nil) (else decision))))) (handle! wrapper (quote describe) (fn (self) (str "<membrane around " (%send target describe) ">"))) (handle! wrapper (quote target) (fn (self) target)) wrapper))

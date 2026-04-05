@@ -1,6 +1,0 @@
-(def Facet { Object
-  describe: (self)
-    "<Facet>"
-})
-
-(handle! Facet ["wrap:" toSymbol] (lambda (self allowing:) (target selectors) (def wrapper (%object-literal Object)) (handle! wrapper (quote doesNotUnderstand:) (fn (self selector args) (if (%send selectors any?: (fn (s) (eq s selector))) (eval (cons target (cons selector args))) nil))) (handle! wrapper (quote describe) (fn (self) (str "<facet of " (%send target describe) ">"))) (handle! wrapper (quote allowedSelectors) (fn (self) selectors)) (handle! wrapper (quote target) (fn (self) target)) wrapper))

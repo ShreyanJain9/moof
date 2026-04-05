@@ -1,1 +1,0 @@
-(def string? (lambda (x) (eq (type-of x) (quote String))))

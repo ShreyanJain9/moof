@@ -1,3 +1,7 @@
+(module membrane
+  (requires bootstrap)
+  (provides Membrane Facet LoggingMembrane))
+
 ; membrane.moof — capability security as objects
 
 ; ── Membrane ────────────────────────────────────────────────

@@ -1,1 +1,0 @@
-(def inspect (lambda (val) (print (type-of val)) (cond ((lambda? val) (print (source val))) ((operative? val) (print (source val))) ((object? val) (print (%send val slotNames)) (print (%send val interface))) (else (print val))) val))

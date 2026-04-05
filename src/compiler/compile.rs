@@ -10,16 +10,38 @@ use crate::runtime::value::{Value, HeapObject, BytecodeChunk};
 use crate::runtime::heap::Heap;
 use crate::vm::opcodes::*;
 
+/// Controls what forms the compiler allows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CompilerMode {
+    /// Full access — REPL, bootstrap
+    Unrestricted,
+    /// Module loading — no IO, no load, no eval-string, no FFI
+    Sandboxed,
+}
+
 pub struct Compiler {
     code: Vec<u8>,
     constants: Vec<Value>,
+    mode: CompilerMode,
 }
+
+/// Forms rejected in Sandboxed mode.
+const SANDBOXED_REJECT: &[&str] = &["print", "load", "eval-string", "ffi-open", "ffi-bind"];
 
 impl Compiler {
     pub fn new() -> Self {
         Compiler {
             code: Vec::new(),
             constants: Vec::new(),
+            mode: CompilerMode::Unrestricted,
+        }
+    }
+
+    pub fn new_sandboxed() -> Self {
+        Compiler {
+            code: Vec::new(),
+            constants: Vec::new(),
+            mode: CompilerMode::Sandboxed,
         }
     }
 
@@ -125,6 +147,12 @@ impl Compiler {
 
         if let Value::Symbol(sym) = head {
             let name = heap.symbol_name(sym).to_string();
+
+            // Sandbox check: reject restricted forms in module context
+            if self.mode == CompilerMode::Sandboxed && SANDBOXED_REJECT.contains(&name.as_str()) {
+                return Err(format!("'{}' is not available in sandboxed module context", name));
+            }
+
             match name.as_str() {
                 "vau" => return self.compile_vau(heap, &elements[1..]),
                 "def" => return self.compile_def(heap, &elements[1..]),
