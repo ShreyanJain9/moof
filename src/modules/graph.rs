@@ -195,7 +195,7 @@ mod tests {
             name: name.to_string(),
             requires: requires.iter().map(|s| s.to_string()).collect(),
             provides: provides.iter().map(|s| s.to_string()).collect(),
-            path: PathBuf::from(format!("lib/{}.moof", name)),
+            path: Some(PathBuf::from(format!("lib/{}.moof", name))),
             source_hash: String::new(),
             body_offset: 0,
             unrestricted: false,

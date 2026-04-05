@@ -1,7 +1,7 @@
 /// Module loader — discover, parse, sort, load, reload, remove.
 ///
 /// Coordinates the full module lifecycle:
-/// 1. Discover .moof files in lib/
+/// 1. Discover .moof files (from image dir or seed dir)
 /// 2. Parse module headers
 /// 3. Build dependency graph
 /// 4. Load in topological order (sandboxed)
@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 use std::fs;
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeMap};
 
 use crate::reader::lexer::Lexer;
 use crate::reader::parser::Parser;
@@ -17,6 +17,7 @@ use crate::compiler::compile::Compiler;
 use crate::runtime::value::Value;
 use crate::runtime::heap::Heap;
 use crate::vm::exec::VM;
+use crate::persistence::image;
 
 use super::{ModuleDescriptor, graph::ModuleGraph, sandbox, cache};
 
@@ -27,17 +28,19 @@ pub struct ModuleLoader {
     pub loaded_envs: HashMap<String, u32>,
     /// Module name -> list of (symbol_name, value) exports
     pub exports: HashMap<String, Vec<(String, Value)>>,
-    /// Base directory for modules
-    pub lib_dir: PathBuf,
+    /// Module name -> full source text (for persistence)
+    pub source_texts: HashMap<String, String>,
+    /// Image directory (.moof/)
+    pub image_dir: PathBuf,
 }
 
 impl ModuleLoader {
-    /// Discover all .moof files in lib_dir, parse headers, build graph.
-    pub fn discover(lib_dir: &Path, heap: &mut Heap) -> Result<Self, String> {
+    /// Discover all .moof files in a directory, parse headers, build graph.
+    pub fn discover(dir: &Path, heap: &mut Heap) -> Result<Self, String> {
         let mut descriptors = Vec::new();
 
-        let entries = fs::read_dir(lib_dir)
-            .map_err(|e| format!("cannot read {}: {}", lib_dir.display(), e))?;
+        let entries = fs::read_dir(dir)
+            .map_err(|e| format!("cannot read {}: {}", dir.display(), e))?;
 
         for entry in entries {
             let entry = entry.map_err(|e| format!("readdir: {}", e))?;
@@ -51,11 +54,7 @@ impl ModuleLoader {
 
             match parse_header(&source, &path, heap) {
                 Ok(desc) => descriptors.push(desc),
-                Err(_) => {
-                    // File has no module header — skip it silently
-                    // (allows non-module .moof files to coexist during migration)
-                    continue;
-                }
+                Err(_) => continue,
             }
         }
 
@@ -65,7 +64,8 @@ impl ModuleLoader {
             graph,
             loaded_envs: HashMap::new(),
             exports: HashMap::new(),
-            lib_dir: lib_dir.to_path_buf(),
+            source_texts: HashMap::new(),
+            image_dir: PathBuf::from(".moof"),
         })
     }
 
@@ -86,8 +86,18 @@ impl ModuleLoader {
             .ok_or_else(|| format!("unknown module: {}", name))?
             .clone();
 
-        let source = fs::read_to_string(&desc.path)
-            .map_err(|e| format!("cannot read {}: {}", desc.path.display(), e))?;
+        // Read source — from path if available, else from stored source_texts
+        let source = if let Some(ref path) = desc.path {
+            fs::read_to_string(path)
+                .map_err(|e| format!("cannot read {}: {}", path.display(), e))?
+        } else if let Some(src) = self.source_texts.get(name) {
+            src.clone()
+        } else {
+            return Err(format!("{}: no source available", name));
+        };
+
+        // Store source text for persistence
+        self.source_texts.insert(name.to_string(), source.clone());
 
         // Get the body (everything after the module header)
         let body = &source[desc.body_offset..];
@@ -170,24 +180,43 @@ impl ModuleLoader {
             return Err(format!("unknown module: {}", name));
         }
 
-        // Get dependents in topo order
         let dependents = self.graph.transitive_dependents(name);
 
-        // Reload the module itself
         self.load_module(name, vm)?;
 
-        // Reload all dependents in order
         for dep in &dependents {
             self.load_module(dep, vm)?;
         }
 
-        // Re-merge into root
         self.merge_into_root(vm, root_env);
-
         Ok(())
     }
 
-    /// Remove a module. Returns error if anything depends on it.
+    /// Update a module's source text, re-parse header, re-evaluate.
+    pub fn update_module_source(
+        &mut self,
+        name: &str,
+        new_source: String,
+        vm: &mut VM,
+        root_env: u32,
+    ) -> Result<(), String> {
+        // Re-parse the header from the new source
+        let dummy_path = PathBuf::from(format!("{}.moof", name));
+        let new_desc = parse_header(&new_source, &dummy_path, &mut vm.heap)?;
+
+        if new_desc.name != name {
+            return Err(format!("module name changed from '{}' to '{}'", name, new_desc.name));
+        }
+
+        // Update the descriptor in the graph
+        self.graph.modules.insert(name.to_string(), new_desc);
+        self.source_texts.insert(name.to_string(), new_source);
+
+        // Reload module + dependents
+        self.reload(name, vm, root_env)
+    }
+
+    /// Remove a module. Returns the symbols that were unbound.
     pub fn remove(&mut self, name: &str) -> Result<Vec<String>, String> {
         self.graph.can_remove(name).map_err(|deps| {
             format!("cannot remove '{}': depended on by {}", name, deps.join(", "))
@@ -200,6 +229,7 @@ impl ModuleLoader {
             .collect();
 
         self.loaded_envs.remove(name);
+        self.source_texts.remove(name);
 
         Ok(provides)
     }
@@ -216,20 +246,50 @@ impl ModuleLoader {
         }
         result
     }
+
+    /// Save the current state to the image directory.
+    /// Writes each module's source file + the manifest.
+    pub fn save_image(&self) -> Result<String, String> {
+        let order = self.graph.topo_sort()?;
+
+        let mut source_hashes = BTreeMap::new();
+        let mut provides_counts = BTreeMap::new();
+
+        for name in &order {
+            let source = self.source_texts.get(name)
+                .ok_or_else(|| format!("no source text for module '{}'", name))?;
+
+            let hash = image::save_module_source(&self.image_dir, name, source)?;
+            source_hashes.insert(name.clone(), hash);
+
+            let count = self.exports.get(name).map(|e| e.len()).unwrap_or(0);
+            provides_counts.insert(name.clone(), count);
+        }
+
+        let manifest = image::build_manifest(&order, &source_hashes, &provides_counts);
+        image::save_manifest(&self.image_dir, &manifest)?;
+
+        Ok(manifest.global_hash)
+    }
+
+    /// Save just one module's source and update the manifest.
+    pub fn save_module(&self, name: &str) -> Result<String, String> {
+        // Save the individual module source
+        let source = self.source_texts.get(name)
+            .ok_or_else(|| format!("no source text for module '{}'", name))?;
+        image::save_module_source(&self.image_dir, name, source)?;
+
+        // Rebuild and save the full manifest
+        self.save_image()
+    }
 }
 
 /// Parse the module header from a .moof file's source text.
 ///
 /// Expected form: (module NAME (requires DEP1 DEP2 ...) (provides SYM1 SYM2 ...))
-///
-/// Returns the descriptor (with body_offset set to the byte position
-/// after the closing paren of the module form).
 pub fn parse_header(source: &str, path: &Path, heap: &mut Heap) -> Result<ModuleDescriptor, String> {
-    // Find the byte offset where the first top-level form ends.
-    // We need this to know where the module body starts.
     let body_offset = find_first_form_end(source)?;
 
-    // Parse just the header form
     let header_source = &source[..body_offset];
     let mut lexer = Lexer::new(header_source);
     let tokens = lexer.tokenize()
@@ -243,14 +303,11 @@ pub fn parse_header(source: &str, path: &Path, heap: &mut Heap) -> Result<Module
     }
 
     let header_expr = exprs[0];
-
-    // Destructure: (module NAME (requires ...) (provides ...))
     let elements = heap.list_to_vec(header_expr);
     if elements.is_empty() {
         return Err("expected (module ...) form".into());
     }
 
-    // Check head is 'module'
     match elements[0] {
         Value::Symbol(sym) if heap.symbol_name(sym) == "module" => {}
         _ => return Err("first form is not (module ...)".into()),
@@ -260,19 +317,16 @@ pub fn parse_header(source: &str, path: &Path, heap: &mut Heap) -> Result<Module
         return Err("(module) missing name".into());
     }
 
-    // Module name
     let name = match elements[1] {
         Value::Symbol(sym) => heap.symbol_name(sym).to_string(),
         _ => return Err("module name must be a symbol".into()),
     };
 
-    // Parse (requires ...), (provides ...), and (unrestricted) in any order
     let mut requires = Vec::new();
     let mut provides = Vec::new();
     let mut unrestricted = false;
 
     for &element in &elements[2..] {
-        // Check if it's a bare symbol like 'unrestricted'
         if let Value::Symbol(sym) = element {
             let kw = heap.symbol_name(sym).to_string();
             if kw == "unrestricted" {
@@ -320,7 +374,7 @@ pub fn parse_header(source: &str, path: &Path, heap: &mut Heap) -> Result<Module
         name,
         requires,
         provides,
-        path: path.to_path_buf(),
+        path: Some(path.to_path_buf()),
         source_hash,
         body_offset,
         unrestricted,
@@ -328,18 +382,15 @@ pub fn parse_header(source: &str, path: &Path, heap: &mut Heap) -> Result<Module
 }
 
 /// Find the byte offset just past the end of the first top-level s-expression.
-/// Skips leading whitespace and comments.
 fn find_first_form_end(source: &str) -> Result<usize, String> {
     let bytes = source.as_bytes();
     let mut i = 0;
 
-    // Skip leading whitespace and comments
     loop {
         while i < bytes.len() && bytes[i].is_ascii_whitespace() {
             i += 1;
         }
         if i < bytes.len() && bytes[i] == b';' {
-            // Skip comment line
             while i < bytes.len() && bytes[i] != b'\n' {
                 i += 1;
             }
@@ -352,19 +403,13 @@ fn find_first_form_end(source: &str) -> Result<usize, String> {
         return Err("no opening paren found for module header".into());
     }
 
-    // Track parens to find matching close
     let mut depth = 0i32;
     let mut in_string = false;
     let mut escape = false;
 
-    let start = i;
     while i < bytes.len() {
         let ch = bytes[i];
-        if escape {
-            escape = false;
-            i += 1;
-            continue;
-        }
+        if escape { escape = false; i += 1; continue; }
         if in_string {
             if ch == b'\\' { escape = true; }
             else if ch == b'"' { in_string = false; }
@@ -374,28 +419,20 @@ fn find_first_form_end(source: &str) -> Result<usize, String> {
         match ch {
             b'"' => in_string = true,
             b';' => {
-                while i < bytes.len() && bytes[i] != b'\n' {
-                    i += 1;
-                }
+                while i < bytes.len() && bytes[i] != b'\n' { i += 1; }
                 continue;
             }
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' | b'}' => {
                 depth -= 1;
-                if depth == 0 {
-                    return Ok(i + 1); // byte after the closing paren
-                }
+                if depth == 0 { return Ok(i + 1); }
             }
             _ => {}
         }
         i += 1;
     }
 
-    if start == i {
-        Err("empty source".into())
-    } else {
-        Err("unmatched paren in module header".into())
-    }
+    Err("unmatched paren in module header".into())
 }
 
 #[cfg(test)]

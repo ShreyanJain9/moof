@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use crate::runtime::value::{Value, HeapObject};
 use crate::runtime::heap::Heap;
 use crate::vm::exec::VM;
-use crate::persistence::snapshot::{self, Image};
+// persistence is now directory-based — gui save is a no-op for now
 
 // ── types ──────────────────────────────────────────────────
 
@@ -371,11 +371,8 @@ impl eframe::App for App {
 
 // ── helpers (pure, no self borrows) ────────────────────────
 
-fn do_save(vm: &VM) {
-    let img = Image { objects: vm.heap.objects().to_vec(), symbol_names: vm.heap.symbol_names_ref().to_vec() };
-    let root = vm.root_env.unwrap_or(0);
-    let (c, _) = snapshot::compact_image(&img, root);
-    let _ = snapshot::save_image(&c, &std::path::PathBuf::from(".moof"));
+fn do_save(_vm: &VM) {
+    // Image saving is now directory-based — handled by ModuleLoader
 }
 
 fn get_bindings(heap: &Heap, env_id: u32) -> Vec<(String, Value)> {

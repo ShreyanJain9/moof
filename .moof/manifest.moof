@@ -1,0 +1,14 @@
+; MOOF image manifest — do not edit by hand
+; global hash: 809c00f97078074fda604c91162084a159fe2ac59b6aae55ec0f60d43255b572
+
+(image
+  (hash "809c00f97078074fda604c91162084a159fe2ac59b6aae55ec0f60d43255b572")
+  (modules
+    (bootstrap hash: "bf36101586cb7b4bfb1ccad7689fe1fc97740c2205550cc36a6ec5e0ad752c57" provides: 57)
+    (collections hash: "4b0919f6e06a80a750f4678e85be6e25c127306e1c2d9745c37e0db4c9985ee0" provides: 10)
+    (classes hash: "074e325fa865f7124b5914847b96641abdc20c3bb21871603141e176726b538e" provides: 8)
+    (geometry hash: "19efc81791a93eabe178302ccc74891cfe8239c29c1df2c00aa87ce149b1eed0" provides: 1)
+    (json hash: "ced127d88d3f911fe6eee5481475246c5a24fc74ead1da617fd8db6aac086c2e" provides: 1)
+    (mcp hash: "8ba3b86ad1c2703a622b537d813c3ba67c64a0e73c46ac0c866ce56743d95c87" provides: 15)
+    (membrane hash: "a2c1839ed1316185bba444f4cd1ae9d25e5394a9015042c6e77f7d5bb5f7b760" provides: 3)
+  ))

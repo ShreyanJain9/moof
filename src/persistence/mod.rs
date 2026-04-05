@@ -1,15 +1,15 @@
 /// Persistence layer for MOOF.
 ///
-/// The heap IS the image. "Serialize the slab" is literally the strategy.
-/// Content-addressed snapshots + write-ahead log for crash recovery.
+/// The image is a directory of .moof source files + a manifest:
 ///
-/// Directory layout:
 ///   .moof/
-///     image.bin       — serialized heap (Vec<HeapObject>)
-///     symbols.bin     — symbol intern table (Vec<String>)
-///     wal.bin         — write-ahead log (mutations since last snapshot)
-///     image.sha256    — hash of current snapshot
+///     manifest.moof     — load order, per-module hashes, global hash
+///     modules/
+///       bootstrap.moof  — full source, comments and all
+///       collections.moof
+///       ...
+///
+/// Source files are the canonical representation. The manifest provides
+/// integrity checking and deterministic load ordering.
 
-pub mod snapshot;
-pub mod wal;
-pub mod source_project;
+pub mod image;

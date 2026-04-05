@@ -28,8 +28,8 @@ pub struct ModuleDescriptor {
     pub requires: Vec<String>,
     /// Symbols this module exports
     pub provides: Vec<String>,
-    /// Path to the source file
-    pub path: PathBuf,
+    /// Path to the source file (None when loaded from image)
+    pub path: Option<PathBuf>,
     /// SHA-256 hash of the source file contents
     pub source_hash: String,
     /// Byte offset where the module body starts (after the header form)
