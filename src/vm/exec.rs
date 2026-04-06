@@ -74,13 +74,31 @@ pub struct VatState {
     pub root_env: Option<u32>,
     /// Execution status
     pub status: VatStatus,
+    /// Fuel remaining — instructions before yielding. 0 = unlimited.
+    pub fuel: u32,
 }
+
+/// Default fuel per turn (0 = unlimited, used for REPL/seed mode)
+pub const DEFAULT_FUEL: u32 = 0;
+/// Fuel for scheduled vat turns
+pub const VAT_TURN_FUEL: u32 = 10_000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum VatStatus {
     Ready,
     Running,
     Suspended { error: String },
+}
+
+/// Result of a vat turn.
+#[derive(Debug)]
+pub enum TurnResult {
+    /// Turn completed normally with a value
+    Completed(Value),
+    /// Fuel exhausted — resume later
+    Yielded,
+    /// Unhandled error
+    Error(String),
 }
 
 impl VatState {
@@ -91,6 +109,7 @@ impl VatState {
             frames: Vec::with_capacity(64),
             root_env: None,
             status: VatStatus::Ready,
+            fuel: DEFAULT_FUEL,
         }
     }
 }
@@ -418,6 +437,28 @@ impl VM {
     }
 
     /// Execute a bytecode chunk in a given environment. Returns the final value.
+    /// Execute a chunk as a vat turn with fuel budget.
+    /// Returns TurnResult instead of VMResult.
+    pub fn execute_turn(&mut self, chunk_id: u32, env_id: u32, fuel: u32) -> TurnResult {
+        self.vat.fuel = fuel;
+        self.vat.status = VatStatus::Running;
+        match self.execute(chunk_id, env_id) {
+            Ok(val) => {
+                self.vat.status = VatStatus::Ready;
+                TurnResult::Completed(val)
+            }
+            Err(e) if e == "__yielded" => {
+                self.vat.status = VatStatus::Ready;
+                TurnResult::Yielded
+            }
+            Err(e) => {
+                self.vat.status = VatStatus::Suspended { error: e.clone() };
+                TurnResult::Error(e)
+            }
+        }
+    }
+
+    /// Execute a bytecode chunk. For direct use (REPL), fuel is 0 (unlimited).
     pub fn execute(&mut self, chunk_id: u32, env_id: u32) -> VMResult {
         let frame_depth = self.vat.frames.len();
         self.vat.frames.push(CallFrame {
@@ -430,11 +471,21 @@ impl VM {
         self.run(frame_depth)
     }
 
-    /// The main execution loop. Runs until we drop back to `base_depth` frames.
+    /// The main execution loop. Runs until we drop back to `base_depth` frames
+    /// or fuel is exhausted.
     fn run(&mut self, base_depth: usize) -> VMResult {
         loop {
             if self.vat.frames.len() <= base_depth {
                 return Ok(self.vat.stack.pop().unwrap_or(Value::Nil));
+            }
+
+            // Fuel check: yield if exhausted (0 = unlimited)
+            if self.vat.fuel > 0 {
+                self.vat.fuel -= 1;
+                if self.vat.fuel == 0 {
+                    self.vat.status = VatStatus::Ready;
+                    return Err("__yielded".into());
+                }
             }
 
             let frame = self.vat.frames.last().unwrap();
