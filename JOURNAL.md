@@ -484,3 +484,71 @@ The design doc (§6) says "source files are the canonical representation." We've
 - `all_module_ids()` looked for an `entries` slot on Assoc but the real Assoc uses `data` — fixed to try both
 - `let` vs `let*` scoping: `define-in` vau had a let binding that referenced a sibling binding (parallel scope), fixed by nesting lets
 - `[sym toString]` returns `"'hello"` with quote prefix — fixed `as-name` helper to use `[sym name]` instead
+
+---
+
+## §14 — Death of source projection: the image IS the program (`53fd98f`..`HEAD`)
+
+### The shift
+
+Source projection was always a compromise. The idea: project .moof files from heap-resident Definition objects for git diffing, human reading, and source-load fallback. But this created a maintenance burden (two projection paths, dual save logic, projection filtering by value type) and a philosophical contradiction: if the heap is truth, why are we maintaining a parallel text representation?
+
+The answer: we shouldn't be. The image is the only artifact.
+
+### What this means
+
+**No more .moof source files as a persistence mechanism.** The binary image (`image.bin`) is the canonical and only representation. Source text lives on the objects themselves:
+- Lambdas and operatives already carry their source AST in a `source` slot
+- Definitions carry human-authored source text (with comments, sugar, docs)
+- Objects carry their handlers (which are lambdas with source)
+
+**You don't edit source files. You evolve the image.** `(define-in system greet "(def greet (fn (x) x))")` modifies the heap, creates/updates a Definition, saves the image. There's no .moof file to write. The source text is on the Definition object in the heap.
+
+**Reading code = inspecting objects.** `(module-source bootstrap)` walks Definition objects and prints their source slots. `(source greet)` returns the lambda's source AST. `[def slotAt: 'doc]` returns documentation. All from the living image.
+
+**The MCP server becomes the programming interface.** An AI agent inspects the image via MCP tools, modifies definitions by sending messages, and sees changes reflected immediately. No file I/O. No text editor. The objectspace is the IDE.
+
+### What was removed
+
+- `__save-source` native (source projection to .moof files)
+- `native_save_source` in exec.rs (the projection + manifest writer)
+- `project_module_source` in exec.rs (the code/value filtering logic)
+- `project_source` in loader.rs (delegated to VM, then removed)
+- `save_image` in loader.rs (the manifest/source writer)
+- Source file writing on checkpoint — `(checkpoint)` now just saves `image.bin`
+- The manifest system (`manifest.moof`, per-module hashes)
+- The `--seed` path and `lib/` directory concept
+
+### What was kept
+
+- `read` native — still needed for parsing strings into ASTs at the REPL
+- `image.bin` serialization via `__save-image` — the only persistence
+- Definition objects on the heap — they carry source text as metadata
+- ModuleImage objects — they organize definitions into modules
+- The module loader for initial bootstrap (first boot from lib/ if no image exists)
+
+### The bootstrap problem
+
+If there's no image and no source files, how do you start? Answer: a seed image. Ship a pre-built `image.bin` that contains the full bootstrap. First run loads it. After that, the image evolves in place. The `lib/` directory becomes a development artifact for building the seed, not a runtime dependency.
+
+### What this enables
+
+- **The MCP server is the IDE.** The agent reads/writes the image directly. No file system needed.
+- **Versioning becomes object-level.** Instead of `git diff` on text files, version individual objects. `[obj history]` returns a stream of past states. This is future work but the architecture now supports it.
+- **The image is portable.** One file. Copy it, run it. No directory structure, no manifest, no source files to keep in sync.
+- **Simpler codebase.** Removed ~200 lines of projection, manifest, and dual-save logic.
+
+### The `read` native and vau
+
+`read` parses a string into an AST without evaluating. Combined with `eval` and `$env` from vau, this gives full in-image code manipulation:
+
+```moof
+; parse → eval → bind, all through moof primitives
+(eval (read "(def foo (fn (x) [x + 1]))") root-env)
+
+; define-in: vau captures symbols unevaluated, reads the source string,
+; evals in the module's env, updates the Definition
+(define-in system greet "(def greet (fn (x) x))")
+```
+
+No Rust natives beyond `read` (parsing) and `__save-image` (serialization). Everything else is vau + environment manipulation.

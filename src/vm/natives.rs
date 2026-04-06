@@ -798,12 +798,7 @@ fn register_io_natives(vm: &mut VM, root_env: u32) {
     let sym = vm.heap.intern("__save-image");
     vm.heap.env_define(root_env, sym, val);
 
-    // __save-source: project and save all module source files (VM-level native)
-    let val = vm.register_native("__save-source", Box::new(|_heap, _args| {
-        Ok(Value::True)
-    }));
-    let sym = vm.heap.intern("__save-source");
-    vm.heap.env_define(root_env, sym, val);
+    // __save-source removed — no more source projection
 
     // __eval-in, __undef, __define-global removed —
     // replaced by pure vau + environment manipulation in system.moof

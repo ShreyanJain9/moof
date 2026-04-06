@@ -391,7 +391,8 @@ impl ModuleLoader {
         })?;
 
         // Read provides from heap before removing
-        let provides: Vec<String> = if let Some(mod_id) = self.find_module_id(vm, name) {
+        let mod_id = vm.all_module_ids().iter().find(|(n, _)| n == name).map(|(_, id)| *id);
+        let provides: Vec<String> = if let Some(mod_id) = mod_id {
             vm.read_string_list(vm.read_slot(mod_id, "provides"))
         } else {
             Vec::new()
@@ -422,92 +423,7 @@ impl ModuleLoader {
             .join(format!("{}.moof", name));
         let _ = std::fs::remove_file(&mod_path);
 
-        // Re-save manifest
-        if let Err(e) = self.save_image(vm) {
-            eprintln!("!! manifest save failed: {}", e);
-        }
-
         Ok(provides)
-    }
-
-    /// Save the current state to the image directory.
-    /// Projects source from heap-resident Definition objects.
-    pub fn save_image(&self, vm: &VM) -> Result<String, String> {
-        // Get module order: from graph if available, else from heap
-        let order = if !self.graph.modules.is_empty() {
-            self.graph.topo_sort()?
-        } else {
-            self.load_order_from_heap(vm)?
-        };
-
-        let mut source_hashes = BTreeMap::new();
-        let mut provides_counts = BTreeMap::new();
-
-        for name in &order {
-            // Try to project source from heap Definitions first
-            let source = if let Some(mod_id) = self.find_module_id(vm, name) {
-                let projected = self.project_source(vm, mod_id);
-                if projected.trim().contains('\n') {
-                    projected
-                } else {
-                    // Fallback to stored source_texts if projection is empty
-                    self.source_texts.get(name).cloned()
-                        .unwrap_or_else(|| projected)
-                }
-            } else {
-                self.source_texts.get(name).cloned()
-                    .ok_or_else(|| format!("no source text for module '{}'", name))?
-            };
-
-            let hash = image::save_module_source(&self.image_dir, name, &source)?;
-            source_hashes.insert(name.clone(), hash);
-
-            let count = if let Some(exports) = self.exports.get(name) {
-                exports.len()
-            } else if let Some(mod_id) = self.find_module_id(vm, name) {
-                let provides = vm.read_string_list(vm.read_slot(mod_id, "provides"));
-                provides.len()
-            } else {
-                0
-            };
-            provides_counts.insert(name.clone(), count);
-        }
-
-        let manifest = image::build_manifest(&order, &source_hashes, &provides_counts);
-        image::save_manifest(&self.image_dir, &manifest)?;
-
-        Ok(manifest.global_hash)
-    }
-
-    /// Project source text from a ModuleImage's Definition objects.
-    fn project_source(&self, vm: &VM, mod_id: u32) -> String {
-        vm.project_module_source(mod_id)
-    }
-
-    /// Find a module's heap object id by name (non-mutating).
-    fn find_module_id(&self, vm: &VM, name: &str) -> Option<u32> {
-        let modules = vm.all_module_ids();
-        modules.iter().find(|(n, _)| n == name).map(|(_, id)| *id)
-    }
-
-    /// Compute load order from heap-resident ModuleImage objects.
-    fn load_order_from_heap(&self, vm: &VM) -> Result<Vec<String>, String> {
-        let modules = vm.all_module_ids();
-        let pairs: Vec<(String, Vec<String>)> = modules.iter()
-            .map(|(name, id)| {
-                let requires = vm.read_string_list(vm.read_slot(*id, "requires"));
-                (name.clone(), requires)
-            })
-            .collect();
-        super::graph::topo_sort_pairs(&pairs)
-    }
-
-    /// Save just one module's source and update the manifest.
-    pub fn save_module(&self, name: &str, vm: &VM) -> Result<String, String> {
-        let source = self.source_texts.get(name)
-            .ok_or_else(|| format!("no source text for module '{}'", name))?;
-        image::save_module_source(&self.image_dir, name, source)?;
-        self.save_image(vm)
     }
 
     /// Define a binding in a module: eval the expression, append to source,
@@ -559,11 +475,6 @@ impl ModuleLoader {
         let sym = vm.heap.intern(def_name);
         if let Ok(val) = vm.env_lookup(env_id, sym) {
             vm.env_define_helper(root_env, sym, val);
-        }
-
-        // Autosave source projection
-        if let Err(e) = self.save_image(vm) {
-            eprintln!("!! autosave failed: {}", e);
         }
 
         // ── Update/create Definition on the heap ──
@@ -684,9 +595,6 @@ impl ModuleLoader {
         let env_id = sandbox::create_sandbox_env(vm, &imports);
         self.loaded_envs.insert(name.to_string(), env_id);
         self.exports.insert(name.to_string(), Vec::new());
-
-        // Autosave
-        self.save_module(name, vm)?;
 
         Ok(())
     }

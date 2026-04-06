@@ -65,40 +65,6 @@
     [p set: "description" to: description]
     p))
 
-(def mcp-tools
-  (list
-    (mcp-make-tool "moof_eval" "Evaluate a MOOF expression in the live image. Returns the result as a string. Use this for any computation, definition, or query."
-      (mcp-make-schema
-        [Assoc from: "expression" (mcp-string-prop "A MOOF expression to evaluate. Examples: [3 + 4], (def x 42), (map (fn (x) [x * x]) (list 1 2 3))")]
-        (list "expression")))
-
-    (mcp-make-tool "moof_define" "Define a new named value in the MOOF image. The definition persists across sessions."
-      (mcp-make-schema
-        [Assoc from:
-          "name" (mcp-string-prop "Name for the definition")
-          "code" (mcp-string-prop "MOOF expression for the value. Examples: 42, (fn (x) [x + 1]), { Object x: 10 y: 20 }")]
-        (list "name" "code")))
-
-    (mcp-make-tool "moof_inspect" "Inspect a named object in the MOOF image. Shows its type, slots, handlers, and delegation chain."
-      (mcp-make-schema
-        [Assoc from: "name" (mcp-string-prop "Name of the object to inspect")]
-        (list "name")))
-
-    (mcp-make-tool "moof_list_objects" "List all named objects in the MOOF image with their types."
-      (mcp-make-schema { Assoc } nil))
-
-    (mcp-make-tool "moof_add_handler" "Add or replace a handler (method) on an object. The handler is a MOOF lambda expression."
-      (mcp-make-schema
-        [Assoc from:
-          "object" (mcp-string-prop "Name of the object to modify")
-          "selector" (mcp-string-prop "Handler name (selector), e.g. describe, greet:, at:put:")
-          "code" (mcp-string-prop "MOOF lambda expression, e.g. (fn (self) \"hello\")")]
-        (list "object" "selector" "code")))
-
-    (mcp-make-tool "moof_checkpoint" "Save the current image to disk (compacted snapshot + source projection)."
-      (mcp-make-schema { Assoc } nil))
-  ))
-
 (def mcp-handle-initialize
   (fn (id params)
     (let-seq ((caps { Assoc })

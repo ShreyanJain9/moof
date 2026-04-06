@@ -138,9 +138,7 @@ impl VM {
         if name == "__save-image" {
             return self.native_save_image(args);
         }
-        if name == "__save-source" {
-            return self.native_save_source(args);
-        }
+        // __save-source removed — no more source projection
         // __eval-in, __undef, __define-global removed —
         // replaced by pure vau + environment manipulation in system.moof
 
@@ -163,106 +161,8 @@ impl VM {
         Ok(Value::True)
     }
 
-    /// Native: project and save all module source files + manifest
-    fn native_save_source(&mut self, _args: &[Value]) -> Result<Value, String> {
-        use crate::persistence::image;
-        use crate::modules;
-
-        let modules = self.all_module_ids();
-        let mut source_hashes = std::collections::BTreeMap::new();
-        let mut provides_counts = std::collections::BTreeMap::new();
-        let image_dir = std::path::PathBuf::from(".moof");
-
-        // Compute topo order
-        let pairs: Vec<(String, Vec<String>)> = modules.iter()
-            .map(|(n, id)| (n.clone(), self.read_string_list(self.read_slot(*id, "requires"))))
-            .collect();
-        let order = modules::graph::topo_sort_pairs(&pairs)?;
-
-        for name in &order {
-            let mod_id = modules.iter().find(|(n, _)| n == name).map(|(_, id)| *id);
-            let source = if let Some(mid) = mod_id {
-                self.project_module_source(mid)
-            } else {
-                continue;
-            };
-
-            let hash = image::save_module_source(&image_dir, name, &source)?;
-            source_hashes.insert(name.clone(), hash);
-
-            let provides = if let Some(mid) = mod_id {
-                self.read_string_list(self.read_slot(mid, "provides"))
-            } else {
-                Vec::new()
-            };
-            provides_counts.insert(name.clone(), provides.len());
-        }
-
-        let manifest = image::build_manifest(&order, &source_hashes, &provides_counts);
-        image::save_manifest(&image_dir, &manifest)?;
-        Ok(Value::True)
-    }
-
-    /// Project source text from a ModuleImage's Definition objects.
-    pub fn project_module_source(&self, mod_id: u32) -> String {
-        let name = self.read_string(self.read_slot(mod_id, "name")).unwrap_or_default();
-        let requires = self.read_string_list(self.read_slot(mod_id, "requires"));
-        let provides = self.read_string_list(self.read_slot(mod_id, "provides"));
-        let unrestricted = self.read_slot(mod_id, "unrestricted").is_truthy();
-
-        let mut source = format!("(module {}\n  (requires {})\n",
-            name,
-            if requires.is_empty() { String::new() } else { requires.join(" ") }
-        );
-        if unrestricted {
-            source.push_str("  (unrestricted)\n");
-        }
-        source.push_str(&format!("  (provides {}))\n", provides.join(" ")));
-
-        // Only project definitions whose value is a lambda, operative,
-        // or object with handlers (i.e. code). Plain values live in the
-        // binary image only — no source projection needed.
-        let env_val = self.read_slot(mod_id, "env");
-        let env_id = match env_val {
-            Value::Object(id) => Some(id),
-            _ => None,
-        };
-        let defs = self.definitions_list(mod_id);
-        for def_id in defs {
-            let def_name = match self.definition_name(def_id) {
-                Some(n) => n,
-                None => continue,
-            };
-
-            // Check the actual value to determine if it's code
-            let is_code = if let Some(eid) = env_id {
-                let sym = match self.heap.symbol_lookup_only(&def_name) {
-                    Some(s) => s,
-                    None => { continue; }
-                };
-                match self.env_lookup(eid, sym) {
-                    Ok(Value::Object(val_id)) => match self.heap.get(val_id) {
-                        HeapObject::Lambda { .. } => true,
-                        HeapObject::Operative { .. } => true,
-                        HeapObject::GeneralObject { handlers, .. } => !handlers.is_empty(),
-                        _ => false,
-                    },
-                    _ => false,
-                }
-            } else {
-                true // no env, include everything (fallback)
-            };
-
-            if is_code {
-                if let Some(def_source) = self.definition_source(def_id) {
-                    source.push('\n');
-                    source.push_str(&def_source);
-                    source.push('\n');
-                }
-            }
-        }
-        source
-    }
+    // native_save_source and project_module_source removed.
+    // Source projection is dead. The image IS the program.
 
     /// Get the type prototype for a value (if registered).
     fn type_prototype(&self, val: Value) -> Option<u32> {

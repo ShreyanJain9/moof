@@ -1,8 +1,4 @@
 (module workspace
   (requires collections geometry classes membrane json modules mcp bootstrap system)
   (unrestricted)
-  (provides Foo count greet))
-
-(def Foo { Object x: 1 describe: () "a foo" })
-
-(def greet (fn (x) (str "hi " x)))
+  (provides ))

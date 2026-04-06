@@ -109,17 +109,12 @@ fn main() {
                         loader.merge_into_root(&mut vm, root_env);
                         setup_workspace(&mut loader, &mut vm, root_env);
 
-                        match loader.save_image(&vm) {
-                            Ok(hash) => {
-                                let n = loader.graph.modules.len();
-                                eprintln!("(loaded {} modules, hash {}...)", n, &hash[..12]);
-                            }
-                            Err(e) => eprintln!("!! manifest save: {}", e),
-                        }
+                        let n = loader.graph.modules.len();
+                        eprintln!("(loaded {} modules)", n);
 
                         // Save binary image
                         if let Err(e) = snapshot::save_image(&bin_path, &vm.heap, root_env, vm.get_protos()) {
-                            eprintln!("!! image.bin save failed: {}", e);
+                            eprintln!("!! image save failed: {}", e);
                         }
 
                         module_loader = Some(loader);
@@ -175,11 +170,8 @@ fn main() {
         match stdin.lock().read_line(&mut line) {
             Ok(0) => {
                 // Save on exit
-                if let Some(ref loader) = module_loader {
-                    let _ = loader.save_image(&vm);
-                    let _ = snapshot::save_image(&bin_path, &vm.heap, root_env, vm.get_protos());
-                    eprintln!("(saved image)");
-                }
+                let _ = snapshot::save_image(&bin_path, &vm.heap, root_env, vm.get_protos());
+                eprintln!("(saved)");
                 println!("\nmoof.");
                 break;
             }
@@ -363,9 +355,11 @@ fn handle_module_edit(
     loader.update_module_source(name, new_source, vm, root_env)
         .map_err(|e| format!("reload failed: {}", e))?;
 
-    // Save the updated module to disk
-    loader.save_module(name, vm)
-        .map_err(|e| format!("save failed: {}", e))?;
+    // Save binary image
+    let _ = crate::persistence::snapshot::save_image(
+        &std::path::PathBuf::from(".moof/image.bin"),
+        &vm.heap, root_env, vm.get_protos(),
+    );
 
     Ok(())
 }

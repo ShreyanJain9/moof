@@ -4,9 +4,8 @@
   (provides modules module-source module-exports which-module checkpoint save undef define-in as-name))
 
 (def checkpoint (fn ()
-  (__save-source)
   (__save-image)
-  (write-err "(saved image)")
+  (write-err "(saved)")
   nil))
 
 (def save checkpoint)
