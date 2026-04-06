@@ -67,11 +67,16 @@
             (write-err (str "(defined " def-name " in " module-name ")"))
             nil))))))
 
-; (undef foo) — truly removes the binding (not just sets to nil)
+; (undef foo) — removes binding from root AND Definition from its module
 (def undef
   (vau (name) $env
-    [root-env remove: [(as-name name) toSymbol]]
-    nil))
+    (let ((n (as-name name)))
+      [root-env remove: [n toSymbol]]
+      (let ((m [Modules which: n]))
+        (if (not (null? m))
+          [m remove-def: n]))
+      (checkpoint)
+      nil)))
 
 (defmethod String startsWith: (prefix)
   (let ((idx [self indexOf: prefix]))
