@@ -13,11 +13,9 @@
 
 (def save checkpoint)
 
-; coerce symbol or string to string (for Modules lookup)
 (def as-name (fn (x)
   (if (symbol? x) [x name] x)))
 
-; (modules) — list all loaded modules
 (def modules (fn ()
   (for-each
     (fn (name)
@@ -31,38 +29,26 @@
     [Modules list])
   nil))
 
-; (module-source bootstrap) — bare symbol, shows source
 (def module-source
   (vau (name) $env
-    (let ((n (as-name name)))
-      (let ((m [Modules named: n]))
-        (if (null? m)
-          (write-err (str "unknown module: " n))
-          (for-each
-            (fn (d) (display (str [d slotAt: 'source] "\n\n")))
-            [m slotAt: 'definitions]))))))
+    (let ((m [Modules named: (as-name name)]))
+      (if (null? m)
+        (write-err (str "unknown module: " (as-name name)))
+        (for-each
+          (fn (d) (display (str [d slotAt: 'source] "\n\n")))
+          [m slotAt: 'definitions])))))
 
-; (module-exports bootstrap) — bare symbol, lists exports
 (def module-exports
   (vau (name) $env
     (let ((m [Modules named: (as-name name)]))
       (if (null? m) nil
         [m slotAt: 'provides]))))
 
-; (which-module Assoc) — bare symbol, finds defining module
 (def which-module
   (vau (name) $env
     (let ((m [Modules which: (as-name name)]))
       (if (null? m) nil [m slotAt: 'name]))))
 
-; (define-in module def-name source-string)
-;
-; module and def-name are bare symbols (captured by vau, not evaluated).
-; source is a string expression (evaluated).
-;
-;   (define-in system greet "(def greet (fn (x) x))")
-;   (define-in workspace my-var "(def my-var 42)")
-;
 (def define-in
   (vau (mod-sym def-sym source-expr) $env
     (let ((module-name (as-name mod-sym))
@@ -71,18 +57,19 @@
       (let ((m [Modules named: module-name]))
         (if (null? m)
           (do (write-err (str "unknown module: " module-name)) nil)
-          (let ((mod-env [m slotAt: 'env]))
-            (__eval-in def-source mod-env)
+          (let ((mod-env [m slotAt: 'env])
+                (ast (read def-source)))
+            (eval ast mod-env)
             [m define: def-name source: def-source]
-            (__define-global def-name [mod-env lookup: [def-name toSymbol]])
+            [root-env define: [def-name toSymbol]
+                         to: [mod-env lookup: [def-name toSymbol]]]
             (checkpoint)
             (write-err (str "(defined " def-name " in " module-name ")"))
             nil))))))
 
-; (undef foo) — bare symbol, removes binding from root
 (def undef
   (vau (name) $env
-    (__undef (as-name name))
+    [root-env define: [(as-name name) toSymbol] to: nil]
     nil))
 
 (defmethod String startsWith: (prefix)

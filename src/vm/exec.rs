@@ -141,15 +141,8 @@ impl VM {
         if name == "__save-source" {
             return self.native_save_source(args);
         }
-        if name == "__eval-in" {
-            return self.native_eval_in(args);
-        }
-        if name == "__undef" {
-            return self.native_undef(args);
-        }
-        if name == "__define-global" {
-            return self.native_define_global(args);
-        }
+        // __eval-in, __undef, __define-global removed —
+        // replaced by pure vau + environment manipulation in system.moof
 
         let registry = std::mem::replace(&mut self.native_registry, NativeRegistry::new());
         let result = match registry.get(name) {
@@ -235,55 +228,6 @@ impl VM {
             }
         }
         source
-    }
-
-    /// Native: eval a string in a specific environment
-    fn native_eval_in(&mut self, args: &[Value]) -> Result<Value, String> {
-        let source = match args.first() {
-            Some(Value::Object(id)) => match self.heap.get(*id) {
-                HeapObject::MoofString(s) => s.clone(),
-                _ => return Err("__eval-in: first arg must be a string".into()),
-            },
-            _ => return Err("__eval-in: first arg must be a string".into()),
-        };
-        let env_id = match args.get(1) {
-            Some(Value::Object(id)) => *id,
-            _ => return Err("__eval-in: second arg must be an environment".into()),
-        };
-        crate::eval_source(self, env_id, &source, "<eval-in>")
-    }
-
-    /// Native: define a binding in root env
-    fn native_define_global(&mut self, args: &[Value]) -> Result<Value, String> {
-        let name = match args.first() {
-            Some(Value::Object(id)) => match self.heap.get(*id) {
-                HeapObject::MoofString(s) => s.clone(),
-                _ => return Err("__define-global: first arg must be a string".into()),
-            },
-            Some(Value::Symbol(s)) => self.heap.symbol_name(*s).to_string(),
-            _ => return Err("__define-global: first arg must be a string or symbol".into()),
-        };
-        let val = args.get(1).copied().unwrap_or(Value::Nil);
-        let root = self.root_env.ok_or("__define-global: no root env")?;
-        let sym = self.heap.intern(&name);
-        self.env_define_helper(root, sym, val);
-        Ok(val)
-    }
-
-    /// Native: remove a binding from root env (set to nil)
-    fn native_undef(&mut self, args: &[Value]) -> Result<Value, String> {
-        let name = match args.first() {
-            Some(Value::Object(id)) => match self.heap.get(*id) {
-                HeapObject::MoofString(s) => s.clone(),
-                _ => return Err("__undef: expected string".into()),
-            },
-            Some(Value::Symbol(s)) => self.heap.symbol_name(*s).to_string(),
-            _ => return Err("__undef: expected string or symbol".into()),
-        };
-        let root = self.root_env.ok_or("__undef: no root env")?;
-        let sym = self.heap.intern(&name);
-        self.heap.env_define(root, sym, Value::Nil);
-        Ok(Value::Nil)
     }
 
     /// Get the type prototype for a value (if registered).
@@ -1500,6 +1444,14 @@ impl VM {
                                 let val = args.get(1).copied().unwrap_or(Value::Nil);
                                 let _ = env;
                                 self.env_set(id, sym, val)?;
+                                Ok(Some(val))
+                            }
+                            "define:to:" => {
+                                let sym = args.first()
+                                    .and_then(|v| v.as_symbol())
+                                    .ok_or("define:to: expects a symbol")?;
+                                let val = args.get(1).copied().unwrap_or(Value::Nil);
+                                self.heap.env_define(id, sym, val);
                                 Ok(Some(val))
                             }
                             _ => Ok(None),

@@ -48,6 +48,9 @@ fn main() {
                 vm.set_protos(protos);
                 // RE-REGISTER NATIVES: closures are not in the image
                 register_type_prototypes(&mut vm, root_env);
+                // Ensure root-env is bound (may not be in old images)
+                let root_sym = vm.heap.intern("root-env");
+                vm.env_define_helper(root_env, root_sym, Value::Object(root_env));
                 eprintln!("(resumed from image: {} objects, {} symbols)", vm.heap.len(), vm.heap.symbol_count());
                 loaded_from_image = true;
             }
@@ -63,7 +66,7 @@ fn main() {
     }
 
     if !loaded_from_image {
-        let root_sym = vm.heap.intern("*root-env*");
+        let root_sym = vm.heap.intern("root-env");
         vm.env_define_helper(root_env, root_sym, Value::Object(root_env));
         vm.root_env = Some(root_env);
     }

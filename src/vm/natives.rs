@@ -805,26 +805,8 @@ fn register_io_natives(vm: &mut VM, root_env: u32) {
     let sym = vm.heap.intern("__save-source");
     vm.heap.env_define(root_env, sym, val);
 
-    // __eval-in: eval a string in a specific environment (VM-level native)
-    let val = vm.register_native("__eval-in", Box::new(|_heap, _args| {
-        Ok(Value::Nil)
-    }));
-    let sym = vm.heap.intern("__eval-in");
-    vm.heap.env_define(root_env, sym, val);
-
-    // __undef: remove a binding from root env (VM-level native)
-    let val = vm.register_native("__undef", Box::new(|_heap, _args| {
-        Ok(Value::Nil)
-    }));
-    let sym = vm.heap.intern("__undef");
-    vm.heap.env_define(root_env, sym, val);
-
-    // __define-global: define a binding in root env (VM-level native)
-    let val = vm.register_native("__define-global", Box::new(|_heap, _args| {
-        Ok(Value::Nil)
-    }));
-    let sym = vm.heap.intern("__define-global");
-    vm.heap.env_define(root_env, sym, val);
+    // __eval-in, __undef, __define-global removed —
+    // replaced by pure vau + environment manipulation in system.moof
 
     // read-line: reads a line from stdin, returns string or nil on EOF
     let val = vm.register_native("io:read-line", Box::new(|heap, _args| {
@@ -932,5 +914,33 @@ fn register_io_natives(vm: &mut VM, root_env: u32) {
         Ok(Value::Nil)
     }));
     let sym = vm.heap.intern("write-file");
+    vm.heap.env_define(root_env, sym, val);
+
+    // read: parse a string into an unevaluated AST (no eval, just parse)
+    let val = vm.register_native("io:read", Box::new(|heap, args| {
+        use crate::reader::lexer::Lexer;
+        use crate::reader::parser::Parser;
+
+        let source = match args.first() {
+            Some(Value::Object(id)) => match heap.get(*id) {
+                HeapObject::MoofString(s) => s.clone(),
+                _ => return Err("read: expected string".into()),
+            },
+            _ => return Err("read: expected string".into()),
+        };
+        let mut lexer = Lexer::new(&source);
+        let tokens = lexer.tokenize()
+            .map_err(|e| format!("read: lex error: {}", e))?;
+        let mut parser = Parser::new(tokens);
+        let exprs = parser.parse_all(heap)
+            .map_err(|e| format!("read: parse error: {}", e))?;
+        // Return single expression or list of expressions
+        match exprs.len() {
+            0 => Ok(Value::Nil),
+            1 => Ok(exprs[0]),
+            _ => Ok(heap.list(&exprs)),
+        }
+    }));
+    let sym = vm.heap.intern("read");
     vm.heap.env_define(root_env, sym, val);
 }
