@@ -71,65 +71,45 @@ fn main() {
         vm.root_env = Some(root_env);
     }
 
-    let mod_dir = image::modules_dir(&img_dir);
-    let need_seed = seed_mode || (!mod_dir.exists() && !loaded_from_image);
-
-    if need_seed {
-        // ── Seed from lib/ into .moof/modules/ ──
+    // ── Boot ──
+    if loaded_from_image {
+        // Image resume: everything is in the heap. Nothing to load.
+    } else if seed_mode || !bin_path.exists() {
+        // Seed: build image from lib/ source files
         let lib_dir = find_lib_dir();
         if !lib_dir.exists() {
             eprintln!("!! No image found and no lib/ directory to seed from");
             std::process::exit(1);
         }
-        eprintln!("(seeding image from {})", lib_dir.display());
-        match image::seed_from_directory(&lib_dir, &img_dir) {
-            Ok(files) => eprintln!("(copied {} files)", files.len()),
-            Err(e) => {
-                eprintln!("!! Seed failed: {}", e);
-                std::process::exit(1);
-            }
-        }
-    }
-
-    // ── Load modules ──
-    if loaded_from_image {
-        // Image resume: all ModuleImage + Definition objects are in the heap.
-        // The Modules registry is in the heap. No re-evaluation needed.
-        // We just need a ModuleLoader with the image_dir for save operations.
-        let loader = modules::loader::ModuleLoader::from_image_dir(img_dir.clone());
-        module_loader = Some(loader);
-    } else {
-        // Source load: discover .moof files, parse, compile, eval, register on heap.
-        match modules::loader::ModuleLoader::discover(&mod_dir, &mut vm.heap) {
+        // Discover and load modules from lib/
+        match modules::loader::ModuleLoader::discover(&lib_dir, &mut vm.heap) {
             Ok(mut loader) => {
                 loader.image_dir = img_dir.clone();
-
                 match load_modules_sequenced(&mut loader, &mut vm, root_env) {
                     Ok(()) => {
                         loader.merge_into_root(&mut vm, root_env);
                         setup_workspace(&mut loader, &mut vm, root_env);
-
                         let n = loader.graph.modules.len();
-                        eprintln!("(loaded {} modules)", n);
-
-                        // Save binary image
+                        eprintln!("(loaded {} modules from seed)", n);
                         if let Err(e) = snapshot::save_image(&bin_path, &vm.heap, root_env, vm.get_protos()) {
                             eprintln!("!! image save failed: {}", e);
                         }
-
                         module_loader = Some(loader);
                     }
                     Err(e) => {
-                        eprintln!("!! Module loading failed: {}", e);
+                        eprintln!("!! Seed failed: {}", e);
                         std::process::exit(1);
                     }
                 }
             }
             Err(e) => {
-                eprintln!("!! Module discovery failed: {}", e);
+                eprintln!("!! Seed discovery failed: {}", e);
                 std::process::exit(1);
             }
         }
+    } else {
+        eprintln!("!! No image found. Use --seed to build from lib/");
+        std::process::exit(1);
     }
 
     if gui_mode {
@@ -207,100 +187,11 @@ fn main() {
                     continue;
                 }
 
-                // Module system commands (most moved to system.moof)
-                if input.starts_with("(module-edit ") {
-                    let name = input[13..input.len()-1].trim().to_string();
-                    if let Some(ref mut loader) = module_loader {
-                        match handle_module_edit(&name, loader, &mut vm, root_env) {
-                            Ok(()) => eprintln!("(reloaded {})", name),
-                            Err(e) => eprintln!("!! {}", e),
-                        }
-                    }
-                    continue;
-                }
-
-                if input.starts_with("(module-reload ") {
-                    let name = input[15..input.len()-1].trim();
-                    if let Some(ref mut loader) = module_loader {
-                        // Re-read source from disk (in case externally edited)
-                        let mod_path = image::modules_dir(&img_dir)
-                            .join(format!("{}.moof", name));
-                        if let Ok(new_source) = std::fs::read_to_string(&mod_path) {
-                            loader.source_texts.insert(name.to_string(), new_source);
-                        }
-                        match loader.reload(name, &mut vm, root_env) {
-                            Ok(()) => eprintln!("(reloaded {})", name),
-                            Err(e) => eprintln!("!! {}", e),
-                        }
-                    }
-                    continue;
-                }
-
-                if input.starts_with("(module-remove ") {
-                    let name = input[15..input.len()-1].trim();
-                    if let Some(ref mut loader) = module_loader {
-                        match loader.remove(name, &mut vm) {
-                            Ok(removed) => {
-                                for sym_name in &removed {
-                                    let sym = vm.heap.intern(sym_name);
-                                    vm.env_define_helper(root_env, sym, Value::Nil);
-                                }
-                                eprintln!("(removed {} — unbound {} symbols)", name, removed.len());
-                            }
-                            Err(e) => eprintln!("!! {}", e),
-                        }
-                    }
-                    continue;
-                }
-
-                if input == "(export-modules)" || input.starts_with("(export-modules ") {
-                    let target = if input.starts_with("(export-modules ") {
-                        PathBuf::from(input[16..input.len()-1].trim())
-                    } else {
-                        PathBuf::from("lib")
-                    };
-                    match image::export_to_directory(&img_dir, &target) {
-                        Ok(n) => eprintln!("(exported {} modules to {})", n, target.display()),
-                        Err(e) => eprintln!("!! {}", e),
-                    }
-                    continue;
-                }
-
-                if input == "(import-modules)" || input.starts_with("(import-modules ") {
-                    let source_dir = if input.starts_with("(import-modules ") {
-                        PathBuf::from(input[16..input.len()-1].trim())
-                    } else {
-                        find_lib_dir()
-                    };
-                    match image::seed_from_directory(&source_dir, &img_dir) {
-                        Ok(files) => {
-                            eprintln!("(imported {} files — restart to reload)", files.len());
-                        }
-                        Err(e) => eprintln!("!! {}", e),
-                    }
-                    continue;
-                }
-
-                // define-in and module-create are now moof functions in system.moof
-
                 // ── Evaluate expression ──
                 match eval_line(&mut vm, root_env, &input) {
                     Ok(val) => {
                         let formatted = vm.format_value(val);
                         println!("=> {}", formatted);
-
-                        // Autosave (def ...) forms to workspace via moof define-in
-                        let trimmed_input = input.trim();
-                        if trimmed_input.starts_with("(def ") || trimmed_input.starts_with("(defmethod ") {
-                            if let Ok(def_name) = extract_def_name(trimmed_input) {
-                                let escaped = trimmed_input.replace('\\', "\\\\").replace('"', "\\\"");
-                                let autosave_expr = format!(
-                                    "(define-in workspace {} \"{}\")",
-                                    def_name, escaped
-                                );
-                                let _ = eval_source(&mut vm, root_env, &autosave_expr, "<autosave>");
-                            }
-                        }
                     }
                     Err(e) => {
                         println!("!! {}", e);

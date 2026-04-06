@@ -1,4 +1,0 @@
-(module workspace
-  (requires collections geometry classes membrane json modules mcp bootstrap system)
-  (unrestricted)
-  (provides ))

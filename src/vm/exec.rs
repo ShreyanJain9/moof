@@ -453,8 +453,17 @@ impl VM {
                         _ => return Err("DEF: expected symbol in constants".into()),
                     };
                     let val = self.stack.pop().ok_or("DEF: empty stack")?;
+                    // Error if already bound in THIS env (not parent).
+                    // Shadowing a parent binding is fine; redefining is not.
+                    // Use <- to update existing bindings.
+                    if let HeapObject::Environment(env) = self.heap.get(env_id) {
+                        if env.lookup_local(sym).is_some() {
+                            let name = self.heap.symbol_name(sym).to_string();
+                            return Err(format!("def: '{}' is already defined (use <- to update)", name));
+                        }
+                    }
                     self.env_define(env_id, sym, val);
-                    self.stack.push(val); // def returns the value
+                    self.stack.push(val);
                 }
 
                 OP_GET_ENV => {
@@ -731,15 +740,31 @@ impl VM {
                     let slot_count = code[ip + 1] as usize;
                     self.frames.last_mut().unwrap().ip = ip + 2;
                     // Stack: [parent, key1, val1, key2, val2, ...]
-                    let mut slots = Vec::new();
+                    let mut explicit_slots = Vec::new();
                     for _ in 0..slot_count {
                         let val = self.stack.pop().ok_or("MAKE_OBJECT: empty stack")?;
                         let key = self.stack.pop().ok_or("MAKE_OBJECT: empty stack")?;
                         let key_sym = key.as_symbol().ok_or("MAKE_OBJECT: slot key must be symbol")?;
-                        slots.push((key_sym, val));
+                        explicit_slots.push((key_sym, val));
                     }
-                    slots.reverse(); // restore original order
+                    explicit_slots.reverse();
                     let parent = self.stack.pop().ok_or("MAKE_OBJECT: empty stack")?;
+
+                    // Clone default slot values from parent prototype.
+                    // Explicit slots override parent defaults.
+                    let mut slots = Vec::new();
+                    if let Value::Object(parent_id) = parent {
+                        if let HeapObject::GeneralObject { slots: parent_slots, .. } = self.heap.get(parent_id) {
+                            let parent_slots = parent_slots.clone();
+                            for (key, val) in &parent_slots {
+                                if !explicit_slots.iter().any(|(k, _)| k == key) {
+                                    slots.push((*key, *val));
+                                }
+                            }
+                        }
+                    }
+                    slots.extend(explicit_slots);
+
                     let obj = HeapObject::GeneralObject {
                         parent,
                         slots,
