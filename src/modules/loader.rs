@@ -252,13 +252,8 @@ impl ModuleLoader {
         let mod_name_val = vm.heap.alloc_string(name);
 
         for (def_name, def_source) in defs.iter().rev() {
-            let kind = if def_source.starts_with("(defmethod ") {
-                "method"
-            } else if def_source.contains("{ Object") || def_source.contains("{Object") || def_source.contains("{ ") {
-                "prototype"
-            } else {
-                "value"
-            };
+            // All definitions from module source files are code
+            let kind = "code";
 
             let def_name_val = vm.heap.alloc_string(def_name);
             let def_source_val = vm.heap.alloc_string(def_source);
@@ -486,32 +481,7 @@ impl ModuleLoader {
 
     /// Project source text from a ModuleImage's Definition objects.
     fn project_source(&self, vm: &VM, mod_id: u32) -> String {
-        let name = vm.read_string(vm.read_slot(mod_id, "name")).unwrap_or_default();
-        let requires = vm.read_string_list(vm.read_slot(mod_id, "requires"));
-        let provides = vm.read_string_list(vm.read_slot(mod_id, "provides"));
-        let unrestricted = vm.read_slot(mod_id, "unrestricted").is_truthy();
-
-        // Build module header
-        let mut source = format!("(module {}\n  (requires {})\n",
-            name,
-            if requires.is_empty() { String::new() } else { requires.join(" ") }
-        );
-        if unrestricted {
-            source.push_str("  (unrestricted)\n");
-        }
-        source.push_str(&format!("  (provides {}))\n", provides.join(" ")));
-
-        // Append each Definition's source
-        let defs = vm.definitions_list(mod_id);
-        for def_id in defs {
-            if let Some(def_source) = vm.definition_source(def_id) {
-                source.push('\n');
-                source.push_str(&def_source);
-                source.push('\n');
-            }
-        }
-
-        source
+        vm.project_module_source(mod_id)
     }
 
     /// Find a module's heap object id by name (non-mutating).
@@ -623,9 +593,7 @@ impl ModuleLoader {
                     let name_val = vm.heap.alloc_string(def_name);
                     let source_val = vm.heap.alloc_string(def_source);
                     let kind_sym = vm.heap.intern("kind");
-                    let kind_val = Value::Symbol(vm.heap.intern(
-                        if def_source.starts_with("(defmethod ") { "method" } else { "value" }
-                    ));
+                    let kind_val = Value::Symbol(vm.heap.intern("code"));
 
                     let def_id = vm.heap.alloc(HeapObject::GeneralObject {
                         parent: Value::Object(def_proto),

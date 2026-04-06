@@ -1,9 +1,7 @@
 (module system
   (requires bootstrap collections modules)
   (unrestricted)
-  (provides hello modules module-source module-exports which-module checkpoint save undef define-in as-name))
-
-(def hello (fn (x) x))
+  (provides modules module-source module-exports which-module checkpoint save undef define-in as-name))
 
 (def checkpoint (fn ()
   (__save-source)
@@ -67,7 +65,6 @@
             (write-err (str "(defined " def-name " in " module-name ")"))
             nil))))))
 
-; (undef foo) — removes binding from root AND Definition from its module
 (def undef
   (vau (name) $env
     (let ((n (as-name name)))
@@ -77,33 +74,3 @@
           [m remove-def: n]))
       (checkpoint)
       nil)))
-
-(defmethod String startsWith: (prefix)
-  (let ((idx [self indexOf: prefix]))
-    (if (null? idx) false [idx = 0])))
-
-(defmethod String endsWith: (suffix)
-  (let ((slen [self length])
-        (plen [suffix length]))
-    (if [plen > slen] false
-      [[self substring: [slen - plen] to: slen] = suffix])))
-
-(defmethod String contains: (sub)
-  (not (null? [self indexOf: sub])))
-
-(handle! ModuleImage ["define:source:" toSymbol]
-  (fn (self def-name def-source)
-    (let ((existing (find (fn (d) [[d slotAt: 'name] = def-name]) [self slotAt: 'definitions])))
-      (if (null? existing)
-        (let ((d { Definition
-                   module-name: [self slotAt: 'name]
-                   name: def-name
-                   source: def-source
-                   kind: 'value }))
-          [self slotAt: 'definitions put: (cons d [self slotAt: 'definitions])]
-          (if (null? (find (fn (p) [p = def-name]) [self slotAt: 'provides]))
-            [self slotAt: 'provides put: (cons def-name [self slotAt: 'provides])])
-          d)
-        (do
-          [existing slotAt: 'source put: def-source]
-          existing)))))

@@ -219,12 +219,46 @@ impl VM {
         }
         source.push_str(&format!("  (provides {}))\n", provides.join(" ")));
 
+        // Only project definitions whose value is a lambda, operative,
+        // or object with handlers (i.e. code). Plain values live in the
+        // binary image only — no source projection needed.
+        let env_val = self.read_slot(mod_id, "env");
+        let env_id = match env_val {
+            Value::Object(id) => Some(id),
+            _ => None,
+        };
         let defs = self.definitions_list(mod_id);
         for def_id in defs {
-            if let Some(def_source) = self.definition_source(def_id) {
-                source.push('\n');
-                source.push_str(&def_source);
-                source.push('\n');
+            let def_name = match self.definition_name(def_id) {
+                Some(n) => n,
+                None => continue,
+            };
+
+            // Check the actual value to determine if it's code
+            let is_code = if let Some(eid) = env_id {
+                let sym = match self.heap.symbol_lookup_only(&def_name) {
+                    Some(s) => s,
+                    None => { continue; }
+                };
+                match self.env_lookup(eid, sym) {
+                    Ok(Value::Object(val_id)) => match self.heap.get(val_id) {
+                        HeapObject::Lambda { .. } => true,
+                        HeapObject::Operative { .. } => true,
+                        HeapObject::GeneralObject { handlers, .. } => !handlers.is_empty(),
+                        _ => false,
+                    },
+                    _ => false,
+                }
+            } else {
+                true // no env, include everything (fallback)
+            };
+
+            if is_code {
+                if let Some(def_source) = self.definition_source(def_id) {
+                    source.push('\n');
+                    source.push_str(&def_source);
+                    source.push('\n');
+                }
             }
         }
         source

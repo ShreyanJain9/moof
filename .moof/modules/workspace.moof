@@ -1,12 +1,8 @@
 (module workspace
   (requires collections geometry classes membrane json modules mcp bootstrap system)
   (unrestricted)
-  (provides test-vau twice myfoo i))
+  (provides Foo count greet))
 
-(def test-vau (vau (name . body) $e (cons (quote def) (cons name body))))
+(def Foo { Object x: 1 describe: () "a foo" })
 
-(def twice (fn (x) [x * 2]))
-
-(def myfoo 42)
-
-(def i 0)
+(def greet (fn (x) (str "hi " x)))
