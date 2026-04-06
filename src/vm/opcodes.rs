@@ -88,21 +88,12 @@ pub const OP_TAIL_CALL: u8 = 0x35;
 // ── Built-in operations ──
 /// Evaluate an expression in the current environment.
 pub const OP_EVAL: u8 = 0x50;
-/// Print a value to the transcript.
-pub const OP_PRINT: u8 = 0x51;
-/// List operations (car, cdr) as opcodes for efficiency.
+/// List operations (car, cdr) as opcodes for efficiency (kernel-level hot path).
 pub const OP_CAR: u8 = 0x52;
 pub const OP_CDR: u8 = 0x53;
-/// Type checking. Stack: [value] → [symbol]
-pub const OP_TYPE_OF: u8 = 0x54;
-/// Load and evaluate a file. Stack: [path_string] → [result]
-pub const OP_LOAD: u8 = 0x55;
-/// Get the source AST of a lambda/operative. Stack: [callable] → [ast_or_nil]
-pub const OP_SOURCE: u8 = 0x56;
 /// Append two lists. Stack: [list-a, list-b] → [append(a, b)]
+/// Needed for quasiquote splicing — not just a convenience op.
 pub const OP_APPEND: u8 = 0x57;
-/// Evaluate a moof expression from a string. Stack: [string] → [result]
-pub const OP_EVAL_STRING: u8 = 0x58;
 
 // ── Object construction ──
 /// Create a new GeneralObject. Arg: u8 slot_count.
@@ -123,10 +114,12 @@ pub const OP_SLOT_SET: u8 = 0x63;
 
 // 0x64 formerly OP_PRIM_SEND — removed. All native ops are NativeFunction closures now.
 
-/// Open a native library. Stack: [name_string] → [library_object]
-pub const OP_FFI_OPEN: u8 = 0x70;
-/// Bind a foreign function via the native registry. Stack: [lib, name_string, arg_types_list, ret_type_sym] → [native_fn]
-pub const OP_FFI_BIND: u8 = 0x71;
+/// Eventual send — enqueue a message, return a promise.
+/// Same encoding as OP_SEND: u16 constant index (selector), u8 arg count.
+/// Stack: [receiver, arg1, ...argN] → [promise]
+pub const OP_EVENTUAL_SEND: u8 = 0x65;
+
+// FFI opcodes removed — ffi-open and ffi-bind are now native functions.
 
 /// Read a u16 from bytecode at the given offset (big-endian).
 pub fn read_u16(code: &[u8], offset: usize) -> u16 {

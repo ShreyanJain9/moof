@@ -10,6 +10,7 @@ use super::exec::VM;
 /// Register all native type prototype handlers.
 /// Called after bootstrap defines the prototype objects.
 pub fn register_all_natives(vm: &mut VM, root_env: u32) {
+    register_object_natives(vm, root_env);
     register_integer_natives(vm, root_env);
     register_float_natives(vm, root_env);
     register_boolean_natives(vm, root_env);
@@ -39,6 +40,73 @@ fn add_native(vm: &mut VM, proto_id: u32, selector: &str, name: &str, func: Box<
     let val = vm.register_native(name, func);
     let sel_sym = vm.heap.intern(selector);
     vm.heap.add_handler(proto_id, sel_sym, val);
+}
+
+// ── Object (universal protocol for GeneralObjects) ──
+// These handlers live on the Object prototype (root of the delegation chain).
+// Every GeneralObject inherits them. args[0] = the actual receiver.
+
+fn register_object_natives(vm: &mut VM, root_env: u32) {
+    // Look up "Object" in the root env — it's defined by bootstrap as (object nil).
+    let sym_obj = vm.heap.intern("Object");
+    let obj_id = match vm.env_lookup_helper(root_env, sym_obj) {
+        Ok(Value::Object(id)) => id,
+        _ => return, // Object not defined yet — skip
+    };
+
+    // slotAt: — read a slot by symbol key from the receiver
+    add_native(vm, obj_id, "slotAt:", "Object.slotAt:", Box::new(|heap, args| {
+        let id = args[0].as_object().ok_or("slotAt: expects object receiver")?;
+        let key = args.get(1).and_then(|v| v.as_symbol())
+            .ok_or("slotAt: expects a symbol")?;
+        match heap.get(id) {
+            HeapObject::GeneralObject { slots, .. } => {
+                let val = slots.iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| *v)
+                    .unwrap_or(Value::Nil);
+                Ok(val)
+            }
+            _ => Ok(Value::Nil),
+        }
+    }));
+
+    // slotAt:put: — set a slot by symbol key on the receiver
+    add_native(vm, obj_id, "slotAt:put:", "Object.slotAt:put:", Box::new(|heap, args| {
+        let id = args[0].as_object().ok_or("slotAt:put: expects object receiver")?;
+        let key = args.get(1).and_then(|v| v.as_symbol())
+            .ok_or("slotAt:put: expects a symbol key")?;
+        let val = args.get(2).copied().unwrap_or(Value::Nil);
+        heap.set_slot(id, key, val);
+        Ok(val)
+    }));
+
+    // slotNames — list all slot names of the receiver
+    add_native(vm, obj_id, "slotNames", "Object.slotNames", Box::new(|heap, args| {
+        let id = args[0].as_object().ok_or("slotNames expects object receiver")?;
+        match heap.get(id) {
+            HeapObject::GeneralObject { slots, .. } => {
+                let names: Vec<Value> = slots.iter()
+                    .map(|(k, _)| Value::Symbol(*k))
+                    .collect();
+                Ok(heap.list(&names))
+            }
+            _ => Ok(Value::Nil),
+        }
+    }));
+
+    // NOTE: handlerNames, handlerAt:, and parent are NOT registered here.
+    // They are handled in primitive_send (dispatch.rs) as part of the universal
+    // object protocol, because primitive types need different behavior
+    // (e.g., [42 parent] returns the Integer prototype, not a delegation parent).
+    // If we put them on Object, they'd be found via type proto delegation
+    // at step 2 of message_send, preempting the correct primitive behavior.
+
+    // describe — default description string
+    add_native(vm, obj_id, "describe", "Object.describe", Box::new(|heap, args| {
+        let id = args[0].as_object().ok_or("describe expects object receiver")?;
+        Ok(heap.alloc_string(&format!("<object #{}>", id)))
+    }));
 }
 
 // ── Integer ──
@@ -128,11 +196,6 @@ fn register_integer_natives(vm: &mut VM, root_env: u32) {
 
     add_native(vm, proto_id, "describe", "Integer.describe", Box::new(|heap, args| {
         let a = args[0].as_integer().ok_or("describe expects integer")?;
-        Ok(heap.alloc_string(&format!("{}", a)))
-    }));
-
-    add_native(vm, proto_id, "asString", "Integer.asString", Box::new(|heap, args| {
-        let a = args[0].as_integer().ok_or("asString expects integer")?;
         Ok(heap.alloc_string(&format!("{}", a)))
     }));
 
@@ -265,10 +328,6 @@ fn register_float_natives(vm: &mut VM, root_env: u32) {
         Ok(heap.alloc_string(&format!("{}", a)))
     }));
 
-    add_native(vm, proto_id, "asString", "Float.asString", Box::new(|heap, args| {
-        let a = args[0].as_float().ok_or("asString expects number")?;
-        Ok(heap.alloc_string(&format!("{}", a)))
-    }));
 }
 
 // ── Boolean ──
@@ -303,8 +362,23 @@ fn register_boolean_natives(vm: &mut VM, root_env: u32) {
         }
     }));
 
-    // NOTE: ifTrue:, ifTrue:ifFalse:, ifFalse:, and:, or: need call_value,
-    // which requires the VM — not just the heap. These stay in primitive_send.
+    // Boolean conditionals need call_value (VM access), so they're registered
+    // as stubs here and intercepted in VM::call_native.
+    add_native(vm, proto_id, "ifTrue:", "__bool_ifTrue:", Box::new(|_heap, _args| {
+        Ok(Value::Nil) // stub — intercepted in call_native
+    }));
+    add_native(vm, proto_id, "ifFalse:", "__bool_ifFalse:", Box::new(|_heap, _args| {
+        Ok(Value::Nil)
+    }));
+    add_native(vm, proto_id, "ifTrue:ifFalse:", "__bool_ifTrue:ifFalse:", Box::new(|_heap, _args| {
+        Ok(Value::Nil)
+    }));
+    add_native(vm, proto_id, "and:", "__bool_and:", Box::new(|_heap, _args| {
+        Ok(Value::Nil)
+    }));
+    add_native(vm, proto_id, "or:", "__bool_or:", Box::new(|_heap, _args| {
+        Ok(Value::Nil)
+    }));
 }
 
 // ── String ──
@@ -661,15 +735,6 @@ fn register_symbol_natives(vm: &mut VM, root_env: u32) {
         }
     }));
 
-    add_native(vm, proto_id, "asString", "Symbol.asString", Box::new(|heap, args| {
-        if let Value::Symbol(id) = args[0] {
-            let name = heap.symbol_name(id).to_string();
-            Ok(heap.alloc_string(&name))
-        } else {
-            Err("asString expects symbol".into())
-        }
-    }));
-
     add_native(vm, proto_id, "name", "Symbol.name", Box::new(|heap, args| {
         if let Value::Symbol(id) = args[0] {
             let name = heap.symbol_name(id).to_string();
@@ -722,6 +787,11 @@ fn register_lambda_natives(vm: &mut VM, root_env: u32) {
     add_native(vm, proto_id, "describe", "Lambda.describe", Box::new(|heap, _args| {
         Ok(heap.alloc_string("<lambda>"))
     }));
+
+    // call: — VM intercept, needs call_value
+    add_native(vm, proto_id, "call:", "__lambda_call:", Box::new(|_heap, _args| {
+        Ok(Value::Nil) // actual work in VM::call_native intercept
+    }));
 }
 
 // ── Operative ──
@@ -766,8 +836,8 @@ fn register_operative_natives(vm: &mut VM, root_env: u32) {
 }
 
 // ── Environment ──
-// NOTE: eval:, lookup:, set:to: need VM-level access (call_value, env_lookup, env_set).
-// These stay in primitive_send. We only register the pure ones here.
+// eval:, lookup:, set:to:, define:to:, remove: need VM-level access.
+// They're registered as stubs here and intercepted in VM::call_native.
 
 fn register_environment_natives(vm: &mut VM, root_env: u32) {
     let proto_id = match lookup_proto(vm, root_env, "Environment", |vm| &mut vm.proto_environment) {
@@ -781,6 +851,23 @@ fn register_environment_natives(vm: &mut VM, root_env: u32) {
 
     add_native(vm, proto_id, "describe", "Environment.describe", Box::new(|heap, _args| {
         Ok(heap.alloc_string("<environment>"))
+    }));
+
+    // VM-level intercepts: stubs that route through call_native
+    add_native(vm, proto_id, "eval:", "__env_eval:", Box::new(|_heap, _args| {
+        Ok(Value::Nil) // stub — intercepted in call_native
+    }));
+    add_native(vm, proto_id, "lookup:", "__env_lookup:", Box::new(|_heap, _args| {
+        Ok(Value::Nil)
+    }));
+    add_native(vm, proto_id, "set:to:", "__env_set:to:", Box::new(|_heap, _args| {
+        Ok(Value::Nil)
+    }));
+    add_native(vm, proto_id, "define:to:", "__env_define:to:", Box::new(|_heap, _args| {
+        Ok(Value::Nil)
+    }));
+    add_native(vm, proto_id, "remove:", "__env_remove:", Box::new(|_heap, _args| {
+        Ok(Value::Nil)
     }));
 }
 
@@ -805,6 +892,105 @@ fn register_io_natives(vm: &mut VM, root_env: u32) {
         Ok(Value::Nil) // actual work done in VM::call_native intercept
     }));
     let sym = vm.heap.intern("__try");
+    vm.heap.env_define(root_env, sym, val);
+
+    // __spawn: create a new vat (VM-level native)
+    let val = vm.register_native("__spawn", Box::new(|_heap, _args| {
+        Ok(Value::Nil) // actual work done in VM::call_native intercept
+    }));
+    let sym = vm.heap.intern("__spawn");
+    vm.heap.env_define(root_env, sym, val.clone());
+    // Also bind as `spawn` for convenience
+    let sym2 = vm.heap.intern("spawn");
+    vm.heap.env_define(root_env, sym2, val);
+
+    // ── Former opcodes, now native functions ──
+
+    // print: print a value to stdout (was OP_PRINT)
+    let val = vm.register_native("print", Box::new(|heap, args| {
+        if let Some(&v) = args.first() {
+            // Simple print — we don't have format_value without VM,
+            // so use a minimal formatter
+            let s = match v {
+                Value::Nil => "nil".to_string(),
+                Value::True => "true".to_string(),
+                Value::False => "false".to_string(),
+                Value::Integer(n) => n.to_string(),
+                Value::Float(f) => format!("{}", f),
+                Value::Symbol(id) => format!("'{}", heap.symbol_name(id)),
+                Value::Object(id) => match heap.get(id) {
+                    HeapObject::MoofString(s) => s.clone(),
+                    _ => format!("<object #{}>", id),
+                },
+            };
+            println!("{}", s);
+        }
+        Ok(Value::Nil)
+    }));
+    let sym = vm.heap.intern("print");
+    vm.heap.env_define(root_env, sym, val);
+
+    // type-of: return a symbol naming the type (was OP_TYPE_OF)
+    let val = vm.register_native("type-of", Box::new(|heap, args| {
+        let v = args.first().copied().unwrap_or(Value::Nil);
+        let type_name = match v {
+            Value::Nil => "Nil",
+            Value::True | Value::False => "Boolean",
+            Value::Integer(_) => "Integer",
+            Value::Float(_) => "Float",
+            Value::Symbol(_) => "Symbol",
+            Value::Object(id) => match heap.get(id) {
+                HeapObject::Cons { .. } => "Cons",
+                HeapObject::MoofString(_) => "String",
+                HeapObject::GeneralObject { .. } => "Object",
+                HeapObject::BytecodeChunk(_) => "Bytecode",
+                HeapObject::Operative { .. } => "Operative",
+                HeapObject::Lambda { .. } => "Lambda",
+                HeapObject::Environment(_) => "Environment",
+                HeapObject::NativeFunction { .. } => "NativeFunction",
+            },
+        };
+        let sym = heap.intern(type_name);
+        Ok(Value::Symbol(sym))
+    }));
+    let sym = vm.heap.intern("type-of");
+    vm.heap.env_define(root_env, sym, val);
+
+    // source: get the source AST of a lambda/operative (was OP_SOURCE)
+    let val = vm.register_native("source", Box::new(|heap, args| {
+        let v = args.first().copied().unwrap_or(Value::Nil);
+        let source = match v {
+            Value::Object(id) => match heap.get(id) {
+                HeapObject::Lambda { source, .. } => *source,
+                HeapObject::Operative { source, .. } => *source,
+                _ => Value::Nil,
+            },
+            _ => Value::Nil,
+        };
+        Ok(source)
+    }));
+    let sym = vm.heap.intern("source");
+    vm.heap.env_define(root_env, sym, val);
+
+    // eval-string: parse and evaluate a moof string (VM-level, was OP_EVAL_STRING)
+    let val = vm.register_native("__eval-string", Box::new(|_heap, _args| {
+        Ok(Value::Nil) // actual work done in VM::call_native intercept
+    }));
+    let sym = vm.heap.intern("eval-string");
+    vm.heap.env_define(root_env, sym, val);
+
+    // ffi-open: open a native library (VM-level, was OP_FFI_OPEN)
+    let val = vm.register_native("__ffi-open", Box::new(|_heap, _args| {
+        Ok(Value::Nil) // actual work done in VM::call_native intercept
+    }));
+    let sym = vm.heap.intern("ffi-open");
+    vm.heap.env_define(root_env, sym, val);
+
+    // ffi-bind: bind a foreign function (VM-level, was OP_FFI_BIND)
+    let val = vm.register_native("__ffi-bind", Box::new(|_heap, _args| {
+        Ok(Value::Nil) // actual work done in VM::call_native intercept
+    }));
+    let sym = vm.heap.intern("ffi-bind");
     vm.heap.env_define(root_env, sym, val);
 
     // read-line: reads a line from stdin, returns string or nil on EOF

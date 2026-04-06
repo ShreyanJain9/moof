@@ -1,21 +1,11 @@
 /// Module system for MOOF.
 ///
-/// Source files are the canonical representation. Each .moof file declares
-/// a module with explicit dependencies and exports. Modules load in
-/// topological order within sandboxed environments.
-///
-/// Directory layout:
-///   lib/
-///     bootstrap.moof    — kernel module (no deps)
-///     collections.moof  — data structures
-///     ...
-///   .moof/
-///     cache/            — compiled bytecode cache (derived, not canonical)
+/// Modules are objects in the image. Source files in lib/ exist only for
+/// initial seeding — once the image is built, it IS the program.
 
 pub mod graph;
 pub mod loader;
 pub mod sandbox;
-pub mod cache;
 
 use std::path::PathBuf;
 

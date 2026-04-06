@@ -1,7 +1,7 @@
-/// Module loader — discover, parse, sort, load, reload, remove.
+/// Module loader — discover, parse, sort, load.
 ///
-/// Coordinates the full module lifecycle:
-/// 1. Discover .moof files (from image dir or seed dir)
+/// Coordinates module loading:
+/// 1. Discover .moof files in a seed directory
 /// 2. Parse module headers
 /// 3. Build dependency graph
 /// 4. Load in topological order (sandboxed)
@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 use std::fs;
-use std::collections::{HashMap, BTreeMap};
+use std::collections::HashMap;
 
 use crate::reader::lexer::Lexer;
 use crate::reader::parser::Parser;
@@ -17,9 +17,7 @@ use crate::compiler::compile::Compiler;
 use crate::runtime::value::{Value, HeapObject};
 use crate::runtime::heap::Heap;
 use crate::vm::exec::VM;
-use crate::persistence::image;
-
-use super::{ModuleDescriptor, graph::ModuleGraph, sandbox, cache};
+use super::{ModuleDescriptor, graph::ModuleGraph, sandbox};
 
 pub struct ModuleLoader {
     /// The dependency graph
@@ -35,23 +33,6 @@ pub struct ModuleLoader {
 }
 
 impl ModuleLoader {
-    /// Create a minimal loader for image-resume mode.
-    /// All module state lives in the heap — this just provides
-    /// the image_dir for save operations.
-    pub fn from_image_dir(image_dir: PathBuf) -> Self {
-        ModuleLoader {
-            graph: super::graph::ModuleGraph {
-                modules: HashMap::new(),
-                edges: HashMap::new(),
-                reverse_edges: HashMap::new(),
-            },
-            loaded_envs: HashMap::new(),
-            exports: HashMap::new(),
-            source_texts: HashMap::new(),
-            image_dir,
-        }
-    }
-
     /// Discover all .moof files in a directory, parse headers, build graph.
     pub fn discover(dir: &Path, heap: &mut Heap) -> Result<Self, String> {
         let mut descriptors = Vec::new();
@@ -332,333 +313,6 @@ impl ModuleLoader {
         }
     }
 
-    /// Reload a module and all its transitive dependents.
-    pub fn reload(&mut self, name: &str, vm: &mut VM, root_env: u32) -> Result<(), String> {
-        // Check module exists on heap
-        if vm.find_module(name).is_none() {
-            return Err(format!("unknown module: {}", name));
-        }
-
-        // Compute dependents from heap
-        let modules = vm.all_module_ids();
-        let pairs: Vec<(String, Vec<String>)> = modules.iter()
-            .map(|(n, id)| (n.clone(), vm.read_string_list(vm.read_slot(*id, "requires"))))
-            .collect();
-        let dependents = super::graph::transitive_dependents_pairs(&pairs, name);
-
-        self.load_module(name, vm)?;
-        for dep in &dependents {
-            self.load_module(dep, vm)?;
-        }
-
-        self.merge_into_root(vm, root_env);
-        Ok(())
-    }
-
-    /// Update a module's source text, re-parse header, re-evaluate.
-    pub fn update_module_source(
-        &mut self,
-        name: &str,
-        new_source: String,
-        vm: &mut VM,
-        root_env: u32,
-    ) -> Result<(), String> {
-        // Re-parse the header from the new source
-        let dummy_path = PathBuf::from(format!("{}.moof", name));
-        let new_desc = parse_header(&new_source, &dummy_path, &mut vm.heap)?;
-
-        if new_desc.name != name {
-            return Err(format!("module name changed from '{}' to '{}'", name, new_desc.name));
-        }
-
-        // Update the descriptor in the graph (still needed for load_module)
-        self.graph.modules.insert(name.to_string(), new_desc);
-        self.source_texts.insert(name.to_string(), new_source);
-
-        // Reload module + dependents
-        self.reload(name, vm, root_env)
-    }
-
-    /// Remove a module. Returns the symbols that were unbound.
-    pub fn remove(&mut self, name: &str, vm: &mut VM) -> Result<Vec<String>, String> {
-        // Check dependents from heap
-        let modules = vm.all_module_ids();
-        let pairs: Vec<(String, Vec<String>)> = modules.iter()
-            .map(|(n, id)| (n.clone(), vm.read_string_list(vm.read_slot(*id, "requires"))))
-            .collect();
-        super::graph::can_remove_pairs(&pairs, name).map_err(|deps| {
-            format!("cannot remove '{}': depended on by {}", name, deps.join(", "))
-        })?;
-
-        // Read provides from heap before removing
-        let mod_id = vm.all_module_ids().iter().find(|(n, _)| n == name).map(|(_, id)| *id);
-        let provides: Vec<String> = if let Some(mod_id) = mod_id {
-            vm.read_string_list(vm.read_slot(mod_id, "provides"))
-        } else {
-            Vec::new()
-        };
-
-        // Remove from Modules registry on heap
-        // (We can't easily remove from Assoc yet, but we can set to nil)
-        if let Some(modules_obj) = vm.find_module_registry() {
-            let registry_val = vm.read_slot(modules_obj, "_registry");
-            if let Value::Object(registry_id) = registry_val {
-                let sel_set = vm.heap.intern("set:to:");
-                let name_val = vm.heap.alloc_string(name);
-                let _ = vm.message_send(
-                    Value::Object(registry_id),
-                    sel_set,
-                    &[name_val, Value::Nil],
-                );
-            }
-        }
-
-        // Also clean up graph/HashMap state if present
-        self.loaded_envs.remove(name);
-        self.source_texts.remove(name);
-        self.graph.modules.remove(name);
-
-        // Delete the .moof file
-        let mod_path = image::modules_dir(&self.image_dir)
-            .join(format!("{}.moof", name));
-        let _ = std::fs::remove_file(&mod_path);
-
-        Ok(provides)
-    }
-
-    /// Define a binding in a module: eval the expression, append to source,
-    /// update provides, and autosave.
-    ///
-    /// `def_source` is the raw source text, e.g. "(def foo (fn (x) [x + 1]))"
-    /// `def_name` is the symbol being defined, e.g. "foo"
-    pub fn define_in(
-        &mut self,
-        module_name: &str,
-        def_name: &str,
-        def_source: &str,
-        vm: &mut VM,
-        root_env: u32,
-    ) -> Result<Value, String> {
-        // Read env_id and unrestricted from heap ModuleImage
-        let mod_id = vm.find_module(module_name)
-            .ok_or_else(|| format!("unknown module: {}", module_name))?;
-        let env_id = match vm.read_slot(mod_id, "env") {
-            Value::Object(id) => id,
-            _ => return Err(format!("{}: no env on ModuleImage", module_name)),
-        };
-        let is_unrestricted = module_name == "bootstrap"
-            || vm.read_slot(mod_id, "unrestricted").is_truthy();
-
-        // Compile and eval the expression in the module's env
-        let mut lexer = Lexer::new(def_source);
-        let tokens = lexer.tokenize()
-            .map_err(|e| format!("lex error: {}", e))?;
-        let mut parser = Parser::new(tokens);
-        let exprs = parser.parse_all(&mut vm.heap)
-            .map_err(|e| format!("parse error: {}", e))?;
-
-        let mut result = Value::Nil;
-        for expr in exprs {
-            let mut compiler = if is_unrestricted {
-                Compiler::new()
-            } else {
-                Compiler::new_sandboxed()
-            };
-            let chunk = compiler.compile_expr(&mut vm.heap, expr)
-                .map_err(|e| format!("compile error: {}", e))?;
-            let chunk_id = vm.heap.alloc_chunk(chunk);
-            result = vm.execute(chunk_id, env_id)
-                .map_err(|e| format!("runtime error: {}", e))?;
-        }
-
-        // Update root env with the new binding
-        let sym = vm.heap.intern(def_name);
-        if let Ok(val) = vm.env_lookup(env_id, sym) {
-            vm.env_define_helper(root_env, sym, val);
-        }
-
-        // ── Update/create Definition on the heap ──
-        if let Some(mod_id) = vm.find_module(module_name) {
-            let sym_definition = vm.heap.intern("Definition");
-            let def_proto = match vm.env_lookup(root_env, sym_definition) {
-                Ok(Value::Object(id)) => id,
-                _ => 0,
-            };
-
-            if def_proto != 0 {
-                // Check if a Definition with this name already exists
-                let name_sym = vm.heap.intern("name");
-                let source_sym = vm.heap.intern("source");
-                let existing_def = vm.definitions_list(mod_id).into_iter().find(|def_id| {
-                    vm.definition_name(*def_id).as_deref() == Some(def_name)
-                });
-
-                if let Some(existing_id) = existing_def {
-                    // Update existing Definition's source
-                    let new_source_val = vm.heap.alloc_string(def_source);
-                    vm.heap.set_slot(existing_id, source_sym, new_source_val);
-                } else {
-                    // Create new Definition
-                    let mod_name_sym = vm.heap.intern("module-name");
-                    let mod_name_val = vm.heap.alloc_string(module_name);
-                    let name_val = vm.heap.alloc_string(def_name);
-                    let source_val = vm.heap.alloc_string(def_source);
-                    let kind_sym = vm.heap.intern("kind");
-                    let kind_val = Value::Symbol(vm.heap.intern("code"));
-
-                    let def_id = vm.heap.alloc(HeapObject::GeneralObject {
-                        parent: Value::Object(def_proto),
-                        slots: vec![
-                            (mod_name_sym, mod_name_val),
-                            (name_sym, name_val),
-                            (source_sym, source_val),
-                            (kind_sym, kind_val),
-                        ],
-                        handlers: Vec::new(),
-                    });
-
-                    // Cons onto definitions list
-                    let sym_definitions = vm.heap.intern("definitions");
-                    let current_defs = vm.read_slot(mod_id, "definitions");
-                    let new_defs = vm.heap.cons(Value::Object(def_id), current_defs);
-                    vm.heap.set_slot(mod_id, sym_definitions, new_defs);
-
-                    // Update provides on ModuleImage
-                    let provides_sym = vm.heap.intern("provides");
-                    let current_provides = vm.read_slot(mod_id, "provides");
-                    let prov_list = vm.read_string_list(current_provides);
-                    if !prov_list.contains(&def_name.to_string()) {
-                        let new_prov = vm.heap.alloc_string(def_name);
-                        let new_provides = vm.heap.cons(new_prov, current_provides);
-                        vm.heap.set_slot(mod_id, provides_sym, new_provides);
-                    }
-                }
-            }
-        }
-
-        Ok(result)
-    }
-
-    /// Create a new module with the given name, dependencies, and initial source.
-    pub fn create_module(
-        &mut self,
-        name: &str,
-        requires: &[String],
-        unrestricted: bool,
-        vm: &mut VM,
-        root_env: u32,
-    ) -> Result<(), String> {
-        if self.graph.modules.contains_key(name) {
-            return Err(format!("module '{}' already exists", name));
-        }
-
-        // Validate requires
-        for req in requires {
-            if !self.graph.modules.contains_key(req.as_str()) {
-                return Err(format!("unknown required module: {}", req));
-            }
-        }
-
-        // Build the source text
-        let mut header = format!("(module {}\n  (requires {})\n  (provides))",
-            name,
-            if requires.is_empty() { String::new() }
-            else { requires.join(" ") });
-
-        if unrestricted {
-            header = header.replace("(provides)", "(unrestricted)\n  (provides)");
-        }
-
-        let source = format!("{}\n\n; — {} —\n", header, name);
-
-        // Parse the header to get a descriptor
-        let dummy_path = PathBuf::from(format!("{}.moof", name));
-        let desc = parse_header(&source, &dummy_path, &mut vm.heap)?;
-
-        // Add to graph (rebuild to validate no cycles)
-        let mut all_descs: Vec<ModuleDescriptor> = self.graph.modules.values().cloned().collect();
-        all_descs.push(desc);
-        self.graph = ModuleGraph::build(all_descs)?;
-
-        // Store source
-        self.source_texts.insert(name.to_string(), source);
-
-        // Create sandbox env
-        let mut imports: HashMap<String, Value> = HashMap::new();
-        for req in requires {
-            if let Some(req_exports) = self.exports.get(req.as_str()) {
-                for (sym_name, val) in req_exports {
-                    imports.insert(sym_name.clone(), *val);
-                }
-            }
-        }
-        let env_id = sandbox::create_sandbox_env(vm, &imports);
-        self.loaded_envs.insert(name.to_string(), env_id);
-        self.exports.insert(name.to_string(), Vec::new());
-
-        Ok(())
-    }
-
-    /// Find which module defines a given symbol.
-    pub fn which_module(&self, symbol: &str) -> Option<&str> {
-        // Check in topo order so we get the "real" owner (not re-exports)
-        if let Ok(order) = self.graph.topo_sort() {
-            for name in &order {
-                if let Some(desc) = self.graph.modules.get(name) {
-                    if desc.provides.contains(&symbol.to_string()) {
-                        return Some(&desc.name);
-                    }
-                }
-            }
-        }
-        None
-    }
-}
-
-/// Remove duplicate (def NAME ...) forms from source, keeping the last occurrence.
-fn dedup_defs(source: &str, def_name: &str) -> String {
-    let pattern = format!("(def {} ", def_name);
-    let alt_pattern = format!("(def {}\n", def_name);
-
-    // Find all occurrences of this def
-    let mut occurrences: Vec<(usize, usize)> = Vec::new(); // (start, end) byte ranges
-
-    let mut search_from = 0;
-    while search_from < source.len() {
-        let found = source[search_from..].find(&pattern)
-            .or_else(|| source[search_from..].find(&alt_pattern));
-
-        if let Some(rel_pos) = found {
-            let start = search_from + rel_pos;
-            // Find the end of this form by matching parens
-            if let Some(end) = find_form_end(&source[start..]) {
-                occurrences.push((start, start + end));
-                search_from = start + end;
-            } else {
-                break;
-            }
-        } else {
-            break;
-        }
-    }
-
-    // If 0 or 1 occurrences, nothing to dedup
-    if occurrences.len() <= 1 {
-        return source.to_string();
-    }
-
-    // Remove all but the last occurrence
-    let mut result = source.to_string();
-    for &(start, end) in occurrences[..occurrences.len() - 1].iter().rev() {
-        // Also eat trailing whitespace
-        let mut trim_end = end;
-        while trim_end < result.len() && result.as_bytes()[trim_end] == b'\n' {
-            trim_end += 1;
-        }
-        result.replace_range(start..trim_end, "");
-    }
-
-    result
 }
 
 /// Find the byte offset of the end of a top-level form starting at the beginning of `s`.
@@ -788,22 +442,6 @@ fn extract_def_name_from_form(form: &str) -> Option<String> {
     }
 }
 
-/// Update the (provides ...) clause in a module header.
-fn update_header_provides(source: &str, provides: &[String]) -> String {
-    // Find the (provides ...) form in the header
-    if let Some(prov_start) = source.find("(provides") {
-        // Find the matching close paren
-        if let Some(rel_end) = find_form_end(&source[prov_start..]) {
-            let prov_end = prov_start + rel_end;
-            let new_provides = format!("(provides {})", provides.join(" "));
-            let mut result = source.to_string();
-            result.replace_range(prov_start..prov_end, &new_provides);
-            return result;
-        }
-    }
-    source.to_string()
-}
-
 /// Parse the module header from a .moof file's source text.
 ///
 /// Expected form: (module NAME (requires DEP1 DEP2 ...) (provides SYM1 SYM2 ...))
@@ -888,7 +526,7 @@ pub fn parse_header(source: &str, path: &Path, heap: &mut Heap) -> Result<Module
         }
     }
 
-    let source_hash = cache::sha256_hex(source.as_bytes());
+    let source_hash = String::new();
 
     Ok(ModuleDescriptor {
         name,

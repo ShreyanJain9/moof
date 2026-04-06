@@ -4,11 +4,9 @@
 /// signatures dispatched at runtime based on type descriptors.
 
 use libloading::{Library, Symbol as LibSymbol};
-use std::collections::HashMap;
 use std::ffi::{CString, CStr, c_void};
 
 use crate::runtime::value::{Value, HeapObject};
-use crate::runtime::heap::Heap;
 
 /// A loaded native library.
 pub struct NativeLibrary {
@@ -201,7 +199,3 @@ fn get_string_arg(val: &Value, heap: &crate::runtime::heap::Heap) -> Result<Stri
     }
 }
 
-/// The name of a foreign function (for display).
-pub fn foreign_name(ff: &ForeignFunction) -> &str {
-    &ff.name
-}

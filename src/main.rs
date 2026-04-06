@@ -11,11 +11,13 @@ mod gui;
 use std::io::{self, Write, BufRead};
 use std::path::PathBuf;
 use vm::exec::VM;
+use vm::scheduler::Scheduler;
+use vm::repl_ext::ReplExtension;
 use reader::lexer::Lexer;
 use reader::parser::Parser;
 use compiler::compile::Compiler;
 use runtime::value::{Value, HeapObject};
-use persistence::{image, snapshot};
+use persistence::snapshot;
 
 fn image_dir() -> PathBuf {
     PathBuf::from(".moof")
@@ -133,12 +135,35 @@ fn main() {
     println!("clarus the dogcow lives again");
     println!("Type expressions to evaluate. Ctrl-D to exit.\n");
 
+    // ── Scheduler setup ──
+    // Create the scheduler. Park the REPL vat (vat 0) into it,
+    // then swap it back in for the REPL loop. Other vats (from spawn)
+    // get round-robin turns between REPL reads.
+    let mut scheduler = Scheduler::new();
+    let repl_vat_id = {
+        let id = vm.vat.id;
+        scheduler.park(&mut vm);
+        id
+    };
+    // Register the REPL extension
+    scheduler.add_extension(Box::new(ReplExtension::new(repl_vat_id)));
+    // Swap vat 0 back in — it's the active vat for REPL eval
+    scheduler.swap_in(&mut vm, repl_vat_id);
+
     // REPL
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let mut buffer = String::new();
 
     loop {
+        // ── Process spawns + run other vats before prompting ──
+        scheduler.drain_spawns(&mut vm);
+        if scheduler.len() > 0 {
+            scheduler.park(&mut vm);
+            scheduler.run_round(&mut vm);
+            scheduler.swap_in(&mut vm, repl_vat_id);
+        }
+
         if buffer.is_empty() {
             print!("moof> ");
         } else {
@@ -206,55 +231,6 @@ fn main() {
     }
 }
 
-/// Handle (module-edit name) — open $EDITOR, re-evaluate on save.
-fn handle_module_edit(
-    name: &str,
-    loader: &mut modules::loader::ModuleLoader,
-    vm: &mut VM,
-    root_env: u32,
-) -> Result<(), String> {
-    let source = loader.source_texts.get(name)
-        .ok_or_else(|| format!("unknown module: {}", name))?
-        .clone();
-
-    // Write to temp file
-    let tmp_path = std::env::temp_dir().join(format!("{}.moof", name));
-    std::fs::write(&tmp_path, &source)
-        .map_err(|e| format!("cannot write temp file: {}", e))?;
-
-    // Open $EDITOR
-    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
-    let status = std::process::Command::new(&editor)
-        .arg(&tmp_path)
-        .status()
-        .map_err(|e| format!("cannot open editor '{}': {}", editor, e))?;
-
-    if !status.success() {
-        return Err("editor exited with error".into());
-    }
-
-    // Read back
-    let new_source = std::fs::read_to_string(&tmp_path)
-        .map_err(|e| format!("cannot read temp file: {}", e))?;
-    let _ = std::fs::remove_file(&tmp_path);
-
-    if new_source == source {
-        return Err("no changes".into());
-    }
-
-    // Update module source, re-parse header, re-evaluate
-    loader.update_module_source(name, new_source, vm, root_env)
-        .map_err(|e| format!("reload failed: {}", e))?;
-
-    // Save binary image
-    let _ = crate::persistence::snapshot::save_image(
-        &std::path::PathBuf::from(".moof/image.bin"),
-        &vm.heap, root_env, vm.get_protos(),
-    );
-
-    Ok(())
-}
-
 /// Populate the Modules object with info about all loaded modules.
 /// Set up the workspace module for REPL autosave.
 fn setup_workspace(
@@ -269,8 +245,7 @@ fn setup_workspace(
 
     // If there's a workspace.moof file, it'll be loaded by the module system.
     // If not, we create one dynamically.
-    let workspace_path = image::modules_dir(&image_dir())
-        .join("workspace.moof");
+    let workspace_path = image_dir().join("modules").join("workspace.moof");
 
     if !workspace_path.exists() {
         // Get all module names for the requires list
@@ -622,110 +597,6 @@ impl VM {
         }
         Err("not found".into())
     }
-}
-
-/// Parse (define-in module-name (def name ...)) or (define-in module-name (defmethod ...))
-/// Returns (module_name, def_name, full_def_source)
-fn parse_define_in(input: &str) -> Result<(String, String, String), String> {
-    // (define-in MODULE_NAME REST...)
-    // Strip outer parens: "define-in MODULE_NAME REST..."
-    let inner = &input[1..input.len()-1]; // strip ( and )
-    let inner = inner.strip_prefix("define-in ").ok_or("expected (define-in ...)")?;
-    let inner = inner.trim_start();
-
-    // Find module name (first token)
-    let space = inner.find(|c: char| c.is_whitespace())
-        .ok_or("expected module name and definition")?;
-    let module_name = inner[..space].to_string();
-    let def_source = inner[space..].trim().to_string();
-
-    // Extract the defined name from the def source
-    let def_name = extract_def_name(&def_source)?;
-
-    Ok((module_name, def_name, def_source))
-}
-
-/// Extract the name being defined from a (def NAME ...) or (defmethod OBJ NAME ...) form.
-fn extract_def_name(source: &str) -> Result<String, String> {
-    let trimmed = source.trim();
-    if trimmed.starts_with("(def ") && !trimmed.starts_with("(defmethod ") {
-        // (def NAME ...)
-        let after = &trimmed[5..];
-        let end = after.find(|c: char| c.is_whitespace() || c == ')')
-            .unwrap_or(after.len());
-        Ok(after[..end].to_string())
-    } else if trimmed.starts_with("(defmethod ") {
-        // (defmethod OBJ NAME ...)
-        let after = &trimmed[11..];
-        let first_space = after.find(|c: char| c.is_whitespace())
-            .ok_or("expected (defmethod OBJ NAME ...)")?;
-        let rest = after[first_space..].trim_start();
-        let end = rest.find(|c: char| c.is_whitespace() || c == ')')
-            .unwrap_or(rest.len());
-        Ok(rest[..end].to_string())
-    } else if trimmed.starts_with("(handle! ") {
-        // (handle! OBJ 'SELECTOR ...) — use the selector as the name
-        // This is trickier; just use a generic name
-        Ok("_handler_".to_string())
-    } else {
-        Err(format!("cannot extract name from: {}", &trimmed[..trimmed.len().min(40)]))
-    }
-}
-
-/// Parse (module-create name (requires dep1 dep2))
-fn parse_module_create(input: &str, heap: &mut crate::runtime::heap::Heap) -> Result<(String, Vec<String>, bool), String> {
-    let inner = &input[1..input.len()-1]; // strip outer parens
-    let inner = inner.strip_prefix("module-create ").ok_or("expected (module-create ...)")?;
-    let inner = inner.trim_start();
-
-    // Parse as a moof expression for clean handling
-    let full = format!("(module-create {})", inner);
-    let mut lexer = Lexer::new(&full);
-    let tokens = lexer.tokenize().map_err(|e| format!("lex error: {}", e))?;
-    let mut parser = Parser::new(tokens);
-    let exprs = parser.parse_all(heap).map_err(|e| format!("parse error: {}", e))?;
-
-    if exprs.is_empty() {
-        return Err("empty module-create".into());
-    }
-
-    let elements = heap.list_to_vec(exprs[0]);
-    // elements[0] = module-create, elements[1] = name, elements[2..] = clauses
-
-    if elements.len() < 2 {
-        return Err("(module-create) missing name".into());
-    }
-
-    let name = match elements[1] {
-        Value::Symbol(sym) => heap.symbol_name(sym).to_string(),
-        _ => return Err("module name must be a symbol".into()),
-    };
-
-    let mut requires = Vec::new();
-    let mut unrestricted = false;
-
-    for &element in &elements[2..] {
-        if let Value::Symbol(sym) = element {
-            if heap.symbol_name(sym) == "unrestricted" {
-                unrestricted = true;
-                continue;
-            }
-        }
-        let sub = heap.list_to_vec(element);
-        if sub.is_empty() { continue; }
-        if let Value::Symbol(sym) = sub[0] {
-            let kw = heap.symbol_name(sym).to_string();
-            if kw == "requires" {
-                for &item in &sub[1..] {
-                    if let Value::Symbol(s) = item {
-                        requires.push(heap.symbol_name(s).to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    Ok((name, requires, unrestricted))
 }
 
 /// Find the lib/ directory for seeding.

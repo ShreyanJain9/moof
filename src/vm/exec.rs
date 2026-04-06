@@ -7,7 +7,7 @@ use crate::runtime::value::{Value, HeapObject};
 use crate::runtime::heap::Heap;
 use crate::ffi::bridge::{self, NativeLibrary, FfiType};
 use super::opcodes::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 /// A native function callable from MOOF. Receives a mutable heap and args.
 pub type NativeFn = Box<dyn Fn(&mut Heap, &[Value]) -> Result<Value, String>>;
@@ -61,6 +61,20 @@ struct CallFrame {
     stack_base: usize,
 }
 
+/// A message queued for delivery to a vat.
+/// Eventual sends produce these; the scheduler delivers one per turn.
+#[derive(Debug, Clone)]
+pub struct Message {
+    /// The receiver object (heap id)
+    pub receiver: u32,
+    /// The selector symbol (heap id)
+    pub selector: u32,
+    /// Arguments to the send
+    pub args: Vec<Value>,
+    /// Promise object to resolve with the result (if any)
+    pub resolver: Option<u32>,
+}
+
 /// Per-vat execution state. Each vat has its own stack, frames, and root env.
 /// Multiple vats share the same heap (via the VM/Runtime).
 pub struct VatState {
@@ -76,6 +90,8 @@ pub struct VatState {
     pub status: VatStatus,
     /// Fuel remaining — instructions before yielding. 0 = unlimited.
     pub fuel: u32,
+    /// Pending messages to process
+    pub mailbox: VecDeque<Message>,
 }
 
 /// Default fuel per turn (0 = unlimited, used for REPL/seed mode)
@@ -110,8 +126,34 @@ impl VatState {
             root_env: None,
             status: VatStatus::Ready,
             fuel: DEFAULT_FUEL,
+            mailbox: VecDeque::new(),
         }
     }
+
+    /// Enqueue a message for this vat.
+    pub fn enqueue(&mut self, msg: Message) {
+        self.mailbox.push_back(msg);
+    }
+
+    /// Dequeue the next pending message (if any).
+    pub fn dequeue(&mut self) -> Option<Message> {
+        self.mailbox.pop_front()
+    }
+
+    /// Check if this vat has pending messages.
+    pub fn has_messages(&self) -> bool {
+        !self.mailbox.is_empty()
+    }
+}
+
+/// A pending spawn request. Created by the __spawn native,
+/// processed by the scheduler after the current turn completes.
+#[derive(Debug)]
+pub struct SpawnRequest {
+    /// The function (lambda) to run in the new vat
+    pub func: Value,
+    /// The handle object id (allocated by __spawn, returned to caller)
+    pub handle_id: u32,
 }
 
 /// The MOOF virtual machine.
@@ -124,6 +166,8 @@ pub struct VM {
     pub sym_call: u32,
     pub sym_parent: u32,
     pub sym_does_not_understand: u32,
+    pub sym_slot_at: u32,
+    pub sym_slot_at_put: u32,
     /// Type prototypes — maps primitive types to their prototype object ids.
     pub proto_integer: Option<u32>,
     pub proto_float: Option<u32>,
@@ -139,6 +183,8 @@ pub struct VM {
     pub native_registry: NativeRegistry,
     /// FFI: open native libraries (keyed by name, kept for symbol lookup)
     pub ffi_libs: HashMap<String, NativeLibrary>,
+    /// Pending spawn requests (drained by the scheduler after each turn)
+    pub spawn_queue: Vec<SpawnRequest>,
 }
 
 /// Result of VM execution.
@@ -150,6 +196,8 @@ impl VM {
         let sym_call = heap.intern("call:");
         let sym_parent = heap.intern("parent");
         let sym_dnu = heap.intern("doesNotUnderstand:");
+        let sym_slot_at = heap.intern("slotAt:");
+        let sym_slot_at_put = heap.intern("slotAt:put:");
 
         VM {
             heap,
@@ -157,6 +205,8 @@ impl VM {
             sym_call,
             sym_parent,
             sym_does_not_understand: sym_dnu,
+            sym_slot_at,
+            sym_slot_at_put,
             proto_integer: None,
             proto_float: None,
             proto_boolean: None,
@@ -169,6 +219,7 @@ impl VM {
             proto_environment: None,
             native_registry: NativeRegistry::new(),
             ffi_libs: HashMap::new(),
+            spawn_queue: Vec::new(),
         }
     }
 
@@ -180,7 +231,7 @@ impl VM {
     }
 
     /// Call a native function by name, temporarily taking the registry to avoid borrow conflicts.
-    fn call_native(&mut self, name: &str, args: &[Value]) -> Result<Value, String> {
+    pub(crate) fn call_native(&mut self, name: &str, args: &[Value]) -> Result<Value, String> {
         // VM-level natives that need full VM access (not just Heap)
         if name == "__save-image" {
             return self.native_save_image(args);
@@ -188,8 +239,54 @@ impl VM {
         if name == "__try" {
             return self.native_try(args);
         }
-        // __eval-in, __undef, __define-global removed —
-        // replaced by pure vau + environment manipulation in system.moof
+        if name == "__spawn" {
+            return self.native_spawn(args);
+        }
+        if name == "__eval-string" {
+            return self.native_eval_string(args);
+        }
+        if name == "__ffi-open" {
+            return self.native_ffi_open(args);
+        }
+        if name == "__ffi-bind" {
+            return self.native_ffi_bind(args);
+        }
+        if name == "__lambda_call:" {
+            // args[0] = the lambda/native receiver, args[1..] = actual call args
+            let callable = args.first().copied().ok_or("call: needs receiver")?;
+            return self.call_value(callable, &args[1..]);
+        }
+        if name == "__bool_ifTrue:" {
+            return self.native_bool_iftrue(args);
+        }
+        if name == "__bool_ifFalse:" {
+            return self.native_bool_iffalse(args);
+        }
+        if name == "__bool_ifTrue:ifFalse:" {
+            return self.native_bool_iftrue_iffalse(args);
+        }
+        if name == "__bool_and:" {
+            return self.native_bool_and(args);
+        }
+        if name == "__bool_or:" {
+            return self.native_bool_or(args);
+        }
+        // Environment VM intercepts — need full VM access for eval/env ops
+        if name == "__env_eval:" {
+            return self.native_env_eval(args);
+        }
+        if name == "__env_lookup:" {
+            return self.native_env_lookup(args);
+        }
+        if name == "__env_set:to:" {
+            return self.native_env_set_to(args);
+        }
+        if name == "__env_define:to:" {
+            return self.native_env_define_to(args);
+        }
+        if name == "__env_remove:" {
+            return self.native_env_remove(args);
+        }
 
         let registry = std::mem::replace(&mut self.native_registry, NativeRegistry::new());
         let result = match registry.get(name) {
@@ -226,215 +323,221 @@ impl VM {
         }
     }
 
-    /// Get the type prototype for a value (if registered).
-    fn type_prototype(&self, val: Value) -> Option<u32> {
-        match val {
-            Value::Integer(_) => self.proto_integer,
-            Value::Float(_) => self.proto_float.or(self.proto_integer), // prefer Float proto, fall back to Integer
-            Value::True | Value::False => self.proto_boolean,
-            Value::Nil => self.proto_nil,
-            Value::Symbol(_) => self.proto_symbol,
+    /// Native: spawn a new vat.
+    /// Args: [lambda]
+    /// Creates a SpawnRequest. The scheduler processes it after the turn.
+    /// Returns a VatHandle object with a `vat-id` slot (set to -1 until scheduler assigns it).
+    fn native_spawn(&mut self, args: &[Value]) -> Result<Value, String> {
+        let func = args.first().copied().ok_or("spawn: needs a function argument")?;
+
+        // Validate it's callable
+        match func {
             Value::Object(id) => match self.heap.get(id) {
-                HeapObject::MoofString(_) => self.proto_string,
-                HeapObject::Cons { .. } => self.proto_cons,
-                HeapObject::Lambda { .. } => self.proto_lambda,
-                HeapObject::Operative { .. } => self.proto_operative,
-                HeapObject::Environment(_) => self.proto_environment,
-                _ => None,
+                HeapObject::Lambda { .. } | HeapObject::Operative { .. } | HeapObject::NativeFunction { .. } => {}
+                _ => return Err("spawn: argument must be a function".into()),
             },
+            _ => return Err("spawn: argument must be a function".into()),
         }
+
+        // Allocate a handle object — the scheduler will fill in vat-id
+        let vat_id_sym = self.heap.intern("vat-id");
+        let status_sym = self.heap.intern("status");
+        let status_val = self.heap.alloc_string("pending");
+        let handle_id = self.heap.alloc(HeapObject::GeneralObject {
+            parent: Value::Nil,
+            slots: vec![
+                (vat_id_sym, Value::Integer(-1)),
+                (status_sym, status_val),
+            ],
+            handlers: Vec::new(),
+        });
+
+        self.spawn_queue.push(SpawnRequest {
+            func,
+            handle_id,
+        });
+
+        Ok(Value::Object(handle_id))
+    }
+
+    /// Native: eval-string. Parses and evaluates a moof string.
+    fn native_eval_string(&mut self, args: &[Value]) -> Result<Value, String> {
+        let str_val = args.first().copied().ok_or("eval-string: needs argument")?;
+        let source = match str_val {
+            Value::Object(id) => match self.heap.get(id).clone() {
+                HeapObject::MoofString(s) => s,
+                _ => return Err("eval-string: expected string".into()),
+            },
+            _ => return Err("eval-string: expected string".into()),
+        };
+        let env_id = self.vat.root_env.unwrap_or(0);
+        crate::eval_source(self, env_id, &source, "<eval-string>")
+    }
+
+    /// Native: ffi-open. Opens a native library.
+    fn native_ffi_open(&mut self, args: &[Value]) -> Result<Value, String> {
+        let name_val = args.first().copied().ok_or("ffi-open: needs library name")?;
+        let name = match name_val {
+            Value::Object(id) => match self.heap.get(id).clone() {
+                HeapObject::MoofString(s) => s,
+                _ => return Err("ffi-open: expected string name".into()),
+            },
+            _ => return Err("ffi-open: expected string name".into()),
+        };
+        let lib = bridge::open_library(&name)?;
+        self.ffi_libs.insert(name.clone(), lib);
+        let lib_sym = self.heap.intern(&format!("ffi:{}", name));
+        Ok(Value::Symbol(lib_sym))
+    }
+
+    /// Native: ffi-bind. Binds a foreign function from an open library.
+    fn native_ffi_bind(&mut self, args: &[Value]) -> Result<Value, String> {
+        if args.len() != 4 {
+            return Err("ffi-bind: requires lib, name, arg-types, ret-type".into());
+        }
+        let lib_val = args[0];
+        let func_name_val = args[1];
+        let arg_types_val = args[2];
+        let ret_type_val = args[3];
+
+        let lib_name = match lib_val {
+            Value::Symbol(id) => {
+                let full = self.heap.symbol_name(id).to_string();
+                full.strip_prefix("ffi:").unwrap_or(&full).to_string()
+            }
+            _ => return Err("ffi-bind: first arg must be a library handle".into()),
+        };
+        let func_name = match func_name_val {
+            Value::Object(id) => match self.heap.get(id).clone() {
+                HeapObject::MoofString(s) => s,
+                _ => return Err("ffi-bind: expected string function name".into()),
+            },
+            _ => return Err("ffi-bind: expected string function name".into()),
+        };
+        let arg_type_syms = self.heap.list_to_vec(arg_types_val);
+        let mut arg_types = Vec::new();
+        for sym_val in &arg_type_syms {
+            if let Value::Symbol(sid) = sym_val {
+                let name = self.heap.symbol_name(*sid).to_string();
+                let ftype = FfiType::from_symbol_name(&name)
+                    .ok_or_else(|| format!("ffi-bind: unknown type '{}'", name))?;
+                arg_types.push(ftype);
+            } else {
+                return Err("ffi-bind: arg types must be symbols".into());
+            }
+        }
+        let ret_type_name = match ret_type_val {
+            Value::Symbol(sid) => self.heap.symbol_name(sid).to_string(),
+            _ => return Err("ffi-bind: return type must be a symbol".into()),
+        };
+        let ret_type = FfiType::from_symbol_name(&ret_type_name)
+            .ok_or_else(|| format!("ffi-bind: unknown return type '{}'", ret_type_name))?;
+
+        let lib = self.ffi_libs.get(&lib_name)
+            .ok_or_else(|| format!("ffi-bind: library '{}' not open", lib_name))?;
+        let ff = bridge::bind_function(lib, &func_name, arg_types, ret_type)?;
+
+        let native_name = format!("ffi:{}:{}", lib_name, func_name);
+        let ff_closure: NativeFn = Box::new(move |heap, args| {
+            bridge::call_foreign(&ff, args, heap)
+        });
+        self.native_registry.register(native_name.clone(), ff_closure);
+        let nf_obj = HeapObject::NativeFunction { name: native_name };
+        let nf_id = self.heap.alloc(nf_obj);
+        Ok(Value::Object(nf_id))
+    }
+
+    // ── Boolean conditional natives ──
+    // These need call_value (VM access), so they're intercepted here.
+    // args[0] = receiver (True/False), args[1..] = block arguments.
+
+    fn native_bool_iftrue(&mut self, args: &[Value]) -> Result<Value, String> {
+        match args[0] {
+            Value::True => self.call_value(args[1], &[]),
+            Value::False => Ok(Value::Nil),
+            _ => Err("ifTrue: expects boolean receiver".into()),
+        }
+    }
+
+    fn native_bool_iffalse(&mut self, args: &[Value]) -> Result<Value, String> {
+        match args[0] {
+            Value::True => Ok(Value::Nil),
+            Value::False => self.call_value(args[1], &[]),
+            _ => Err("ifFalse: expects boolean receiver".into()),
+        }
+    }
+
+    fn native_bool_iftrue_iffalse(&mut self, args: &[Value]) -> Result<Value, String> {
+        match args[0] {
+            Value::True => self.call_value(args[1], &[]),
+            Value::False => self.call_value(args[2], &[]),
+            _ => Err("ifTrue:ifFalse: expects boolean receiver".into()),
+        }
+    }
+
+    fn native_bool_and(&mut self, args: &[Value]) -> Result<Value, String> {
+        match args[0] {
+            Value::True => self.call_value(args[1], &[]),
+            Value::False => Ok(Value::False),
+            _ => Err("and: expects boolean receiver".into()),
+        }
+    }
+
+    fn native_bool_or(&mut self, args: &[Value]) -> Result<Value, String> {
+        match args[0] {
+            Value::True => Ok(Value::True),
+            Value::False => self.call_value(args[1], &[]),
+            _ => Err("or: expects boolean receiver".into()),
+        }
+    }
+
+    // ── Environment VM intercepts ──
+    // args[0] = receiver (the environment object), args[1..] = message arguments
+
+    fn native_env_eval(&mut self, args: &[Value]) -> Result<Value, String> {
+        let env_id = args[0].as_object().ok_or("eval: expects environment receiver")?;
+        let expr = args.get(1).copied().ok_or("eval: expects an expression")?;
+        self.eval(expr, env_id)
+    }
+
+    fn native_env_lookup(&mut self, args: &[Value]) -> Result<Value, String> {
+        let env_id = args[0].as_object().ok_or("lookup: expects environment receiver")?;
+        let sym = args.get(1).and_then(|v| v.as_symbol())
+            .ok_or("lookup: expects a symbol")?;
+        self.env_lookup(env_id, sym)
+    }
+
+    fn native_env_set_to(&mut self, args: &[Value]) -> Result<Value, String> {
+        let env_id = args[0].as_object().ok_or("set:to: expects environment receiver")?;
+        let sym = args.get(1).and_then(|v| v.as_symbol())
+            .ok_or("set:to: expects a symbol")?;
+        let val = args.get(2).copied().unwrap_or(Value::Nil);
+        self.env_set(env_id, sym, val)?;
+        Ok(val)
+    }
+
+    fn native_env_define_to(&mut self, args: &[Value]) -> Result<Value, String> {
+        let env_id = args[0].as_object().ok_or("define:to: expects environment receiver")?;
+        let sym = args.get(1).and_then(|v| v.as_symbol())
+            .ok_or("define:to: expects a symbol")?;
+        let val = args.get(2).copied().unwrap_or(Value::Nil);
+        self.heap.env_define(env_id, sym, val);
+        Ok(val)
+    }
+
+    fn native_env_remove(&mut self, args: &[Value]) -> Result<Value, String> {
+        let env_id = args[0].as_object().ok_or("remove: expects environment receiver")?;
+        let sym = args.get(1).and_then(|v| v.as_symbol())
+            .ok_or("remove: expects a symbol")?;
+        self.heap.env_remove(env_id, sym);
+        Ok(Value::Nil)
     }
 
     // Native handler registration has moved to vm::natives::register_all_natives.
     // All native operations are NativeFunction closures in the NativeRegistry.
     // One path. One mechanism.
 
-    /// Get all registered prototypes as a Vec of (name, id).
-    pub fn get_protos(&self) -> Vec<(String, u32)> {
-        let mut result = Vec::new();
-        let list = [
-            ("integer", self.proto_integer),
-            ("float", self.proto_float),
-            ("boolean", self.proto_boolean),
-            ("string", self.proto_string),
-            ("cons", self.proto_cons),
-            ("nil", self.proto_nil),
-            ("symbol", self.proto_symbol),
-            ("lambda", self.proto_lambda),
-            ("operative", self.proto_operative),
-            ("environment", self.proto_environment),
-        ];
-        for (name, opt) in list {
-            if let Some(id) = opt {
-                result.push((name.to_string(), id));
-            }
-        }
-        result
-    }
-
-    /// Restore prototypes from a Vec of (name, id).
-    pub fn set_protos(&mut self, protos: Vec<(String, u32)>) {
-        for (name, id) in protos {
-            match name.as_str() {
-                "integer" => self.proto_integer = Some(id),
-                "float" => self.proto_float = Some(id),
-                "boolean" => self.proto_boolean = Some(id),
-                "string" => self.proto_string = Some(id),
-                "cons" => self.proto_cons = Some(id),
-                "nil" => self.proto_nil = Some(id),
-                "symbol" => self.proto_symbol = Some(id),
-                "lambda" => self.proto_lambda = Some(id),
-                "operative" => self.proto_operative = Some(id),
-                "environment" => self.proto_environment = Some(id),
-                _ => {}
-            }
-        }
-    }
-
-    /// Find the Modules singleton object.
-    pub fn find_module_registry(&self) -> Option<u32> {
-        let root = self.vat.root_env?;
-        let sym = self.heap.symbol_lookup_only("Modules")?;
-        match self.env_lookup(root, sym) {
-            Ok(Value::Object(id)) => Some(id),
-            _ => None,
-        }
-    }
-
-    /// Find a ModuleImage object by name.
-    pub fn find_module(&mut self, name: &str) -> Option<u32> {
-        let root = self.vat.root_env?;
-        let sym_modules = self.heap.intern("Modules");
-        let modules_obj = match self.env_lookup(root, sym_modules) {
-            Ok(Value::Object(id)) => id,
-            _ => return None,
-        };
-
-        // Send 'named: name' to Modules
-        let sel_named = self.heap.intern("named:");
-        let name_val = self.heap.alloc_string(name);
-        match self.message_send(Value::Object(modules_obj), sel_named, &[name_val]) {
-            Ok(Value::Object(id)) => Some(id),
-            _ => None,
-        }
-    }
-
-    // ── Heap-walker methods ──────────────────────────────────
-    // These let the ModuleLoader read module/definition state
-    // directly from heap objects, without caching in HashMaps.
-
-    /// Read a named slot from a GeneralObject (non-mutating).
-    pub fn read_slot(&self, obj_id: u32, slot_name: &str) -> Value {
-        let sym = match self.heap.symbol_lookup_only(slot_name) {
-            Some(s) => s,
-            None => return Value::Nil,
-        };
-        match self.heap.get(obj_id) {
-            HeapObject::GeneralObject { slots, .. } => {
-                slots.iter().find(|(k, _)| *k == sym).map(|(_, v)| *v).unwrap_or(Value::Nil)
-            }
-            _ => Value::Nil,
-        }
-    }
-
-    /// Read a Value that should be a MoofString as a Rust String.
-    pub fn read_string(&self, val: Value) -> Option<String> {
-        match val {
-            Value::Object(id) => match self.heap.get(id) {
-                HeapObject::MoofString(s) => Some(s.clone()),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
-    /// Read a Value that should be a list of strings as Vec<String>.
-    pub fn read_string_list(&self, val: Value) -> Vec<String> {
-        self.heap.list_to_vec(val).iter()
-            .filter_map(|v| self.read_string(*v))
-            .collect()
-    }
-
-    /// Read a Value that should be a list of symbols as Vec<String>.
-    pub fn read_symbol_list(&self, val: Value) -> Vec<String> {
-        self.heap.list_to_vec(val).iter()
-            .filter_map(|v| match v {
-                Value::Symbol(s) => Some(self.heap.symbol_name(*s).to_string()),
-                _ => self.read_string(*v),
-            })
-            .collect()
-    }
-
-    /// Get all (name, mod_id) pairs from the Modules registry.
-    /// Walks Modules._registry which is an Assoc with a `data` slot
-    /// containing a list of (key . value) pairs.
-    pub fn all_module_ids(&self) -> Vec<(String, u32)> {
-        let root = match self.vat.root_env {
-            Some(r) => r,
-            None => return Vec::new(),
-        };
-        let sym_modules = match self.heap.symbol_lookup_only("Modules") {
-            Some(s) => s,
-            None => return Vec::new(),
-        };
-        let modules_obj = match self.env_lookup(root, sym_modules) {
-            Ok(Value::Object(id)) => id,
-            _ => return Vec::new(),
-        };
-
-        // Read _registry slot
-        let registry_id = match self.read_slot(modules_obj, "_registry") {
-            Value::Object(id) => id,
-            _ => return Vec::new(),
-        };
-
-        // Assoc stores entries in "data" slot as list of (key . value) cons cells.
-        // The stub registry uses "entries" instead.
-        let data_val = self.read_slot(registry_id, "data");
-        let entries_val = if data_val == Value::Nil {
-            self.read_slot(registry_id, "entries")
-        } else {
-            data_val
-        };
-
-        let mut result = Vec::new();
-        let entries = self.heap.list_to_vec(entries_val);
-        for entry in entries {
-            if let Value::Object(pair_id) = entry {
-                if let HeapObject::Cons { car, cdr } = self.heap.get(pair_id) {
-                    if let Some(name) = self.read_string(*car) {
-                        if let Value::Object(mod_id) = cdr {
-                            result.push((name, *mod_id));
-                        }
-                    }
-                }
-            }
-        }
-        result
-    }
-
-    /// Get Definition object ids from a ModuleImage's definitions list.
-    pub fn definitions_list(&self, mod_id: u32) -> Vec<u32> {
-        let defs_val = self.read_slot(mod_id, "definitions");
-        self.heap.list_to_vec(defs_val).iter()
-            .filter_map(|v| match v {
-                Value::Object(id) => Some(*id),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// Read the source text from a Definition object.
-    pub fn definition_source(&self, def_id: u32) -> Option<String> {
-        let source_val = self.read_slot(def_id, "source");
-        self.read_string(source_val)
-    }
-
-    /// Read the name from a Definition object.
-    pub fn definition_name(&self, def_id: u32) -> Option<String> {
-        let name_val = self.read_slot(def_id, "name");
-        self.read_string(name_val)
-    }
+    // Introspection / module-reading methods live in vm::introspect.
 
     /// Execute a bytecode chunk in a given environment. Returns the final value.
     /// Execute a chunk as a vat turn with fuel budget.
@@ -581,6 +684,50 @@ impl VM {
                     self.vat.stack.push(result);
                 }
 
+                OP_EVENTUAL_SEND => {
+                    let sel_idx = read_u16(&code, ip + 1) as usize;
+                    let argc = code[ip + 3] as usize;
+                    self.vat.frames.last_mut().unwrap().ip = ip + 4;
+                    let selector = match constants[sel_idx] {
+                        Value::Symbol(s) => s,
+                        _ => return Err("EVENTUAL_SEND: expected symbol selector".into()),
+                    };
+                    // Stack: [receiver, arg1, ..., argN]
+                    let stack_start = self.vat.stack.len() - argc - 1;
+                    let receiver = self.vat.stack[stack_start];
+                    let args: Vec<Value> = self.vat.stack[stack_start + 1..].to_vec();
+                    self.vat.stack.truncate(stack_start);
+
+                    let receiver_id = match receiver {
+                        Value::Object(id) => id,
+                        _ => return Err("eventual send: receiver must be an object".into()),
+                    };
+
+                    // Create a Promise object
+                    let val_sym = self.heap.intern("value");
+                    let resolved_sym = self.heap.intern("resolved");
+                    let waiters_sym = self.heap.intern("waiters");
+                    let promise_id = self.heap.alloc(HeapObject::GeneralObject {
+                        parent: Value::Nil,
+                        slots: vec![
+                            (val_sym, Value::Nil),
+                            (resolved_sym, Value::False),
+                            (waiters_sym, Value::Nil),
+                        ],
+                        handlers: Vec::new(),
+                    });
+
+                    // Enqueue message on this vat's mailbox
+                    self.vat.enqueue(Message {
+                        receiver: receiver_id,
+                        selector,
+                        args,
+                        resolver: Some(promise_id),
+                    });
+
+                    self.vat.stack.push(Value::Object(promise_id));
+                }
+
                 OP_CONS => {
                     let cdr = self.vat.stack.pop().ok_or("CONS: empty stack")?;
                     let car = self.vat.stack.pop().ok_or("CONS: empty stack")?;
@@ -641,13 +788,35 @@ impl VM {
                 }
 
                 OP_CALL => {
+                    // Semantically: [callable call: args...]
+                    // Fast path for Lambda/NativeFunction (skip handler lookup).
+                    // Falls back to message_send for GeneralObjects with call: handlers.
                     let argc = code[ip + 1] as usize;
                     self.vat.frames.last_mut().unwrap().ip = ip + 2;
                     let stack_start = self.vat.stack.len() - argc - 1;
                     let callable = self.vat.stack[stack_start];
                     let args: Vec<Value> = self.vat.stack[stack_start + 1..].to_vec();
                     self.vat.stack.truncate(stack_start);
-                    let result = self.call_value(callable, &args)?;
+                    // Classify callable to avoid borrow conflict
+                    let is_direct = match callable {
+                        Value::Object(id) => matches!(
+                            self.heap.get(id),
+                            HeapObject::Lambda { .. } | HeapObject::NativeFunction { .. }
+                        ),
+                        _ => false,
+                    };
+                    let is_operative = match callable {
+                        Value::Object(id) => matches!(self.heap.get(id), HeapObject::Operative { .. }),
+                        _ => false,
+                    };
+                    let result = if is_operative {
+                        return Err("Cannot call an operative with evaluated arguments".into());
+                    } else if is_direct {
+                        self.call_value(callable, &args)?
+                    } else {
+                        // General case: [callable call: args...]
+                        self.message_send(callable, self.sym_call, &args)?
+                    };
                     self.vat.stack.push(result);
                 }
 
@@ -699,79 +868,110 @@ impl VM {
                 }
 
                 OP_APPLY => {
-                    // Generic apply: runtime check for operative vs applicative
+                    // Semantically: [callable call: args...]
+                    // Operatives receive raw args + caller env (fundamental to vau).
+                    // Everything else: eval args, then call.
                     // Stack: [callable, quoted_args_list]
                     let args_list = self.vat.stack.pop().ok_or("APPLY: empty stack")?;
                     let callable = self.vat.stack.pop().ok_or("APPLY: empty stack")?;
 
-                    let result = match callable {
-                        Value::Object(id) => {
-                            match self.heap.get(id).clone() {
-                                HeapObject::Operative { .. } => {
-                                    // Operative: pass raw args + caller env (fundamental to vau)
-                                    self.call_operative(callable, args_list, env_id)?
-                                }
-                                _ => {
-                                    // Everything else: eval args, then dispatch through call:
-                                    // Lambdas, NativeFunctions, GeneralObjects — all use the
-                                    // same message_send path. One mechanism.
-                                    let raw_args = self.heap.list_to_vec(args_list);
-                                    let mut evaled = Vec::new();
-                                    for arg in raw_args {
-                                        evaled.push(self.eval(arg, env_id)?);
-                                    }
-                                    self.message_send(callable, self.sym_call, &evaled)?
-                                }
-                            }
+                    // Classify to avoid borrow conflicts
+                    let is_operative = match callable {
+                        Value::Object(id) => matches!(self.heap.get(id), HeapObject::Operative { .. }),
+                        _ => false,
+                    };
+                    let is_direct = match callable {
+                        Value::Object(id) => matches!(
+                            self.heap.get(id),
+                            HeapObject::Lambda { .. } | HeapObject::NativeFunction { .. }
+                        ),
+                        _ => false,
+                    };
+
+                    let result = if is_operative {
+                        self.call_operative(callable, args_list, env_id)?
+                    } else {
+                        // Eval args
+                        let raw_args = self.heap.list_to_vec(args_list);
+                        let mut evaled = Vec::new();
+                        for arg in raw_args {
+                            evaled.push(self.eval(arg, env_id)?);
                         }
-                        _ => return Err(format!("Cannot apply {:?}", callable)),
+                        if is_direct {
+                            // Fast path: Lambda/NativeFunction
+                            self.call_value(callable, &evaled)?
+                        } else {
+                            // General case: [callable call: args...]
+                            self.message_send(callable, self.sym_call, &evaled)?
+                        }
                     };
                     self.vat.stack.push(result);
                 }
 
                 OP_TAIL_APPLY => {
-                    // Tail-call variant: replaces current frame for lambdas/blocks
+                    // Tail-call variant: replaces current frame for lambdas
                     let args_list = self.vat.stack.pop().ok_or("TAIL_APPLY: empty stack")?;
                     let callable = self.vat.stack.pop().ok_or("TAIL_APPLY: empty stack")?;
 
-                    match callable {
-                        Value::Object(id) => {
-                            match self.heap.get(id).clone() {
-                                HeapObject::Lambda { params, body, def_env, .. } => {
-                                    // TCO optimization: semantically equivalent to
-                                    // [callable call: evaled...] but avoids frame push.
-                                    let raw_args = self.heap.list_to_vec(args_list);
-                                    let mut evaled = Vec::new();
-                                    for arg in raw_args {
-                                        evaled.push(self.eval(arg, env_id)?);
-                                    }
-                                    let new_env_id = self.heap.alloc_env(Some(def_env));
-                                    let evaled_list = self.heap.list(&evaled);
-                                    self.bind_params(new_env_id, params, evaled_list);
-                                    let frame = self.vat.frames.last_mut().unwrap();
-                                    self.vat.stack.truncate(frame.stack_base);
-                                    frame.chunk_id = body;
-                                    frame.ip = 0;
-                                    frame.env_id = new_env_id;
-                                }
-                                HeapObject::Operative { .. } => {
-                                    // Can't TCO operatives — fall back to regular call
-                                    let result = self.call_operative(callable, args_list, env_id)?;
-                                    self.vat.stack.push(result);
-                                }
-                                _ => {
-                                    // Everything else: dispatch through call:
-                                    let raw_args = self.heap.list_to_vec(args_list);
-                                    let mut evaled = Vec::new();
-                                    for arg in raw_args {
-                                        evaled.push(self.eval(arg, env_id)?);
-                                    }
-                                    let result = self.message_send(callable, self.sym_call, &evaled)?;
-                                    self.vat.stack.push(result);
-                                }
+                    // Classify to avoid borrow conflicts
+                    let variant = match callable {
+                        Value::Object(id) => match self.heap.get(id) {
+                            HeapObject::Lambda { .. } => 1,      // TCO path
+                            HeapObject::Operative { .. } => 2,   // operative path
+                            HeapObject::NativeFunction { .. } => 3, // direct call
+                            _ => 4,                              // general message_send
+                        },
+                        _ => 4,
+                    };
+
+                    match variant {
+                        1 => {
+                            // Lambda TCO: replace frame instead of pushing new one
+                            let (params, body, def_env) = match callable {
+                                Value::Object(id) => match self.heap.get(id).clone() {
+                                    HeapObject::Lambda { params, body, def_env, .. } => (params, body, def_env),
+                                    _ => unreachable!(),
+                                },
+                                _ => unreachable!(),
+                            };
+                            let raw_args = self.heap.list_to_vec(args_list);
+                            let mut evaled = Vec::new();
+                            for arg in raw_args {
+                                evaled.push(self.eval(arg, env_id)?);
                             }
+                            let new_env_id = self.heap.alloc_env(Some(def_env));
+                            let evaled_list = self.heap.list(&evaled);
+                            self.bind_params(new_env_id, params, evaled_list);
+                            let frame = self.vat.frames.last_mut().unwrap();
+                            self.vat.stack.truncate(frame.stack_base);
+                            frame.chunk_id = body;
+                            frame.ip = 0;
+                            frame.env_id = new_env_id;
                         }
-                        _ => return Err(format!("Cannot apply {:?}", callable)),
+                        2 => {
+                            let result = self.call_operative(callable, args_list, env_id)?;
+                            self.vat.stack.push(result);
+                        }
+                        3 => {
+                            // NativeFunction: eval args, direct call
+                            let raw_args = self.heap.list_to_vec(args_list);
+                            let mut evaled = Vec::new();
+                            for arg in raw_args {
+                                evaled.push(self.eval(arg, env_id)?);
+                            }
+                            let result = self.call_value(callable, &evaled)?;
+                            self.vat.stack.push(result);
+                        }
+                        _ => {
+                            // General case: [callable call: args...]
+                            let raw_args = self.heap.list_to_vec(args_list);
+                            let mut evaled = Vec::new();
+                            for arg in raw_args {
+                                evaled.push(self.eval(arg, env_id)?);
+                            }
+                            let result = self.message_send(callable, self.sym_call, &evaled)?;
+                            self.vat.stack.push(result);
+                        }
                     }
                 }
 
@@ -811,13 +1011,6 @@ impl VM {
                     let expr = self.vat.stack.pop().ok_or("EVAL: empty stack")?;
                     let result = self.eval(expr, env_id)?;
                     self.vat.stack.push(result);
-                }
-
-                OP_PRINT => {
-                    let val = self.vat.stack.pop().ok_or("PRINT: empty stack")?;
-                    let s = self.format_value(val);
-                    println!("{}", s);
-                    self.vat.stack.push(Value::Nil);
                 }
 
                 OP_CAR => {
@@ -879,11 +1072,21 @@ impl VM {
                 }
 
                 OP_SLOT_GET => {
+                    // Semantically: [obj slotAt: 'name]
+                    // Fast path: direct slot read on plain GeneralObjects.
+                    // Falls back to message_send for custom slotAt: handlers (Membranes, etc).
                     let field_sym = self.vat.stack.pop().ok_or("SLOT_GET: empty stack")?;
                     let obj_val = self.vat.stack.pop().ok_or("SLOT_GET: empty stack")?;
                     let sym_id = field_sym.as_symbol().ok_or("SLOT_GET: field must be symbol")?;
-                    let result = match obj_val {
-                        Value::Object(id) => {
+                    let sel = self.sym_slot_at;
+                    let result = if let Value::Object(id) = obj_val {
+                        // Fast path: check if this object has a custom slotAt: handler
+                        // (via user-defined handler, NOT the Object proto default).
+                        // If it does, route through message_send for interception.
+                        let has_custom_handler = self.lookup_handler(id, sel).is_some();
+                        if has_custom_handler {
+                            self.message_send(obj_val, sel, &[field_sym])?
+                        } else {
                             match self.heap.get(id) {
                                 HeapObject::GeneralObject { slots, .. } => {
                                     slots.iter()
@@ -894,22 +1097,57 @@ impl VM {
                                 _ => return Err("SLOT_GET: not an object with slots".into()),
                             }
                         }
-                        _ => return Err(format!("SLOT_GET: cannot access field on {:?}", obj_val)),
+                    } else {
+                        return Err(format!("SLOT_GET: cannot access field on {:?}", obj_val));
                     };
                     self.vat.stack.push(result);
                 }
 
                 OP_SLOT_SET => {
+                    // Semantically: [obj slotAt: 'name put: val]
+                    // Fast path: direct slot write. Falls back to message_send
+                    // if receiver has a custom slotAt:put: handler.
                     let val = self.vat.stack.pop().ok_or("SLOT_SET: empty stack")?;
                     let field_sym = self.vat.stack.pop().ok_or("SLOT_SET: empty stack")?;
                     let obj_val = self.vat.stack.pop().ok_or("SLOT_SET: empty stack")?;
                     let sym_id = field_sym.as_symbol().ok_or("SLOT_SET: field must be symbol")?;
-                    let obj_id = obj_val.as_object().ok_or("SLOT_SET: expected object")?;
-                    self.heap.set_slot(obj_id, sym_id, val);
-                    self.vat.stack.push(val);
+                    let sel = self.sym_slot_at_put;
+                    if let Value::Object(id) = obj_val {
+                        let has_custom_handler = self.lookup_handler(id, sel).is_some();
+                        if has_custom_handler {
+                            let result = self.message_send(obj_val, sel, &[field_sym, val])?;
+                            self.vat.stack.push(result);
+                        } else {
+                            self.heap.set_slot(id, sym_id, val);
+                            self.vat.stack.push(val);
+                        }
+                    } else {
+                        return Err("SLOT_SET: expected object".into());
+                    }
                 }
 
-                OP_TYPE_OF => {
+                OP_APPEND => {
+                    let b = self.vat.stack.pop().ok_or("APPEND: empty stack")?;
+                    let a = self.vat.stack.pop().ok_or("APPEND: empty stack")?;
+                    // append(a, b): walk a, cons each element onto b
+                    let a_elems = self.heap.list_to_vec(a);
+                    let mut result = b;
+                    for &elem in a_elems.iter().rev() {
+                        result = self.heap.cons(elem, result);
+                    }
+                    self.vat.stack.push(result);
+                }
+
+                // Legacy opcodes — redirect to native functions.
+                // Old bytecode in the image may still use these.
+                // New compilations go through the native fn path instead.
+                0x51 => { // was OP_PRINT
+                    let val = self.vat.stack.pop().ok_or("PRINT: empty stack")?;
+                    let s = self.format_value(val);
+                    println!("{}", s);
+                    self.vat.stack.push(Value::Nil);
+                }
+                0x54 => { // was OP_TYPE_OF
                     let val = self.vat.stack.pop().ok_or("TYPE_OF: empty stack")?;
                     let type_name = match val {
                         Value::Nil => "Nil",
@@ -931,25 +1169,10 @@ impl VM {
                     let sym = self.heap.intern(type_name);
                     self.vat.stack.push(Value::Symbol(sym));
                 }
-
-                OP_LOAD => {
-                    let path_val = self.vat.stack.pop().ok_or("LOAD: empty stack")?;
-                    let path = match path_val {
-                        Value::Object(id) => match self.heap.get(id).clone() {
-                            HeapObject::MoofString(s) => s,
-                            _ => return Err("load: expected string path".into()),
-                        },
-                        _ => return Err("load: expected string path".into()),
-                    };
-                    let load_env = self.vat.root_env.unwrap_or(env_id);
-                    let source = std::fs::read_to_string(&path)
-                        .map_err(|e| format!("load: cannot read {}: {}", path, e))?;
-                    // Use the public eval_source from main
-                    let result = crate::eval_source(self, load_env, &source, &path)?;
-                    self.vat.stack.push(result);
+                0x55 => { // was OP_LOAD — just error, no source files
+                    return Err("load: removed — the image IS the program".into());
                 }
-
-                OP_SOURCE => {
+                0x56 => { // was OP_SOURCE
                     let val = self.vat.stack.pop().ok_or("SOURCE: empty stack")?;
                     let source = match val {
                         Value::Object(id) => match self.heap.get(id) {
@@ -961,8 +1184,7 @@ impl VM {
                     };
                     self.vat.stack.push(source);
                 }
-
-                OP_EVAL_STRING => {
+                0x58 => { // was OP_EVAL_STRING
                     let str_val = self.vat.stack.pop().ok_or("EVAL_STRING: empty stack")?;
                     let source = match str_val {
                         Value::Object(id) => match self.heap.get(id).clone() {
@@ -974,96 +1196,18 @@ impl VM {
                     let result = crate::eval_source(self, env_id, &source, "<eval-string>")?;
                     self.vat.stack.push(result);
                 }
-
-                OP_APPEND => {
-                    let b = self.vat.stack.pop().ok_or("APPEND: empty stack")?;
-                    let a = self.vat.stack.pop().ok_or("APPEND: empty stack")?;
-                    // append(a, b): walk a, cons each element onto b
-                    let a_elems = self.heap.list_to_vec(a);
-                    let mut result = b;
-                    for &elem in a_elems.iter().rev() {
-                        result = self.heap.cons(elem, result);
-                    }
+                0x70 => { // was OP_FFI_OPEN
+                    let name_val = self.vat.stack.pop().ok_or("FFI_OPEN: empty stack")?;
+                    let result = self.native_ffi_open(&[name_val])?;
                     self.vat.stack.push(result);
                 }
-
-                OP_FFI_OPEN => {
-                    let name_val = self.vat.stack.pop().ok_or("FFI_OPEN: empty stack")?;
-                    let name = match name_val {
-                        Value::Object(id) => match self.heap.get(id).clone() {
-                            HeapObject::MoofString(s) => s,
-                            _ => return Err("ffi-open: expected string name".into()),
-                        },
-                        _ => return Err("ffi-open: expected string name".into()),
-                    };
-                    let lib = bridge::open_library(&name)?;
-                    self.ffi_libs.insert(name.clone(), lib);
-                    // Return a symbol representing the library
-                    let lib_sym = self.heap.intern(&format!("ffi:{}", name));
-                    self.vat.stack.push(Value::Symbol(lib_sym));
-                }
-
-                OP_FFI_BIND => {
-                    let ret_type_val = self.vat.stack.pop().ok_or("FFI_BIND: empty stack")?;
-                    let arg_types_val = self.vat.stack.pop().ok_or("FFI_BIND: empty stack")?;
-                    let func_name_val = self.vat.stack.pop().ok_or("FFI_BIND: empty stack")?;
-                    let lib_val = self.vat.stack.pop().ok_or("FFI_BIND: empty stack")?;
-
-                    // Get library name from the symbol
-                    let lib_name = match lib_val {
-                        Value::Symbol(id) => {
-                            let full = self.heap.symbol_name(id).to_string();
-                            full.strip_prefix("ffi:").unwrap_or(&full).to_string()
-                        }
-                        _ => return Err("ffi-bind: first arg must be a library handle".into()),
-                    };
-
-                    let func_name = match func_name_val {
-                        Value::Object(id) => match self.heap.get(id).clone() {
-                            HeapObject::MoofString(s) => s,
-                            _ => return Err("ffi-bind: expected string function name".into()),
-                        },
-                        _ => return Err("ffi-bind: expected string function name".into()),
-                    };
-
-                    // Parse arg types from a list of symbols
-                    let arg_type_syms = self.heap.list_to_vec(arg_types_val);
-                    let mut arg_types = Vec::new();
-                    for sym_val in &arg_type_syms {
-                        if let Value::Symbol(sid) = sym_val {
-                            let name = self.heap.symbol_name(*sid).to_string();
-                            let ftype = FfiType::from_symbol_name(&name)
-                                .ok_or_else(|| format!("ffi-bind: unknown type '{}'", name))?;
-                            arg_types.push(ftype);
-                        } else {
-                            return Err("ffi-bind: arg types must be symbols".into());
-                        }
-                    }
-
-                    let ret_type_name = match ret_type_val {
-                        Value::Symbol(sid) => self.heap.symbol_name(sid).to_string(),
-                        _ => return Err("ffi-bind: return type must be a symbol".into()),
-                    };
-                    let ret_type = FfiType::from_symbol_name(&ret_type_name)
-                        .ok_or_else(|| format!("ffi-bind: unknown return type '{}'", ret_type_name))?;
-
-                    // Bind the function via FFI bridge
-                    let lib = self.ffi_libs.get(&lib_name)
-                        .ok_or_else(|| format!("ffi-bind: library '{}' not open", lib_name))?;
-                    let ff = bridge::bind_function(lib, &func_name, arg_types, ret_type)?;
-
-                    // Wrap the bound FFI function as a NativeFn closure and register it
-                    let native_name = format!("ffi:{}:{}", lib_name, func_name);
-                    // The ForeignFunction is moved into the closure
-                    let ff_closure: NativeFn = Box::new(move |heap, args| {
-                        bridge::call_foreign(&ff, args, heap)
-                    });
-                    self.native_registry.register(native_name.clone(), ff_closure);
-
-                    // Create a NativeFunction heap object
-                    let nf_obj = HeapObject::NativeFunction { name: native_name };
-                    let nf_id = self.heap.alloc(nf_obj);
-                    self.vat.stack.push(Value::Object(nf_id));
+                0x71 => { // was OP_FFI_BIND
+                    let ret = self.vat.stack.pop().ok_or("FFI_BIND: empty stack")?;
+                    let arg_types = self.vat.stack.pop().ok_or("FFI_BIND: empty stack")?;
+                    let func_name = self.vat.stack.pop().ok_or("FFI_BIND: empty stack")?;
+                    let lib = self.vat.stack.pop().ok_or("FFI_BIND: empty stack")?;
+                    let result = self.native_ffi_bind(&[lib, func_name, arg_types, ret])?;
+                    self.vat.stack.push(result);
                 }
 
                 _ => return Err(format!("Unknown opcode: 0x{:02x}", op)),
@@ -1090,12 +1234,12 @@ impl VM {
     }
 
     /// Define a binding in an environment.
-    fn env_define(&mut self, env_id: u32, sym: u32, val: Value) {
+    pub(crate) fn env_define(&mut self, env_id: u32, sym: u32, val: Value) {
         self.heap.env_define(env_id, sym, val);
     }
 
     /// Set a binding by walking the environment chain. Errors if not found.
-    fn env_set(&mut self, env_id: u32, sym: u32, val: Value) -> Result<(), String> {
+    pub(crate) fn env_set(&mut self, env_id: u32, sym: u32, val: Value) -> Result<(), String> {
         let mut current = Some(env_id);
         while let Some(eid) = current {
             let (found, parent) = match self.heap.get(eid) {
@@ -1114,478 +1258,4 @@ impl VM {
         Err(format!("Cannot set unbound symbol: {}", name))
     }
 
-    /// Call a value as a function: [callable call: args...]
-    fn call_value(&mut self, callable: Value, args: &[Value]) -> VMResult {
-        match callable {
-            Value::Object(id) => {
-                match self.heap.get(id).clone() {
-                    HeapObject::Lambda { params, body, def_env, .. } => {
-                        self.call_lambda(params, body, def_env, args)
-                    }
-                    HeapObject::Operative { .. } => {
-                        Err("Cannot call an operative with evaluated arguments — use vau syntax".into())
-                    }
-                    HeapObject::NativeFunction { name } => {
-                        let name = name.clone();
-                        self.call_native(&name, args)
-                    }
-                    _ => {
-                        // Try message send: [callable call: args...]
-                        self.message_send(callable, self.sym_call, args)
-                    }
-                }
-            }
-            _ => Err(format!("Cannot call {:?}", callable)),
-        }
-    }
-
-    /// Call a lambda: create a new environment, bind params, execute body.
-    /// Handles both positional params (a b c) and rest params (args) and
-    /// dotted rest (a b . rest).
-    fn call_lambda(&mut self, params: Value, body: u32, def_env: u32, args: &[Value]) -> VMResult {
-        let new_env_id = self.heap.alloc_env(Some(def_env));
-        // Use bind_params for proper destructuring (handles rest params)
-        let args_list = self.heap.list(args);
-        self.bind_params(new_env_id, params, args_list);
-        self.execute(body, new_env_id)
-    }
-
-    /// Call an operative with unevaluated args and the caller's environment.
-    fn call_operative(&mut self, operative: Value, args_list: Value, caller_env: u32) -> VMResult {
-        match operative {
-            Value::Object(id) => {
-                match self.heap.get(id).clone() {
-                    HeapObject::Operative { params, env_param, body, def_env, .. } => {
-                        let new_env_id = self.heap.alloc_env(Some(def_env));
-                        // Bind the parameter list to the unevaluated args
-                        self.bind_params(new_env_id, params, args_list);
-                        // Bind the environment parameter to the caller's env
-                        self.env_define(new_env_id, env_param, Value::Object(caller_env));
-                        self.execute(body, new_env_id)
-                    }
-                    _ => Err("call_operative: not an operative".into()),
-                }
-            }
-            _ => Err(format!("call_operative: expected object, got {:?}", operative)),
-        }
-    }
-
-    /// Bind parameters to arguments (destructuring cons lists).
-    fn bind_params(&mut self, env_id: u32, params: Value, args: Value) {
-        match params {
-            Value::Symbol(sym) => {
-                // Rest parameter — bind the whole list
-                self.env_define(env_id, sym, args);
-            }
-            Value::Nil => {} // no params
-            Value::Object(pid) => {
-                match self.heap.get(pid).clone() {
-                    HeapObject::Cons { car, cdr } => {
-                        let arg_car = self.heap.car(args);
-                        let arg_cdr = self.heap.cdr(args);
-                        self.bind_params(env_id, car, arg_car);
-                        self.bind_params(env_id, cdr, arg_cdr);
-                    }
-                    _ => {} // ignore non-cons
-                }
-            }
-            _ => {} // ignore non-bindable
-        }
-    }
-
-    /// The core message send: look up a handler and invoke it.
-    /// "the vm's single privileged operation is `send`" (§0)
-    ///
-    /// Dispatch order:
-    /// 1. User-defined handlers on the object itself (GeneralObject delegation chain)
-    /// 2. Type prototype handlers (Integer, Boolean, String, etc.)
-    /// 3. VM fast path (arithmetic — NativeHandler markers route here)
-    /// 4. doesNotUnderstand:
-    pub fn message_send(&mut self, receiver: Value, selector: u32, args: &[Value]) -> VMResult {
-        // 1. For GeneralObjects, check user-defined handlers (§4.2)
-        if let Value::Object(id) = receiver {
-            if let HeapObject::GeneralObject { .. } = self.heap.get(id) {
-                if let Some(handler) = self.lookup_handler(id, selector) {
-                    let mut full_args = vec![receiver];
-                    full_args.extend_from_slice(args);
-                    return self.call_value(handler, &full_args);
-                }
-            }
-        }
-
-        // 2. Check type prototype handlers (real callable lambdas)
-        if let Some(proto_id) = self.type_prototype(receiver) {
-            if let Some(handler) = self.lookup_handler(proto_id, selector) {
-                let mut full_args = vec![receiver];
-                full_args.extend_from_slice(args);
-                return self.call_value(handler, &full_args);
-            }
-        }
-
-        // 3. VM fast path fallback (for unregistered prototypes during bootstrap)
-        if let Some(result) = self.primitive_send(receiver, selector, args)? {
-            return Ok(result);
-        }
-
-        // 4. doesNotUnderstand:
-        if selector != self.sym_does_not_understand {
-            if let Value::Object(id) = receiver {
-                if let Some(dnu_handler) = self.lookup_handler(id, self.sym_does_not_understand) {
-                    let sel_sym = Value::Symbol(selector);
-                    let args_list = self.heap.list(args);
-                    let full_args = vec![receiver, sel_sym, args_list];
-                    return self.call_value(dnu_handler, &full_args);
-                }
-            }
-            // Also check type prototype for doesNotUnderstand:
-            if let Some(proto_id) = self.type_prototype(receiver) {
-                if let Some(dnu_handler) = self.lookup_handler(proto_id, self.sym_does_not_understand) {
-                    let sel_sym = Value::Symbol(selector);
-                    let args_list = self.heap.list(args);
-                    let full_args = vec![receiver, sel_sym, args_list];
-                    return self.call_value(dnu_handler, &full_args);
-                }
-            }
-        }
-
-        let sel_name = self.heap.symbol_name(selector).to_string();
-        Err(format!("doesNotUnderstand: {} on {:?}", sel_name, receiver))
-    }
-
-    /// Look up a handler in the delegation chain (§4.2).
-    fn lookup_handler(&self, obj_id: u32, selector: u32) -> Option<Value> {
-        let mut current = Some(obj_id);
-        while let Some(id) = current {
-            match self.heap.get(id) {
-                HeapObject::GeneralObject { parent, handlers, .. } => {
-                    for &(sel, handler) in handlers {
-                        if sel == selector {
-                            return Some(handler);
-                        }
-                    }
-                    // Delegate to parent
-                    match parent {
-                        Value::Object(pid) => current = Some(*pid),
-                        _ => current = None,
-                    }
-                }
-                _ => return None,
-            }
-        }
-        None
-    }
-
-    /// Fallback message handlers for primitive types.
-    ///
-    /// Most native operations are now NativeFunction closures found via type
-    /// prototype handler lookup in message_send. This fallback handles:
-    /// - Universal object protocol (handlerNames, parent, handlerAt:)
-    /// - Operations that need VM-level dispatch (boolean conditionals, env eval/lookup/set)
-    /// - Float arithmetic (floats share Integer's prototype, so Float-specific ops live here)
-    /// - GeneralObject introspection (slotAt:, slotNames, etc.)
-    /// - Lambda call: (needs call_value)
-    fn primitive_send(&mut self, receiver: Value, selector: u32, args: &[Value]) -> Result<Option<Value>, String> {
-        let sel_name = self.heap.symbol_name(selector);
-
-        // Universal object protocol: handlerNames, parent, handlerAt:
-        // These make primitive types behave as full objects via type prototypes.
-        if let Some(proto_id) = self.type_prototype(receiver) {
-            match sel_name {
-                "handlerNames" => {
-                    match self.heap.get(proto_id) {
-                        HeapObject::GeneralObject { handlers, .. } => {
-                            let names: Vec<Value> = handlers.iter()
-                                .map(|(k, _)| Value::Symbol(*k))
-                                .collect();
-                            return Ok(Some(self.heap.list(&names)));
-                        }
-                        _ => return Ok(Some(Value::Nil)),
-                    }
-                }
-                "parent" => {
-                    return Ok(Some(Value::Object(proto_id)));
-                }
-                "handlerAt:" => {
-                    let key = args.first()
-                        .and_then(|v| v.as_symbol())
-                        .ok_or("handlerAt: expects a symbol")?;
-                    match self.heap.get(proto_id) {
-                        HeapObject::GeneralObject { handlers, .. } => {
-                            let handler = handlers.iter()
-                                .find(|(k, _)| *k == key)
-                                .map(|(_, v)| *v)
-                                .unwrap_or(Value::Nil);
-                            return Ok(Some(handler));
-                        }
-                        _ => return Ok(Some(Value::Nil)),
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        match receiver {
-            // Float arithmetic — floats share proto_integer, so Integer NativeFunction
-            // handlers won't match (as_integer returns None for Float). This fallback catches them.
-            Value::Float(a) => {
-                match sel_name {
-                    "+" => { let b = args.first().and_then(|v| v.as_float()).ok_or("+ expects number")?; Ok(Some(Value::Float(a + b))) }
-                    "-" => { let b = args.first().and_then(|v| v.as_float()).ok_or("- expects number")?; Ok(Some(Value::Float(a - b))) }
-                    "*" => { let b = args.first().and_then(|v| v.as_float()).ok_or("* expects number")?; Ok(Some(Value::Float(a * b))) }
-                    "/" => { let b = args.first().and_then(|v| v.as_float()).ok_or("/ expects number")?; Ok(Some(Value::Float(a / b))) }
-                    "%" => { let b = args.first().and_then(|v| v.as_float()).ok_or("% expects number")?; Ok(Some(Value::Float(a % b))) }
-                    "<" => { let b = args.first().and_then(|v| v.as_float()).ok_or("< expects number")?; Ok(Some(if a < b { Value::True } else { Value::False })) }
-                    ">" => { let b = args.first().and_then(|v| v.as_float()).ok_or("> expects number")?; Ok(Some(if a > b { Value::True } else { Value::False })) }
-                    "=" => { let b = args.first().and_then(|v| v.as_float()).ok_or("= expects number")?; Ok(Some(if a == b { Value::True } else { Value::False })) }
-                    "<=" => { let b = args.first().and_then(|v| v.as_float()).ok_or("<= expects number")?; Ok(Some(if a <= b { Value::True } else { Value::False })) }
-                    ">=" => { let b = args.first().and_then(|v| v.as_float()).ok_or(">= expects number")?; Ok(Some(if a >= b { Value::True } else { Value::False })) }
-                    "negate" => Ok(Some(Value::Float(-a))),
-                    "abs" => Ok(Some(Value::Float(a.abs()))),
-                    "floor" => Ok(Some(Value::Integer(a.floor() as i64))),
-                    "ceil" => Ok(Some(Value::Integer(a.ceil() as i64))),
-                    "round" => Ok(Some(Value::Integer(a.round() as i64))),
-                    "sqrt" => Ok(Some(Value::Float(a.sqrt()))),
-                    "sin" => Ok(Some(Value::Float(a.sin()))),
-                    "cos" => Ok(Some(Value::Float(a.cos()))),
-                    "toInteger" => Ok(Some(Value::Integer(a as i64))),
-                    "toString" | "describe" | "asString" => Ok(Some(self.heap.alloc_string(&format!("{}", a)))),
-                    _ => Ok(None),
-                }
-            }
-
-            // Boolean conditionals need call_value — can't be heap-only closures.
-            Value::True => {
-                match sel_name {
-                    "ifTrue:ifFalse:" | "ifTrue:" => {
-                        let block = args.first().copied().ok_or("ifTrue: expects a block")?;
-                        self.call_value(block, &[]).map(Some)
-                    }
-                    "and:" => {
-                        let block = args.first().copied().ok_or("and: expects a block")?;
-                        self.call_value(block, &[]).map(Some)
-                    }
-                    "or:" => Ok(Some(Value::True)),
-                    "ifFalse:" => Ok(Some(Value::Nil)),
-                    _ => Ok(None),
-                }
-            }
-
-            Value::False => {
-                match sel_name {
-                    "ifTrue:ifFalse:" => {
-                        let block = args.get(1).copied().ok_or("ifFalse: expects a block")?;
-                        self.call_value(block, &[]).map(Some)
-                    }
-                    "ifTrue:" => Ok(Some(Value::Nil)),
-                    "ifFalse:" => {
-                        let block = args.first().copied().ok_or("ifFalse: expects a block")?;
-                        self.call_value(block, &[]).map(Some)
-                    }
-                    "and:" => Ok(Some(Value::False)),
-                    "or:" => {
-                        let block = args.first().copied().ok_or("or: expects a block")?;
-                        self.call_value(block, &[]).map(Some)
-                    }
-                    _ => Ok(None),
-                }
-            }
-
-            Value::Object(id) => {
-                match self.heap.get(id).clone() {
-                    // GeneralObject introspection — needs VM for slot mutation
-                    HeapObject::GeneralObject { ref slots, .. } => {
-                        match sel_name {
-                            "slotAt:" => {
-                                let key = args.first()
-                                    .and_then(|v| v.as_symbol())
-                                    .ok_or("slotAt: expects a symbol")?;
-                                let val = slots.iter()
-                                    .find(|(k, _)| *k == key)
-                                    .map(|(_, v)| *v)
-                                    .unwrap_or(Value::Nil);
-                                Ok(Some(val))
-                            }
-                            "slotAt:put:" => {
-                                let key = args.first()
-                                    .and_then(|v| v.as_symbol())
-                                    .ok_or("slotAt:put: expects a symbol key")?;
-                                let val = args.get(1).copied().unwrap_or(Value::Nil);
-                                let _ = slots;
-                                self.heap.set_slot(id, key, val);
-                                Ok(Some(val))
-                            }
-                            "slotNames" => {
-                                let names: Vec<Value> = slots.iter()
-                                    .map(|(k, _)| Value::Symbol(*k))
-                                    .collect();
-                                let list = self.heap.list(&names);
-                                Ok(Some(list))
-                            }
-                            "handlerNames" => {
-                                drop(slots);
-                                match self.heap.get(id) {
-                                    HeapObject::GeneralObject { handlers, .. } => {
-                                        let names: Vec<Value> = handlers.iter()
-                                            .map(|(k, _)| Value::Symbol(*k))
-                                            .collect();
-                                        Ok(Some(self.heap.list(&names)))
-                                    }
-                                    _ => Ok(Some(Value::Nil)),
-                                }
-                            }
-                            "handlerAt:" => {
-                                let key = args.first()
-                                    .and_then(|v| v.as_symbol())
-                                    .ok_or("handlerAt: expects a symbol")?;
-                                drop(slots);
-                                match self.heap.get(id) {
-                                    HeapObject::GeneralObject { handlers, .. } => {
-                                        let handler = handlers.iter()
-                                            .find(|(k, _)| *k == key)
-                                            .map(|(_, v)| *v)
-                                            .unwrap_or(Value::Nil);
-                                        Ok(Some(handler))
-                                    }
-                                    _ => Ok(Some(Value::Nil)),
-                                }
-                            }
-                            "parent" => {
-                                drop(slots);
-                                match self.heap.get(id) {
-                                    HeapObject::GeneralObject { parent, .. } => Ok(Some(*parent)),
-                                    _ => Ok(Some(Value::Nil)),
-                                }
-                            }
-                            "describe" => {
-                                Ok(Some(self.heap.alloc_string(&format!("<object #{}>", id))))
-                            }
-                            _ => Ok(None),
-                        }
-                    }
-                    // Lambda call: needs call_value
-                    HeapObject::Lambda { .. } => {
-                        match sel_name {
-                            "call:" => self.call_value(receiver, args).map(Some),
-                            _ => Ok(None),
-                        }
-                    }
-                    // NativeFunction call: dispatch through call_value
-                    HeapObject::NativeFunction { .. } => {
-                        match sel_name {
-                            "call:" => self.call_value(receiver, args).map(Some),
-                            _ => Ok(None),
-                        }
-                    }
-                    // Environment operations need VM-level eval/lookup/set
-                    HeapObject::Environment(ref env) => {
-                        match sel_name {
-                            "eval:" => {
-                                let expr = args.first().copied().ok_or("eval: expects an expression")?;
-                                let _ = env;
-                                self.eval(expr, id).map(Some)
-                            }
-                            "lookup:" => {
-                                let sym = args.first()
-                                    .and_then(|v| v.as_symbol())
-                                    .ok_or("lookup: expects a symbol")?;
-                                self.env_lookup(id, sym).map(Some)
-                            }
-                            "set:to:" => {
-                                let sym = args.first()
-                                    .and_then(|v| v.as_symbol())
-                                    .ok_or("set:to: expects a symbol")?;
-                                let val = args.get(1).copied().unwrap_or(Value::Nil);
-                                let _ = env;
-                                self.env_set(id, sym, val)?;
-                                Ok(Some(val))
-                            }
-                            "define:to:" => {
-                                let sym = args.first()
-                                    .and_then(|v| v.as_symbol())
-                                    .ok_or("define:to: expects a symbol")?;
-                                let val = args.get(1).copied().unwrap_or(Value::Nil);
-                                self.heap.env_define(id, sym, val);
-                                Ok(Some(val))
-                            }
-                            "remove:" => {
-                                let sym = args.first()
-                                    .and_then(|v| v.as_symbol())
-                                    .ok_or("remove: expects a symbol")?;
-                                self.heap.env_remove(id, sym);
-                                Ok(Some(Value::Nil))
-                            }
-                            _ => Ok(None),
-                        }
-                    }
-                    _ => Ok(None),
-                }
-            }
-
-            _ => Ok(None),
-        }
-    }
-
-    /// Evaluate an expression in an environment (used by eval:, the REPL, etc).
-    /// This is the tree-walking fallback for when we need to eval AST directly.
-    pub fn eval(&mut self, expr: Value, env_id: u32) -> VMResult {
-        use crate::compiler::compile::Compiler;
-        let mut compiler = Compiler::new();
-        let chunk = compiler.compile_expr(&mut self.heap, expr)?;
-        let chunk_id = self.heap.alloc_chunk(chunk);
-        self.execute(chunk_id, env_id)
-    }
-
-    /// Format a value for display.
-    pub fn format_value(&self, val: Value) -> String {
-        match val {
-            Value::Nil => "nil".to_string(),
-            Value::True => "true".to_string(),
-            Value::False => "false".to_string(),
-            Value::Integer(n) => n.to_string(),
-            Value::Float(f) => format!("{}", f),
-            Value::Symbol(id) => format!("'{}", self.heap.symbol_name(id)),
-            Value::Object(id) => {
-                match self.heap.get(id) {
-                    HeapObject::Cons { .. } => self.format_list(val),
-                    HeapObject::MoofString(s) => format!("\"{}\"", s),
-                    HeapObject::GeneralObject { .. } => format!("<object #{}>", id),
-                    HeapObject::BytecodeChunk(_) => "<bytecode>".to_string(),
-                    HeapObject::Operative { .. } => "<operative>".to_string(),
-                    HeapObject::Lambda { .. } => "<lambda>".to_string(),
-                    HeapObject::Environment(_) => "<environment>".to_string(),
-                    HeapObject::NativeFunction { name } => {
-                        format!("<native {}>", name)
-                    }
-                }
-            }
-        }
-    }
-
-    /// Format a cons-list for display.
-    fn format_list(&self, val: Value) -> String {
-        let mut parts = Vec::new();
-        let mut current = val;
-        loop {
-            match current {
-                Value::Nil => break,
-                Value::Object(id) => {
-                    match self.heap.get(id) {
-                        HeapObject::Cons { car, cdr } => {
-                            parts.push(self.format_value(*car));
-                            current = *cdr;
-                        }
-                        _ => {
-                            parts.push(format!(". {}", self.format_value(current)));
-                            break;
-                        }
-                    }
-                }
-                other => {
-                    parts.push(format!(". {}", self.format_value(other)));
-                    break;
-                }
-            }
-        }
-        format!("({})", parts.join(" "))
-    }
 }

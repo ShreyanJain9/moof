@@ -176,40 +176,52 @@ impl Parser {
             return Ok(receiver);
         }
 
+        // Check for eventual send: [obj <- selector: arg]
+        let eventual = match &self.tokens[self.pos] {
+            Token::Symbol(name) if name == "<-" => {
+                self.pos += 1; // consume <-
+                true
+            }
+            _ => false,
+        };
+
         let mut selector_parts = Vec::new();
         let mut args = Vec::new();
 
-        match &self.tokens[self.pos] {
-            Token::Keyword(_kw) => {
-                while self.pos < self.tokens.len() {
-                    match &self.tokens[self.pos] {
-                        Token::Keyword(kw) => {
-                            selector_parts.push(kw.clone());
-                            self.pos += 1;
-                            args.push(self.parse_expr(heap)?);
-                        }
-                        Token::RBracket => break,
-                        _ => {
-                            args.push(self.parse_expr(heap)?);
+        // After consuming optional <-, parse selector + args normally
+        if self.pos < self.tokens.len() && self.tokens[self.pos] != Token::RBracket {
+            match &self.tokens[self.pos] {
+                Token::Keyword(_kw) => {
+                    while self.pos < self.tokens.len() {
+                        match &self.tokens[self.pos] {
+                            Token::Keyword(kw) => {
+                                selector_parts.push(kw.clone());
+                                self.pos += 1;
+                                args.push(self.parse_expr(heap)?);
+                            }
+                            Token::RBracket => break,
+                            _ => {
+                                args.push(self.parse_expr(heap)?);
+                            }
                         }
                     }
                 }
-            }
-            Token::Symbol(name) if is_binary_operator(name) => {
-                let op = name.clone();
-                self.pos += 1;
-                selector_parts.push(op);
-                while self.pos < self.tokens.len() && self.tokens[self.pos] != Token::RBracket {
-                    args.push(self.parse_expr(heap)?);
-                }
-            }
-            _ => {
-                let sel = self.parse_expr(heap)?;
-                match sel {
-                    Value::Symbol(sym_id) => {
-                        selector_parts.push(heap.symbol_name(sym_id).to_string());
+                Token::Symbol(name) if is_binary_operator(name) => {
+                    let op = name.clone();
+                    self.pos += 1;
+                    selector_parts.push(op);
+                    while self.pos < self.tokens.len() && self.tokens[self.pos] != Token::RBracket {
+                        args.push(self.parse_expr(heap)?);
                     }
-                    _ => return Err("Expected selector symbol in message send".into()),
+                }
+                _ => {
+                    let sel = self.parse_expr(heap)?;
+                    match sel {
+                        Value::Symbol(sym_id) => {
+                            selector_parts.push(heap.symbol_name(sym_id).to_string());
+                        }
+                        _ => return Err("Expected selector symbol in message send".into()),
+                    }
                 }
             }
         }
@@ -219,11 +231,15 @@ impl Parser {
         }
         self.pos += 1; // skip ]
 
-        let send_sym = Value::Symbol(heap.intern("%send"));
+        let head = if eventual {
+            Value::Symbol(heap.intern("%eventual-send"))
+        } else {
+            Value::Symbol(heap.intern("%send"))
+        };
         let selector_str = selector_parts.join("");
         let selector = Value::Symbol(heap.intern(&selector_str));
 
-        let mut elements = vec![send_sym, receiver, selector];
+        let mut elements = vec![head, receiver, selector];
         elements.extend(args);
         Ok(heap.list(&elements))
     }

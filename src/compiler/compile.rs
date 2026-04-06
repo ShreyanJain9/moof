@@ -160,6 +160,7 @@ impl Compiler {
                 "cons" => return self.compile_cons(heap, &elements[1..]),
                 "eq" => return self.compile_eq(heap, &elements[1..]),
                 "%send" => return self.compile_send(heap, &elements[1..]),
+                "%eventual-send" => return self.compile_eventual_send(heap, &elements[1..]),
                 // %do — removed; bootstrap `do` vau handles it
                 "%dot" => return self.compile_dot(heap, &elements[1..]),
                 "%object-literal" => return self.compile_object_literal(heap, &elements[1..]),
@@ -167,18 +168,10 @@ impl Compiler {
                 "lambda" => return self.compile_lambda(heap, &elements[1..]),
                 "let" => return self.compile_let(heap, &elements[1..], tail),
                 "eval" => return self.compile_eval(heap, &elements[1..]),
-                "print" => return self.compile_print(heap, &elements[1..]),
                 "car" => return self.compile_car(heap, &elements[1..]),
                 "cdr" => return self.compile_cdr(heap, &elements[1..]),
-                "type-of" => return self.compile_type_of(heap, &elements[1..]),
-                // list, set!, while — removed; handled by bootstrap.moof definitions
-                "load" => return self.compile_load(heap, &elements[1..]),
-                "eval-string" => return self.compile_eval_string(heap, &elements[1..]),
-                "source" => return self.compile_source(heap, &elements[1..]),
                 "object" => return self.compile_object(heap, &elements[1..]),
                 "handle!" => return self.compile_handle(heap, &elements[1..]),
-                "ffi-open" => return self.compile_ffi_open(heap, &elements[1..]),
-                "ffi-bind" => return self.compile_ffi_bind(heap, &elements[1..]),
                 "quasiquote" => return self.compile_quasiquote(heap, &elements[1..]),
                 _ => {}
             }
@@ -372,6 +365,25 @@ impl Compiler {
         Ok(())
     }
 
+    fn compile_eventual_send(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
+        if args.len() < 2 {
+            return Err("%eventual-send requires receiver and selector".into());
+        }
+        let receiver = args[0];
+        let selector = args[1];
+        let msg_args = &args[2..];
+
+        self.compile(heap, receiver, false)?;
+        for &arg in msg_args {
+            self.compile(heap, arg, false)?;
+        }
+        let sel_idx = self.add_constant(selector);
+        self.emit(OP_EVENTUAL_SEND);
+        self.emit_u16(sel_idx);
+        self.emit(msg_args.len() as u8);
+        Ok(())
+    }
+
 
     /// Compile (if cond then else). Branches inherit tail position.
     fn compile_if(&mut self, heap: &mut Heap, args: &[Value], tail: bool) -> Result<(), String> {
@@ -500,13 +512,6 @@ impl Compiler {
         }
     }
 
-    fn compile_print(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
-        if args.len() != 1 { return Err("print requires exactly one argument".into()); }
-        self.compile(heap, args[0], false)?;
-        self.emit(OP_PRINT);
-        Ok(())
-    }
-
     fn compile_car(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
         if args.len() != 1 { return Err("car requires exactly one argument".into()); }
         self.compile(heap, args[0], false)?;
@@ -518,13 +523,6 @@ impl Compiler {
         if args.len() != 1 { return Err("cdr requires exactly one argument".into()); }
         self.compile(heap, args[0], false)?;
         self.emit(OP_CDR);
-        Ok(())
-    }
-
-    fn compile_type_of(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
-        if args.len() != 1 { return Err("type-of requires exactly one argument".into()); }
-        self.compile(heap, args[0], false)?;
-        self.emit(OP_TYPE_OF);
         Ok(())
     }
 
@@ -558,46 +556,6 @@ impl Compiler {
         self.compile(heap, args[1], false)?;
         self.compile(heap, args[2], false)?;
         self.emit(OP_HANDLE);
-        Ok(())
-    }
-
-    fn compile_load(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
-        if args.len() != 1 { return Err("load requires exactly one argument (path)".into()); }
-        self.compile(heap, args[0], false)?;
-        self.emit(OP_LOAD);
-        Ok(())
-    }
-
-    fn compile_eval_string(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
-        if args.len() != 1 { return Err("eval-string requires exactly one argument".into()); }
-        self.compile(heap, args[0], false)?;
-        self.emit(OP_EVAL_STRING);
-        Ok(())
-    }
-
-    fn compile_source(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
-        if args.len() != 1 { return Err("source requires exactly one argument".into()); }
-        self.compile(heap, args[0], false)?;
-        self.emit(OP_SOURCE);
-        Ok(())
-    }
-
-    /// Compile (ffi-open "libname")
-    fn compile_ffi_open(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
-        if args.len() != 1 { return Err("ffi-open requires library name".into()); }
-        self.compile(heap, args[0], false)?;
-        self.emit(OP_FFI_OPEN);
-        Ok(())
-    }
-
-    /// Compile (ffi-bind lib "funcname" '(f64) 'f64)
-    fn compile_ffi_bind(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
-        if args.len() != 4 { return Err("ffi-bind requires lib, name, arg-types, ret-type".into()); }
-        self.compile(heap, args[0], false)?; // lib
-        self.compile(heap, args[1], false)?; // func name string
-        self.compile(heap, args[2], false)?; // arg types list
-        self.compile(heap, args[3], false)?; // return type symbol
-        self.emit(OP_FFI_BIND);
         Ok(())
     }
 
