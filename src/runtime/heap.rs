@@ -113,6 +113,15 @@ impl Heap {
         });
     }
 
+    /// Remove a binding from an environment.
+    pub fn env_remove(&mut self, env_id: u32, sym: u32) {
+        self.mutate(env_id, |obj| {
+            if let HeapObject::Environment(env) = obj {
+                env.bindings.remove(&sym);
+            }
+        });
+    }
+
     /// Add or replace a handler on a GeneralObject.
     pub fn add_handler(&mut self, obj_id: u32, sel: u32, handler: Value) {
         self.mutate(obj_id, |obj| {

@@ -1454,6 +1454,13 @@ impl VM {
                                 self.heap.env_define(id, sym, val);
                                 Ok(Some(val))
                             }
+                            "remove:" => {
+                                let sym = args.first()
+                                    .and_then(|v| v.as_symbol())
+                                    .ok_or("remove: expects a symbol")?;
+                                self.heap.env_remove(id, sym);
+                                Ok(Some(Value::Nil))
+                            }
                             _ => Ok(None),
                         }
                     }

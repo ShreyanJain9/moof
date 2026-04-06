@@ -67,9 +67,10 @@
             (write-err (str "(defined " def-name " in " module-name ")"))
             nil))))))
 
+; (undef foo) — truly removes the binding (not just sets to nil)
 (def undef
   (vau (name) $env
-    [root-env define: [(as-name name) toSymbol] to: nil]
+    [root-env remove: [(as-name name) toSymbol]]
     nil))
 
 (defmethod String startsWith: (prefix)
