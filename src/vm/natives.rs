@@ -456,47 +456,7 @@ fn register_string_natives(vm: &mut VM, root_env: u32) {
         Ok(heap.alloc_string(s.trim()))
     }));
 
-    add_native(vm, proto_id, "startsWith:", "String.startsWith:", Box::new(|heap, args| {
-        let id = args[0].as_object().ok_or("startsWith: expects string")?;
-        let s = match heap.get(id) {
-            HeapObject::MoofString(s) => s.clone(),
-            _ => return Err("startsWith: expects string".into()),
-        };
-        if let Some(Value::Object(other_id)) = args.get(1) {
-            if let HeapObject::MoofString(prefix) = heap.get(*other_id) {
-                return Ok(if s.starts_with(prefix.as_str()) { Value::True } else { Value::False });
-            }
-        }
-        Ok(Value::False)
-    }));
-
-    add_native(vm, proto_id, "endsWith:", "String.endsWith:", Box::new(|heap, args| {
-        let id = args[0].as_object().ok_or("endsWith: expects string")?;
-        let s = match heap.get(id) {
-            HeapObject::MoofString(s) => s.clone(),
-            _ => return Err("endsWith: expects string".into()),
-        };
-        if let Some(Value::Object(other_id)) = args.get(1) {
-            if let HeapObject::MoofString(suffix) = heap.get(*other_id) {
-                return Ok(if s.ends_with(suffix.as_str()) { Value::True } else { Value::False });
-            }
-        }
-        Ok(Value::False)
-    }));
-
-    add_native(vm, proto_id, "contains:", "String.contains:", Box::new(|heap, args| {
-        let id = args[0].as_object().ok_or("contains: expects string")?;
-        let s = match heap.get(id) {
-            HeapObject::MoofString(s) => s.clone(),
-            _ => return Err("contains: expects string".into()),
-        };
-        if let Some(Value::Object(other_id)) = args.get(1) {
-            if let HeapObject::MoofString(needle) = heap.get(*other_id) {
-                return Ok(if s.contains(needle.as_str()) { Value::True } else { Value::False });
-            }
-        }
-        Ok(Value::False)
-    }));
+    // startsWith:, endsWith:, contains: — migrated to system.moof
 
     add_native(vm, proto_id, "toUpper", "String.toUpper", Box::new(|heap, args| {
         let id = args[0].as_object().ok_or("toUpper expects string")?;
@@ -829,6 +789,42 @@ fn register_environment_natives(vm: &mut VM, root_env: u32) {
 
 fn register_io_natives(vm: &mut VM, root_env: u32) {
     use std::io::{self, BufRead, Write as IoWrite};
+
+    // __save-image: serialize heap to .moof/image.bin (VM-level native)
+    let val = vm.register_native("__save-image", Box::new(|_heap, _args| {
+        // Actual work is done in VM::call_native via intercept
+        Ok(Value::True)
+    }));
+    let sym = vm.heap.intern("__save-image");
+    vm.heap.env_define(root_env, sym, val);
+
+    // __save-source: project and save all module source files (VM-level native)
+    let val = vm.register_native("__save-source", Box::new(|_heap, _args| {
+        Ok(Value::True)
+    }));
+    let sym = vm.heap.intern("__save-source");
+    vm.heap.env_define(root_env, sym, val);
+
+    // __eval-in: eval a string in a specific environment (VM-level native)
+    let val = vm.register_native("__eval-in", Box::new(|_heap, _args| {
+        Ok(Value::Nil)
+    }));
+    let sym = vm.heap.intern("__eval-in");
+    vm.heap.env_define(root_env, sym, val);
+
+    // __undef: remove a binding from root env (VM-level native)
+    let val = vm.register_native("__undef", Box::new(|_heap, _args| {
+        Ok(Value::Nil)
+    }));
+    let sym = vm.heap.intern("__undef");
+    vm.heap.env_define(root_env, sym, val);
+
+    // __define-global: define a binding in root env (VM-level native)
+    let val = vm.register_native("__define-global", Box::new(|_heap, _args| {
+        Ok(Value::Nil)
+    }));
+    let sym = vm.heap.intern("__define-global");
+    vm.heap.env_define(root_env, sym, val);
 
     // read-line: reads a line from stdin, returns string or nil on EOF
     let val = vm.register_native("io:read-line", Box::new(|heap, _args| {

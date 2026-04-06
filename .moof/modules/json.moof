@@ -2,11 +2,6 @@
   (requires bootstrap collections)
   (provides JSON))
 
-; json.moof — JSON as an object
-;
-;   [JSON parse: "{\"x\":1}"]       => Assoc with x=1
-;   [JSON serialize: (list 1 2)]    => "[1,2]"
-
 (def JSON { Object
 
   serialize: (val)

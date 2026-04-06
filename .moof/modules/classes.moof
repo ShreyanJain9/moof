@@ -2,10 +2,6 @@
   (requires bootstrap collections)
   (provides Stack Queue Set Counter Range Pair Box EventEmitter))
 
-; classes.moof -- useful class definitions for the objectspace
-
-; ── Stack: LIFO on cons cells ──────────────────────────────
-
 (def Stack { Object
   data: nil
 
@@ -26,8 +22,6 @@
   clear: () (<- @data nil) self
   describe: () (str "<Stack " (length @data) ">")
 })
-
-; ── Queue: FIFO with two-list amortization ─────────────────
 
 (def Queue { Object
   front: nil
@@ -58,8 +52,6 @@
   clear: () (<- @front nil) (<- @back nil) self
   describe: () (str "<Queue " [self size] ">")
 })
-
-; ── Set: unique elements ───────────────────────────────────
 
 (def Set { Object
   data: nil
@@ -103,8 +95,6 @@
   (for-each (fn (x) [s add: x]) items)
   s))
 
-; ── Counter: frequency counting ────────────────────────────
-
 (def Counter { Object
   data: nil
 
@@ -135,8 +125,6 @@
   (for-each (fn (x) [self increment: x]) lst)
   self)
 
-; ── Range: iterable numeric range as an object ─────────────
-
 (def Range { Object
   start: 0
   end: 0
@@ -163,15 +151,11 @@
   describe: () (str "<Range " @start ".." @end ">")
 })
 
-; ── Pair: named tuple ──────────────────────────────────────
-
 (def Pair { Object
   first: nil
   second: nil
   describe: () (str "(" @first " . " @second ")")
 })
-
-; ── Box: single mutable cell ──────────────────────────────
 
 (def Box { Object
   value: nil
@@ -181,8 +165,6 @@
   update: (f) (<- @value (f @value)) self
   describe: () (str "<Box " @value ">")
 })
-
-; ── EventEmitter: simple pub/sub ───────────────────────────
 
 (def EventEmitter { Object
   listeners: nil

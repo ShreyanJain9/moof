@@ -74,6 +74,11 @@ impl Heap {
         self.symbol_names.len()
     }
 
+    /// Look up a symbol id without interning. Returns None if not yet interned.
+    pub fn symbol_lookup_only(&self, name: &str) -> Option<u32> {
+        self.symbol_lookup.get(name).copied()
+    }
+
     /// Clone all heap objects (for serialization).
     pub fn objects_clone(&self) -> Vec<HeapObject> {
         self.objects.clone()

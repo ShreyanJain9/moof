@@ -185,6 +185,109 @@ impl ModuleGraph {
     }
 }
 
+// ── Free functions operating on (name, requires) pairs ──
+// These let the ModuleLoader compute dependency info from heap-resident
+// ModuleImage objects without building a full ModuleGraph.
+
+/// Topological sort from (name, requires) pairs. Kahn's algorithm.
+pub fn topo_sort_pairs(modules: &[(String, Vec<String>)]) -> Result<Vec<String>, String> {
+    let names: HashSet<&str> = modules.iter().map(|(n, _)| n.as_str()).collect();
+
+    // Build edges + reverse edges
+    let mut edges: HashMap<&str, HashSet<&str>> = HashMap::new();
+    let mut reverse: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for (name, requires) in modules {
+        let deps: HashSet<&str> = requires.iter()
+            .filter_map(|r| if names.contains(r.as_str()) { Some(r.as_str()) } else { None })
+            .collect();
+        edges.insert(name.as_str(), deps);
+        reverse.entry(name.as_str()).or_default();
+    }
+    for (name, requires) in modules {
+        for req in requires {
+            if names.contains(req.as_str()) {
+                reverse.entry(req.as_str()).or_default().insert(name.as_str());
+            }
+        }
+    }
+
+    let mut in_degree: HashMap<&str, usize> = HashMap::new();
+    for (name, deps) in &edges {
+        in_degree.insert(name, deps.len());
+    }
+
+    let mut ready: BTreeSet<&str> = BTreeSet::new();
+    for (name, &deg) in &in_degree {
+        if deg == 0 {
+            ready.insert(name);
+        }
+    }
+
+    let mut order = Vec::new();
+    while let Some(name) = ready.pop_first() {
+        order.push(name.to_string());
+        if let Some(dependents) = reverse.get(name) {
+            for dep in dependents {
+                let deg = in_degree.get_mut(dep).unwrap();
+                *deg -= 1;
+                if *deg == 0 {
+                    ready.insert(dep);
+                }
+            }
+        }
+    }
+
+    if order.len() != modules.len() {
+        return Err("cycle detected during topological sort".into());
+    }
+
+    Ok(order)
+}
+
+/// Transitive dependents from (name, requires) pairs, in topological order.
+pub fn transitive_dependents_pairs(modules: &[(String, Vec<String>)], name: &str) -> Vec<String> {
+    // Build reverse edges
+    let mut reverse: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (mod_name, requires) in modules {
+        for req in requires {
+            reverse.entry(req.as_str()).or_default().push(mod_name.as_str());
+        }
+    }
+
+    // BFS/DFS to collect all transitive dependents
+    let mut visited = HashSet::new();
+    let mut stack = vec![name];
+    while let Some(n) = stack.pop() {
+        if let Some(deps) = reverse.get(n) {
+            for dep in deps {
+                if visited.insert(*dep) {
+                    stack.push(dep);
+                }
+            }
+        }
+    }
+
+    // Return in topo order
+    if let Ok(full_order) = topo_sort_pairs(modules) {
+        full_order.into_iter().filter(|n| visited.contains(n.as_str())).collect()
+    } else {
+        visited.into_iter().map(|s| s.to_string()).collect()
+    }
+}
+
+/// Check if a module can be removed (no dependents).
+pub fn can_remove_pairs(modules: &[(String, Vec<String>)], name: &str) -> Result<(), Vec<String>> {
+    let dependents: Vec<String> = modules.iter()
+        .filter(|(_, requires)| requires.iter().any(|r| r == name))
+        .map(|(n, _)| n.clone())
+        .collect();
+    if dependents.is_empty() {
+        Ok(())
+    } else {
+        Err(dependents)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

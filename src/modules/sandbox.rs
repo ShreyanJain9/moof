@@ -37,3 +37,21 @@ pub fn create_sandbox_env(
 
     env_id
 }
+
+/// Create an unrestricted environment that inherits from root.
+/// Used for modules marked (unrestricted) that need access to natives.
+pub fn create_unrestricted_env(
+    vm: &mut VM,
+    imports: &HashMap<String, Value>,
+) -> u32 {
+    let root = vm.root_env.unwrap_or(0);
+    let env_id = vm.heap.alloc_env(Some(root));
+
+    // Bind all imported symbols (override root bindings if needed)
+    for (name, &value) in imports {
+        let sym = vm.heap.intern(name);
+        vm.env_define_helper(env_id, sym, value);
+    }
+
+    env_id
+}

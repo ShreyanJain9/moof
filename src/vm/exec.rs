@@ -134,6 +134,23 @@ impl VM {
 
     /// Call a native function by name, temporarily taking the registry to avoid borrow conflicts.
     fn call_native(&mut self, name: &str, args: &[Value]) -> Result<Value, String> {
+        // VM-level natives that need full VM access (not just Heap)
+        if name == "__save-image" {
+            return self.native_save_image(args);
+        }
+        if name == "__save-source" {
+            return self.native_save_source(args);
+        }
+        if name == "__eval-in" {
+            return self.native_eval_in(args);
+        }
+        if name == "__undef" {
+            return self.native_undef(args);
+        }
+        if name == "__define-global" {
+            return self.native_define_global(args);
+        }
+
         let registry = std::mem::replace(&mut self.native_registry, NativeRegistry::new());
         let result = match registry.get(name) {
             Some(func) => func(&mut self.heap, args),
@@ -141,6 +158,132 @@ impl VM {
         };
         self.native_registry = registry;
         result
+    }
+
+    /// Native: save the binary image to .moof/image.bin
+    fn native_save_image(&mut self, _args: &[Value]) -> Result<Value, String> {
+        use crate::persistence::snapshot;
+        let path = std::path::PathBuf::from(".moof/image.bin");
+        let root_env = self.root_env.ok_or("no root env")?;
+        let protos = self.get_protos();
+        snapshot::save_image(&path, &self.heap, root_env, protos)?;
+        Ok(Value::True)
+    }
+
+    /// Native: project and save all module source files + manifest
+    fn native_save_source(&mut self, _args: &[Value]) -> Result<Value, String> {
+        use crate::persistence::image;
+        use crate::modules;
+
+        let modules = self.all_module_ids();
+        let mut source_hashes = std::collections::BTreeMap::new();
+        let mut provides_counts = std::collections::BTreeMap::new();
+        let image_dir = std::path::PathBuf::from(".moof");
+
+        // Compute topo order
+        let pairs: Vec<(String, Vec<String>)> = modules.iter()
+            .map(|(n, id)| (n.clone(), self.read_string_list(self.read_slot(*id, "requires"))))
+            .collect();
+        let order = modules::graph::topo_sort_pairs(&pairs)?;
+
+        for name in &order {
+            let mod_id = modules.iter().find(|(n, _)| n == name).map(|(_, id)| *id);
+            let source = if let Some(mid) = mod_id {
+                self.project_module_source(mid)
+            } else {
+                continue;
+            };
+
+            let hash = image::save_module_source(&image_dir, name, &source)?;
+            source_hashes.insert(name.clone(), hash);
+
+            let provides = if let Some(mid) = mod_id {
+                self.read_string_list(self.read_slot(mid, "provides"))
+            } else {
+                Vec::new()
+            };
+            provides_counts.insert(name.clone(), provides.len());
+        }
+
+        let manifest = image::build_manifest(&order, &source_hashes, &provides_counts);
+        image::save_manifest(&image_dir, &manifest)?;
+        Ok(Value::True)
+    }
+
+    /// Project source text from a ModuleImage's Definition objects.
+    pub fn project_module_source(&self, mod_id: u32) -> String {
+        let name = self.read_string(self.read_slot(mod_id, "name")).unwrap_or_default();
+        let requires = self.read_string_list(self.read_slot(mod_id, "requires"));
+        let provides = self.read_string_list(self.read_slot(mod_id, "provides"));
+        let unrestricted = self.read_slot(mod_id, "unrestricted").is_truthy();
+
+        let mut source = format!("(module {}\n  (requires {})\n",
+            name,
+            if requires.is_empty() { String::new() } else { requires.join(" ") }
+        );
+        if unrestricted {
+            source.push_str("  (unrestricted)\n");
+        }
+        source.push_str(&format!("  (provides {}))\n", provides.join(" ")));
+
+        let defs = self.definitions_list(mod_id);
+        for def_id in defs {
+            if let Some(def_source) = self.definition_source(def_id) {
+                source.push('\n');
+                source.push_str(&def_source);
+                source.push('\n');
+            }
+        }
+        source
+    }
+
+    /// Native: eval a string in a specific environment
+    fn native_eval_in(&mut self, args: &[Value]) -> Result<Value, String> {
+        let source = match args.first() {
+            Some(Value::Object(id)) => match self.heap.get(*id) {
+                HeapObject::MoofString(s) => s.clone(),
+                _ => return Err("__eval-in: first arg must be a string".into()),
+            },
+            _ => return Err("__eval-in: first arg must be a string".into()),
+        };
+        let env_id = match args.get(1) {
+            Some(Value::Object(id)) => *id,
+            _ => return Err("__eval-in: second arg must be an environment".into()),
+        };
+        crate::eval_source(self, env_id, &source, "<eval-in>")
+    }
+
+    /// Native: define a binding in root env
+    fn native_define_global(&mut self, args: &[Value]) -> Result<Value, String> {
+        let name = match args.first() {
+            Some(Value::Object(id)) => match self.heap.get(*id) {
+                HeapObject::MoofString(s) => s.clone(),
+                _ => return Err("__define-global: first arg must be a string".into()),
+            },
+            Some(Value::Symbol(s)) => self.heap.symbol_name(*s).to_string(),
+            _ => return Err("__define-global: first arg must be a string or symbol".into()),
+        };
+        let val = args.get(1).copied().unwrap_or(Value::Nil);
+        let root = self.root_env.ok_or("__define-global: no root env")?;
+        let sym = self.heap.intern(&name);
+        self.env_define_helper(root, sym, val);
+        Ok(val)
+    }
+
+    /// Native: remove a binding from root env (set to nil)
+    fn native_undef(&mut self, args: &[Value]) -> Result<Value, String> {
+        let name = match args.first() {
+            Some(Value::Object(id)) => match self.heap.get(*id) {
+                HeapObject::MoofString(s) => s.clone(),
+                _ => return Err("__undef: expected string".into()),
+            },
+            Some(Value::Symbol(s)) => self.heap.symbol_name(*s).to_string(),
+            _ => return Err("__undef: expected string or symbol".into()),
+        };
+        let root = self.root_env.ok_or("__undef: no root env")?;
+        let sym = self.heap.intern(&name);
+        self.heap.env_define(root, sym, Value::Nil);
+        Ok(Value::Nil)
     }
 
     /// Get the type prototype for a value (if registered).
@@ -208,6 +351,16 @@ impl VM {
         }
     }
 
+    /// Find the Modules singleton object.
+    pub fn find_module_registry(&self) -> Option<u32> {
+        let root = self.root_env?;
+        let sym = self.heap.symbol_lookup_only("Modules")?;
+        match self.env_lookup(root, sym) {
+            Ok(Value::Object(id)) => Some(id),
+            _ => None,
+        }
+    }
+
     /// Find a ModuleImage object by name.
     pub fn find_module(&mut self, name: &str) -> Option<u32> {
         let root = self.root_env?;
@@ -224,6 +377,123 @@ impl VM {
             Ok(Value::Object(id)) => Some(id),
             _ => None,
         }
+    }
+
+    // ── Heap-walker methods ──────────────────────────────────
+    // These let the ModuleLoader read module/definition state
+    // directly from heap objects, without caching in HashMaps.
+
+    /// Read a named slot from a GeneralObject (non-mutating).
+    pub fn read_slot(&self, obj_id: u32, slot_name: &str) -> Value {
+        let sym = match self.heap.symbol_lookup_only(slot_name) {
+            Some(s) => s,
+            None => return Value::Nil,
+        };
+        match self.heap.get(obj_id) {
+            HeapObject::GeneralObject { slots, .. } => {
+                slots.iter().find(|(k, _)| *k == sym).map(|(_, v)| *v).unwrap_or(Value::Nil)
+            }
+            _ => Value::Nil,
+        }
+    }
+
+    /// Read a Value that should be a MoofString as a Rust String.
+    pub fn read_string(&self, val: Value) -> Option<String> {
+        match val {
+            Value::Object(id) => match self.heap.get(id) {
+                HeapObject::MoofString(s) => Some(s.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Read a Value that should be a list of strings as Vec<String>.
+    pub fn read_string_list(&self, val: Value) -> Vec<String> {
+        self.heap.list_to_vec(val).iter()
+            .filter_map(|v| self.read_string(*v))
+            .collect()
+    }
+
+    /// Read a Value that should be a list of symbols as Vec<String>.
+    pub fn read_symbol_list(&self, val: Value) -> Vec<String> {
+        self.heap.list_to_vec(val).iter()
+            .filter_map(|v| match v {
+                Value::Symbol(s) => Some(self.heap.symbol_name(*s).to_string()),
+                _ => self.read_string(*v),
+            })
+            .collect()
+    }
+
+    /// Get all (name, mod_id) pairs from the Modules registry.
+    /// Walks Modules._registry which is an Assoc with a `data` slot
+    /// containing a list of (key . value) pairs.
+    pub fn all_module_ids(&self) -> Vec<(String, u32)> {
+        let root = match self.root_env {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+        let sym_modules = match self.heap.symbol_lookup_only("Modules") {
+            Some(s) => s,
+            None => return Vec::new(),
+        };
+        let modules_obj = match self.env_lookup(root, sym_modules) {
+            Ok(Value::Object(id)) => id,
+            _ => return Vec::new(),
+        };
+
+        // Read _registry slot
+        let registry_id = match self.read_slot(modules_obj, "_registry") {
+            Value::Object(id) => id,
+            _ => return Vec::new(),
+        };
+
+        // Assoc stores entries in "data" slot as list of (key . value) cons cells.
+        // The stub registry uses "entries" instead.
+        let data_val = self.read_slot(registry_id, "data");
+        let entries_val = if data_val == Value::Nil {
+            self.read_slot(registry_id, "entries")
+        } else {
+            data_val
+        };
+
+        let mut result = Vec::new();
+        let entries = self.heap.list_to_vec(entries_val);
+        for entry in entries {
+            if let Value::Object(pair_id) = entry {
+                if let HeapObject::Cons { car, cdr } = self.heap.get(pair_id) {
+                    if let Some(name) = self.read_string(*car) {
+                        if let Value::Object(mod_id) = cdr {
+                            result.push((name, *mod_id));
+                        }
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Get Definition object ids from a ModuleImage's definitions list.
+    pub fn definitions_list(&self, mod_id: u32) -> Vec<u32> {
+        let defs_val = self.read_slot(mod_id, "definitions");
+        self.heap.list_to_vec(defs_val).iter()
+            .filter_map(|v| match v {
+                Value::Object(id) => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Read the source text from a Definition object.
+    pub fn definition_source(&self, def_id: u32) -> Option<String> {
+        let source_val = self.read_slot(def_id, "source");
+        self.read_string(source_val)
+    }
+
+    /// Read the name from a Definition object.
+    pub fn definition_name(&self, def_id: u32) -> Option<String> {
+        let name_val = self.read_slot(def_id, "name");
+        self.read_string(name_val)
     }
 
     /// Execute a bytecode chunk in a given environment. Returns the final value.

@@ -1,6 +1,12 @@
 (module workspace
-  (requires collections geometry classes membrane json modules mcp bootstrap)
+  (requires collections geometry classes membrane json modules mcp bootstrap system)
   (unrestricted)
-  (provides))
+  (provides test-vau twice myfoo i))
 
-; workspace — REPL definitions autosave here
+(def test-vau (vau (name . body) $e (cons (quote def) (cons name body))))
+
+(def twice (fn (x) [x * 2]))
+
+(def myfoo 42)
+
+(def i 0)

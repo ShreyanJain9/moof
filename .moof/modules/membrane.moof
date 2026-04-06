@@ -2,16 +2,6 @@
   (requires bootstrap)
   (provides Membrane Facet LoggingMembrane))
 
-; membrane.moof — capability security as objects
-
-; ── Membrane ────────────────────────────────────────────────
-;
-; wraps an object, intercepts every message via doesNotUnderstand:.
-; the on-send handler returns 'proceed, 'deny, or a replacement value.
-;
-;   (def safe [Membrane wrap: dangerous-obj
-;     on-send: (fn (sel args) (do (print sel) 'proceed))])
-
 (def Membrane { Object
 
   wrap:on-send: (target on-send)
@@ -32,12 +22,6 @@
   describe: () "<Membrane>"
 })
 
-; ── Facet ───────────────────────────────────────────────────
-;
-; restricts an object to a whitelist of selectors.
-;
-;   (def view [Facet wrap: obj allowing: '(describe interface)])
-
 (def Facet { Object
 
   wrap:allowing: (target selectors)
@@ -55,14 +39,6 @@
 
   describe: () "<Facet>"
 })
-
-; ── LoggingMembrane ─────────────────────────────────────────
-;
-; logs every message send, then proceeds.
-;
-;   (def logged [LoggingMembrane wrap: obj])
-;   [logged someMethod]
-;   [logged log]  => list of (selector . args) pairs
 
 (def LoggingMembrane { Object
 

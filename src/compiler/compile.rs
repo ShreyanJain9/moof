@@ -160,7 +160,7 @@ impl Compiler {
                 "cons" => return self.compile_cons(heap, &elements[1..]),
                 "eq" => return self.compile_eq(heap, &elements[1..]),
                 "%send" => return self.compile_send(heap, &elements[1..]),
-                "%do" => return self.compile_do(heap, &elements[1..], tail),
+                // %do — removed; bootstrap `do` vau handles it
                 "%dot" => return self.compile_dot(heap, &elements[1..]),
                 "%object-literal" => return self.compile_object_literal(heap, &elements[1..]),
                 "if" => return self.compile_if(heap, &elements[1..], tail),
@@ -171,9 +171,7 @@ impl Compiler {
                 "car" => return self.compile_car(heap, &elements[1..]),
                 "cdr" => return self.compile_cdr(heap, &elements[1..]),
                 "type-of" => return self.compile_type_of(heap, &elements[1..]),
-                "list" => return self.compile_list_form(heap, &elements[1..]),
-                "set!" => return self.compile_set(heap, &elements[1..]),
-                "while" => return self.compile_while(heap, &elements[1..]),
+                // list, set!, while — removed; handled by bootstrap.moof definitions
                 "load" => return self.compile_load(heap, &elements[1..]),
                 "eval-string" => return self.compile_eval_string(heap, &elements[1..]),
                 "source" => return self.compile_source(heap, &elements[1..]),
@@ -375,21 +373,6 @@ impl Compiler {
     }
 
 
-    /// Compile (%do expr1 ... exprN). Last expression inherits tail position.
-    fn compile_do(&mut self, heap: &mut Heap, exprs: &[Value], tail: bool) -> Result<(), String> {
-        for (i, &expr) in exprs.iter().enumerate() {
-            let is_last = i == exprs.len() - 1;
-            self.compile(heap, expr, is_last && tail)?;
-            if !is_last {
-                self.emit(OP_POP);
-            }
-        }
-        if exprs.is_empty() {
-            self.emit(OP_NIL);
-        }
-        Ok(())
-    }
-
     /// Compile (if cond then else). Branches inherit tail position.
     fn compile_if(&mut self, heap: &mut Heap, args: &[Value], tail: bool) -> Result<(), String> {
         if args.len() < 2 {
@@ -545,17 +528,6 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_list_form(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
-        for &arg in args.iter() {
-            self.compile(heap, arg, false)?;
-        }
-        self.emit(OP_NIL);
-        for _ in 0..args.len() {
-            self.emit(OP_CONS);
-        }
-        Ok(())
-    }
-
     fn compile_object(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
         if args.is_empty() {
             self.emit(OP_NIL);
@@ -586,44 +558,6 @@ impl Compiler {
         self.compile(heap, args[1], false)?;
         self.compile(heap, args[2], false)?;
         self.emit(OP_HANDLE);
-        Ok(())
-    }
-
-    fn compile_set(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
-        if args.len() != 2 { return Err("set! requires name and value".into()); }
-        self.compile(heap, args[1], false)?;
-        let name_idx = self.add_constant(args[0]);
-        self.emit(OP_DEF);
-        self.emit_u16(name_idx);
-        Ok(())
-    }
-
-    fn compile_while(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
-        if args.len() < 2 { return Err("while requires condition and body".into()); }
-        let condition = args[0];
-        let body_exprs = &args[1..];
-
-        let loop_start = self.code.len();
-        self.compile(heap, condition, false)?;
-
-        self.emit(OP_JUMP_IF_FALSE);
-        let exit_jump = self.code.len();
-        self.emit_u16(0);
-
-        for &expr in body_exprs {
-            self.compile(heap, expr, false)?;
-            self.emit(OP_POP);
-        }
-
-        self.emit(OP_LOOP_BACK);
-        let back_distance = (self.code.len() + 2) - loop_start;
-        self.emit_u16(back_distance as u16);
-
-        let exit_offset = self.code.len() - (exit_jump + 2);
-        self.code[exit_jump] = (exit_offset >> 8) as u8;
-        self.code[exit_jump + 1] = (exit_offset & 0xFF) as u8;
-
-        self.emit(OP_NIL);
         Ok(())
     }
 

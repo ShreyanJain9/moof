@@ -1,20 +1,7 @@
 (module mcp
   (requires bootstrap json collections)
   (unrestricted)
-  (provides mcp-json-rpc-response mcp-json-rpc-error
-            mcp-text-result mcp-error-result
-            mcp-make-tool mcp-make-schema mcp-string-prop
-            mcp-tools mcp-handle-initialize mcp-handle-tools-list
-            mcp-handle-tools-call mcp-format-inspect mcp-format-object-list
-            mcp-dispatch mcp-serve))
-
-; mcp.moof — Model Context Protocol server over stdio
-;
-; Usage: moof --mcp
-; Reads JSON-RPC 2.0 from stdin, dispatches to moof objects, writes responses to stdout.
-; Exposes the live moof image as MCP tools for AI agents.
-
-; ── helpers ────────────────────────────────────────────────
+  (provides mcp-json-rpc-response mcp-json-rpc-error mcp-text-result mcp-error-result mcp-make-tool mcp-make-schema mcp-string-prop mcp-tools mcp-handle-initialize mcp-handle-tools-list mcp-handle-tools-call mcp-format-inspect mcp-format-object-list mcp-dispatch mcp-serve))
 
 (def mcp-json-rpc-response
   (fn (id result)
@@ -78,8 +65,6 @@
     [p set: "description" to: description]
     p))
 
-; ── tool definitions ──────────────────────────────────────
-
 (def mcp-tools
   (list
     (mcp-make-tool "moof_eval" "Evaluate a MOOF expression in the live image. Returns the result as a string. Use this for any computation, definition, or query."
@@ -113,8 +98,6 @@
     (mcp-make-tool "moof_checkpoint" "Save the current image to disk (compacted snapshot + source projection)."
       (mcp-make-schema { Assoc } nil))
   ))
-
-; ── MCP method handlers ────────────────────────────────────
 
 (def mcp-handle-initialize
   (fn (id params)
@@ -178,8 +161,6 @@
 
         (else (mcp-error-result id (str "Unknown tool: " tool-name)))))))
 
-; ── inspect formatting ────────────────────────────────────
-
 (def mcp-format-inspect
   (fn (name val)
     (let ((t (type-of val)))
@@ -207,8 +188,6 @@
       "(use moof_inspect to examine any of these)\n\n"
       "Type (type-of name) and [name interface] to explore.")))
 
-; ── dispatch ───────────────────────────────────────────────
-
 (def mcp-dispatch
   (fn (request)
     (let-seq ((method [request get: "method"])
@@ -220,8 +199,6 @@
         ([method = "tools/call"]  (mcp-handle-tools-call id params))
         ([method = "notifications/initialized"] nil)
         (else (mcp-json-rpc-error id -32601 (str "Method not found: " method)))))))
-
-; ── main loop ──────────────────────────────────────────────
 
 (def mcp-serve
   (fn ()

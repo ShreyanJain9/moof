@@ -2,8 +2,6 @@
   (requires bootstrap)
   (provides Point))
 
-; geometry.moof -- the new syntax showcase
-
 (def Point { Object
   describe: () "a Point"
   distanceTo: (other)
@@ -11,9 +9,3 @@
           (dy [@y - other.y]))
       [[dx * dx] + [dy * dy]])
 })
-
-; no make-point needed — just use object literals:
-;   (def pt { Point x: 3 y: 4 })
-;   pt.x        => 3
-;   [pt describe] => "a Point"
-;   [pt distanceTo: { Point x: 0 y: 0 }] => 25

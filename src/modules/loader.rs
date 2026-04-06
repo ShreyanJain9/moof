@@ -35,6 +35,23 @@ pub struct ModuleLoader {
 }
 
 impl ModuleLoader {
+    /// Create a minimal loader for image-resume mode.
+    /// All module state lives in the heap — this just provides
+    /// the image_dir for save operations.
+    pub fn from_image_dir(image_dir: PathBuf) -> Self {
+        ModuleLoader {
+            graph: super::graph::ModuleGraph {
+                modules: HashMap::new(),
+                edges: HashMap::new(),
+                reverse_edges: HashMap::new(),
+            },
+            loaded_envs: HashMap::new(),
+            exports: HashMap::new(),
+            source_texts: HashMap::new(),
+            image_dir,
+        }
+    }
+
     /// Discover all .moof files in a directory, parse headers, build graph.
     pub fn discover(dir: &Path, heap: &mut Heap) -> Result<Self, String> {
         let mut descriptors = Vec::new();
@@ -116,7 +133,11 @@ impl ModuleLoader {
         let is_unrestricted = name == "bootstrap" || desc.unrestricted;
 
         // Create the module's evaluation environment
-        let env_id = sandbox::create_sandbox_env(vm, &imports);
+        let env_id = if is_unrestricted {
+            sandbox::create_unrestricted_env(vm, &imports)
+        } else {
+            sandbox::create_sandbox_env(vm, &imports)
+        };
 
         // Lex + parse the body
         let mut lexer = Lexer::new(body);
@@ -160,30 +181,177 @@ impl ModuleLoader {
         self.loaded_envs.insert(name.to_string(), env_id);
         self.exports.insert(name.to_string(), module_exports);
 
+        // ── Create heap-resident ModuleImage + Definition objects ──
+        // Only if the ModuleImage prototype exists (i.e., bootstrap has loaded).
+        self.register_module_on_heap(name, &desc, &source, env_id, vm);
+
         eprintln!("(loaded module: {})", name);
         Ok(())
     }
 
+    /// Create a ModuleImage and its Definition objects on the heap,
+    /// and register it in the Modules registry.
+    /// No-op if ModuleImage prototype or Modules object don't exist yet.
+    pub fn register_module_on_heap(
+        &self,
+        name: &str,
+        desc: &super::ModuleDescriptor,
+        source: &str,
+        env_id: u32,
+        vm: &mut VM,
+    ) {
+        let root_env = match vm.root_env {
+            Some(r) => r,
+            None => return,
+        };
+
+        // Look up ModuleImage prototype
+        let sym_module_image = vm.heap.intern("ModuleImage");
+        let module_image_proto = match vm.env_lookup(root_env, sym_module_image) {
+            Ok(Value::Object(id)) => id,
+            _ => return, // bootstrap hasn't loaded yet
+        };
+
+        // Look up Definition prototype
+        let sym_definition = vm.heap.intern("Definition");
+        let def_proto = match vm.env_lookup(root_env, sym_definition) {
+            Ok(Value::Object(id)) => id,
+            _ => return,
+        };
+
+        // Build requires list on the heap
+        let requires_val = {
+            let mut list = Value::Nil;
+            for req in desc.requires.iter().rev() {
+                let s = vm.heap.alloc_string(req);
+                list = vm.heap.cons(s, list);
+            }
+            list
+        };
+
+        // Build provides list on the heap
+        let provides_val = {
+            let mut list = Value::Nil;
+            for prov in desc.provides.iter().rev() {
+                let s = vm.heap.alloc_string(prov);
+                list = vm.heap.cons(s, list);
+            }
+            list
+        };
+
+        // Split source body into definitions
+        let body = &source[desc.body_offset..];
+        let defs = split_into_definitions(body);
+
+        // Create Definition objects
+        let mut definitions_list = Value::Nil;
+        let name_sym = vm.heap.intern("name");
+        let source_sym = vm.heap.intern("source");
+        let kind_sym = vm.heap.intern("kind");
+        let module_name_sym = vm.heap.intern("module-name");
+        let mod_name_val = vm.heap.alloc_string(name);
+
+        for (def_name, def_source) in defs.iter().rev() {
+            let kind = if def_source.starts_with("(defmethod ") {
+                "method"
+            } else if def_source.contains("{ Object") || def_source.contains("{Object") || def_source.contains("{ ") {
+                "prototype"
+            } else {
+                "value"
+            };
+
+            let def_name_val = vm.heap.alloc_string(def_name);
+            let def_source_val = vm.heap.alloc_string(def_source);
+            let kind_val = Value::Symbol(vm.heap.intern(kind));
+
+            let def_id = vm.heap.alloc(HeapObject::GeneralObject {
+                parent: Value::Object(def_proto),
+                slots: vec![
+                    (module_name_sym, mod_name_val),
+                    (name_sym, def_name_val),
+                    (source_sym, def_source_val),
+                    (kind_sym, kind_val),
+                ],
+                handlers: Vec::new(),
+            });
+            definitions_list = vm.heap.cons(Value::Object(def_id), definitions_list);
+        }
+
+        // Create ModuleImage object
+        let mod_name_sym = vm.heap.intern("name");
+        let requires_sym = vm.heap.intern("requires");
+        let provides_sym = vm.heap.intern("provides");
+        let definitions_sym = vm.heap.intern("definitions");
+        let durable_objects_sym = vm.heap.intern("durable-objects");
+        let env_sym = vm.heap.intern("env");
+        let unrestricted_sym = vm.heap.intern("unrestricted");
+        let mod_name_val = vm.heap.alloc_string(name);
+
+        let mod_id = vm.heap.alloc(HeapObject::GeneralObject {
+            parent: Value::Object(module_image_proto),
+            slots: vec![
+                (mod_name_sym, mod_name_val),
+                (requires_sym, requires_val),
+                (provides_sym, provides_val),
+                (definitions_sym, definitions_list),
+                (durable_objects_sym, Value::Nil),
+                (env_sym, Value::Object(env_id)),
+                (unrestricted_sym, if desc.unrestricted { Value::True } else { Value::False }),
+            ],
+            handlers: Vec::new(),
+        });
+
+        // Register in Modules registry via its Assoc (if Modules exists)
+        if let Some(modules_obj) = vm.find_module_registry() {
+            let registry_val = vm.read_slot(modules_obj, "_registry");
+            if let Value::Object(registry_id) = registry_val {
+                let sel_set = vm.heap.intern("set:to:");
+                let name_val = vm.heap.alloc_string(name);
+                let _ = vm.message_send(
+                    Value::Object(registry_id),
+                    sel_set,
+                    &[name_val, Value::Object(mod_id)],
+                );
+            }
+        }
+    }
+
     /// Merge all module exports into the root environment.
+    /// Reads provides + env from heap ModuleImage objects.
     pub fn merge_into_root(&self, vm: &mut VM, root_env: u32) {
-        for (_module_name, module_exports) in &self.exports {
-            for (sym_name, val) in module_exports {
-                let sym = vm.heap.intern(sym_name);
-                vm.env_define_helper(root_env, sym, *val);
+        let modules = vm.all_module_ids();
+        for (_, mod_id) in &modules {
+            let provides_val = vm.read_slot(*mod_id, "provides");
+            let env_val = vm.read_slot(*mod_id, "env");
+            let env_id = match env_val {
+                Value::Object(id) => id,
+                _ => continue,
+            };
+            let provides = vm.read_string_list(provides_val);
+            for prov_name in provides {
+                let sym = vm.heap.intern(&prov_name);
+                if let Ok(val) = vm.env_lookup(env_id, sym) {
+                    vm.env_define_helper(root_env, sym, val);
+                }
             }
         }
     }
 
     /// Reload a module and all its transitive dependents.
     pub fn reload(&mut self, name: &str, vm: &mut VM, root_env: u32) -> Result<(), String> {
-        if !self.graph.modules.contains_key(name) {
+        // Check module exists on heap
+        if vm.find_module(name).is_none() {
             return Err(format!("unknown module: {}", name));
         }
 
-        let dependents = self.graph.transitive_dependents(name);
+        // Compute dependents from heap
+        let modules = vm.all_module_ids();
+        let pairs: Vec<(String, Vec<String>)> = modules.iter()
+            .map(|(n, id)| (n.clone(), vm.read_string_list(vm.read_slot(*id, "requires"))))
+            .collect();
+        let dependents = super::graph::transitive_dependents_pairs(&pairs, name);
 
         self.load_module(name, vm)?;
-
         for dep in &dependents {
             self.load_module(dep, vm)?;
         }
@@ -208,7 +376,7 @@ impl ModuleLoader {
             return Err(format!("module name changed from '{}' to '{}'", name, new_desc.name));
         }
 
-        // Update the descriptor in the graph
+        // Update the descriptor in the graph (still needed for load_module)
         self.graph.modules.insert(name.to_string(), new_desc);
         self.source_texts.insert(name.to_string(), new_source);
 
@@ -217,27 +385,42 @@ impl ModuleLoader {
     }
 
     /// Remove a module. Returns the symbols that were unbound.
-    /// Removes from graph, disk, and manifest.
-    pub fn remove(&mut self, name: &str) -> Result<Vec<String>, String> {
-        self.graph.can_remove(name).map_err(|deps| {
+    pub fn remove(&mut self, name: &str, vm: &mut VM) -> Result<Vec<String>, String> {
+        // Check dependents from heap
+        let modules = vm.all_module_ids();
+        let pairs: Vec<(String, Vec<String>)> = modules.iter()
+            .map(|(n, id)| (n.clone(), vm.read_string_list(vm.read_slot(*id, "requires"))))
+            .collect();
+        super::graph::can_remove_pairs(&pairs, name).map_err(|deps| {
             format!("cannot remove '{}': depended on by {}", name, deps.join(", "))
         })?;
 
-        let provides = self.exports.remove(name)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(sym, _)| sym)
-            .collect();
+        // Read provides from heap before removing
+        let provides: Vec<String> = if let Some(mod_id) = self.find_module_id(vm, name) {
+            vm.read_string_list(vm.read_slot(mod_id, "provides"))
+        } else {
+            Vec::new()
+        };
 
+        // Remove from Modules registry on heap
+        // (We can't easily remove from Assoc yet, but we can set to nil)
+        if let Some(modules_obj) = vm.find_module_registry() {
+            let registry_val = vm.read_slot(modules_obj, "_registry");
+            if let Value::Object(registry_id) = registry_val {
+                let sel_set = vm.heap.intern("set:to:");
+                let name_val = vm.heap.alloc_string(name);
+                let _ = vm.message_send(
+                    Value::Object(registry_id),
+                    sel_set,
+                    &[name_val, Value::Nil],
+                );
+            }
+        }
+
+        // Also clean up graph/HashMap state if present
         self.loaded_envs.remove(name);
         self.source_texts.remove(name);
         self.graph.modules.remove(name);
-        self.graph.edges.remove(name);
-        self.graph.reverse_edges.remove(name);
-        // Clean reverse edges that point to the removed module
-        for deps in self.graph.reverse_edges.values_mut() {
-            deps.remove(name);
-        }
 
         // Delete the .moof file
         let mod_path = image::modules_dir(&self.image_dir)
@@ -245,42 +428,53 @@ impl ModuleLoader {
         let _ = std::fs::remove_file(&mod_path);
 
         // Re-save manifest
-        if let Err(e) = self.save_image() {
+        if let Err(e) = self.save_image(vm) {
             eprintln!("!! manifest save failed: {}", e);
         }
 
         Ok(provides)
     }
 
-    /// List all loaded modules and their dependency info.
-    pub fn list_modules(&self) -> Vec<(&str, &[String], &[String])> {
-        let mut result: Vec<(&str, &[String], &[String])> = Vec::new();
-        if let Ok(order) = self.graph.topo_sort() {
-            for name in &order {
-                if let Some(desc) = self.graph.modules.get(name) {
-                    result.push((&desc.name, &desc.requires, &desc.provides));
-                }
-            }
-        }
-        result
-    }
-
     /// Save the current state to the image directory.
-    /// Writes each module's source file + the manifest.
-    pub fn save_image(&self) -> Result<String, String> {
-        let order = self.graph.topo_sort()?;
+    /// Projects source from heap-resident Definition objects.
+    pub fn save_image(&self, vm: &VM) -> Result<String, String> {
+        // Get module order: from graph if available, else from heap
+        let order = if !self.graph.modules.is_empty() {
+            self.graph.topo_sort()?
+        } else {
+            self.load_order_from_heap(vm)?
+        };
 
         let mut source_hashes = BTreeMap::new();
         let mut provides_counts = BTreeMap::new();
 
         for name in &order {
-            let source = self.source_texts.get(name)
-                .ok_or_else(|| format!("no source text for module '{}'", name))?;
+            // Try to project source from heap Definitions first
+            let source = if let Some(mod_id) = self.find_module_id(vm, name) {
+                let projected = self.project_source(vm, mod_id);
+                if projected.trim().contains('\n') {
+                    projected
+                } else {
+                    // Fallback to stored source_texts if projection is empty
+                    self.source_texts.get(name).cloned()
+                        .unwrap_or_else(|| projected)
+                }
+            } else {
+                self.source_texts.get(name).cloned()
+                    .ok_or_else(|| format!("no source text for module '{}'", name))?
+            };
 
-            let hash = image::save_module_source(&self.image_dir, name, source)?;
+            let hash = image::save_module_source(&self.image_dir, name, &source)?;
             source_hashes.insert(name.clone(), hash);
 
-            let count = self.exports.get(name).map(|e| e.len()).unwrap_or(0);
+            let count = if let Some(exports) = self.exports.get(name) {
+                exports.len()
+            } else if let Some(mod_id) = self.find_module_id(vm, name) {
+                let provides = vm.read_string_list(vm.read_slot(mod_id, "provides"));
+                provides.len()
+            } else {
+                0
+            };
             provides_counts.insert(name.clone(), count);
         }
 
@@ -290,12 +484,60 @@ impl ModuleLoader {
         Ok(manifest.global_hash)
     }
 
+    /// Project source text from a ModuleImage's Definition objects.
+    fn project_source(&self, vm: &VM, mod_id: u32) -> String {
+        let name = vm.read_string(vm.read_slot(mod_id, "name")).unwrap_or_default();
+        let requires = vm.read_string_list(vm.read_slot(mod_id, "requires"));
+        let provides = vm.read_string_list(vm.read_slot(mod_id, "provides"));
+        let unrestricted = vm.read_slot(mod_id, "unrestricted").is_truthy();
+
+        // Build module header
+        let mut source = format!("(module {}\n  (requires {})\n",
+            name,
+            if requires.is_empty() { String::new() } else { requires.join(" ") }
+        );
+        if unrestricted {
+            source.push_str("  (unrestricted)\n");
+        }
+        source.push_str(&format!("  (provides {}))\n", provides.join(" ")));
+
+        // Append each Definition's source
+        let defs = vm.definitions_list(mod_id);
+        for def_id in defs {
+            if let Some(def_source) = vm.definition_source(def_id) {
+                source.push('\n');
+                source.push_str(&def_source);
+                source.push('\n');
+            }
+        }
+
+        source
+    }
+
+    /// Find a module's heap object id by name (non-mutating).
+    fn find_module_id(&self, vm: &VM, name: &str) -> Option<u32> {
+        let modules = vm.all_module_ids();
+        modules.iter().find(|(n, _)| n == name).map(|(_, id)| *id)
+    }
+
+    /// Compute load order from heap-resident ModuleImage objects.
+    fn load_order_from_heap(&self, vm: &VM) -> Result<Vec<String>, String> {
+        let modules = vm.all_module_ids();
+        let pairs: Vec<(String, Vec<String>)> = modules.iter()
+            .map(|(name, id)| {
+                let requires = vm.read_string_list(vm.read_slot(*id, "requires"));
+                (name.clone(), requires)
+            })
+            .collect();
+        super::graph::topo_sort_pairs(&pairs)
+    }
+
     /// Save just one module's source and update the manifest.
-    pub fn save_module(&self, name: &str) -> Result<String, String> {
+    pub fn save_module(&self, name: &str, vm: &VM) -> Result<String, String> {
         let source = self.source_texts.get(name)
             .ok_or_else(|| format!("no source text for module '{}'", name))?;
         image::save_module_source(&self.image_dir, name, source)?;
-        self.save_image()
+        self.save_image(vm)
     }
 
     /// Define a binding in a module: eval the expression, append to source,
@@ -311,13 +553,15 @@ impl ModuleLoader {
         vm: &mut VM,
         root_env: u32,
     ) -> Result<Value, String> {
-        let env_id = *self.loaded_envs.get(module_name)
+        // Read env_id and unrestricted from heap ModuleImage
+        let mod_id = vm.find_module(module_name)
             .ok_or_else(|| format!("unknown module: {}", module_name))?;
-
-        // Determine compiler mode
+        let env_id = match vm.read_slot(mod_id, "env") {
+            Value::Object(id) => id,
+            _ => return Err(format!("{}: no env on ModuleImage", module_name)),
+        };
         let is_unrestricted = module_name == "bootstrap"
-            || self.graph.modules.get(module_name)
-                .map(|d| d.unrestricted).unwrap_or(false);
+            || vm.read_slot(mod_id, "unrestricted").is_truthy();
 
         // Compile and eval the expression in the module's env
         let mut lexer = Lexer::new(def_source);
@@ -341,51 +585,18 @@ impl ModuleLoader {
                 .map_err(|e| format!("runtime error: {}", e))?;
         }
 
-        // Update provides if this is a new symbol
-        if let Some(desc) = self.graph.modules.get_mut(module_name) {
-            if !desc.provides.contains(&def_name.to_string()) {
-                desc.provides.push(def_name.to_string());
-            }
-        }
-
-        // Update exports
+        // Update root env with the new binding
         let sym = vm.heap.intern(def_name);
         if let Ok(val) = vm.env_lookup(env_id, sym) {
-            let exports = self.exports.entry(module_name.to_string()).or_default();
-            if let Some(entry) = exports.iter_mut().find(|(n, _)| n == def_name) {
-                entry.1 = val;
-            } else {
-                exports.push((def_name.to_string(), val));
-            }
-            // Also update root env
             vm.env_define_helper(root_env, sym, val);
         }
 
-        // Append to source text and dedup
-        if let Some(source) = self.source_texts.get_mut(module_name) {
-            // Append the new definition
-            if !source.ends_with('\n') {
-                source.push('\n');
-            }
-            source.push('\n');
-            source.push_str(def_source);
-            source.push('\n');
-
-            // Dedup: remove earlier (def name ...) forms, keep last
-            *source = dedup_defs(source, def_name);
-
-            // Update the header's provides list
-            if let Some(desc) = self.graph.modules.get(module_name) {
-                *source = update_header_provides(source, &desc.provides);
-            }
-        }
-
-        // Autosave
-        if let Err(e) = self.save_module(module_name) {
+        // Autosave source projection
+        if let Err(e) = self.save_image(vm) {
             eprintln!("!! autosave failed: {}", e);
         }
 
-        // ── Phase 2/3: Create Definition object on the heap ──
+        // ── Update/create Definition on the heap ──
         if let Some(mod_id) = vm.find_module(module_name) {
             let sym_definition = vm.heap.intern("Definition");
             let def_proto = match vm.env_lookup(root_env, sym_definition) {
@@ -394,39 +605,55 @@ impl ModuleLoader {
             };
 
             if def_proto != 0 {
-                let mod_name_sym = vm.heap.intern("module-name");
-                let mod_name_val = vm.heap.alloc_string(module_name);
+                // Check if a Definition with this name already exists
                 let name_sym = vm.heap.intern("name");
-                let name_val = vm.heap.alloc_string(def_name);
-                let source_sym_attr = vm.heap.intern("source");
-                let source_val = vm.heap.alloc_string(def_source);
-                let kind_sym = vm.heap.intern("kind");
-                let kind_val = Value::Symbol(vm.heap.intern(if def_source.contains("(defmethod ") { "method" } else { "value" }));
-
-                let def_id = vm.heap.alloc(HeapObject::GeneralObject {
-                    parent: Value::Object(def_proto),
-                    slots: vec![
-                        (mod_name_sym, mod_name_val),
-                        (name_sym, name_val),
-                        (source_sym_attr, source_val),
-                        (kind_sym, kind_val),
-                    ],
-                    handlers: Vec::new(),
+                let source_sym = vm.heap.intern("source");
+                let existing_def = vm.definitions_list(mod_id).into_iter().find(|def_id| {
+                    vm.definition_name(*def_id).as_deref() == Some(def_name)
                 });
 
-                // Link to ModuleImage.definitions list
-                let sym_definitions = vm.heap.intern("definitions");
-                let current_defs = match vm.heap.get(mod_id) {
-                    HeapObject::GeneralObject { slots, .. } => {
-                        slots.iter().find(|(k, _)| *k == sym_definitions).map(|(_, v)| *v).unwrap_or(Value::Nil)
+                if let Some(existing_id) = existing_def {
+                    // Update existing Definition's source
+                    let new_source_val = vm.heap.alloc_string(def_source);
+                    vm.heap.set_slot(existing_id, source_sym, new_source_val);
+                } else {
+                    // Create new Definition
+                    let mod_name_sym = vm.heap.intern("module-name");
+                    let mod_name_val = vm.heap.alloc_string(module_name);
+                    let name_val = vm.heap.alloc_string(def_name);
+                    let source_val = vm.heap.alloc_string(def_source);
+                    let kind_sym = vm.heap.intern("kind");
+                    let kind_val = Value::Symbol(vm.heap.intern(
+                        if def_source.starts_with("(defmethod ") { "method" } else { "value" }
+                    ));
+
+                    let def_id = vm.heap.alloc(HeapObject::GeneralObject {
+                        parent: Value::Object(def_proto),
+                        slots: vec![
+                            (mod_name_sym, mod_name_val),
+                            (name_sym, name_val),
+                            (source_sym, source_val),
+                            (kind_sym, kind_val),
+                        ],
+                        handlers: Vec::new(),
+                    });
+
+                    // Cons onto definitions list
+                    let sym_definitions = vm.heap.intern("definitions");
+                    let current_defs = vm.read_slot(mod_id, "definitions");
+                    let new_defs = vm.heap.cons(Value::Object(def_id), current_defs);
+                    vm.heap.set_slot(mod_id, sym_definitions, new_defs);
+
+                    // Update provides on ModuleImage
+                    let provides_sym = vm.heap.intern("provides");
+                    let current_provides = vm.read_slot(mod_id, "provides");
+                    let prov_list = vm.read_string_list(current_provides);
+                    if !prov_list.contains(&def_name.to_string()) {
+                        let new_prov = vm.heap.alloc_string(def_name);
+                        let new_provides = vm.heap.cons(new_prov, current_provides);
+                        vm.heap.set_slot(mod_id, provides_sym, new_provides);
                     }
-                    _ => Value::Nil,
-                };
-                
-                // Append or replace? For now, just append.
-                // In a real system, we'd replace existing definitions of the same name.
-                let new_defs = vm.heap.cons(Value::Object(def_id), current_defs);
-                vm.heap.set_slot(mod_id, sym_definitions, new_defs);
+                }
             }
         }
 
@@ -491,7 +718,7 @@ impl ModuleLoader {
         self.exports.insert(name.to_string(), Vec::new());
 
         // Autosave
-        self.save_module(name)?;
+        self.save_module(name, vm)?;
 
         Ok(())
     }
@@ -590,6 +817,99 @@ fn find_form_end(s: &str) -> Option<usize> {
         i += 1;
     }
     None
+}
+
+/// Split a module body into individual top-level definition forms.
+/// Returns (def_name, form_source) for each `(def ...)` or `(defmethod ...)` form.
+/// Non-definition forms (bare expressions, comments) are returned with name "__expr_N".
+fn split_into_definitions(body: &str) -> Vec<(String, String)> {
+    let mut result = Vec::new();
+    let mut pos = 0;
+    let mut expr_count = 0;
+    let bytes = body.as_bytes();
+
+    while pos < bytes.len() {
+        // Skip whitespace
+        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        if pos >= bytes.len() { break; }
+
+        // Skip comment lines (collect them as prefix for the next form)
+        let mut comment_start = pos;
+        let mut has_comments = false;
+        while pos < bytes.len() && bytes[pos] == b';' {
+            has_comments = true;
+            while pos < bytes.len() && bytes[pos] != b'\n' {
+                pos += 1;
+            }
+            if pos < bytes.len() { pos += 1; } // skip the newline
+            // Skip whitespace between comment lines
+            while pos < bytes.len() && (bytes[pos] == b' ' || bytes[pos] == b'\t') {
+                pos += 1;
+            }
+        }
+
+        if pos >= bytes.len() { break; }
+
+        // If we hit a non-paren after comments, skip the line
+        if bytes[pos] != b'(' && bytes[pos] != b'[' && bytes[pos] != b'{' {
+            while pos < bytes.len() && bytes[pos] != b'\n' {
+                pos += 1;
+            }
+            continue;
+        }
+
+        let form_start = if has_comments { comment_start } else { pos };
+
+        if let Some(end) = find_form_end(&body[pos..]) {
+            let form_text_start = pos;
+            let form_end = pos + end;
+            let form_source = body[form_start..form_end].trim().to_string();
+
+            // Extract the name: look for (def NAME or (defmethod TYPE SELECTOR
+            let inner = &body[form_text_start..form_end];
+            let name = extract_def_name_from_form(inner);
+
+            match name {
+                Some(n) => result.push((n, form_source)),
+                None => {
+                    expr_count += 1;
+                    result.push((format!("__expr_{}", expr_count), form_source));
+                }
+            }
+
+            pos = form_end;
+        } else {
+            break;
+        }
+    }
+
+    result
+}
+
+/// Extract the definition name from a form like `(def NAME ...)` or `(defmethod TYPE SEL ...)`.
+fn extract_def_name_from_form(form: &str) -> Option<String> {
+    let trimmed = form.trim();
+    if trimmed.starts_with("(def ") || trimmed.starts_with("(def\n") || trimmed.starts_with("(def\t") {
+        // (def NAME ...)
+        let after_def = &trimmed[4..].trim_start();
+        let end = after_def.find(|c: char| c.is_whitespace() || c == '(' || c == '{' || c == '[')
+            .unwrap_or(after_def.len());
+        let name = &after_def[..end];
+        if !name.is_empty() { Some(name.to_string()) } else { None }
+    } else if trimmed.starts_with("(defmethod ") {
+        // (defmethod TYPE SEL ...) — name it as "TYPE.SEL" for identification
+        let after = &trimmed[11..].trim_start();
+        let type_end = after.find(|c: char| c.is_whitespace()).unwrap_or(after.len());
+        let type_name = &after[..type_end];
+        let rest = after[type_end..].trim_start();
+        let sel_end = rest.find(|c: char| c.is_whitespace() || c == '(').unwrap_or(rest.len());
+        let sel_name = &rest[..sel_end];
+        Some(format!("{}.{}", type_name, sel_name))
+    } else {
+        None
+    }
 }
 
 /// Update the (provides ...) clause in a module header.

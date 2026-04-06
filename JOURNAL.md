@@ -412,3 +412,75 @@ New compiler form + `OP_EVAL_STRING` opcode. Parses and evaluates a moof express
 ### let-seq
 
 Sequential let bindings (Scheme's `let*`). Named `let-seq` because `*` is an operator character in the lexer. Each binding visible to the next. Implemented as a quasiquote-powered vau that nests `let` forms.
+
+---
+
+## §13 — Image v3: the heap becomes truth (`92b0ff8`..`HEAD`)
+
+The largest architectural change since the module system. Three sessions, three contributors (codex wrote the plan revision, gemini did a first implementation pass, claude did the heap-walker rewrite and moof migration). The result: moof is now a self-modifiable living image.
+
+### The problem
+
+The system had a source/image duality. Rust-side `ModuleLoader` owned HashMaps of module state (source texts, exports, environments, dependency graph) that duplicated what should have lived as moof objects. The binary image serialized the heap but couldn't actually restore module state — every startup re-parsed, re-compiled, and re-evaluated everything from source files. The design doc says "things just survive." We had the opposite.
+
+### What changed
+
+**Heap-walker infrastructure.** The ModuleLoader stopped owning module state. New methods on the VM (`read_slot`, `all_module_ids`, `definitions_list`, `definition_source`) walk the heap to read ModuleImage and Definition objects directly. The Rust struct went from five fields to one (`image_dir: PathBuf`). All consumers — `merge_into_root`, `save_image`, `reload`, `remove`, the `(modules)` command — read from the heap now.
+
+**Definition objects.** Every top-level form in every module becomes a `Definition` object on the heap during loading: name, source text, kind, owning module. The `split_into_definitions` parser walks the module body and creates one Definition per form. On `define_in`, existing Definitions are updated (not appended) by name. Definitions are the canonical source — `.moof` files are projections.
+
+**Source projection.** `save_image` now projects source files from Definition objects: builds the module header from ModuleImage slots (name, requires, provides, unrestricted), concatenates each Definition's source slot. Round-trips verified: delete image.bin → load from source → checkpoint → load from projected source → identical behavior.
+
+**Bootstrap stub and migration.** ModuleImage and Definition prototypes are defined in bootstrap.moof, but the Modules registry is defined in modules.moof (which loads later). Solution: create a stub Modules object with list-backed handlers before loading begins, then migrate all registered ModuleImage objects to the real Assoc-backed Modules after modules.moof loads. The stub is garbage after migration.
+
+**Image resume actually works.** Loading from `image.bin` now deserializes the heap, re-registers native functions, and goes straight to REPL. No parsing, no compiling, no evaluating. All ModuleImage objects, Definition objects, the Modules registry, all module environments with bindings — everything is in the heap. The 25-line "compromise" comment block that said "re-eval everything anyway" is gone.
+
+**Unrestricted module environments.** Modules marked `(unrestricted)` now get `root_env` as their environment parent, so they can access VM-level natives like `__save-image` and `__eval-in`. Sandboxed modules still get isolated environments.
+
+### Shrinking Rust, growing moof
+
+**system.moof.** New module providing moof-level functions for what used to be Rust REPL command dispatch. `(modules)`, `(module-source bootstrap)`, `(module-exports system)`, `(which-module Assoc)`, `(checkpoint)`, `(save)`, `(undef foo)`, `(define-in system hello "(def hello ...)")` — all moof functions now. Most are vaus that accept bare symbols: you write `(module-exports bootstrap)` not `(module-exports "bootstrap")`.
+
+**VM-level natives.** Five new natives intercepted in `call_native` with full VM access: `__save-image` (bincode serialization), `__save-source` (source projection + manifest), `__eval-in` (eval string in specific env), `__define-global` (bind in root), `__undef` (remove from root). These are the escape hatches — everything else is moof.
+
+**Compiler diet.** Removed compiler special-case handling for `while`, `set!`, `%do`, `list`. Bootstrap.moof now provides `(def list (fn args args))` (variadic rest param) and `(def while (vau (test . body) ...))` (recursive operative). 67 lines gone from compile.rs.
+
+**Native handler migration.** `startsWith:`, `endsWith:`, `contains:` moved from Rust natives to moof defmethod definitions in system.moof, using the existing `indexOf:` and `substring:to:` primitives.
+
+**`populate_modules_registry` deleted.** This was 52 lines of Rust that built moof objects by eval-ing string templates. Replaced entirely by `register_module_on_heap` which creates objects directly during module loading.
+
+**REPL interceptors removed.** The Rust REPL loop no longer string-matches against `(modules)`, `(module-source ...)`, `(module-exports ...)`, `(which-module ...)`, `(define-in ...)`, `(module-create ...)`, `(checkpoint)`. These all fall through to eval and are handled by moof functions.
+
+### ModuleImage methods (in moof)
+
+```
+[module define: "name" source: "(def name ...)"]   ; create/update Definition
+[module remove-def: "name"]                         ; remove Definition + provides
+[module project-source]                             ; build .moof text from Definitions
+```
+
+The `define:source:` multi-keyword handler is installed in system.moof (not bootstrap) because it needs `toSymbol` which requires type prototypes to be registered.
+
+### In-image editing works
+
+The litmus test: you can `(define-in system greet "(def greet (fn (x) x))")` from the REPL, and it evals in the module's env, creates a Definition, updates provides, saves the binary image AND projects the source file, all without touching any .moof file directly. Workspace autosave uses the same path — `(def foo 42)` at the REPL auto-saves via `define-in`.
+
+### What the design doc says vs where we are
+
+The design doc (§6) says "source files are the canonical representation." We've moved past that: the heap is canonical for runtime state, Definition objects are canonical for source meaning, and source files are deterministic projections. This is the plan's "three layers" (Definition, State, Projection) made real. The design doc will need updating.
+
+### What's still missing
+
+- Compacting GC before serialization (heap grows monotonically)
+- Identity-preserving reload (re-eval still creates new objects rather than patching existing ones)
+- The `ModuleLoader` still has HashMap fields used during source-load mode (graph, loaded_envs, exports, source_texts) — they're not the source of truth anymore but they're not removed yet
+- Many REPL commands still have Rust interceptors (module-edit, module-reload, module-remove, export/import-modules, browse)
+- No `form->string` serializer for building source text from AST (blocks fully vau-based define-in)
+
+### Bugs fixed along the way
+
+- `modules.moof` used `.keys` dot access (reads a slot) instead of `[... keys]` message send on Assoc — broke `[Modules list]`
+- `bootstrap.moof` didn't export `Definition` or `ModuleImage` — they were defined but not in the provides list
+- `all_module_ids()` looked for an `entries` slot on Assoc but the real Assoc uses `data` — fixed to try both
+- `let` vs `let*` scoping: `define-in` vau had a let binding that referenced a sibling binding (parallel scope), fixed by nesting lets
+- `[sym toString]` returns `"'hello"` with quote prefix — fixed `as-name` helper to use `[sym name]` instead

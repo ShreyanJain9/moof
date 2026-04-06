@@ -1,16 +1,17 @@
 ; MOOF image manifest — do not edit by hand
-; global hash: d8ab683d7e21d2af6ab4ecdd0c35f42fffb35d5cae5ed19daeb966a5dcda5bbc
+; global hash: 57604fff1050a9ef51169217f322ce4140ff9e99a06ead94bf2e69b5b3c45a61
 
 (image
-  (hash "d8ab683d7e21d2af6ab4ecdd0c35f42fffb35d5cae5ed19daeb966a5dcda5bbc")
+  (hash "57604fff1050a9ef51169217f322ce4140ff9e99a06ead94bf2e69b5b3c45a61")
   (modules
-    (bootstrap hash: "bf36101586cb7b4bfb1ccad7689fe1fc97740c2205550cc36a6ec5e0ad752c57" provides: 57)
-    (collections hash: "4b0919f6e06a80a750f4678e85be6e25c127306e1c2d9745c37e0db4c9985ee0" provides: 10)
-    (classes hash: "074e325fa865f7124b5914847b96641abdc20c3bb21871603141e176726b538e" provides: 8)
-    (geometry hash: "19efc81791a93eabe178302ccc74891cfe8239c29c1df2c00aa87ce149b1eed0" provides: 1)
-    (json hash: "ced127d88d3f911fe6eee5481475246c5a24fc74ead1da617fd8db6aac086c2e" provides: 1)
-    (mcp hash: "8ba3b86ad1c2703a622b537d813c3ba67c64a0e73c46ac0c866ce56743d95c87" provides: 15)
-    (membrane hash: "a2c1839ed1316185bba444f4cd1ae9d25e5394a9015042c6e77f7d5bb5f7b760" provides: 3)
-    (modules hash: "615fb3b3e9a087ef2a39dcade9be68a352bd3626a1a7457cfbc6b3f1797a2981" provides: 2)
-    (workspace hash: "89cbe1476987cf8fc1a7d2f6007a3b9927df9a8bd3b4493371acb48d29f79f7e" provides: 0)
+    (bootstrap hash: "22bd1154f77673d1773bf9621e245263d07c4cca1805a3232c3922a655135c72" provides: 61)
+    (collections hash: "86b46003aed81a199c948eba3fb1a4f19ca98c66793f81ce0305f4b8c19f2274" provides: 10)
+    (classes hash: "e1d5075998ceaad084e06aa133fc06a8c4dfc2fabdeaeb6ab2e38e813b73140a" provides: 8)
+    (geometry hash: "fbc872708b921a316680dd107e3cb2e670582224872073ae453ad0c37bc84b5d" provides: 1)
+    (json hash: "f0798bec020eea1c90a034b21e9c1efc0998adcae017988c5094ab5ff3b8da68" provides: 1)
+    (mcp hash: "686960aec3f3e409f3d043b4bb8bc927f5647d065bc5d28626fb05f308b35818" provides: 15)
+    (membrane hash: "4bb28e53f398e90b55d183c4b359709040cdf2ca41c8ae1b6b3a2388399d19c9" provides: 3)
+    (modules hash: "267982b264f2b5a39bba604d13ca6864e8610fd270a83effebe2274afbb37903" provides: 1)
+    (system hash: "d846e9788fac71d72e8a1dff40278c7016a60a57bf9c09be81b3ef260a8fb4d9" provides: 10)
+    (workspace hash: "738d92d766786b37042ba263398fa4e0942e6f2400c6d354184024219caecaac" provides: 4)
   ))

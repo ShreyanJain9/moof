@@ -1,18 +1,6 @@
 (module bootstrap
-  (requires)
-  (provides fn wrap cond when unless do not and or
-            null? pair? symbol? integer? string? lambda? operative? object?
-            let-seq cadr caddr cddr length append reverse
-            map filter fold for-each nth range last take drop zip
-            compose identity constantly apply str println display
-            Object defmethod
-            Integer Float Boolean String Cons Nil Symbol Lambda Operative Environment
-            <- define-handler redefine inspect))
-
-; MOOF Bootstrap — derived forms from the six kernel primitives
-; everything here is built on: vau, send, def, quote, cons, eq
-
-; ── meta ────────────────────────────────────────────────────
+  (requires )
+  (provides fn wrap cond when unless do not and or null? pair? symbol? integer? string? lambda? operative? object? let-seq cadr caddr cddr length append reverse map filter fold for-each nth range last take drop zip compose identity constantly apply str println display Object defmethod Integer Float Boolean String Cons Nil Symbol Lambda Operative Environment <- define-handler redefine inspect Definition ModuleImage list while))
 
 ; fn: short lambda — a vau that builds and evals a lambda form
 (def fn
@@ -24,8 +12,6 @@
   (vau (operative) $e
     (fn args
       (eval (cons (eval operative $e) args)))))
-
-; ── control flow ────────────────────────────────────────────
 
 (def cond
   (vau clauses $e
@@ -66,8 +52,6 @@
     (if (eq body nil) nil
       (do-helper body))))
 
-; ── logic ───────────────────────────────────────────────────
-
 (def not (fn (x) (if x false true)))
 
 (def and
@@ -78,20 +62,21 @@
   (vau (a b) $e
     (if (eval a $e) true (if (eval b $e) true false))))
 
-; ── type predicates ─────────────────────────────────────────
-
 (def null?      (fn (x) (eq x nil)))
-(def pair?      (fn (x) (eq (type-of x) 'Cons)))
-(def symbol?    (fn (x) (eq (type-of x) 'Symbol)))
-(def integer?   (fn (x) (eq (type-of x) 'Integer)))
-(def string?    (fn (x) (eq (type-of x) 'String)))
-(def lambda?    (fn (x) (eq (type-of x) 'Lambda)))
-(def operative? (fn (x) (eq (type-of x) 'Operative)))
-(def object?    (fn (x) (eq (type-of x) 'Object)))
 
-; ── sequential let ─────────────────────────────────────────
-; let-seq: like Scheme's let* — bindings are evaluated sequentially,
-; each one visible to the next.
+(def pair?      (fn (x) (eq (type-of x) 'Cons)))
+
+(def symbol?    (fn (x) (eq (type-of x) 'Symbol)))
+
+(def integer?   (fn (x) (eq (type-of x) 'Integer)))
+
+(def string?    (fn (x) (eq (type-of x) 'String)))
+
+(def lambda?    (fn (x) (eq (type-of x) 'Lambda)))
+
+(def operative? (fn (x) (eq (type-of x) 'Operative)))
+
+(def object?    (fn (x) (eq (type-of x) 'Object)))
 
 (def let-seq
   (vau (bindings . body) $e
@@ -100,10 +85,10 @@
       (eval `(let (,(car bindings))
                (let-seq ,(cdr bindings) ,@body)) $e))))
 
-; ── list operations ─────────────────────────────────────────
-
 (def cadr  (fn (x) (car (cdr x))))
+
 (def caddr (fn (x) (car (cdr (cdr x)))))
+
 (def cddr  (fn (x) (cdr (cdr x))))
 
 (def length
@@ -168,30 +153,38 @@
     (if (or [n <= 0] (null? lst)) lst
       (drop [n - 1] (cdr lst)))))
 
+; list: variadic list constructor — rest param captures all args
+(def list (fn args args))
+
+; while: loop with test and body — uses recursive vau
+(def while
+  (vau (test . body) $env
+    (if (eval test $env)
+      (do
+        (for-each (fn (expr) (eval expr $env)) body)
+        (eval (cons 'while (cons test body)) $env))
+      nil)))
+
 (def zip
   (fn (a b)
     (if (or (null? a) (null? b)) nil
       (cons (list (car a) (car b)) (zip (cdr a) (cdr b))))))
 
-; ── higher-order ────────────────────────────────────────────
-
 (def compose    (fn (f g) (fn (x) (f (g x)))))
-(def identity   (fn (x) x))
-(def constantly (fn (x) (fn args x)))
-(def apply      (fn (f args) (eval (cons f args))))
 
-; ── string helpers ──────────────────────────────────────────
+(def identity   (fn (x) x))
+
+(def constantly (fn (x) (fn args x)))
+
+(def apply      (fn (f args) (eval (cons f args))))
 
 (def str
   (fn args
     (fold (fn (acc x) [acc ++ [x toString]]) "" args)))
 
-; ── printing ────────────────────────────────────────────────
-
 (def println (fn (x) (print x)))
-(def display (fn (x) (print x)))
 
-; ── object model ────────────────────────────────────────────
+(def display (fn (x) (print x)))
 
 (def Object (object nil))
 
@@ -203,6 +196,7 @@
       (lambda ,(cons 'self params) ,@body)) $e)))
 
 (defmethod Object describe () "<object>")
+
 (defmethod Object clone () (object self))
 
 ; interface: collect handler names from the whole delegation chain (deduplicated)
@@ -231,8 +225,6 @@
   (let ((handler [self handlerAt: selector]))
     (if (null? handler) nil (source handler))))
 
-; ── image model ─────────────────────────────────────────────
-
 ; Definition: a durable, named program element (§2 of PLAN-image-v3)
 (def Definition { Object
   id: nil
@@ -259,12 +251,28 @@
   durable-objects: nil ; list of module-owned objects
   env: nil
   unrestricted: false
-  
+
   describe: ()
     (str "<ModuleImage " @name ">")
-})
 
-; ── type prototypes ─────────────────────────────────────────
+  ; remove-def: — remove a Definition by name
+  remove-def: (def-name)
+    (<- @definitions
+      (filter (fn (d) (not [[d slotAt: 'name] = def-name])) @definitions))
+    (<- @provides
+      (filter (fn (p) (not [p = def-name])) @provides))
+    nil
+
+  ; project-source — build the .moof file text from Definitions
+  project-source: ()
+    (let ((header (str "(module " @name "\n"
+                    "  (requires " (if (null? @requires) "" [(map (fn (r) r) @requires) join: " "]) ")\n"
+                    (if @unrestricted "  (unrestricted)\n" "")
+                    "  (provides " (if (null? @provides) "" [(map (fn (p) p) @provides) join: " "]) "))\n")))
+      (fold (fn (acc d) (str acc "\n" [d slotAt: 'source] "\n"))
+            header
+            @definitions))
+})
 
 (def Integer { Object
   describe: () [self toString]
@@ -313,8 +321,6 @@
   describe: () "<environment>"
 })
 
-; ── mutation ─────────────────────────────────────────────────
-
 (def <-
   (vau (target value) $e
     (def val (eval value $e))
@@ -323,8 +329,6 @@
       (let ((obj (eval (car (cdr target)) $e))
             (field (eval (car (cdr (cdr target))) $e)))
         [obj slotAt: field put: val]))))
-
-; ── self-modification tools ─────────────────────────────────
 
 (def define-handler
   (vau (obj selector handler) $e

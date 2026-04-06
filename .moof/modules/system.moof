@@ -1,0 +1,116 @@
+(module system
+  (requires bootstrap collections modules)
+  (unrestricted)
+  (provides hello modules module-source module-exports which-module checkpoint save undef define-in as-name))
+
+(def hello (fn (x) x))
+
+(def checkpoint (fn ()
+  (__save-source)
+  (__save-image)
+  (write-err "(saved image)")
+  nil))
+
+(def save checkpoint)
+
+; coerce symbol or string to string (for Modules lookup)
+(def as-name (fn (x)
+  (if (symbol? x) [x name] x)))
+
+; (modules) — list all loaded modules
+(def modules (fn ()
+  (for-each
+    (fn (name)
+      (let ((m [Modules named: name]))
+        (if (null? m) nil
+          (let ((reqs [m slotAt: 'requires])
+                (provs [m slotAt: 'provides]))
+            (display (str "  " name
+              " [requires: " (if (null? reqs) "(kernel)" [(map (fn (r) r) reqs) join: ", "]) "]"
+              " [provides: " (length provs) " symbols]\n"))))))
+    [Modules list])
+  nil))
+
+; (module-source bootstrap) — bare symbol, shows source
+(def module-source
+  (vau (name) $env
+    (let ((n (as-name name)))
+      (let ((m [Modules named: n]))
+        (if (null? m)
+          (write-err (str "unknown module: " n))
+          (for-each
+            (fn (d) (display (str [d slotAt: 'source] "\n\n")))
+            [m slotAt: 'definitions]))))))
+
+; (module-exports bootstrap) — bare symbol, lists exports
+(def module-exports
+  (vau (name) $env
+    (let ((m [Modules named: (as-name name)]))
+      (if (null? m) nil
+        [m slotAt: 'provides]))))
+
+; (which-module Assoc) — bare symbol, finds defining module
+(def which-module
+  (vau (name) $env
+    (let ((m [Modules which: (as-name name)]))
+      (if (null? m) nil [m slotAt: 'name]))))
+
+; (define-in module def-name source-string)
+;
+; module and def-name are bare symbols (captured by vau, not evaluated).
+; source is a string expression (evaluated).
+;
+;   (define-in system greet "(def greet (fn (x) x))")
+;   (define-in workspace my-var "(def my-var 42)")
+;
+(def define-in
+  (vau (mod-sym def-sym source-expr) $env
+    (let ((module-name (as-name mod-sym))
+          (def-name (as-name def-sym))
+          (def-source (eval source-expr $env)))
+      (let ((m [Modules named: module-name]))
+        (if (null? m)
+          (do (write-err (str "unknown module: " module-name)) nil)
+          (let ((mod-env [m slotAt: 'env]))
+            (__eval-in def-source mod-env)
+            [m define: def-name source: def-source]
+            (__define-global def-name [mod-env lookup: [def-name toSymbol]])
+            (checkpoint)
+            (write-err (str "(defined " def-name " in " module-name ")"))
+            nil))))))
+
+; (undef foo) — bare symbol, removes binding from root
+(def undef
+  (vau (name) $env
+    (__undef (as-name name))
+    nil))
+
+(defmethod String startsWith: (prefix)
+  (let ((idx [self indexOf: prefix]))
+    (if (null? idx) false [idx = 0])))
+
+(defmethod String endsWith: (suffix)
+  (let ((slen [self length])
+        (plen [suffix length]))
+    (if [plen > slen] false
+      [[self substring: [slen - plen] to: slen] = suffix])))
+
+(defmethod String contains: (sub)
+  (not (null? [self indexOf: sub])))
+
+(handle! ModuleImage ["define:source:" toSymbol]
+  (fn (self def-name def-source)
+    (let ((existing (find (fn (d) [[d slotAt: 'name] = def-name]) [self slotAt: 'definitions])))
+      (if (null? existing)
+        (let ((d { Definition
+                   module-name: [self slotAt: 'name]
+                   name: def-name
+                   source: def-source
+                   kind: 'value }))
+          [self slotAt: 'definitions put: (cons d [self slotAt: 'definitions])]
+          (if (null? (find (fn (p) [p = def-name]) [self slotAt: 'provides]))
+            [self slotAt: 'provides put: (cons def-name [self slotAt: 'provides])])
+          d)
+        (do
+          [existing slotAt: 'source put: def-source]
+          existing)))))

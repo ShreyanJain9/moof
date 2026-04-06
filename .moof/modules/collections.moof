@@ -1,11 +1,6 @@
 (module collections
   (requires bootstrap)
-  (provides Assoc assoc-equal?
-            flat-map flatten find any? every? sort sort-by join))
-
-; collections.moof — data structures as proper MOOF objects
-
-; ── Assoc: ordered key-value map ────────────────────────────
+  (provides Assoc assoc-equal? flat-map flatten find any? every? sort sort-by join))
 
 (def assoc-equal?
   (fn (a b)
@@ -68,8 +63,6 @@
   (<- result.data (reverse (build args nil)))
   result)
 
-; ── list methods on Cons ────────────────────────────────────
-
 (defmethod Cons flatMap: (f)
   (if (null? (cdr self))
     (f (car self))
@@ -108,13 +101,18 @@
       [(car self) toString]
       [(str (car self) sep) ++ [(cdr self) join: sep]])))
 
-; ── standalone aliases ──────────────────────────────────────
-
 (def flat-map (fn (f lst) (if (null? lst) nil [lst flatMap: f])))
+
 (def flatten  (fn (lst) (flat-map identity lst)))
+
 (def find     (fn (pred lst) (if (null? lst) nil [lst find: pred])))
+
 (def any?     (fn (pred lst) (if (null? lst) false [lst any: pred])))
+
 (def every?   (fn (pred lst) (if (null? lst) true [lst every: pred])))
+
 (def sort     (fn (lst) (if (null? lst) nil [lst sort])))
+
 (def sort-by  (fn (cmp lst) (if (null? lst) nil [lst sortBy: cmp])))
+
 (def join     (fn (sep lst) (if (null? lst) "" [lst join: sep])))

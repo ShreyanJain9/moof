@@ -3,32 +3,24 @@
   (unrestricted)
   (provides Modules))
 
-; modules.moof — the module system as moof objects
-;
-;   [Modules list]                      => list of module names
-;   [Modules named: "collections"]      => a ModuleImage object
-;   [Modules which: "Stack"]            => "classes"
-
 ; Modules registry singleton
 (def Modules { Object
   _registry: { Assoc }
 
-  list: () @_registry.keys
-  
+  list: () [@_registry keys]
+
   named: (name) [@_registry get: name]
 
   which: (sym-name)
     (find (fn (m)
-          (let ((provs m.provides))
+          (let ((provs [m slotAt: 'provides]))
             (if (null? provs) false
               [provs any: (fn (p) [p = sym-name])])))
-        @_registry.values)
+        [@_registry values])
 
   describe: ()
-    (str "<Modules " @_registry.size " loaded>")
+    (str "<Modules " [@_registry size] " loaded>")
 })
-
-; ── multi-keyword: register:source:provides:requires:env: ──
 
 (handle! Modules ["register:source:provides:requires:env:" toSymbol]
   (fn (self name source provides requires env)
@@ -42,8 +34,6 @@
     }))
       [@_registry set: name to: m]
       m)))
-
-; ── multi-keyword: create:requires: ──
 
 (handle! Modules ["create:requires:" toSymbol]
   (fn (self name requires-list)

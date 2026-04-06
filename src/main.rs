@@ -88,56 +88,33 @@ fn main() {
         }
     }
 
-    // ── Discover and load modules from .moof/modules/ ──
-    {
+    // ── Load modules ──
+    if loaded_from_image {
+        // Image resume: all ModuleImage + Definition objects are in the heap.
+        // The Modules registry is in the heap. No re-evaluation needed.
+        // We just need a ModuleLoader with the image_dir for save operations.
+        let loader = modules::loader::ModuleLoader::from_image_dir(img_dir.clone());
+        module_loader = Some(loader);
+    } else {
+        // Source load: discover .moof files, parse, compile, eval, register on heap.
         match modules::loader::ModuleLoader::discover(&mod_dir, &mut vm.heap) {
             Ok(mut loader) => {
                 loader.image_dir = img_dir.clone();
 
-                if loaded_from_image {
-                    // If loaded from image, the module loader still needs to know its state.
-                    // For Phase 1, we still "load" them to populate the loader's metadata,
-                    // but we should eventually make the loader's metadata image-resident.
-                    // For now, re-evaluating if loaded_from_image might be redundant but safe
-                    // IF the image matches the source.
-                    // Actually, if we loaded from image, we SHOULD skip re-evaluating.
-                    // But we still need the ModuleLoader to have loaded_envs and exports.
-                    
-                    // TODO: In Phase 2, we restore ModuleLoader from image.
-                    // For Phase 1, let's just re-load for now to ensure consistency,
-                    // or better: only re-load if image is missing.
-                    
-                    // Actually, if I re-load, I might overwrite state that was in the image.
-                    // Let's try to just populate the loader from the existing heap if possible?
-                    // That's Phase 2.
-                    
-                    // Let's stick to the plan: Phase 1 is just heap persistence.
-                    // If we loaded from image, we have the state.
-                    // If we then run the loader, it will re-eval and potentially overwrite.
-                    // Let's skip the loader if we loaded from image, but then the REPL 
-                    // commands that use `module_loader` won't work.
-                    
-                    // Compromise for Phase 1: still run the loader. It will re-eval everything.
-                    // This is "off-model" but it's a step.
-                }
-
                 match load_modules_sequenced(&mut loader, &mut vm, root_env) {
                     Ok(()) => {
                         loader.merge_into_root(&mut vm, root_env);
-                        populate_modules_registry(&loader, &mut vm, root_env);
                         setup_workspace(&mut loader, &mut vm, root_env);
-                        
-                        match loader.save_image() {
+
+                        match loader.save_image(&vm) {
                             Ok(hash) => {
                                 let n = loader.graph.modules.len();
-                                if !loaded_from_image {
-                                    eprintln!("(loaded {} modules, hash {}...)", n, &hash[..12]);
-                                }
+                                eprintln!("(loaded {} modules, hash {}...)", n, &hash[..12]);
                             }
                             Err(e) => eprintln!("!! manifest save: {}", e),
                         }
 
-                        // SAVE BINARY IMAGE
+                        // Save binary image
                         if let Err(e) = snapshot::save_image(&bin_path, &vm.heap, root_env, vm.get_protos()) {
                             eprintln!("!! image.bin save failed: {}", e);
                         }
@@ -196,7 +173,7 @@ fn main() {
             Ok(0) => {
                 // Save on exit
                 if let Some(ref loader) = module_loader {
-                    let _ = loader.save_image();
+                    let _ = loader.save_image(&vm);
                     let _ = snapshot::save_image(&bin_path, &vm.heap, root_env, vm.get_protos());
                     eprintln!("(saved image)");
                 }
@@ -220,14 +197,7 @@ fn main() {
 
                 // ── REPL commands ──
 
-                if input == "(checkpoint)" || input == "(save)" {
-                    if let Some(ref loader) = module_loader {
-                        let _ = loader.save_image();
-                        let _ = snapshot::save_image(&bin_path, &vm.heap, root_env, vm.get_protos());
-                        eprintln!("(saved image)");
-                    }
-                    continue;
-                }
+                // checkpoint/save is now a moof function in system.moof
 
                 if input == "(browse)" {
                     let _ = tui::inspector::run_inspector(&vm.heap, None);
@@ -242,35 +212,7 @@ fn main() {
                     continue;
                 }
 
-                // Module system commands
-                if input == "(modules)" {
-                    if let Some(ref loader) = module_loader {
-                        let mods = loader.list_modules();
-                        for (name, requires, provides) in mods {
-                            let req_str = if requires.is_empty() {
-                                "(kernel)".to_string()
-                            } else {
-                                requires.join(", ")
-                            };
-                            eprintln!("  {} [requires: {}] [provides: {} symbols]",
-                                name, req_str, provides.len());
-                        }
-                    }
-                    continue;
-                }
-
-                if input.starts_with("(module-source ") {
-                    let name = input[15..input.len()-1].trim();
-                    if let Some(ref loader) = module_loader {
-                        if let Some(source) = loader.source_texts.get(name) {
-                            println!("{}", source);
-                        } else {
-                            eprintln!("!! unknown module: {}", name);
-                        }
-                    }
-                    continue;
-                }
-
+                // Module system commands (most moved to system.moof)
                 if input.starts_with("(module-edit ") {
                     let name = input[13..input.len()-1].trim().to_string();
                     if let Some(ref mut loader) = module_loader {
@@ -302,7 +244,7 @@ fn main() {
                 if input.starts_with("(module-remove ") {
                     let name = input[15..input.len()-1].trim();
                     if let Some(ref mut loader) = module_loader {
-                        match loader.remove(name) {
+                        match loader.remove(name, &mut vm) {
                             Ok(removed) => {
                                 for sym_name in &removed {
                                     let sym = vm.heap.intern(sym_name);
@@ -311,20 +253,6 @@ fn main() {
                                 eprintln!("(removed {} — unbound {} symbols)", name, removed.len());
                             }
                             Err(e) => eprintln!("!! {}", e),
-                        }
-                    }
-                    continue;
-                }
-
-                if input.starts_with("(module-exports ") {
-                    let name = input[16..input.len()-1].trim();
-                    if let Some(ref loader) = module_loader {
-                        if let Some(exports) = loader.exports.get(name) {
-                            for (sym, _val) in exports {
-                                eprintln!("  {}", sym);
-                            }
-                        } else {
-                            eprintln!("!! unknown module: {}", name);
                         }
                     }
                     continue;
@@ -358,59 +286,7 @@ fn main() {
                     continue;
                 }
 
-                // (define-in module-name def-source...)
-                // e.g. (define-in collections (def my-fn (fn (x) [x + 1])))
-                if input.starts_with("(define-in ") {
-                    if let Some(ref mut loader) = module_loader {
-                        match parse_define_in(&input) {
-                            Ok((module_name, def_name, def_source)) => {
-                                match loader.define_in(
-                                    &module_name, &def_name, &def_source,
-                                    &mut vm, root_env,
-                                ) {
-                                    Ok(val) => {
-                                        let formatted = vm.format_value(val);
-                                        println!("=> {}", formatted);
-                                        eprintln!("(defined {} in {})", def_name, module_name);
-                                    }
-                                    Err(e) => eprintln!("!! {}", e),
-                                }
-                            }
-                            Err(e) => eprintln!("!! {}", e),
-                        }
-                    }
-                    continue;
-                }
-
-                // (module-create name (requires dep1 dep2))
-                if input.starts_with("(module-create ") {
-                    if let Some(ref mut loader) = module_loader {
-                        match parse_module_create(&input, &mut vm.heap) {
-                            Ok((name, requires, unrestricted)) => {
-                                match loader.create_module(
-                                    &name, &requires, unrestricted, &mut vm, root_env,
-                                ) {
-                                    Ok(()) => eprintln!("(created module: {})", name),
-                                    Err(e) => eprintln!("!! {}", e),
-                                }
-                            }
-                            Err(e) => eprintln!("!! {}", e),
-                        }
-                    }
-                    continue;
-                }
-
-                // (which-module symbol-name)
-                if input.starts_with("(which-module ") {
-                    let sym_name = input[14..input.len()-1].trim();
-                    if let Some(ref loader) = module_loader {
-                        match loader.which_module(sym_name) {
-                            Some(module_name) => eprintln!("  {} is defined in {}", sym_name, module_name),
-                            None => eprintln!("  {} is not in any module", sym_name),
-                        }
-                    }
-                    continue;
-                }
+                // define-in and module-create are now moof functions in system.moof
 
                 // ── Evaluate expression ──
                 match eval_line(&mut vm, root_env, &input) {
@@ -418,20 +294,16 @@ fn main() {
                         let formatted = vm.format_value(val);
                         println!("=> {}", formatted);
 
-                        // Autosave (def ...) and (defmethod ...) forms to workspace
+                        // Autosave (def ...) forms to workspace via moof define-in
                         let trimmed_input = input.trim();
                         if trimmed_input.starts_with("(def ") || trimmed_input.starts_with("(defmethod ") {
-                            if let Some(ref mut loader) = module_loader {
-                                if loader.graph.modules.contains_key("workspace") {
-                                    if let Ok(def_name) = extract_def_name(trimmed_input) {
-                                        match loader.define_in("workspace", &def_name, trimmed_input, &mut vm, root_env) {
-                                            Ok(_) => {
-                                                let _ = snapshot::save_image(&bin_path, &vm.heap, root_env, vm.get_protos());
-                                            }
-                                            Err(e) => eprintln!("!! workspace autosave: {}", e),
-                                        }
-                                    }
-                                }
+                            if let Ok(def_name) = extract_def_name(trimmed_input) {
+                                let escaped = trimmed_input.replace('\\', "\\\\").replace('"', "\\\"");
+                                let autosave_expr = format!(
+                                    "(define-in workspace {} \"{}\")",
+                                    def_name, escaped
+                                );
+                                let _ = eval_source(&mut vm, root_env, &autosave_expr, "<autosave>");
                             }
                         }
                     }
@@ -489,66 +361,13 @@ fn handle_module_edit(
         .map_err(|e| format!("reload failed: {}", e))?;
 
     // Save the updated module to disk
-    loader.save_module(name)
+    loader.save_module(name, vm)
         .map_err(|e| format!("save failed: {}", e))?;
 
     Ok(())
 }
 
 /// Populate the Modules object with info about all loaded modules.
-fn populate_modules_registry(
-    loader: &modules::loader::ModuleLoader,
-    vm: &mut VM,
-    root_env: u32,
-) {
-    if let Ok(order) = loader.load_order() {
-        for name in &order {
-            if name == "modules" { continue; }
-
-            let desc = match loader.graph.modules.get(name) {
-                Some(d) => d,
-                None => continue,
-            };
-            let env_id = loader.loaded_envs.get(name).copied().unwrap_or(0);
-
-            // Build provides and requires as moof list expressions
-            let provides_str = desc.provides.iter()
-                .map(|p| format!("\"{}\"", p.replace('"', "\\\"")))
-                .collect::<Vec<_>>()
-                .join(" ");
-            let requires_str = desc.requires.iter()
-                .map(|r| format!("\"{}\"", r))
-                .collect::<Vec<_>>()
-                .join(" ");
-
-            // Register via eval
-            let expr = format!(
-                "[Modules register: \"{}\" source: \"\" provides: (list {}) requires: (list {}) env: {}]",
-                name.replace('"', "\\\""),
-                provides_str,
-                requires_str,
-                env_id,
-            );
-
-            match eval_source(vm, root_env, &expr, "<register>") {
-                Ok(module_val) => {
-                    // Set the actual source text directly via heap slot (temporarily, until Definitions exist)
-                    if let Value::Object(mod_id) = module_val {
-                        if let Some(source) = loader.source_texts.get(name) {
-                            // In Image v3, source will be projected from Definitions.
-                            // For now, we still keep it as a slot on the ModuleImage for introspection.
-                            let source_sym = vm.heap.intern("source");
-                            let source_val = vm.heap.alloc_string(source);
-                            vm.heap.set_slot(mod_id, source_sym, source_val);
-                        }
-                    }
-                }
-                Err(e) => eprintln!("!! register {}: {}", name, e),
-            }
-        }
-    }
-}
-
 /// Set up the workspace module for REPL autosave.
 fn setup_workspace(
     loader: &mut modules::loader::ModuleLoader,
@@ -630,6 +449,8 @@ fn load_modules_sequenced(
         loader.load_one(name, vm)?;
 
         if name == "bootstrap" {
+            // Merge bootstrap exports into root so that ModuleImage, Definition,
+            // Object, etc. are available during subsequent module loads.
             if let Some(exports) = loader.exports.get("bootstrap") {
                 for (sym_name, val) in exports {
                     let sym = vm.heap.intern(sym_name);
@@ -637,10 +458,188 @@ fn load_modules_sequenced(
                 }
             }
             register_type_prototypes(vm, root_env);
+
+            // Create a stub Modules object with a simple list-based registry.
+            // This lets register_module_on_heap register ModuleImage objects
+            // before modules.moof defines the real Modules with an Assoc.
+            create_stub_modules(vm, root_env);
+
+            // Now re-register bootstrap itself on the heap (it was loaded
+            // before ModuleImage/Modules existed).
+            if let Some(desc) = loader.graph.modules.get("bootstrap") {
+                if let Some(source) = loader.source_texts.get("bootstrap") {
+                    let env_id = loader.loaded_envs.get("bootstrap").copied().unwrap_or(0);
+                    loader.register_module_on_heap("bootstrap", desc, source, env_id, vm);
+                }
+            }
+        }
+
+        if name == "modules" {
+            // modules.moof just loaded — it defines the real Modules object
+            // with an Assoc-backed _registry. Merge its exports into root.
+            if let Some(exports) = loader.exports.get("modules") {
+                for (sym_name, val) in exports {
+                    let sym = vm.heap.intern(sym_name);
+                    vm.env_define_helper(root_env, sym, *val);
+                }
+            }
+
+            // Migrate: collect all ModuleImage objects that were registered
+            // in the stub, and re-register them in the real Modules.
+            migrate_stub_to_real_modules(vm, root_env);
         }
     }
 
     Ok(())
+}
+
+/// Create a stub Modules singleton with a list-backed registry.
+/// This exists only until modules.moof loads and defines the real Modules.
+fn create_stub_modules(vm: &mut VM, root_env: u32) {
+    // Create a GeneralObject to serve as the stub registry.
+    // It stores entries as a cons-list of (name_string . mod_id) pairs
+    // in an "entries" slot, mimicking the Assoc interface just enough
+    // for register_module_on_heap to work.
+    let entries_sym = vm.heap.intern("entries");
+    let size_sym = vm.heap.intern("size");
+
+    let registry_id = vm.heap.alloc(HeapObject::GeneralObject {
+        parent: Value::Nil,
+        slots: vec![
+            (entries_sym, Value::Nil),
+            (size_sym, Value::Integer(0)),
+        ],
+        handlers: Vec::new(),
+    });
+
+    // Handler lambdas are called with (self, ...args).
+    // We use [self slotAt: ...] instead of @ since these are standalone lambdas.
+    let set_to_sym = vm.heap.intern("set:to:");
+    let set_source = "(fn (self key val) (do [self slotAt: 'entries put: (cons (cons key val) [self slotAt: 'entries])] [self slotAt: 'size put: [[self slotAt: 'size] + 1]] val))";
+    match eval_source(vm, root_env, set_source, "<stub>") {
+        Ok(handler_val) => {
+            vm.heap.add_handler(registry_id, set_to_sym, handler_val);
+        }
+        Err(e) => eprintln!("!! stub registry set:to: failed: {}", e),
+    }
+
+    let get_sym = vm.heap.intern("get:");
+    let get_source = "(fn (self key) (let ((found (find (fn (pair) [[(car pair)] = key]) [self slotAt: 'entries]))) (if (null? found) nil (cdr found))))";
+    match eval_source(vm, root_env, get_source, "<stub>") {
+        Ok(handler_val) => {
+            vm.heap.add_handler(registry_id, get_sym, handler_val);
+        }
+        Err(e) => eprintln!("!! stub registry get: failed: {}", e),
+    }
+
+    let keys_sym = vm.heap.intern("keys");
+    let keys_source = "(fn (self) (map (fn (pair) (car pair)) [self slotAt: 'entries]))";
+    match eval_source(vm, root_env, keys_source, "<stub>") {
+        Ok(handler_val) => {
+            vm.heap.add_handler(registry_id, keys_sym, handler_val);
+        }
+        Err(e) => eprintln!("!! stub registry keys failed: {}", e),
+    }
+
+    let values_sym = vm.heap.intern("values");
+    let values_source = "(fn (self) (map (fn (pair) (cdr pair)) [self slotAt: 'entries]))";
+    match eval_source(vm, root_env, values_source, "<stub>") {
+        Ok(handler_val) => {
+            vm.heap.add_handler(registry_id, values_sym, handler_val);
+        }
+        Err(e) => eprintln!("!! stub registry values failed: {}", e),
+    }
+
+    // Create the stub Modules object
+    let registry_slot_sym = vm.heap.intern("_registry");
+    let modules_id = vm.heap.alloc(HeapObject::GeneralObject {
+        parent: Value::Nil,
+        slots: vec![
+            (registry_slot_sym, Value::Object(registry_id)),
+        ],
+        handlers: Vec::new(),
+    });
+
+    // Add handlers that delegate to registry
+    let list_sym = vm.heap.intern("list");
+    let list_source = "(fn (self) [[self slotAt: '_registry] keys])";
+    match eval_source(vm, root_env, list_source, "<stub>") {
+        Ok(handler_val) => {
+            vm.heap.add_handler(modules_id, list_sym, handler_val);
+        }
+        Err(_) => {}
+    }
+
+    let named_sym = vm.heap.intern("named:");
+    let named_source = "(fn (self name) [[self slotAt: '_registry] get: name])";
+    match eval_source(vm, root_env, named_source, "<stub>") {
+        Ok(handler_val) => {
+            vm.heap.add_handler(modules_id, named_sym, handler_val);
+        }
+        Err(_) => {}
+    }
+
+    let describe_sym = vm.heap.intern("describe");
+    let describe_source = "(fn (self) (str \"<Modules (stub) \" [[self slotAt: '_registry] slotAt: 'size] \" loaded>\"))";
+    match eval_source(vm, root_env, describe_source, "<stub>") {
+        Ok(handler_val) => {
+            vm.heap.add_handler(modules_id, describe_sym, handler_val);
+        }
+        Err(_) => {}
+    }
+
+    // Bind Modules in root env
+    let modules_sym = vm.heap.intern("Modules");
+    vm.env_define_helper(root_env, modules_sym, Value::Object(modules_id));
+
+    // Also bind __stub_modules so migration can find the old entries
+    let stub_sym = vm.heap.intern("__stub_modules");
+    vm.env_define_helper(root_env, stub_sym, Value::Object(modules_id));
+}
+
+/// Migrate ModuleImage objects from the stub Modules to the real Modules.
+/// Called after modules.moof loads and defines the real Modules with Assoc.
+fn migrate_stub_to_real_modules(vm: &mut VM, root_env: u32) {
+    // Read entries from the stub
+    let stub_sym = vm.heap.intern("__stub_modules");
+    let stub_obj = match vm.env_lookup(root_env, stub_sym) {
+        Ok(Value::Object(id)) => id,
+        _ => return,
+    };
+
+    let registry_val = vm.read_slot(stub_obj, "_registry");
+    let entries_val = match registry_val {
+        Value::Object(reg_id) => vm.read_slot(reg_id, "entries"),
+        _ => return,
+    };
+
+    // The real Modules is now bound in root_env
+    let modules_sym = vm.heap.intern("Modules");
+    let real_modules = match vm.env_lookup(root_env, modules_sym) {
+        Ok(Value::Object(id)) if id != stub_obj => id,
+        _ => return,
+    };
+
+    let real_registry_val = vm.read_slot(real_modules, "_registry");
+    let real_registry_id = match real_registry_val {
+        Value::Object(id) => id,
+        _ => return,
+    };
+
+    // Walk the stub entries and re-register each in the real Modules
+    let entries = vm.heap.list_to_vec(entries_val);
+    let set_to_sym = vm.heap.intern("set:to:");
+    for entry in entries {
+        if let Value::Object(pair_id) = entry {
+            if let HeapObject::Cons { car, cdr } = vm.heap.get(pair_id).clone() {
+                let _ = vm.message_send(
+                    Value::Object(real_registry_id),
+                    set_to_sym,
+                    &[car, cdr],
+                );
+            }
+        }
+    }
 }
 
 fn eval_line(vm: &mut VM, env_id: u32, input: &str) -> Result<Value, String> {
