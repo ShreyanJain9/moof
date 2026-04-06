@@ -44,7 +44,7 @@ fn main() {
             Ok((heap, re, protos)) => {
                 vm.heap = heap;
                 root_env = re;
-                vm.root_env = Some(root_env);
+                vm.vat.root_env = Some(root_env);
                 vm.set_protos(protos);
                 // RE-REGISTER NATIVES: closures are not in the image
                 register_type_prototypes(&mut vm, root_env);
@@ -68,7 +68,7 @@ fn main() {
     if !loaded_from_image {
         let root_sym = vm.heap.intern("root-env");
         vm.env_define_helper(root_env, root_sym, Value::Object(root_env));
-        vm.root_env = Some(root_env);
+        vm.vat.root_env = Some(root_env);
     }
 
     // ── Boot ──

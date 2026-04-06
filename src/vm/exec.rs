@@ -61,21 +61,51 @@ struct CallFrame {
     stack_base: usize,
 }
 
+/// Per-vat execution state. Each vat has its own stack, frames, and root env.
+/// Multiple vats share the same heap (via the VM/Runtime).
+pub struct VatState {
+    /// Vat identifier
+    pub id: u32,
+    /// The value stack
+    pub stack: Vec<Value>,
+    /// The call stack
+    pub frames: Vec<CallFrame>,
+    /// The root environment for this vat
+    pub root_env: Option<u32>,
+    /// Execution status
+    pub status: VatStatus,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum VatStatus {
+    Ready,
+    Running,
+    Suspended { error: String },
+}
+
+impl VatState {
+    pub fn new(id: u32) -> Self {
+        VatState {
+            id,
+            stack: Vec::with_capacity(256),
+            frames: Vec::with_capacity(64),
+            root_env: None,
+            status: VatStatus::Ready,
+        }
+    }
+}
+
 /// The MOOF virtual machine.
+/// Contains shared state (heap, natives, protos) and the current vat.
 pub struct VM {
     pub heap: Heap,
-    /// The value stack
-    stack: Vec<Value>,
-    /// The call stack
-    frames: Vec<CallFrame>,
+    /// The current vat's execution state
+    pub vat: VatState,
     /// Well-known symbols (cached for fast dispatch)
     pub sym_call: u32,
     pub sym_parent: u32,
     pub sym_does_not_understand: u32,
-    /// The root environment (set after bootstrap)
-    pub root_env: Option<u32>,
     /// Type prototypes — maps primitive types to their prototype object ids.
-    /// Set after bootstrap defines them.
     pub proto_integer: Option<u32>,
     pub proto_float: Option<u32>,
     pub proto_boolean: Option<u32>,
@@ -104,12 +134,10 @@ impl VM {
 
         VM {
             heap,
-            stack: Vec::with_capacity(256),
-            frames: Vec::with_capacity(64),
+            vat: VatState::new(0),
             sym_call,
             sym_parent,
             sym_does_not_understand: sym_dnu,
-            root_env: None,
             proto_integer: None,
             proto_float: None,
             proto_boolean: None,
@@ -138,7 +166,9 @@ impl VM {
         if name == "__save-image" {
             return self.native_save_image(args);
         }
-        // __save-source removed — no more source projection
+        if name == "__try" {
+            return self.native_try(args);
+        }
         // __eval-in, __undef, __define-global removed —
         // replaced by pure vau + environment manipulation in system.moof
 
@@ -155,14 +185,27 @@ impl VM {
     fn native_save_image(&mut self, _args: &[Value]) -> Result<Value, String> {
         use crate::persistence::snapshot;
         let path = std::path::PathBuf::from(".moof/image.bin");
-        let root_env = self.root_env.ok_or("no root env")?;
+        let root_env = self.vat.root_env.ok_or("no root env")?;
         let protos = self.get_protos();
         snapshot::save_image(&path, &self.heap, root_env, protos)?;
         Ok(Value::True)
     }
 
-    // native_save_source and project_module_source removed.
-    // Source projection is dead. The image IS the program.
+    /// Native: try/catch error containment.
+    /// Args: [body_lambda, handler_lambda]
+    /// Calls body with no args. If it errors, calls handler with error string.
+    fn native_try(&mut self, args: &[Value]) -> Result<Value, String> {
+        let body = args.first().copied().ok_or("__try: needs body")?;
+        let handler = args.get(1).copied().ok_or("__try: needs handler")?;
+
+        match self.call_value(body, &[]) {
+            Ok(val) => Ok(val),
+            Err(err_msg) => {
+                let err_val = self.heap.alloc_string(&err_msg);
+                self.call_value(handler, &[err_val])
+            }
+        }
+    }
 
     /// Get the type prototype for a value (if registered).
     fn type_prototype(&self, val: Value) -> Option<u32> {
@@ -231,7 +274,7 @@ impl VM {
 
     /// Find the Modules singleton object.
     pub fn find_module_registry(&self) -> Option<u32> {
-        let root = self.root_env?;
+        let root = self.vat.root_env?;
         let sym = self.heap.symbol_lookup_only("Modules")?;
         match self.env_lookup(root, sym) {
             Ok(Value::Object(id)) => Some(id),
@@ -241,7 +284,7 @@ impl VM {
 
     /// Find a ModuleImage object by name.
     pub fn find_module(&mut self, name: &str) -> Option<u32> {
-        let root = self.root_env?;
+        let root = self.vat.root_env?;
         let sym_modules = self.heap.intern("Modules");
         let modules_obj = match self.env_lookup(root, sym_modules) {
             Ok(Value::Object(id)) => id,
@@ -307,7 +350,7 @@ impl VM {
     /// Walks Modules._registry which is an Assoc with a `data` slot
     /// containing a list of (key . value) pairs.
     pub fn all_module_ids(&self) -> Vec<(String, u32)> {
-        let root = match self.root_env {
+        let root = match self.vat.root_env {
             Some(r) => r,
             None => return Vec::new(),
         };
@@ -376,12 +419,12 @@ impl VM {
 
     /// Execute a bytecode chunk in a given environment. Returns the final value.
     pub fn execute(&mut self, chunk_id: u32, env_id: u32) -> VMResult {
-        let frame_depth = self.frames.len();
-        self.frames.push(CallFrame {
+        let frame_depth = self.vat.frames.len();
+        self.vat.frames.push(CallFrame {
             chunk_id,
             ip: 0,
             env_id,
-            stack_base: self.stack.len(),
+            stack_base: self.vat.stack.len(),
         });
 
         self.run(frame_depth)
@@ -390,11 +433,11 @@ impl VM {
     /// The main execution loop. Runs until we drop back to `base_depth` frames.
     fn run(&mut self, base_depth: usize) -> VMResult {
         loop {
-            if self.frames.len() <= base_depth {
-                return Ok(self.stack.pop().unwrap_or(Value::Nil));
+            if self.vat.frames.len() <= base_depth {
+                return Ok(self.vat.stack.pop().unwrap_or(Value::Nil));
             }
 
-            let frame = self.frames.last().unwrap();
+            let frame = self.vat.frames.last().unwrap();
             let chunk_id = frame.chunk_id;
             let env_id = frame.env_id;
 
@@ -406,53 +449,53 @@ impl VM {
                 _ => return Err("Not a bytecode chunk".into()),
             };
 
-            let ip = self.frames.last().unwrap().ip;
+            let ip = self.vat.frames.last().unwrap().ip;
             if ip >= code.len() {
                 // End of chunk — return top of stack or nil
-                let result = self.stack.pop().unwrap_or(Value::Nil);
-                let base = self.frames.last().unwrap().stack_base;
-                self.frames.pop();
-                self.stack.truncate(base);
-                self.stack.push(result);
+                let result = self.vat.stack.pop().unwrap_or(Value::Nil);
+                let base = self.vat.frames.last().unwrap().stack_base;
+                self.vat.frames.pop();
+                self.vat.stack.truncate(base);
+                self.vat.stack.push(result);
                 continue;
             }
 
             let op = code[ip];
             // Advance ip
-            self.frames.last_mut().unwrap().ip = ip + 1;
+            self.vat.frames.last_mut().unwrap().ip = ip + 1;
 
             match op {
                 OP_CONST => {
                     let idx = read_u16(&code, ip + 1) as usize;
-                    self.frames.last_mut().unwrap().ip = ip + 3;
-                    self.stack.push(constants[idx]);
+                    self.vat.frames.last_mut().unwrap().ip = ip + 3;
+                    self.vat.stack.push(constants[idx]);
                 }
 
-                OP_NIL => self.stack.push(Value::Nil),
-                OP_TRUE => self.stack.push(Value::True),
-                OP_FALSE => self.stack.push(Value::False),
+                OP_NIL => self.vat.stack.push(Value::Nil),
+                OP_TRUE => self.vat.stack.push(Value::True),
+                OP_FALSE => self.vat.stack.push(Value::False),
 
-                OP_POP => { self.stack.pop(); }
+                OP_POP => { self.vat.stack.pop(); }
 
                 OP_LOOKUP => {
                     let idx = read_u16(&code, ip + 1) as usize;
-                    self.frames.last_mut().unwrap().ip = ip + 3;
+                    self.vat.frames.last_mut().unwrap().ip = ip + 3;
                     let sym = match constants[idx] {
                         Value::Symbol(s) => s,
                         _ => return Err("LOOKUP: expected symbol in constants".into()),
                     };
                     let val = self.env_lookup(env_id, sym)?;
-                    self.stack.push(val);
+                    self.vat.stack.push(val);
                 }
 
                 OP_DEF => {
                     let idx = read_u16(&code, ip + 1) as usize;
-                    self.frames.last_mut().unwrap().ip = ip + 3;
+                    self.vat.frames.last_mut().unwrap().ip = ip + 3;
                     let sym = match constants[idx] {
                         Value::Symbol(s) => s,
                         _ => return Err("DEF: expected symbol in constants".into()),
                     };
-                    let val = self.stack.pop().ok_or("DEF: empty stack")?;
+                    let val = self.vat.stack.pop().ok_or("DEF: empty stack")?;
                     // Error if already bound in THIS env (not parent).
                     // Shadowing a parent binding is fine; redefining is not.
                     // Use <- to update existing bindings.
@@ -463,47 +506,47 @@ impl VM {
                         }
                     }
                     self.env_define(env_id, sym, val);
-                    self.stack.push(val);
+                    self.vat.stack.push(val);
                 }
 
                 OP_GET_ENV => {
-                    self.stack.push(Value::Object(env_id));
+                    self.vat.stack.push(Value::Object(env_id));
                 }
 
                 OP_SEND => {
                     let sel_idx = read_u16(&code, ip + 1) as usize;
                     let argc = code[ip + 3] as usize;
-                    self.frames.last_mut().unwrap().ip = ip + 4;
+                    self.vat.frames.last_mut().unwrap().ip = ip + 4;
                     let selector = match constants[sel_idx] {
                         Value::Symbol(s) => s,
                         _ => return Err("SEND: expected symbol selector".into()),
                     };
                     // Stack: [receiver, arg1, ..., argN]
-                    let stack_start = self.stack.len() - argc - 1;
-                    let receiver = self.stack[stack_start];
-                    let args: Vec<Value> = self.stack[stack_start + 1..].to_vec();
-                    self.stack.truncate(stack_start);
+                    let stack_start = self.vat.stack.len() - argc - 1;
+                    let receiver = self.vat.stack[stack_start];
+                    let args: Vec<Value> = self.vat.stack[stack_start + 1..].to_vec();
+                    self.vat.stack.truncate(stack_start);
                     let result = self.message_send(receiver, selector, &args)?;
-                    self.stack.push(result);
+                    self.vat.stack.push(result);
                 }
 
                 OP_CONS => {
-                    let cdr = self.stack.pop().ok_or("CONS: empty stack")?;
-                    let car = self.stack.pop().ok_or("CONS: empty stack")?;
+                    let cdr = self.vat.stack.pop().ok_or("CONS: empty stack")?;
+                    let car = self.vat.stack.pop().ok_or("CONS: empty stack")?;
                     let val = self.heap.cons(car, cdr);
-                    self.stack.push(val);
+                    self.vat.stack.push(val);
                 }
 
                 OP_EQ => {
-                    let b = self.stack.pop().ok_or("EQ: empty stack")?;
-                    let a = self.stack.pop().ok_or("EQ: empty stack")?;
-                    self.stack.push(if a == b { Value::True } else { Value::False });
+                    let b = self.vat.stack.pop().ok_or("EQ: empty stack")?;
+                    let a = self.vat.stack.pop().ok_or("EQ: empty stack")?;
+                    self.vat.stack.push(if a == b { Value::True } else { Value::False });
                 }
 
                 OP_QUOTE => {
                     let idx = read_u16(&code, ip + 1) as usize;
-                    self.frames.last_mut().unwrap().ip = ip + 3;
-                    self.stack.push(constants[idx]);
+                    self.vat.frames.last_mut().unwrap().ip = ip + 3;
+                    self.vat.stack.push(constants[idx]);
                 }
 
                 OP_VAU => {
@@ -511,7 +554,7 @@ impl VM {
                     let env_param_idx = read_u16(&code, ip + 3) as usize;
                     let body_idx = read_u16(&code, ip + 5) as usize;
                     let source_idx = read_u16(&code, ip + 7) as usize;
-                    self.frames.last_mut().unwrap().ip = ip + 9;
+                    self.vat.frames.last_mut().unwrap().ip = ip + 9;
 
                     let params = constants[params_idx];
                     let env_param_sym = match constants[env_param_idx] {
@@ -543,42 +586,42 @@ impl VM {
                         }
                     };
                     let id = self.heap.alloc(obj);
-                    self.stack.push(Value::Object(id));
+                    self.vat.stack.push(Value::Object(id));
                 }
 
                 OP_CALL => {
                     let argc = code[ip + 1] as usize;
-                    self.frames.last_mut().unwrap().ip = ip + 2;
-                    let stack_start = self.stack.len() - argc - 1;
-                    let callable = self.stack[stack_start];
-                    let args: Vec<Value> = self.stack[stack_start + 1..].to_vec();
-                    self.stack.truncate(stack_start);
+                    self.vat.frames.last_mut().unwrap().ip = ip + 2;
+                    let stack_start = self.vat.stack.len() - argc - 1;
+                    let callable = self.vat.stack[stack_start];
+                    let args: Vec<Value> = self.vat.stack[stack_start + 1..].to_vec();
+                    self.vat.stack.truncate(stack_start);
                     let result = self.call_value(callable, &args)?;
-                    self.stack.push(result);
+                    self.vat.stack.push(result);
                 }
 
                 OP_RETURN => {
-                    let result = self.stack.pop().unwrap_or(Value::Nil);
-                    let base = self.frames.last().unwrap().stack_base;
-                    self.frames.pop();
-                    self.stack.truncate(base);
-                    self.stack.push(result);
-                    if self.frames.is_empty() {
+                    let result = self.vat.stack.pop().unwrap_or(Value::Nil);
+                    let base = self.vat.frames.last().unwrap().stack_base;
+                    self.vat.frames.pop();
+                    self.vat.stack.truncate(base);
+                    self.vat.stack.push(result);
+                    if self.vat.frames.is_empty() {
                         return Ok(result);
                     }
                 }
 
                 OP_JUMP => {
                     let offset = read_u16(&code, ip + 1) as usize;
-                    self.frames.last_mut().unwrap().ip = ip + 3 + offset;
+                    self.vat.frames.last_mut().unwrap().ip = ip + 3 + offset;
                 }
 
                 OP_JUMP_IF_FALSE => {
                     let offset = read_u16(&code, ip + 1) as usize;
-                    self.frames.last_mut().unwrap().ip = ip + 3;
-                    let cond = self.stack.pop().ok_or("JUMP_IF_FALSE: empty stack")?;
+                    self.vat.frames.last_mut().unwrap().ip = ip + 3;
+                    let cond = self.vat.stack.pop().ok_or("JUMP_IF_FALSE: empty stack")?;
                     if !cond.is_truthy() {
-                        self.frames.last_mut().unwrap().ip = ip + 3 + offset;
+                        self.vat.frames.last_mut().unwrap().ip = ip + 3 + offset;
                     }
                 }
 
@@ -587,28 +630,28 @@ impl VM {
                     // Jump backwards: ip is currently at ip+1 (after reading opcode)
                     // We want to go to (ip + 3) - distance
                     let target = (ip + 3).wrapping_sub(distance);
-                    self.frames.last_mut().unwrap().ip = target;
+                    self.vat.frames.last_mut().unwrap().ip = target;
                 }
 
                 OP_CALL_OPERATIVE => {
                     let argc = code[ip + 1] as usize;
-                    self.frames.last_mut().unwrap().ip = ip + 2;
-                    let stack_start = self.stack.len() - argc - 1;
-                    let operative = self.stack[stack_start];
-                    let args: Vec<Value> = self.stack[stack_start + 1..].to_vec();
-                    self.stack.truncate(stack_start);
+                    self.vat.frames.last_mut().unwrap().ip = ip + 2;
+                    let stack_start = self.vat.stack.len() - argc - 1;
+                    let operative = self.vat.stack[stack_start];
+                    let args: Vec<Value> = self.vat.stack[stack_start + 1..].to_vec();
+                    self.vat.stack.truncate(stack_start);
 
                     // Build the args as a cons list (unevaluated)
                     let args_list = self.heap.list(&args);
                     let result = self.call_operative(operative, args_list, env_id)?;
-                    self.stack.push(result);
+                    self.vat.stack.push(result);
                 }
 
                 OP_APPLY => {
                     // Generic apply: runtime check for operative vs applicative
                     // Stack: [callable, quoted_args_list]
-                    let args_list = self.stack.pop().ok_or("APPLY: empty stack")?;
-                    let callable = self.stack.pop().ok_or("APPLY: empty stack")?;
+                    let args_list = self.vat.stack.pop().ok_or("APPLY: empty stack")?;
+                    let callable = self.vat.stack.pop().ok_or("APPLY: empty stack")?;
 
                     let result = match callable {
                         Value::Object(id) => {
@@ -632,13 +675,13 @@ impl VM {
                         }
                         _ => return Err(format!("Cannot apply {:?}", callable)),
                     };
-                    self.stack.push(result);
+                    self.vat.stack.push(result);
                 }
 
                 OP_TAIL_APPLY => {
                     // Tail-call variant: replaces current frame for lambdas/blocks
-                    let args_list = self.stack.pop().ok_or("TAIL_APPLY: empty stack")?;
-                    let callable = self.stack.pop().ok_or("TAIL_APPLY: empty stack")?;
+                    let args_list = self.vat.stack.pop().ok_or("TAIL_APPLY: empty stack")?;
+                    let callable = self.vat.stack.pop().ok_or("TAIL_APPLY: empty stack")?;
 
                     match callable {
                         Value::Object(id) => {
@@ -654,8 +697,8 @@ impl VM {
                                     let new_env_id = self.heap.alloc_env(Some(def_env));
                                     let evaled_list = self.heap.list(&evaled);
                                     self.bind_params(new_env_id, params, evaled_list);
-                                    let frame = self.frames.last_mut().unwrap();
-                                    self.stack.truncate(frame.stack_base);
+                                    let frame = self.vat.frames.last_mut().unwrap();
+                                    self.vat.stack.truncate(frame.stack_base);
                                     frame.chunk_id = body;
                                     frame.ip = 0;
                                     frame.env_id = new_env_id;
@@ -663,7 +706,7 @@ impl VM {
                                 HeapObject::Operative { .. } => {
                                     // Can't TCO operatives — fall back to regular call
                                     let result = self.call_operative(callable, args_list, env_id)?;
-                                    self.stack.push(result);
+                                    self.vat.stack.push(result);
                                 }
                                 _ => {
                                     // Everything else: dispatch through call:
@@ -673,7 +716,7 @@ impl VM {
                                         evaled.push(self.eval(arg, env_id)?);
                                     }
                                     let result = self.message_send(callable, self.sym_call, &evaled)?;
-                                    self.stack.push(result);
+                                    self.vat.stack.push(result);
                                 }
                             }
                         }
@@ -684,11 +727,11 @@ impl VM {
                 OP_TAIL_CALL => {
                     // Tail-call variant of OP_CALL for known-lambda contexts (let)
                     let argc = code[ip + 1] as usize;
-                    self.frames.last_mut().unwrap().ip = ip + 2;
-                    let stack_start = self.stack.len() - argc - 1;
-                    let callable = self.stack[stack_start];
-                    let args: Vec<Value> = self.stack[stack_start + 1..].to_vec();
-                    self.stack.truncate(stack_start);
+                    self.vat.frames.last_mut().unwrap().ip = ip + 2;
+                    let stack_start = self.vat.stack.len() - argc - 1;
+                    let callable = self.vat.stack[stack_start];
+                    let args: Vec<Value> = self.vat.stack[stack_start + 1..].to_vec();
+                    self.vat.stack.truncate(stack_start);
 
                     match callable {
                         Value::Object(id) => {
@@ -697,15 +740,15 @@ impl VM {
                                     let new_env_id = self.heap.alloc_env(Some(def_env));
                                     let args_list = self.heap.list(&args);
                                     self.bind_params(new_env_id, params, args_list);
-                                    let frame = self.frames.last_mut().unwrap();
-                                    self.stack.truncate(frame.stack_base);
+                                    let frame = self.vat.frames.last_mut().unwrap();
+                                    self.vat.stack.truncate(frame.stack_base);
                                     frame.chunk_id = body;
                                     frame.ip = 0;
                                     frame.env_id = new_env_id;
                                 }
                                 _ => {
                                     let result = self.call_value(callable, &args)?;
-                                    self.stack.push(result);
+                                    self.vat.stack.push(result);
                                 }
                             }
                         }
@@ -714,41 +757,41 @@ impl VM {
                 }
 
                 OP_EVAL => {
-                    let expr = self.stack.pop().ok_or("EVAL: empty stack")?;
+                    let expr = self.vat.stack.pop().ok_or("EVAL: empty stack")?;
                     let result = self.eval(expr, env_id)?;
-                    self.stack.push(result);
+                    self.vat.stack.push(result);
                 }
 
                 OP_PRINT => {
-                    let val = self.stack.pop().ok_or("PRINT: empty stack")?;
+                    let val = self.vat.stack.pop().ok_or("PRINT: empty stack")?;
                     let s = self.format_value(val);
                     println!("{}", s);
-                    self.stack.push(Value::Nil);
+                    self.vat.stack.push(Value::Nil);
                 }
 
                 OP_CAR => {
-                    let val = self.stack.pop().ok_or("CAR: empty stack")?;
-                    self.stack.push(self.heap.car(val));
+                    let val = self.vat.stack.pop().ok_or("CAR: empty stack")?;
+                    self.vat.stack.push(self.heap.car(val));
                 }
 
                 OP_CDR => {
-                    let val = self.stack.pop().ok_or("CDR: empty stack")?;
-                    self.stack.push(self.heap.cdr(val));
+                    let val = self.vat.stack.pop().ok_or("CDR: empty stack")?;
+                    self.vat.stack.push(self.heap.cdr(val));
                 }
 
                 OP_MAKE_OBJECT => {
                     let slot_count = code[ip + 1] as usize;
-                    self.frames.last_mut().unwrap().ip = ip + 2;
+                    self.vat.frames.last_mut().unwrap().ip = ip + 2;
                     // Stack: [parent, key1, val1, key2, val2, ...]
                     let mut explicit_slots = Vec::new();
                     for _ in 0..slot_count {
-                        let val = self.stack.pop().ok_or("MAKE_OBJECT: empty stack")?;
-                        let key = self.stack.pop().ok_or("MAKE_OBJECT: empty stack")?;
+                        let val = self.vat.stack.pop().ok_or("MAKE_OBJECT: empty stack")?;
+                        let key = self.vat.stack.pop().ok_or("MAKE_OBJECT: empty stack")?;
                         let key_sym = key.as_symbol().ok_or("MAKE_OBJECT: slot key must be symbol")?;
                         explicit_slots.push((key_sym, val));
                     }
                     explicit_slots.reverse();
-                    let parent = self.stack.pop().ok_or("MAKE_OBJECT: empty stack")?;
+                    let parent = self.vat.stack.pop().ok_or("MAKE_OBJECT: empty stack")?;
 
                     // Clone default slot values from parent prototype.
                     // Explicit slots override parent defaults.
@@ -771,22 +814,22 @@ impl VM {
                         handlers: Vec::new(),
                     };
                     let id = self.heap.alloc(obj);
-                    self.stack.push(Value::Object(id));
+                    self.vat.stack.push(Value::Object(id));
                 }
 
                 OP_HANDLE => {
-                    let handler = self.stack.pop().ok_or("HANDLE: empty stack")?;
-                    let selector = self.stack.pop().ok_or("HANDLE: empty stack")?;
-                    let obj_val = self.stack.pop().ok_or("HANDLE: empty stack")?;
+                    let handler = self.vat.stack.pop().ok_or("HANDLE: empty stack")?;
+                    let selector = self.vat.stack.pop().ok_or("HANDLE: empty stack")?;
+                    let obj_val = self.vat.stack.pop().ok_or("HANDLE: empty stack")?;
                     let sel_sym = selector.as_symbol().ok_or("HANDLE: selector must be symbol")?;
                     let obj_id = obj_val.as_object().ok_or("HANDLE: expected object")?;
                     self.heap.add_handler(obj_id, sel_sym, handler);
-                    self.stack.push(obj_val);
+                    self.vat.stack.push(obj_val);
                 }
 
                 OP_SLOT_GET => {
-                    let field_sym = self.stack.pop().ok_or("SLOT_GET: empty stack")?;
-                    let obj_val = self.stack.pop().ok_or("SLOT_GET: empty stack")?;
+                    let field_sym = self.vat.stack.pop().ok_or("SLOT_GET: empty stack")?;
+                    let obj_val = self.vat.stack.pop().ok_or("SLOT_GET: empty stack")?;
                     let sym_id = field_sym.as_symbol().ok_or("SLOT_GET: field must be symbol")?;
                     let result = match obj_val {
                         Value::Object(id) => {
@@ -802,21 +845,21 @@ impl VM {
                         }
                         _ => return Err(format!("SLOT_GET: cannot access field on {:?}", obj_val)),
                     };
-                    self.stack.push(result);
+                    self.vat.stack.push(result);
                 }
 
                 OP_SLOT_SET => {
-                    let val = self.stack.pop().ok_or("SLOT_SET: empty stack")?;
-                    let field_sym = self.stack.pop().ok_or("SLOT_SET: empty stack")?;
-                    let obj_val = self.stack.pop().ok_or("SLOT_SET: empty stack")?;
+                    let val = self.vat.stack.pop().ok_or("SLOT_SET: empty stack")?;
+                    let field_sym = self.vat.stack.pop().ok_or("SLOT_SET: empty stack")?;
+                    let obj_val = self.vat.stack.pop().ok_or("SLOT_SET: empty stack")?;
                     let sym_id = field_sym.as_symbol().ok_or("SLOT_SET: field must be symbol")?;
                     let obj_id = obj_val.as_object().ok_or("SLOT_SET: expected object")?;
                     self.heap.set_slot(obj_id, sym_id, val);
-                    self.stack.push(val);
+                    self.vat.stack.push(val);
                 }
 
                 OP_TYPE_OF => {
-                    let val = self.stack.pop().ok_or("TYPE_OF: empty stack")?;
+                    let val = self.vat.stack.pop().ok_or("TYPE_OF: empty stack")?;
                     let type_name = match val {
                         Value::Nil => "Nil",
                         Value::True | Value::False => "Boolean",
@@ -835,11 +878,11 @@ impl VM {
                         },
                     };
                     let sym = self.heap.intern(type_name);
-                    self.stack.push(Value::Symbol(sym));
+                    self.vat.stack.push(Value::Symbol(sym));
                 }
 
                 OP_LOAD => {
-                    let path_val = self.stack.pop().ok_or("LOAD: empty stack")?;
+                    let path_val = self.vat.stack.pop().ok_or("LOAD: empty stack")?;
                     let path = match path_val {
                         Value::Object(id) => match self.heap.get(id).clone() {
                             HeapObject::MoofString(s) => s,
@@ -847,16 +890,16 @@ impl VM {
                         },
                         _ => return Err("load: expected string path".into()),
                     };
-                    let load_env = self.root_env.unwrap_or(env_id);
+                    let load_env = self.vat.root_env.unwrap_or(env_id);
                     let source = std::fs::read_to_string(&path)
                         .map_err(|e| format!("load: cannot read {}: {}", path, e))?;
                     // Use the public eval_source from main
                     let result = crate::eval_source(self, load_env, &source, &path)?;
-                    self.stack.push(result);
+                    self.vat.stack.push(result);
                 }
 
                 OP_SOURCE => {
-                    let val = self.stack.pop().ok_or("SOURCE: empty stack")?;
+                    let val = self.vat.stack.pop().ok_or("SOURCE: empty stack")?;
                     let source = match val {
                         Value::Object(id) => match self.heap.get(id) {
                             HeapObject::Lambda { source, .. } => *source,
@@ -865,11 +908,11 @@ impl VM {
                         },
                         _ => Value::Nil,
                     };
-                    self.stack.push(source);
+                    self.vat.stack.push(source);
                 }
 
                 OP_EVAL_STRING => {
-                    let str_val = self.stack.pop().ok_or("EVAL_STRING: empty stack")?;
+                    let str_val = self.vat.stack.pop().ok_or("EVAL_STRING: empty stack")?;
                     let source = match str_val {
                         Value::Object(id) => match self.heap.get(id).clone() {
                             HeapObject::MoofString(s) => s,
@@ -878,23 +921,23 @@ impl VM {
                         _ => return Err("eval-string: expected string".into()),
                     };
                     let result = crate::eval_source(self, env_id, &source, "<eval-string>")?;
-                    self.stack.push(result);
+                    self.vat.stack.push(result);
                 }
 
                 OP_APPEND => {
-                    let b = self.stack.pop().ok_or("APPEND: empty stack")?;
-                    let a = self.stack.pop().ok_or("APPEND: empty stack")?;
+                    let b = self.vat.stack.pop().ok_or("APPEND: empty stack")?;
+                    let a = self.vat.stack.pop().ok_or("APPEND: empty stack")?;
                     // append(a, b): walk a, cons each element onto b
                     let a_elems = self.heap.list_to_vec(a);
                     let mut result = b;
                     for &elem in a_elems.iter().rev() {
                         result = self.heap.cons(elem, result);
                     }
-                    self.stack.push(result);
+                    self.vat.stack.push(result);
                 }
 
                 OP_FFI_OPEN => {
-                    let name_val = self.stack.pop().ok_or("FFI_OPEN: empty stack")?;
+                    let name_val = self.vat.stack.pop().ok_or("FFI_OPEN: empty stack")?;
                     let name = match name_val {
                         Value::Object(id) => match self.heap.get(id).clone() {
                             HeapObject::MoofString(s) => s,
@@ -906,14 +949,14 @@ impl VM {
                     self.ffi_libs.insert(name.clone(), lib);
                     // Return a symbol representing the library
                     let lib_sym = self.heap.intern(&format!("ffi:{}", name));
-                    self.stack.push(Value::Symbol(lib_sym));
+                    self.vat.stack.push(Value::Symbol(lib_sym));
                 }
 
                 OP_FFI_BIND => {
-                    let ret_type_val = self.stack.pop().ok_or("FFI_BIND: empty stack")?;
-                    let arg_types_val = self.stack.pop().ok_or("FFI_BIND: empty stack")?;
-                    let func_name_val = self.stack.pop().ok_or("FFI_BIND: empty stack")?;
-                    let lib_val = self.stack.pop().ok_or("FFI_BIND: empty stack")?;
+                    let ret_type_val = self.vat.stack.pop().ok_or("FFI_BIND: empty stack")?;
+                    let arg_types_val = self.vat.stack.pop().ok_or("FFI_BIND: empty stack")?;
+                    let func_name_val = self.vat.stack.pop().ok_or("FFI_BIND: empty stack")?;
+                    let lib_val = self.vat.stack.pop().ok_or("FFI_BIND: empty stack")?;
 
                     // Get library name from the symbol
                     let lib_name = match lib_val {
@@ -969,7 +1012,7 @@ impl VM {
                     // Create a NativeFunction heap object
                     let nf_obj = HeapObject::NativeFunction { name: native_name };
                     let nf_id = self.heap.alloc(nf_obj);
-                    self.stack.push(Value::Object(nf_id));
+                    self.vat.stack.push(Value::Object(nf_id));
                 }
 
                 _ => return Err(format!("Unknown opcode: 0x{:02x}", op)),

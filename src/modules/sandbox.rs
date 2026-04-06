@@ -44,7 +44,7 @@ pub fn create_unrestricted_env(
     vm: &mut VM,
     imports: &HashMap<String, Value>,
 ) -> u32 {
-    let root = vm.root_env.unwrap_or(0);
+    let root = vm.vat.root_env.unwrap_or(0);
     let env_id = vm.heap.alloc_env(Some(root));
 
     // Bind all imported symbols (override root bindings if needed)

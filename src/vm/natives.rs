@@ -800,8 +800,12 @@ fn register_io_natives(vm: &mut VM, root_env: u32) {
 
     // __save-source removed — no more source projection
 
-    // __eval-in, __undef, __define-global removed —
-    // replaced by pure vau + environment manipulation in system.moof
+    // __try: error containment (VM-level native)
+    let val = vm.register_native("__try", Box::new(|_heap, _args| {
+        Ok(Value::Nil) // actual work done in VM::call_native intercept
+    }));
+    let sym = vm.heap.intern("__try");
+    vm.heap.env_define(root_env, sym, val);
 
     // read-line: reads a line from stdin, returns string or nil on EOF
     let val = vm.register_native("io:read-line", Box::new(|heap, _args| {

@@ -200,7 +200,7 @@ impl ModuleLoader {
         env_id: u32,
         vm: &mut VM,
     ) {
-        let root_env = match vm.root_env {
+        let root_env = match vm.vat.root_env {
             Some(r) => r,
             None => return,
         };
