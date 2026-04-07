@@ -1,0 +1,8 @@
+[package]
+name = "moof-server"
+version = "0.1.0"
+edition = "2024"
+description = "A running moof objectspace. Frontends connect as vats."
+
+[dependencies]
+moof-fabric = { path = "../moof-fabric" }

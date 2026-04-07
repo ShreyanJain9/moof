@@ -1,5 +1,5 @@
 [workspace]
-members = ["moof-fabric", "moof-lang", "."]
+members = ["moof-fabric", "moof-lang", "moof-server", "."]
 
 [package]
 name = "moof"
@@ -9,6 +9,7 @@ edition = "2024"
 [dependencies]
 moof-fabric = { path = "moof-fabric" }
 moof-lang = { path = "moof-lang" }
+moof-server = { path = "moof-server" }
 serde = { version = "1", features = ["derive"] }
 bincode = "1"
 sha2 = "0.10"

@@ -1982,6 +1982,7 @@ dependencies = [
  "libloading",
  "moof-fabric",
  "moof-lang",
+ "moof-server",
  "ratatui",
  "serde",
  "sha2",
@@ -1997,6 +1998,13 @@ dependencies = [
 
 [[package]]
 name = "moof-lang"
+version = "0.1.0"
+dependencies = [
+ "moof-fabric",
+]
+
+[[package]]
+name = "moof-server"
 version = "0.1.0"
 dependencies = [
  "moof-fabric",
