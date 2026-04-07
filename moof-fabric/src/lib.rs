@@ -12,6 +12,7 @@ pub mod heap;
 pub mod dispatch;
 pub mod vat;
 pub mod native;
+pub mod wire;
 
 pub use value::{Value, HeapObject};
 pub use heap::Heap;

@@ -21,3 +21,11 @@ eframe = "0.31"
 [[bin]]
 name = "moof-new"
 path = "src/bin/moof_new.rs"
+
+[[bin]]
+name = "moof-server"
+path = "src/bin/moof_server.rs"
+
+[[bin]]
+name = "moof-repl"
+path = "src/bin/moof_repl.rs"

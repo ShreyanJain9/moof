@@ -202,11 +202,28 @@ pub fn register(fabric: &mut Fabric, native: &mut NativeInvoker) {
         } else { Err("describe expects symbol".into()) }
     });
 
-    // Bind type proto names in root env for bootstrap access
-    let env = fabric.create_object(Value::Nil); // we'll use this differently
-    // Store the root object id for later
-    let root_sym = fabric.intern("Object");
-    // These will be bound in the root environment by the shell
+}
+
+/// Register eval: handler on all environments.
+/// This must be called AFTER the BytecodeInvoker is registered,
+/// because eval: compiles and executes moof source.
+///
+/// eval: is a VM-level intercept — it needs the full invoke context.
+/// We register it as a native that compiles the string argument,
+/// stores the chunk, and executes it.
+pub fn register_eval_handler(fabric: &mut Fabric, native: &mut NativeInvoker) {
+    // We can't easily make this work through NativeInvoker because
+    // eval needs to compile + execute, which requires the full fabric.
+    // Instead, we register a native that's intercepted at the interpreter level.
+    // The interpreter already intercepts eval: on environments.
+    // For the wire protocol path (fabric.send directly), we need a different approach.
+    //
+    // The RIGHT solution: register eval: as a native handler that the
+    // NativeInvoker's invoke() method handles by calling moof_lang::eval.
+    // But NativeInvoker closures only get &mut Heap, not &mut Fabric.
+    //
+    // PRAGMATIC solution: the server binary handles eval: specially in the
+    // wire protocol dispatch, before calling fabric.send().
 }
 
 /// Helper: register a native function on a prototype.
