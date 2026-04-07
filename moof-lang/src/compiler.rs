@@ -165,6 +165,7 @@ impl Compiler {
                 "if" => return self.compile_if(heap, &elements[1..], tail),
                 "lambda" => return self.compile_lambda(heap, &elements[1..]),
                 "let" => return self.compile_let(heap, &elements[1..], tail),
+                "eval" => return self.compile_eval(heap, &elements[1..]),
                 "car" => return self.compile_car(heap, &elements[1..]),
                 "cdr" => return self.compile_cdr(heap, &elements[1..]),
                 "object" => return self.compile_object(heap, &elements[1..]),
@@ -485,6 +486,28 @@ impl Compiler {
         }
         self.emit(argc as u8);
         Ok(())
+    }
+
+    fn compile_eval(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {
+        match args.len() {
+            1 => {
+                // (eval expr) — eval in current environment
+                self.compile(heap, args[0], false)?;
+                self.emit(OP_EVAL);
+                Ok(())
+            }
+            2 => {
+                // (eval expr env) → [env eval: expr] — message send
+                self.compile(heap, args[1], false)?; // env is the receiver
+                self.compile(heap, args[0], false)?; // expr is the arg
+                let sel = self.add_constant(Value::Symbol(heap.intern("eval:")));
+                self.emit(OP_SEND);
+                self.emit_u16(sel);
+                self.emit(1u8);
+                Ok(())
+            }
+            _ => Err("eval requires 1 or 2 arguments".into()),
+        }
     }
 
     fn compile_car(&mut self, heap: &mut Heap, args: &[Value]) -> Result<(), String> {

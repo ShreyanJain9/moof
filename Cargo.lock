@@ -1980,9 +1980,26 @@ dependencies = [
  "crossterm",
  "eframe",
  "libloading",
+ "moof-fabric",
+ "moof-lang",
  "ratatui",
  "serde",
  "sha2",
+]
+
+[[package]]
+name = "moof-fabric"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "serde",
+]
+
+[[package]]
+name = "moof-lang"
+version = "0.1.0"
+dependencies = [
+ "moof-fabric",
 ]
 
 [[package]]

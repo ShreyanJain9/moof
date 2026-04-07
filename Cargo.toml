@@ -8,6 +8,7 @@ edition = "2024"
 
 [dependencies]
 moof-fabric = { path = "moof-fabric" }
+moof-lang = { path = "moof-lang" }
 serde = { version = "1", features = ["derive"] }
 bincode = "1"
 sha2 = "0.10"
@@ -15,3 +16,7 @@ ratatui = "0.29"
 crossterm = "0.28"
 libloading = "0.8"
 eframe = "0.31"
+
+[[bin]]
+name = "moof-new"
+path = "src/bin/moof_new.rs"
