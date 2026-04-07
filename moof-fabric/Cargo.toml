@@ -1,0 +1,9 @@
+[package]
+name = "moof-fabric"
+version = "0.1.0"
+edition = "2024"
+description = "The moof objectspace kernel. Objects, messaging, scheduling, persistence."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+bincode = "1"

@@ -1,9 +1,13 @@
+[workspace]
+members = ["moof-fabric", "."]
+
 [package]
 name = "moof"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+moof-fabric = { path = "moof-fabric" }
 serde = { version = "1", features = ["derive"] }
 bincode = "1"
 sha2 = "0.10"
