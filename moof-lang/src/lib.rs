@@ -4,7 +4,6 @@ pub mod opcodes;
 pub mod compiler;
 pub mod interpreter;
 pub mod conventions;
-pub mod io;
 
 use moof_fabric::{Fabric, Value, NativeInvoker};
 
@@ -60,23 +59,31 @@ pub struct SetupResult {
 }
 
 // ── Extension entry point ──
-// When loaded as a dylib by the server, this function is called.
-// It registers moof-lang: BytecodeInvoker, type conventions, IO handlers,
-// bootstrap, and sets up a root environment.
+// ── Extension entry point ──
+// When loaded as a dylib by the server, this registers the moof
+// language shell: BytecodeInvoker, type conventions, bootstrap.
+// IO is NOT registered here — that's the server's concern.
 
-/// The dylib entry point. Called by the server when loading this extension.
+/// The dylib entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moof_extension_init(server_ptr: *mut moof_server::Server) {
-    let server = &mut *server_ptr;
+    let server = unsafe { &mut *server_ptr };
 
-    // Register language shell
+    // Register language shell (BytecodeInvoker + type conventions)
     let result = setup(server.fabric());
     let root_env = result.root_env;
 
-    // Register IO on system vats
-    io::register_system_handlers(server);
+    // Bind system vat capabilities into root env so bootstrap can use them
+    let caps: Vec<(String, u32)> = server.system.by_name.iter()
+        .filter(|(k, _)| !k.starts_with("__"))
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    for (name, obj_id) in caps {
+        let sym = server.fabric().intern(&name);
+        server.fabric().heap.env_define(root_env, sym, Value::Object(obj_id));
+    }
 
-    // print for bootstrap
+    // print for bootstrap (Console is now bound in root_env)
     let _ = eval(server.fabric(),
         "(def print (lambda (x) [Console writeLine: x]))", root_env);
 
@@ -92,15 +99,13 @@ pub unsafe extern "C" fn moof_extension_init(server_ptr: *mut moof_server::Serve
         }
     }
 
-    // Store root_env on the server for client connections
-    // We use a well-known slot on the fabric's first object
+    // Store root_env for client connections
     let root_env_sym = server.fabric().intern("__moof_root_env");
-    let sentinel = server.fabric().create_object(moof_fabric::Value::Nil);
-    server.fabric().heap.slot_set(sentinel, root_env_sym, moof_fabric::Value::Object(root_env));
+    let sentinel = server.fabric().create_object(Value::Nil);
+    server.fabric().heap.slot_set(sentinel, root_env_sym, Value::Object(root_env));
     server.system.by_name.insert("__moof_env".to_string(), sentinel);
 
-    eprintln!("  [moof-lang] registered (BytecodeInvoker + {} type handlers)",
-        server.fabric().heap.len());
+    eprintln!("  [moof-lang] registered");
 }
 
 fn skip_module_header(source: &str) -> &str {

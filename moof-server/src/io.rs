@@ -5,7 +5,7 @@
 /// User vats get references to these objects as capabilities.
 
 use moof_fabric::*;
-use moof_server::Server;
+use crate::Server;
 use std::io::{self, BufRead, Write as IoWrite};
 
 /// Register handlers on the server's system vat objects.

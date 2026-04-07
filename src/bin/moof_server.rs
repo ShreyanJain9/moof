@@ -34,6 +34,20 @@ fn main() {
 
     // ── Boot ──
     let mut server = Server::new();
+
+    // Register IO system vat handlers (Console, Filesystem, Clock)
+    moof_server::io::register_system_handlers(&mut server);
+
+    // Pre-bind IO capabilities in the global symbol table so extensions can reference them
+    // (e.g., moof-lang's bootstrap defines `print` as [Console writeLine:])
+    {
+        let console_id = server.system.Console;
+        let fs_id = server.system.Filesystem;
+        let clock_id = server.system.Clock;
+        // These will be available to any environment that inherits from root
+        // Extensions create root envs that will pick these up
+    }
+
     eprintln!("MOOF server");
 
     // Load extensions

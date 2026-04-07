@@ -8,6 +8,7 @@
 /// You have the reference or you don't.
 
 pub mod extension;
+pub mod io;
 
 use moof_fabric::*;
 use moof_fabric::dispatch::HandlerInvoker;
