@@ -38,16 +38,6 @@ fn main() {
     // Register IO system vat handlers (Console, Filesystem, Clock)
     moof_server::io::register_system_handlers(&mut server);
 
-    // Pre-bind IO capabilities in the global symbol table so extensions can reference them
-    // (e.g., moof-lang's bootstrap defines `print` as [Console writeLine:])
-    {
-        let console_id = server.system.Console;
-        let fs_id = server.system.Filesystem;
-        let clock_id = server.system.Clock;
-        // These will be available to any environment that inherits from root
-        // Extensions create root envs that will pick these up
-    }
-
     eprintln!("MOOF server");
 
     // Load extensions
@@ -179,7 +169,7 @@ fn main() {
     }
 }
 
-fn handle_request(server: &mut Server, conn: &moof_server::Connection, env_id: Option<u32>, request: Request) -> Response {
+fn handle_request(server: &mut Server, conn: &moof_server::Connection, _env_id: Option<u32>, request: Request) -> Response {
     match request {
         Request::Send { receiver, selector, args } => {
             let resolved: Vec<Value> = args.iter().map(|a| match a {
@@ -187,7 +177,7 @@ fn handle_request(server: &mut Server, conn: &moof_server::Connection, env_id: O
                 WireArg::Str(s) => server.fabric().alloc_string(s),
             }).collect();
 
-            // Intercept eval: on environments → moof_lang::eval (if loaded)
+            // Intercept eval: on environments → use eval hook (registered by language extension)
             if selector == "eval:" {
                 if let HeapObject::Environment { .. } = server.fabric().heap.get(receiver) {
                     let source = match resolved.first().copied().unwrap_or(Value::Nil) {
@@ -197,17 +187,24 @@ fn handle_request(server: &mut Server, conn: &moof_server::Connection, env_id: O
                         },
                         _ => return Response::Error("eval: arg must be string".into()),
                     };
-                    // Use moof_lang if available
-                    match moof_lang::eval(server.fabric(), &source, receiver) {
-                        Ok(val) => {
-                            eprintln!("  [vat {}] eval => {:?}", conn.vat_id, val);
-                            return Response::Ok(val);
+                    // Take the hook out to avoid borrow conflict, put it back after
+                    let hook = server.eval_hook.take();
+                    let result = if let Some(ref eval_fn) = hook {
+                        match eval_fn(&mut server.fabric, &source, receiver) {
+                            Ok(val) => {
+                                eprintln!("  [vat {}] eval => {:?}", conn.vat_id, val);
+                                Response::Ok(val)
+                            }
+                            Err(e) => {
+                                eprintln!("  [vat {}] eval !! {}", conn.vat_id, e);
+                                Response::Error(e)
+                            }
                         }
-                        Err(e) => {
-                            eprintln!("  [vat {}] eval !! {}", conn.vat_id, e);
-                            return Response::Error(e);
-                        }
-                    }
+                    } else {
+                        Response::Error("no eval hook registered (no language extension loaded)".into())
+                    };
+                    server.eval_hook = hook;
+                    return result;
                 }
             }
 

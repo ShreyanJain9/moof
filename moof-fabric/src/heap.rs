@@ -8,7 +8,7 @@ use crate::value::{Value, HeapObject};
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Heap {
     objects: Vec<HeapObject>,
     symbol_names: Vec<String>,

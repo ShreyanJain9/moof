@@ -32,7 +32,6 @@ name = "moof"
 version = "0.2.0"
 dependencies = [
  "moof-fabric",
- "moof-lang",
  "moof-server",
 ]
 

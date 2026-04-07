@@ -14,15 +14,12 @@ pub type NativeFn = Box<dyn Fn(&mut Heap, &[Value]) -> Result<Value, String> + S
 /// Registry of native functions + their invoker.
 pub struct NativeInvoker {
     funcs: HashMap<String, NativeFn>,
-    /// Symbol id for "native-name" (cached after first use)
-    name_sym: Option<u32>,
 }
 
 impl NativeInvoker {
     pub fn new() -> Self {
         NativeInvoker {
             funcs: HashMap::new(),
-            name_sym: None,
         }
     }
 

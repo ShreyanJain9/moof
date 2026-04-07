@@ -13,6 +13,7 @@ pub mod dispatch;
 pub mod vat;
 pub mod native;
 pub mod wire;
+pub mod persist;
 
 pub use value::{Value, HeapObject};
 pub use heap::Heap;
@@ -85,7 +86,7 @@ impl Fabric {
 
     /// Register a native function and create a handler object for it.
     /// Returns the handler Value (an Object with a native-name slot).
-    pub fn register_native(&mut self, name: &str, f: NativeFn) -> Value {
+    pub fn register_native(&mut self, name: &str, _f: NativeFn) -> Value {
         // Register the closure in the first NativeInvoker we find
         // (or create one if none exists)
         let handler_id = NativeInvoker::make_handler(&mut self.heap, name);

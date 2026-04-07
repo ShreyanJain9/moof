@@ -9,7 +9,6 @@ description = "The moof objectspace fabric — a shared data substrate."
 
 [dependencies]
 moof-fabric = { path = "moof-fabric" }
-moof-lang = { path = "moof-lang" }
 moof-server = { path = "moof-server" }
 
 [[bin]]

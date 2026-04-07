@@ -19,53 +19,53 @@ pub fn register(fabric: &mut Fabric, native: &mut NativeInvoker) {
     let int_proto = fabric.create_object(Value::Object(root_obj));
     fabric.type_protos.integer = Some(int_proto);
 
-    reg(fabric, native, int_proto, "+", "Integer.+", |heap, args| {
+    reg(fabric, native, int_proto, "+", "Integer.+", |_heap, args| {
         let a = args[0].as_integer().ok_or("+ expects integer")?;
         let b = args.get(1).and_then(|v| v.as_integer()).ok_or("+ expects integer arg")?;
         Ok(Value::Integer(a + b))
     });
-    reg(fabric, native, int_proto, "-", "Integer.-", |heap, args| {
+    reg(fabric, native, int_proto, "-", "Integer.-", |_heap, args| {
         let a = args[0].as_integer().ok_or("- expects integer")?;
         let b = args.get(1).and_then(|v| v.as_integer()).ok_or("- expects integer arg")?;
         Ok(Value::Integer(a - b))
     });
-    reg(fabric, native, int_proto, "*", "Integer.*", |heap, args| {
+    reg(fabric, native, int_proto, "*", "Integer.*", |_heap, args| {
         let a = args[0].as_integer().ok_or("* expects integer")?;
         let b = args.get(1).and_then(|v| v.as_integer()).ok_or("* expects integer arg")?;
         Ok(Value::Integer(a * b))
     });
-    reg(fabric, native, int_proto, "/", "Integer./", |heap, args| {
+    reg(fabric, native, int_proto, "/", "Integer./", |_heap, args| {
         let a = args[0].as_integer().ok_or("/ expects integer")?;
         let b = args.get(1).and_then(|v| v.as_integer()).ok_or("/ expects integer arg")?;
         if b == 0 { return Err("division by zero".into()); }
         Ok(Value::Integer(a / b))
     });
-    reg(fabric, native, int_proto, "%", "Integer.%", |heap, args| {
+    reg(fabric, native, int_proto, "%", "Integer.%", |_heap, args| {
         let a = args[0].as_integer().ok_or("% expects integer")?;
         let b = args.get(1).and_then(|v| v.as_integer()).ok_or("% expects integer arg")?;
         Ok(Value::Integer(a % b))
     });
-    reg(fabric, native, int_proto, "<", "Integer.<", |heap, args| {
+    reg(fabric, native, int_proto, "<", "Integer.<", |_heap, args| {
         let a = args[0].as_integer().ok_or("< expects integer")?;
         let b = args.get(1).and_then(|v| v.as_integer()).ok_or("< expects integer arg")?;
         Ok(if a < b { Value::True } else { Value::False })
     });
-    reg(fabric, native, int_proto, ">", "Integer.>", |heap, args| {
+    reg(fabric, native, int_proto, ">", "Integer.>", |_heap, args| {
         let a = args[0].as_integer().ok_or("> expects integer")?;
         let b = args.get(1).and_then(|v| v.as_integer()).ok_or("> expects integer arg")?;
         Ok(if a > b { Value::True } else { Value::False })
     });
-    reg(fabric, native, int_proto, "=", "Integer.=", |heap, args| {
+    reg(fabric, native, int_proto, "=", "Integer.=", |_heap, args| {
         let a = args[0].as_integer().ok_or("= expects integer")?;
         let b = args.get(1).and_then(|v| v.as_integer()).ok_or("= expects integer arg")?;
         Ok(if a == b { Value::True } else { Value::False })
     });
-    reg(fabric, native, int_proto, "<=", "Integer.<=", |heap, args| {
+    reg(fabric, native, int_proto, "<=", "Integer.<=", |_heap, args| {
         let a = args[0].as_integer().ok_or("<= expects integer")?;
         let b = args.get(1).and_then(|v| v.as_integer()).ok_or("<= expects integer arg")?;
         Ok(if a <= b { Value::True } else { Value::False })
     });
-    reg(fabric, native, int_proto, ">=", "Integer.>=", |heap, args| {
+    reg(fabric, native, int_proto, ">=", "Integer.>=", |_heap, args| {
         let a = args[0].as_integer().ok_or(">= expects integer")?;
         let b = args.get(1).and_then(|v| v.as_integer()).ok_or(">= expects integer arg")?;
         Ok(if a >= b { Value::True } else { Value::False })
@@ -169,8 +169,8 @@ pub fn register(fabric: &mut Fabric, native: &mut NativeInvoker) {
 
     reg(fabric, native, cons_proto, "car", "Cons.car", |heap, args| Ok(heap.car(args[0])));
     reg(fabric, native, cons_proto, "cdr", "Cons.cdr", |heap, args| Ok(heap.cdr(args[0])));
-    reg(fabric, native, cons_proto, "toString", "Cons.toString", |heap, args| Ok(heap.alloc_string("<cons>")));
-    reg(fabric, native, cons_proto, "describe", "Cons.describe", |heap, args| Ok(heap.alloc_string("<cons>")));
+    reg(fabric, native, cons_proto, "toString", "Cons.toString", |heap, _args| Ok(heap.alloc_string("<cons>")));
+    reg(fabric, native, cons_proto, "describe", "Cons.describe", |heap, _args| Ok(heap.alloc_string("<cons>")));
 
     // ── Nil ──
     let nil_proto = fabric.create_object(Value::Object(root_obj));
@@ -202,28 +202,6 @@ pub fn register(fabric: &mut Fabric, native: &mut NativeInvoker) {
         } else { Err("describe expects symbol".into()) }
     });
 
-}
-
-/// Register eval: handler on all environments.
-/// This must be called AFTER the BytecodeInvoker is registered,
-/// because eval: compiles and executes moof source.
-///
-/// eval: is a VM-level intercept — it needs the full invoke context.
-/// We register it as a native that compiles the string argument,
-/// stores the chunk, and executes it.
-pub fn register_eval_handler(fabric: &mut Fabric, native: &mut NativeInvoker) {
-    // We can't easily make this work through NativeInvoker because
-    // eval needs to compile + execute, which requires the full fabric.
-    // Instead, we register a native that's intercepted at the interpreter level.
-    // The interpreter already intercepts eval: on environments.
-    // For the wire protocol path (fabric.send directly), we need a different approach.
-    //
-    // The RIGHT solution: register eval: as a native handler that the
-    // NativeInvoker's invoke() method handles by calling moof_lang::eval.
-    // But NativeInvoker closures only get &mut Heap, not &mut Fabric.
-    //
-    // PRAGMATIC solution: the server binary handles eval: specially in the
-    // wire protocol dispatch, before calling fabric.send().
 }
 
 /// Helper: register a native function on a prototype.

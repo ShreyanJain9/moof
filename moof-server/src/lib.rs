@@ -14,16 +14,23 @@ use moof_fabric::*;
 use moof_fabric::dispatch::HandlerInvoker;
 use std::collections::HashMap;
 
+/// Function type for eval hooks. Extensions register these to handle
+/// eval: messages on environments. The server calls the hook instead
+/// of routing through fabric.send() (which can't compile code).
+pub type EvalHook = Box<dyn Fn(&mut Fabric, &str, u32) -> Result<Value, String>>;
+
 /// A running objectspace.
 pub struct Server {
     pub fabric: Fabric,
     pub system: SystemVats,
     /// Auth: token → list of capability names to grant.
-    /// The server operator configures this.
     auth_tokens: HashMap<String, Vec<String>>,
+    /// Eval hook: registered by language extensions to handle eval: on environments.
+    pub eval_hook: Option<EvalHook>,
 }
 
 /// Always-running system vats and their interface objects.
+#[allow(non_snake_case)]
 pub struct SystemVats {
     pub console_vat: VatId,
     pub filesystem_vat: VatId,
@@ -79,6 +86,7 @@ impl Server {
                 by_name,
             },
             auth_tokens: HashMap::new(),
+            eval_hook: None,
         }
     }
 
@@ -87,7 +95,7 @@ impl Server {
     /// Register a new virtual vat (external interface).
     /// Returns the interface object id. Handlers are added by the caller.
     pub fn add_virtual_vat(&mut self, name: &str) -> u32 {
-        let vat_id = self.fabric.create_vat();
+        let _vat_id = self.fabric.create_vat();
         let obj = self.fabric.create_object(Value::Nil);
         let tag_sym = self.fabric.intern("type-tag");
         let tag_val = Value::Symbol(self.fabric.intern(name));

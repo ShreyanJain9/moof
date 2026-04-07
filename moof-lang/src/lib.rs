@@ -66,7 +66,7 @@ pub struct SetupResult {
 
 /// The dylib entry point.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moof_extension_init(server_ptr: *mut moof_server::Server) {
+pub extern "C" fn moof_extension_init(server_ptr: *mut moof_server::Server) {
     let server = unsafe { &mut *server_ptr };
 
     // Register language shell (BytecodeInvoker + type conventions)
@@ -104,6 +104,11 @@ pub unsafe extern "C" fn moof_extension_init(server_ptr: *mut moof_server::Serve
     let sentinel = server.fabric().create_object(Value::Nil);
     server.fabric().heap.slot_set(sentinel, root_env_sym, Value::Object(root_env));
     server.system.by_name.insert("__moof_env".to_string(), sentinel);
+
+    // Register eval hook so the server can dispatch eval: without knowing about moof-lang
+    server.eval_hook = Some(Box::new(|fabric, source, env_id| {
+        eval(fabric, source, env_id)
+    }));
 
     eprintln!("  [moof-lang] registered");
 }
