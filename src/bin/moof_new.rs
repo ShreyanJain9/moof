@@ -5,15 +5,35 @@
 
 use std::io::{self, Write, BufRead};
 use std::path::PathBuf;
-use moof_fabric::Value;
+use moof_fabric::{Value, HeapObject, NativeInvoker};
 use moof_server::{Server, Capabilities};
 
 fn main() {
     // ── Boot the server ──
     let mut server = Server::new();
 
-    // Register the moof language shell
-    let root_env = moof_lang::setup(server.fabric());
+    // Register the moof language shell + IO capabilities
+    let setup = moof_lang::setup(server.fabric());
+    let root_env = setup.root_env;
+
+    // Grant IO capabilities to the root environment
+    // These are the monadic effect boundaries —
+    // if you don't have console, you can't print.
+    let console_sym = server.intern("console");
+    server.fabric().heap.env_define(root_env, console_sym, Value::Object(setup.io.console));
+    let fs_sym = server.intern("fs");
+    server.fabric().heap.env_define(root_env, fs_sym, Value::Object(setup.io.filesystem));
+    let clock_sym = server.intern("clock");
+    server.fabric().heap.env_define(root_env, clock_sym, Value::Object(setup.io.clock));
+
+    // print must exist before bootstrap (bootstrap's println wraps it).
+    // We compile a minimal lambda that sends to console.
+    // This works because lambda syntax is a compiler primitive, not a bootstrap definition.
+    match moof_lang::eval(server.fabric(),
+        "(def print (lambda (x) [console writeLine: x]))", root_env) {
+        Ok(_) => {}
+        Err(e) => eprintln!("!! print setup: {}", e),
+    }
 
     // Load bootstrap
     let bootstrap_path = PathBuf::from("lib/bootstrap.moof");
@@ -36,7 +56,13 @@ fn main() {
     }
 
     // ── Connect the REPL as a vat ──
-    let mut repl_conn = server.connect(Capabilities::default());
+    let mut repl_conn = server.connect(Capabilities {
+        grants: vec![
+            ("console".into(), Value::Object(setup.io.console)),
+            ("filesystem".into(), Value::Object(setup.io.filesystem)),
+            ("clock".into(), Value::Object(setup.io.clock)),
+        ],
+    });
     repl_conn.set_root_env(root_env);
 
     println!("MOOF — on the fabric");

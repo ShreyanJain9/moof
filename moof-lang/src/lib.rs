@@ -4,6 +4,7 @@ pub mod opcodes;
 pub mod compiler;
 pub mod interpreter;
 pub mod conventions;
+pub mod io;
 
 use moof_fabric::{Fabric, Value, NativeInvoker};
 
@@ -23,18 +24,23 @@ pub fn eval(fabric: &mut Fabric, source: &str, env_id: u32) -> Result<Value, Str
         let mut comp = compiler::Compiler::new();
         let chunk = comp.compile_expr(&mut fabric.heap, expr)?;
         let chunk_id = chunk.store_in(&mut fabric.heap);
-        // Execute by creating a temporary lambda and invoking it
-        let call_sym = fabric.sym_call();
         result = interpreter::eval_chunk(fabric, chunk_id, env_id)?;
     }
     Ok(result)
 }
 
-/// Set up the moof shell on a fabric: register invokers, create root env, load bootstrap.
-pub fn setup(fabric: &mut Fabric) -> u32 {
-    // Register invokers
+/// Set up the moof shell on a fabric: register invokers, create root env.
+/// Returns (root_env, io_capabilities).
+pub fn setup(fabric: &mut Fabric) -> SetupResult {
     let mut native = NativeInvoker::new();
+
+    // Register type conventions (Integer +, String length, etc.)
     conventions::register(fabric, &mut native);
+
+    // Create IO capability objects
+    let io_caps = io::create_capabilities(fabric, &mut native);
+
+    // Register all invokers
     fabric.register_invoker(Box::new(native));
     fabric.register_invoker(Box::new(interpreter::BytecodeInvoker));
 
@@ -49,5 +55,10 @@ pub fn setup(fabric: &mut Fabric) -> u32 {
     let false_sym = fabric.intern("false");
     fabric.heap.env_define(root_env, false_sym, Value::False);
 
-    root_env
+    SetupResult { root_env, io: io_caps }
+}
+
+pub struct SetupResult {
+    pub root_env: u32,
+    pub io: io::IoCapabilities,
 }
