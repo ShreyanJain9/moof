@@ -1,0 +1,119 @@
+(module collections
+ (requires bootstrap)
+ (provides assoc-equal? Assoc flat-map flatten find any? every? sort sort-by join))
+
+(def assoc-equal?
+ (fn (a b)
+ (if (and (string? a) (string? b)) [a = b] (eq a b))))
+
+(def Assoc { Object
+ data: nil
+
+ get: (key)
+ (def walk (fn (lst)
+ (if (null? lst) nil
+ (if (assoc-equal? (car (car lst)) key)
+ (cdr (car lst))
+ (walk (cdr lst))))))
+ (walk @data)
+
+ has: (key)
+ (def walk (fn (lst)
+ (if (null? lst) false
+ (if (assoc-equal? (car (car lst)) key) true
+ (walk (cdr lst))))))
+ (walk @data)
+
+ remove: (key)
+ (<- @data (filter (fn (pair) (not (assoc-equal? (car pair) key))) @data))
+ self
+
+ keys: () (map (fn (pair) (car pair)) @data)
+ values: () (map (fn (pair) (cdr pair)) @data)
+ pairs: () @data
+ size: () (length @data)
+ describe: () (str "<Assoc " @data ">")
+})
+
+; multi-keyword methods (can't go in {} literals)
+(handle! Assoc ["set:to:" toSymbol] (fn (self key val)
+ (def update (fn (lst)
+ (if (null? lst)
+ (list (cons key val))
+ (if (assoc-equal? (car (car lst)) key)
+ (cons (cons key val) (cdr lst))
+ (cons (car lst) (update (cdr lst)))))))
+ (<- @data (update @data))
+ self))
+
+(defmethod Assoc merge: (other)
+ (for-each
+ (fn (pair) [self set: (car pair) to: (cdr pair)])
+ other.data)
+ self)
+
+; class method: build from alternating keys and values
+(defmethod Assoc from: args
+ (def build (fn (lst acc)
+ (if (null? lst) acc
+ (if (null? (cdr lst)) acc
+ (build (cdr (cdr lst))
+ (cons (cons (car lst) (car (cdr lst))) acc))))))
+ (def result { Assoc })
+ (<- result.data (reverse (build args nil)))
+ result)
+
+(defmethod Cons flatMap: (f)
+ (if (null? (cdr self))
+ (f (car self))
+ (append (f (car self)) [(cdr self) flatMap: f])))
+
+(defmethod Cons find: (pred)
+ (if (pred (car self)) (car self)
+ (if (null? (cdr self)) nil
+ [(cdr self) find: pred])))
+
+(defmethod Cons any: (pred)
+ (if (pred (car self)) true
+ (if (null? (cdr self)) false
+ [(cdr self) any: pred])))
+
+(defmethod Cons every: (pred)
+ (if (pred (car self))
+ (if (null? (cdr self)) true
+ [(cdr self) every: pred])
+ false))
+
+(defmethod Cons sortBy: (cmp)
+ (def insert (fn (x sorted)
+ (if (null? sorted) (list x)
+ (if (cmp x (car sorted))
+ (cons x sorted)
+ (cons (car sorted) (insert x (cdr sorted)))))))
+ (fold insert nil self))
+
+(defmethod Cons sort ()
+ [self sortBy: (fn (a b) [a < b])])
+
+(defmethod Cons join: (sep)
+ (if (null? self) ""
+ (if (null? (cdr self))
+ [(car self) toString]
+ [(str (car self) sep) ++ [(cdr self) join: sep]])))
+
+(def flat-map (fn (f lst) (if (null? lst) nil [lst flatMap: f])))
+
+(def flatten (fn (lst) (flat-map identity lst)))
+
+(def find (fn (pred lst) (if (null? lst) nil [lst find: pred])))
+
+(def any? (fn (pred lst) (if (null? lst) false [lst any: pred])))
+
+(def every? (fn (pred lst) (if (null? lst) true [lst every: pred])))
+
+(def sort (fn (lst) (if (null? lst) nil [lst sort])))
+
+(def sort-by (fn (cmp lst) (if (null? lst) nil [lst sortBy: cmp])))
+
+(def join (fn (sep lst) (if (null? lst) "" [lst join: sep])))
+

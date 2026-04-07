@@ -1,0 +1,76 @@
+(module system
+ (requires bootstrap collections modules)
+ (unrestricted)
+ (provides checkpoint save as-name modules module-source module-exports which-module define-in undef))
+
+(def checkpoint (fn ()
+ (__save-image)
+ (write-err "(saved)")
+ nil))
+
+(def save checkpoint)
+
+(def as-name (fn (x)
+ (if (symbol? x) [x name] x)))
+
+(def modules (fn ()
+ (for-each
+ (fn (name)
+ (let ((m [Modules named: name]))
+ (if (null? m) nil
+ (let ((reqs [m slotAt: 'requires])
+ (provs [m slotAt: 'provides]))
+ (display (str " " name
+ " [requires: " (if (null? reqs) "(kernel)" [(map (fn (r) r) reqs) join: ", "]) "]"
+ " [provides: " (length provs) " symbols]\n"))))))
+ [Modules list])
+ nil))
+
+(def module-source
+ (vau (name) $env
+ (let ((m [Modules named: (as-name name)]))
+ (if (null? m)
+ (write-err (str "unknown module: " (as-name name)))
+ (for-each
+ (fn (d) (display (str [d slotAt: 'source] "\n\n")))
+ [m slotAt: 'definitions])))))
+
+(def module-exports
+ (vau (name) $env
+ (let ((m [Modules named: (as-name name)]))
+ (if (null? m) nil
+ [m slotAt: 'provides]))))
+
+(def which-module
+ (vau (name) $env
+ (let ((m [Modules which: (as-name name)]))
+ (if (null? m) nil [m slotAt: 'name]))))
+
+(def define-in
+ (vau (mod-sym def-sym source-expr) $env
+ (let ((module-name (as-name mod-sym))
+ (def-name (as-name def-sym))
+ (def-source (eval source-expr $env)))
+ (let ((m [Modules named: module-name]))
+ (if (null? m)
+ (do (write-err (str "unknown module: " module-name)) nil)
+ (let ((mod-env [m slotAt: 'env])
+ (ast (read def-source)))
+ (eval ast mod-env)
+ [m define: def-name source: def-source]
+ [root-env define: [def-name toSymbol]
+ to: [mod-env lookup: [def-name toSymbol]]]
+ (checkpoint)
+ (write-err (str "(defined " def-name " in " module-name ")"))
+ nil))))))
+
+(def undef
+ (vau (name) $env
+ (let ((n (as-name name)))
+ [root-env remove: [n toSymbol]]
+ (let ((m [Modules which: n]))
+ (if (not (null? m))
+ [m remove-def: n]))
+ (checkpoint)
+ nil)))
+

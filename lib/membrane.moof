@@ -1,0 +1,58 @@
+(module membrane
+ (requires bootstrap)
+ (provides Membrane Facet LoggingMembrane))
+
+(def Membrane { Object
+
+ wrap:on-send: (target on-send)
+ (def wrapper { Object })
+ (handle! wrapper 'doesNotUnderstand:
+ (fn (self selector args)
+ (let ((decision (on-send selector args)))
+ (cond
+ ((eq decision 'proceed)
+ (eval (cons target (cons selector args))))
+ ((eq decision 'deny) nil)
+ (else decision)))))
+ (handle! wrapper 'describe
+ (fn (self) (str "<membrane around " [target describe] ">")))
+ (handle! wrapper 'target (fn (self) target))
+ wrapper
+
+ describe: () "<Membrane>"
+})
+
+(def Facet { Object
+
+ wrap:allowing: (target selectors)
+ (def wrapper { Object })
+ (handle! wrapper 'doesNotUnderstand:
+ (fn (self selector args)
+ (if [selectors any?: (fn (s) (eq s selector))]
+ (eval (cons target (cons selector args)))
+ nil)))
+ (handle! wrapper 'describe
+ (fn (self) (str "<facet of " [target describe] ">")))
+ (handle! wrapper 'allowedSelectors (fn (self) selectors))
+ (handle! wrapper 'target (fn (self) target))
+ wrapper
+
+ describe: () "<Facet>"
+})
+
+(def LoggingMembrane { Object
+
+ wrap: (target)
+ (def log nil)
+ (def wrapper
+ [Membrane wrap: target on-send:
+ (fn (sel args)
+ (<- log (append log (list (cons sel args))))
+ 'proceed)])
+ (handle! wrapper 'log (fn (self) log))
+ (handle! wrapper 'clearLog (fn (self) (<- log nil)))
+ wrapper
+
+ describe: () "<LoggingMembrane>"
+})
+

@@ -244,16 +244,19 @@ impl Parser {
         Ok(heap.list(&elements))
     }
 
-    /// Parse { ... } — object literal
+    /// Parse { ... } — object literal OR block (closure)
     ///
-    /// Syntax:
+    /// Block syntax (§3.4):
+    ///   { :x [x * 2] }       → object with call: handler taking one arg
+    ///   { :x :y [x + y] }    → object with call: handler taking two args
+    ///
+    /// Object literal syntax:
     ///   { Parent key: value key: (params) body... }
     ///
-    /// If the first token is a Keyword, there's no parent (defaults to nil).
-    /// key: value             → slot (single expression after keyword)
-    /// key: (params) body...  → method (param list + body expressions)
+    /// Detection: if first token is Colon (`:x` block param), it's a block.
+    /// Otherwise it's an object literal.
     ///
-    /// Produces: (%object-literal parent (%slot key val) ... (%method sel params body...) ...)
+    /// Blocks produce: (lambda (params...) body)
     fn parse_brace(&mut self, heap: &mut Heap) -> Result<Value, String> {
         self.pos += 1; // skip {
 
@@ -266,6 +269,11 @@ impl Parser {
             self.pos += 1;
             let tag = Value::Symbol(heap.intern("%object-literal"));
             return Ok(heap.list(&[tag, Value::Nil]));
+        }
+
+        // Detect block syntax: { :param ... }
+        if self.tokens[self.pos] == Token::Colon {
+            return self.parse_block(heap);
         }
 
         // Determine parent: if first token is not a Keyword, parse as parent expression
@@ -339,6 +347,55 @@ impl Parser {
         let mut elements = vec![tag, parent];
         elements.extend(entries);
         Ok(heap.list(&elements))
+    }
+
+    /// Parse block syntax: { :x :y body... }
+    /// Produces: (lambda (x y) body) — a closure, which is an object with call:.
+    /// "blocks are closures are objects" (§3.4)
+    fn parse_block(&mut self, heap: &mut Heap) -> Result<Value, String> {
+        let mut params = Vec::new();
+
+        // Collect :param declarations
+        while self.pos < self.tokens.len() && self.tokens[self.pos] == Token::Colon {
+            self.pos += 1; // skip :
+            match &self.tokens[self.pos] {
+                Token::Symbol(name) => {
+                    params.push(Value::Symbol(heap.intern(name)));
+                    self.pos += 1;
+                }
+                t => return Err(format!("Expected parameter name after ':', got {:?}", t)),
+            }
+        }
+
+        // Parse body expressions until }
+        let mut body_exprs = Vec::new();
+        while self.pos < self.tokens.len() && self.tokens[self.pos] != Token::RBrace {
+            body_exprs.push(self.parse_expr(heap)?);
+        }
+
+        if self.pos >= self.tokens.len() || self.tokens[self.pos] != Token::RBrace {
+            return Err("Unclosed '{' in block".into());
+        }
+        self.pos += 1; // skip }
+
+        if body_exprs.is_empty() {
+            return Err("Block requires at least one body expression".into());
+        }
+
+        // Wrap multiple body exprs in (do ...)
+        let body = if body_exprs.len() == 1 {
+            body_exprs.into_iter().next().unwrap()
+        } else {
+            let do_sym = Value::Symbol(heap.intern("do"));
+            let mut do_form = vec![do_sym];
+            do_form.extend(body_exprs);
+            heap.list(&do_form)
+        };
+
+        // Produce (lambda (params...) body)
+        let lambda_sym = Value::Symbol(heap.intern("lambda"));
+        let params_list = heap.list(&params);
+        Ok(heap.list(&[lambda_sym, params_list, body]))
     }
 
     /// Parse 'x → (quote x)

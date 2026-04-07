@@ -1,0 +1,354 @@
+(module bootstrap
+ (requires )
+ (provides fn wrap cond when unless do not and or null? pair? symbol? integer? string? lambda? operative? object? let-seq cadr caddr cddr length append reverse map filter fold for-each nth range last take drop list while zip compose identity constantly apply str println display Object defmethod Definition ModuleImage Integer Float Boolean String Cons Nil Symbol Lambda Operative Environment <- define-handler redefine inspect))
+
+; fn: short lambda — a vau that builds and evals a lambda form
+(def fn
+ (vau (params . body) $e
+ (eval `(lambda ,params ,@body) $e)))
+
+; wrap: takes an operative, returns one that evaluates its args
+(def wrap
+ (vau (operative) $e
+ (fn args
+ (eval (cons (eval operative $e) args)))))
+
+(def cond
+ (vau clauses $e
+ (def cond-helper
+ (fn (cls)
+ (if (eq cls nil) nil
+ (let ((clause (car cls))
+ (rest (cdr cls)))
+ (let ((test (car clause))
+ (body (car (cdr clause))))
+ (if (eq test 'else)
+ (eval body $e)
+ (if (eval test $e)
+ (eval body $e)
+ (cond-helper rest))))))))
+ (cond-helper clauses)))
+
+(def when
+ (vau (condition . body) $e
+ (if (eval condition $e)
+ (eval `(do ,@body) $e)
+ nil)))
+
+(def unless
+ (vau (condition . body) $e
+ (if (eval condition $e)
+ nil
+ (eval `(do ,@body) $e))))
+
+(def do
+ (vau body $e
+ (def do-helper
+ (fn (exprs)
+ (if (eq (cdr exprs) nil)
+ (eval (car exprs) $e)
+ (let ((_ (eval (car exprs) $e)))
+ (do-helper (cdr exprs))))))
+ (if (eq body nil) nil
+ (do-helper body))))
+
+(def not (fn (x) (if x false true)))
+
+(def and
+ (vau (a b) $e
+ (if (eval a $e) (if (eval b $e) true false) false)))
+
+(def or
+ (vau (a b) $e
+ (if (eval a $e) true (if (eval b $e) true false))))
+
+(def null? (fn (x) (eq x nil)))
+
+(def pair? (fn (x) (eq (type-of x) 'Cons)))
+
+(def symbol? (fn (x) (eq (type-of x) 'Symbol)))
+
+(def integer? (fn (x) (eq (type-of x) 'Integer)))
+
+(def string? (fn (x) (eq (type-of x) 'String)))
+
+(def lambda? (fn (x) (eq (type-of x) 'Lambda)))
+
+(def operative? (fn (x) (eq (type-of x) 'Operative)))
+
+(def object? (fn (x) (eq (type-of x) 'Object)))
+
+(def let-seq
+ (vau (bindings . body) $e
+ (if (null? bindings)
+ (eval `(do ,@body) $e)
+ (eval `(let (,(car bindings))
+ (let-seq ,(cdr bindings) ,@body)) $e))))
+
+(def cadr (fn (x) (car (cdr x))))
+
+(def caddr (fn (x) (car (cdr (cdr x)))))
+
+(def cddr (fn (x) (cdr (cdr x))))
+
+(def length
+ (fn (lst)
+ (if (null? lst) 0 [1 + (length (cdr lst))])))
+
+(def append
+ (fn (a b)
+ (if (null? a) b
+ (cons (car a) (append (cdr a) b)))))
+
+(def reverse
+ (fn (lst)
+ (def rev-helper
+ (fn (remaining acc)
+ (if (null? remaining) acc
+ (rev-helper (cdr remaining) (cons (car remaining) acc)))))
+ (rev-helper lst nil)))
+
+(def map
+ (fn (f lst)
+ (if (null? lst) nil
+ (cons (f (car lst)) (map f (cdr lst))))))
+
+(def filter
+ (fn (pred lst)
+ (if (null? lst) nil
+ (if (pred (car lst))
+ (cons (car lst) (filter pred (cdr lst)))
+ (filter pred (cdr lst))))))
+
+(def fold
+ (fn (f init lst)
+ (if (null? lst) init
+ (fold f (f init (car lst)) (cdr lst)))))
+
+(def for-each
+ (fn (f lst)
+ (if (null? lst) nil
+ (do (f (car lst)) (for-each f (cdr lst))))))
+
+(def nth
+ (fn (lst n)
+ (if [n = 0] (car lst) (nth (cdr lst) [n - 1]))))
+
+(def range
+ (fn (start end)
+ (if [start >= end] nil
+ (cons start (range [start + 1] end)))))
+
+(def last
+ (fn (lst)
+ (if (null? (cdr lst)) (car lst) (last (cdr lst)))))
+
+(def take
+ (fn (n lst)
+ (if (or [n <= 0] (null? lst)) nil
+ (cons (car lst) (take [n - 1] (cdr lst))))))
+
+(def drop
+ (fn (n lst)
+ (if (or [n <= 0] (null? lst)) lst
+ (drop [n - 1] (cdr lst)))))
+
+; list: variadic list constructor — rest param captures all args
+(def list (fn args args))
+
+; while: loop with test and body — uses recursive vau
+(def while
+ (vau (test . body) $env
+ (if (eval test $env)
+ (do
+ (for-each (fn (expr) (eval expr $env)) body)
+ (eval (cons 'while (cons test body)) $env))
+ nil)))
+
+(def zip
+ (fn (a b)
+ (if (or (null? a) (null? b)) nil
+ (cons (list (car a) (car b)) (zip (cdr a) (cdr b))))))
+
+(def compose (fn (f g) (fn (x) (f (g x)))))
+
+(def identity (fn (x) x))
+
+(def constantly (fn (x) (fn args x)))
+
+(def apply (fn (f args) (eval (cons f args))))
+
+(def str
+ (fn args
+ (fold (fn (acc x) [acc ++ [x toString]]) "" args)))
+
+(def println (fn (x) (print x)))
+
+(def display (fn (x) (print x)))
+
+(def Object (object nil))
+
+; defmethod: easy method definition with implicit self
+; uses quasiquote to build the handler form cleanly
+(def defmethod
+ (vau (obj name params . body) $e
+ (eval `(handle! ,obj ',name
+ (lambda ,(cons 'self params) ,@body)) $e)))
+
+(defmethod Object describe () "<object>")
+
+(defmethod Object clone () (object self))
+
+; interface: collect handler names from the whole delegation chain (deduplicated)
+(defmethod Object interface ()
+ (def member?
+ (fn (x lst)
+ (if (null? lst) false
+ (if (eq x (car lst)) true
+ (member? x (cdr lst))))))
+ (def merge
+ (fn (new acc)
+ (if (null? new) acc
+ (if (member? (car new) acc)
+ (merge (cdr new) acc)
+ (merge (cdr new) (append acc (list (car new))))))))
+ (def collect
+ (fn (obj acc)
+ (let ((names [obj handlerNames])
+ (p [obj parent]))
+ (let ((merged (merge names acc)))
+ (if (null? p) merged
+ (collect p merged))))))
+ (collect self nil))
+
+(defmethod Object sourceOf: (selector)
+ (let ((handler [self handlerAt: selector]))
+ (if (null? handler) nil (source handler))))
+
+; Definition: a durable, named program element (§2 of PLAN-image-v3)
+(def Definition { Object
+ id: nil
+ module-name: nil
+ kind: 'value ; 'value, 'method, 'prototype, 'import
+ name: nil
+ selector: nil ; for methods
+ source: nil
+ ast: nil
+ compiled: nil
+ doc: nil
+ metadata: nil
+ 
+ describe: ()
+ (str "<Definition " @module-name ":" @name ">")
+})
+
+; ModuleImage: persistent module-owned state (§1 of PLAN-image-v3)
+(def ModuleImage { Object
+ name: nil
+ requires: nil
+ provides: nil
+ definitions: nil ; list of Definition objects
+ durable-objects: nil ; list of module-owned objects
+ env: nil
+ unrestricted: false
+
+ describe: ()
+ (str "<ModuleImage " @name ">")
+
+ ; remove-def: — remove a Definition by name
+ remove-def: (def-name)
+ (<- @definitions
+ (filter (fn (d) (not [[d slotAt: 'name] = def-name])) @definitions))
+ (<- @provides
+ (filter (fn (p) (not [p = def-name])) @provides))
+ nil
+
+ ; project-source — build the .moof file text from Definitions
+ project-source: ()
+ (let ((header (str "(module " @name "\n"
+ " (requires " (if (null? @requires) "" [(map (fn (r) r) @requires) join: " "]) ")\n"
+ (if @unrestricted " (unrestricted)\n" "")
+ " (provides " (if (null? @provides) "" [(map (fn (p) p) @provides) join: " "]) "))\n")))
+ (fold (fn (acc d) (str acc "\n" [d slotAt: 'source] "\n"))
+ header
+ @definitions))
+})
+
+(def Integer { Object
+ describe: () [self toString]
+})
+
+(def Float { Object
+ describe: () [self toString]
+})
+
+(def Boolean { Object
+ describe: () (if self "true" "false")
+})
+
+(def String { Object
+ describe: () self
+})
+
+(def Cons { Object
+ describe: () [self toString]
+})
+
+(def Nil { Object
+ describe: () "nil"
+ isNil: () true
+})
+
+(defmethod Nil join: (sep) "")
+
+(def Symbol { Object
+ describe: () [self toString]
+})
+
+(def Lambda { Object
+ describe: () "<lambda>"
+ applicative?: () true
+ operative?: () false
+})
+
+(def Operative { Object
+ describe: () "<operative>"
+ applicative?: () false
+ operative?: () true
+})
+
+(def Environment { Object
+ describe: () "<environment>"
+})
+
+(def <-
+ (vau (target value) $e
+ (def val (eval value $e))
+ (if (symbol? target)
+ [$e set: target to: val]
+ (let ((obj (eval (car (cdr target)) $e))
+ (field (eval (car (cdr (cdr target))) $e)))
+ [obj slotAt: field put: val]))))
+
+(def define-handler
+ (vau (obj selector handler) $e
+ (handle! (eval obj $e) (eval selector $e) (eval handler $e))))
+
+(def redefine
+ (vau (name value) $e
+ (def result (eval value $e))
+ (eval `(def ,name ',result) $e)
+ result))
+
+(def inspect
+ (fn (val)
+ (print (type-of val))
+ (cond
+ ((lambda? val) (print (source val)))
+ ((operative? val) (print (source val)))
+ ((object? val)
+ (print [val slotNames])
+ (print [val interface]))
+ (else (print val)))
+ val))
+

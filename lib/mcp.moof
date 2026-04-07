@@ -1,0 +1,216 @@
+(module mcp
+ (requires bootstrap json collections)
+ (unrestricted)
+ (provides mcp-json-rpc-response mcp-json-rpc-error mcp-text-result mcp-error-result mcp-make-tool mcp-make-schema mcp-string-prop mcp-tools mcp-handle-initialize mcp-handle-tools-list mcp-handle-tools-call mcp-format-inspect mcp-format-object-list mcp-dispatch mcp-serve))
+
+(def mcp-json-rpc-response
+ (fn (id result)
+ (def resp { Assoc })
+ [resp set: "jsonrpc" to: "2.0"]
+ [resp set: "id" to: id]
+ [resp set: "result" to: result]
+ resp))
+
+(def mcp-json-rpc-error
+ (fn (id code message)
+ (def err { Assoc })
+ [err set: "code" to: code]
+ [err set: "message" to: message]
+ (def resp { Assoc })
+ [resp set: "jsonrpc" to: "2.0"]
+ [resp set: "id" to: id]
+ [resp set: "error" to: err]
+ resp))
+
+(def mcp-text-result
+ (fn (id text)
+ (let-seq ((item { Assoc })
+ (_ [item set: "type" to: "text"])
+ (_ [item set: "text" to: text])
+ (result { Assoc })
+ (_ [result set: "content" to: (list item)])
+ (_ [result set: "isError" to: false]))
+ (mcp-json-rpc-response id result))))
+
+(def mcp-error-result
+ (fn (id text)
+ (let-seq ((item { Assoc })
+ (_ [item set: "type" to: "text"])
+ (_ [item set: "text" to: text])
+ (result { Assoc })
+ (_ [result set: "content" to: (list item)])
+ (_ [result set: "isError" to: true]))
+ (mcp-json-rpc-response id result))))
+
+(def mcp-make-tool
+ (fn (name description schema)
+ (def tool { Assoc })
+ [tool set: "name" to: name]
+ [tool set: "description" to: description]
+ [tool set: "inputSchema" to: schema]
+ tool))
+
+(def mcp-make-schema
+ (fn (properties required)
+ (def s { Assoc })
+ [s set: "type" to: "object"]
+ [s set: "properties" to: properties]
+ [s set: "required" to: required]
+ s))
+
+(def mcp-string-prop
+ (fn (description)
+ (def p { Assoc })
+ [p set: "type" to: "string"]
+ [p set: "description" to: description]
+ p))
+
+(def mcp-tools
+ (list
+ (mcp-make-tool "moof_eval" "Evaluate a MOOF expression in the live image. Returns the result as a string. Use this for any computation, definition, or query."
+ (mcp-make-schema
+ [Assoc from: "expression" (mcp-string-prop "A MOOF expression to evaluate. Examples: [3 + 4], (def x 42), (map (fn (x) [x * x]) (list 1 2 3))")]
+ (list "expression")))
+
+ (mcp-make-tool "moof_define" "Define a new named value in the MOOF image. The definition persists across sessions."
+ (mcp-make-schema
+ [Assoc from:
+ "name" (mcp-string-prop "Name for the definition")
+ "code" (mcp-string-prop "MOOF expression for the value. Examples: 42, (fn (x) [x + 1]), { Object x: 10 y: 20 }")]
+ (list "name" "code")))
+
+ (mcp-make-tool "moof_inspect" "Inspect a named object in the MOOF image. Shows its type, slots, handlers, and delegation chain."
+ (mcp-make-schema
+ [Assoc from: "name" (mcp-string-prop "Name of the object to inspect")]
+ (list "name")))
+
+ (mcp-make-tool "moof_list_objects" "List all named objects in the MOOF image with their types."
+ (mcp-make-schema { Assoc } nil))
+
+ (mcp-make-tool "moof_add_handler" "Add or replace a handler (method) on an object. The handler is a MOOF lambda expression."
+ (mcp-make-schema
+ [Assoc from:
+ "object" (mcp-string-prop "Name of the object to modify")
+ "selector" (mcp-string-prop "Handler name (selector), e.g. describe, greet:, at:put:")
+ "code" (mcp-string-prop "MOOF lambda expression, e.g. (fn (self) \"hello\")")]
+ (list "object" "selector" "code")))
+
+ (mcp-make-tool "moof_checkpoint" "Save the current image to disk (compacted snapshot + source projection)."
+ (mcp-make-schema { Assoc } nil))
+ ))
+
+(def mcp-handle-initialize
+ (fn (id params)
+ (let-seq ((caps { Assoc })
+ (_ [caps set: "tools" to: { Assoc }])
+ (info { Assoc })
+ (_ [info set: "name" to: "moof"])
+ (_ [info set: "version" to: "0.1.0"])
+ (result { Assoc })
+ (_ [result set: "protocolVersion" to: "2024-11-05"])
+ (_ [result set: "capabilities" to: caps])
+ (_ [result set: "serverInfo" to: info]))
+ (mcp-json-rpc-response id result))))
+
+(def mcp-handle-tools-list
+ (fn (id params)
+ (mcp-json-rpc-response id
+ [Assoc from: "tools" mcp-tools])))
+
+(def mcp-handle-tools-call
+ (fn (id params)
+ (let-seq ((tool-name (if (null? params) nil [params get: "name"]))
+ (args (if (null? params) { Assoc } [params get: "arguments"])))
+ (cond
+ ([tool-name = "moof_eval"]
+ (let ((expr (if (null? args) nil [args get: "expression"])))
+ (if (null? expr)
+ (mcp-error-result id "Missing argument: expression")
+ (mcp-text-result id (str (eval-string expr))))))
+
+ ([tool-name = "moof_define"]
+ (let-seq ((name (if (null? args) nil [args get: "name"]))
+ (code (if (null? args) nil [args get: "code"])))
+ (if (or (null? name) (null? code))
+ (mcp-error-result id "Missing arguments: name, code")
+ (let ((expr (str "(def " name " " code ")")))
+ (mcp-text-result id (str (eval-string expr)))))))
+
+ ([tool-name = "moof_inspect"]
+ (let ((name (if (null? args) nil [args get: "name"])))
+ (if (null? name)
+ (mcp-error-result id "Missing argument: name")
+ (let ((val (eval-string name)))
+ (mcp-text-result id (mcp-format-inspect name val))))))
+
+ ([tool-name = "moof_list_objects"]
+ (mcp-text-result id (mcp-format-object-list)))
+
+ ([tool-name = "moof_add_handler"]
+ (let-seq ((obj-name (if (null? args) nil [args get: "object"]))
+ (selector (if (null? args) nil [args get: "selector"]))
+ (code (if (null? args) nil [args get: "code"])))
+ (if (or (null? obj-name) (or (null? selector) (null? code)))
+ (mcp-error-result id "Missing arguments: object, selector, code")
+ (let ((expr (str "(handle! " obj-name " [\"" selector "\" toSymbol] " code ")")))
+ (mcp-text-result id (str "Handler " selector " installed on " obj-name ". Result: " (eval-string expr)))))))
+
+ ([tool-name = "moof_checkpoint"]
+ (eval-string "(save)")
+ (mcp-text-result id "Image saved."))
+
+ (else (mcp-error-result id (str "Unknown tool: " tool-name)))))))
+
+(def mcp-format-inspect
+ (fn (name val)
+ (let ((t (type-of val)))
+ (str "=== " name " ===\n"
+ "Type: " t "\n"
+ (cond
+ ((eq t 'Object)
+ (str "Parent: " [val parent] "\n"
+ "Slots: " [val slotNames] "\n"
+ "Handlers: " [val interface] "\n"))
+ ((eq t 'Lambda)
+ (str "Params: " [val params] "\n"
+ "Source: " [val source] "\n"))
+ ((eq t 'Operative)
+ (str "Params: " [val params] "\n"
+ "Env param: " [val envParam] "\n"
+ "Source: " [val source] "\n"))
+ (else (str "Value: " val "\n")))))))
+
+(def mcp-format-object-list
+ (fn ()
+ (def items nil)
+ ; we can't easily walk the env from moof, so eval a list of known objects
+ (str "Named objects in the image:\n"
+ "(use moof_inspect to examine any of these)\n\n"
+ "Type (type-of name) and [name interface] to explore.")))
+
+(def mcp-dispatch
+ (fn (request)
+ (let-seq ((method [request get: "method"])
+ (id [request get: "id"])
+ (params [request get: "params"]))
+ (cond
+ ([method = "initialize"] (mcp-handle-initialize id params))
+ ([method = "tools/list"] (mcp-handle-tools-list id params))
+ ([method = "tools/call"] (mcp-handle-tools-call id params))
+ ([method = "notifications/initialized"] nil)
+ (else (mcp-json-rpc-error id -32601 (str "Method not found: " method)))))))
+
+(def mcp-serve
+ (fn ()
+ (def running true)
+ (while running
+ (let ((line (read-line)))
+ (if (null? line)
+ (<- running false)
+ (when [[line length] > 0]
+ (let ((request [JSON parse: line]))
+ (when (not (null? request))
+ (let ((response (mcp-dispatch request)))
+ (when (not (null? response))
+ (write-line [JSON serialize: response])))))))))))
+

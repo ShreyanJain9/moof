@@ -1,0 +1,190 @@
+(module classes
+ (requires bootstrap collections)
+ (provides Stack Queue Set Counter Range Pair Box EventEmitter))
+
+(def Stack { Object
+ data: nil
+
+ push: (val)
+ (<- @data (cons val @data))
+ self
+
+ pop: ()
+ (if (null? @data) nil
+ (let ((top (car @data)))
+ (<- @data (cdr @data))
+ top))
+
+ peek: () (if (null? @data) nil (car @data))
+ empty?: () (null? @data)
+ size: () (length @data)
+ toList: () @data
+ clear: () (<- @data nil) self
+ describe: () (str "<Stack " (length @data) ">")
+})
+
+(def Queue { Object
+ front: nil
+ back: nil
+
+ enqueue: (val)
+ (<- @back (cons val @back))
+ self
+
+ dequeue: ()
+ (when (null? @front)
+ (<- @front (reverse @back))
+ (<- @back nil))
+ (if (null? @front) nil
+ (let ((val (car @front)))
+ (<- @front (cdr @front))
+ val))
+
+ peek: ()
+ (when (null? @front)
+ (<- @front (reverse @back))
+ (<- @back nil))
+ (if (null? @front) nil (car @front))
+
+ empty?: () (and (null? @front) (null? @back))
+ size: () [(length @front) + (length @back)]
+ toList: () (append @front (reverse @back))
+ clear: () (<- @front nil) (<- @back nil) self
+ describe: () (str "<Queue " [self size] ">")
+})
+
+(def Set { Object
+ data: nil
+
+ contains: (val) (not (null? (find (fn (x) (eq x val)) @data)))
+
+ add: (val)
+ (unless [self contains: val]
+ (<- @data (cons val @data)))
+ self
+
+ remove: (val)
+ (<- @data (filter (fn (x) (not (eq x val))) @data))
+ self
+
+ size: () (length @data)
+ empty?: () (null? @data)
+ toList: () @data
+ clear: () (<- @data nil) self
+ describe: () (str "<Set " @data ">")
+})
+
+(defmethod Set union: (other)
+ (def result { Set })
+ (for-each (fn (x) [result add: x]) @data)
+ (for-each (fn (x) [result add: x]) [other toList])
+ result)
+
+(defmethod Set intersection: (other)
+ (def result { Set })
+ (for-each (fn (x) (when [other contains: x] [result add: x])) @data)
+ result)
+
+(defmethod Set difference: (other)
+ (def result { Set })
+ (for-each (fn (x) (unless [other contains: x] [result add: x])) @data)
+ result)
+
+(handle! Set ["from:" toSymbol] (fn (self . items)
+ (def s { Set })
+ (for-each (fn (x) [s add: x]) items)
+ s))
+
+(def Counter { Object
+ data: nil
+
+ count: (key)
+ (def pair (find (fn (p) (eq (car p) key)) @data))
+ (if (null? pair) 0 (cdr pair))
+
+ increment: (key)
+ (def cur [self count: key])
+ (<- @data (cons (cons key [cur + 1])
+ (filter (fn (p) (not (eq (car p) key))) @data)))
+ self
+
+ decrement: (key)
+ (def cur [self count: key])
+ (if [cur > 0]
+ (<- @data (cons (cons key [cur - 1])
+ (filter (fn (p) (not (eq (car p) key))) @data))))
+ self
+
+ keys: () (map car @data)
+ pairs: () @data
+ total: () (fold (fn (acc p) [acc + (cdr p)]) 0 @data)
+ describe: () (str "<Counter " @data ">")
+})
+
+(defmethod Counter countAll: (lst)
+ (for-each (fn (x) [self increment: x]) lst)
+ self)
+
+(def Range { Object
+ start: 0
+ end: 0
+ step: 1
+
+ toList: ()
+ (def collect (fn (i acc)
+ (if [i >= @end] (reverse acc)
+ (collect [i + @step] (cons i acc)))))
+ (collect @start nil)
+
+ contains: (n)
+ (and [n >= @start] [n < @end])
+
+ size: ()
+ (if [@start >= @end] 0
+ (let ((diff [@end - @start]))
+ [diff / @step]))
+
+ map: (f) (map f [self toList])
+ filter: (f) (filter f [self toList])
+ fold: (f init) (fold f init [self toList])
+ forEach: (f) (for-each f [self toList])
+ describe: () (str "<Range " @start ".." @end ">")
+})
+
+(def Pair { Object
+ first: nil
+ second: nil
+ describe: () (str "(" @first " . " @second ")")
+})
+
+(def Box { Object
+ value: nil
+
+ get: () @value
+ set: (v) (<- @value v) self
+ update: (f) (<- @value (f @value)) self
+ describe: () (str "<Box " @value ">")
+})
+
+(def EventEmitter { Object
+ listeners: nil
+
+ on: (event handler)
+ (<- @listeners (cons (cons event handler) @listeners))
+ self
+
+ emit: (event . args)
+ (for-each
+ (fn (pair)
+ (when (eq (car pair) event)
+ (apply (cdr pair) args)))
+ @listeners)
+ self
+
+ off: (event)
+ (<- @listeners (filter (fn (p) (not (eq (car p) event))) @listeners))
+ self
+
+ describe: () (str "<EventEmitter " (length @listeners) " listeners>")
+})
+

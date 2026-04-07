@@ -102,6 +102,18 @@ fn register_object_natives(vm: &mut VM, root_env: u32) {
     // If we put them on Object, they'd be found via type proto delegation
     // at step 2 of message_send, preempting the correct primitive behavior.
 
+    // setParent: — change the delegation parent of an object
+    add_native(vm, obj_id, "setParent:", "Object.setParent:", Box::new(|heap, args| {
+        let id = args[0].as_object().ok_or("setParent: expects object receiver")?;
+        let new_parent = args.get(1).copied().unwrap_or(Value::Nil);
+        heap.mutate(id, |obj| {
+            if let HeapObject::GeneralObject { parent, .. } = obj {
+                *parent = new_parent;
+            }
+        });
+        Ok(args[0])
+    }));
+
     // describe — default description string
     add_native(vm, obj_id, "describe", "Object.describe", Box::new(|heap, args| {
         let id = args[0].as_object().ok_or("describe expects object receiver")?;
