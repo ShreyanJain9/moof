@@ -7,6 +7,8 @@
 /// A capability IS a reference. No roles. No permissions system.
 /// You have the reference or you don't.
 
+pub mod extension;
+
 use moof_fabric::*;
 use moof_fabric::dispatch::HandlerInvoker;
 use std::collections::HashMap;

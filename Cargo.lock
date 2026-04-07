@@ -2008,6 +2008,7 @@ dependencies = [
 name = "moof-server"
 version = "0.1.0"
 dependencies = [
+ "libloading",
  "moof-fabric",
 ]
 

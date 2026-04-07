@@ -6,3 +6,4 @@ description = "A running moof objectspace. Frontends connect as vats."
 
 [dependencies]
 moof-fabric = { path = "../moof-fabric" }
+libloading = "0.8"

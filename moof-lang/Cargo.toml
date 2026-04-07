@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "The moof language shell. Reader, compiler, bytecode interpreter."
 
+[lib]
+crate-type = ["lib", "cdylib"]
+
 [dependencies]
 moof-fabric = { path = "../moof-fabric" }
 moof-server = { path = "../moof-server" }
