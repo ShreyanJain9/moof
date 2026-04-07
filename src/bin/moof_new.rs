@@ -21,7 +21,7 @@ fn main() {
 
     // print must exist before bootstrap (bootstrap's println wraps it)
     match moof_lang::eval(server.fabric(),
-        "(def print (lambda (x) [console writeLine: x]))", root_env) {
+        "(def print (lambda (x) [Console writeLine: x]))", root_env) {
         Ok(_) => {}
         Err(e) => eprintln!("!! print setup: {}", e),
     }
@@ -46,15 +46,15 @@ fn main() {
         eprintln!("(no lib/bootstrap.moof — running with bare fabric)");
     }
 
-    // ── Connect the REPL as root ──
-    let mut repl = server.connect_root();
+    // ── Connect the REPL with all capabilities (dev mode) ──
+    let mut repl = server.connect_all();
     repl.set_root_env(root_env);
 
     // Bind capabilities into the REPL's environment
     repl.bind_capabilities(server.fabric(), root_env);
 
     eprintln!("MOOF — on the fabric");
-    eprintln!("vat {} connected as {:?}", repl.vat_id, repl.role);
+    eprintln!("vat {} connected ({} capabilities)", repl.vat_id, repl.capabilities.len());
     println!("Type expressions to evaluate. Ctrl-D to exit.\n");
 
     // ── REPL loop ──

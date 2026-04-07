@@ -1,11 +1,11 @@
 /// moof-server: a running objectspace with vat-based isolation.
 ///
-/// System vats (console, filesystem, clock) are always running.
-/// Frontends authenticate and receive a user vat with references
-/// to the system vats they're allowed to talk to.
+/// System vats (Console, Filesystem, Clock) are always running.
+/// External interfaces (FFI, HTTP, databases) are virtual vats too.
 ///
-/// A capability IS a reference. If you have it, you can send.
-/// If you don't, the object doesn't exist in your world.
+/// Frontends connect and receive specific object references.
+/// A capability IS a reference. No roles. No permissions system.
+/// You have the reference or you don't.
 
 use moof_fabric::*;
 use moof_fabric::dispatch::HandlerInvoker;
@@ -14,41 +14,30 @@ use std::collections::HashMap;
 /// A running objectspace.
 pub struct Server {
     pub fabric: Fabric,
-    /// System vat handles
     pub system: SystemVats,
-    /// Auth: token → role
-    auth_tokens: HashMap<String, Role>,
+    /// Auth: token → list of capability names to grant.
+    /// The server operator configures this.
+    auth_tokens: HashMap<String, Vec<String>>,
 }
 
-/// The always-running system vats.
+/// Always-running system vats and their interface objects.
 pub struct SystemVats {
-    pub console: VatId,
-    pub filesystem: VatId,
-    pub clock: VatId,
-    /// The interface objects that user vats get references to.
-    /// These are objects IN the system vats that respond to messages.
-    pub console_obj: u32,
-    pub fs_obj: u32,
-    pub clock_obj: u32,
+    pub console_vat: VatId,
+    pub filesystem_vat: VatId,
+    pub clock_vat: VatId,
+    /// Interface objects (what user vats get references to)
+    pub Console: u32,
+    pub Filesystem: u32,
+    pub Clock: u32,
+    /// All system objects by name (for capability grants)
+    pub by_name: HashMap<String, u32>,
 }
 
-/// What level of access a connection gets.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Role {
-    /// Full access to everything. The REPL in dev mode.
-    Root,
-    /// Read + eval, writes go through review. AI agents.
-    Agent,
-    /// Sandboxed eval only. Untrusted code.
-    Guest,
-}
-
-/// A frontend's connection. Holds the vat id and what it can reach.
+/// A frontend's connection.
 pub struct Connection {
     pub vat_id: VatId,
-    pub role: Role,
     pub root_env: Option<u32>,
-    /// Which system vat references this connection holds.
+    /// Which object references this connection holds.
     pub capabilities: Vec<(String, u32)>,
 }
 
@@ -57,126 +46,99 @@ impl Server {
     pub fn new() -> Self {
         let mut fabric = Fabric::new();
 
-        // Create system vats
         let console_vat = fabric.create_vat();
-        let fs_vat = fabric.create_vat();
+        let filesystem_vat = fabric.create_vat();
         let clock_vat = fabric.create_vat();
 
-        // Create the interface objects that live in the system vats.
-        // User vats get references to these objects.
-        // Sends to them are dispatched by the fabric — the system vat
-        // processes them on its turn.
         let console_obj = fabric.create_object(Value::Nil);
         let fs_obj = fabric.create_object(Value::Nil);
         let clock_obj = fabric.create_object(Value::Nil);
 
-        // Tag system objects for describe
+        // Tag system objects
         let tag_sym = fabric.intern("type-tag");
-        let console_tag = Value::Symbol(fabric.intern("Console"));
-        fabric.heap.slot_set(console_obj, tag_sym, console_tag);
-        let fs_tag = Value::Symbol(fabric.intern("Filesystem"));
-        fabric.heap.slot_set(fs_obj, tag_sym, fs_tag);
-        let clock_tag = Value::Symbol(fabric.intern("Clock"));
-        fabric.heap.slot_set(clock_obj, tag_sym, clock_tag);
+        let console_tag = fabric.intern("Console");
+        let fs_tag = fabric.intern("Filesystem");
+        let clock_tag = fabric.intern("Clock");
+        fabric.heap.slot_set(console_obj, tag_sym, Value::Symbol(console_tag));
+        fabric.heap.slot_set(fs_obj, tag_sym, Value::Symbol(fs_tag));
+        fabric.heap.slot_set(clock_obj, tag_sym, Value::Symbol(clock_tag));
 
-        let system = SystemVats {
-            console: console_vat,
-            filesystem: fs_vat,
-            clock: clock_vat,
-            console_obj,
-            fs_obj,
-            clock_obj,
-        };
+        let mut by_name = HashMap::new();
+        by_name.insert("Console".into(), console_obj);
+        by_name.insert("Filesystem".into(), fs_obj);
+        by_name.insert("Clock".into(), clock_obj);
 
         Server {
             fabric,
-            system,
+            system: SystemVats {
+                console_vat, filesystem_vat, clock_vat,
+                Console: console_obj, Filesystem: fs_obj, Clock: clock_obj,
+                by_name,
+            },
             auth_tokens: HashMap::new(),
         }
     }
 
+    // ── Virtual vats ──
+
+    /// Register a new virtual vat (external interface).
+    /// Returns the interface object id. Handlers are added by the caller.
+    pub fn add_virtual_vat(&mut self, name: &str) -> u32 {
+        let vat_id = self.fabric.create_vat();
+        let obj = self.fabric.create_object(Value::Nil);
+        let tag_sym = self.fabric.intern("type-tag");
+        let tag_val = Value::Symbol(self.fabric.intern(name));
+        self.fabric.heap.slot_set(obj, tag_sym, tag_val);
+        self.system.by_name.insert(name.to_string(), obj);
+        obj
+    }
+
     // ── Auth ──
 
-    /// Register an auth token for a role.
-    pub fn add_token(&mut self, token: &str, role: Role) {
-        self.auth_tokens.insert(token.to_string(), role);
+    /// Register a token that grants specific capability names.
+    pub fn add_token(&mut self, token: &str, capability_names: Vec<String>) {
+        self.auth_tokens.insert(token.to_string(), capability_names);
     }
 
-    /// Authenticate with a token. Returns a connection with appropriate capabilities.
+    /// Authenticate with a token. Returns a connection with the granted references.
     pub fn authenticate(&mut self, token: &str) -> Result<Connection, String> {
-        let role = self.auth_tokens.get(token)
+        let cap_names = self.auth_tokens.get(token)
             .cloned()
             .ok_or_else(|| "invalid token".to_string())?;
-        Ok(self.connect(role))
+        self.connect_with(&cap_names)
     }
 
-    /// Connect as root (dev mode, no auth needed).
-    pub fn connect_root(&mut self) -> Connection {
-        self.connect(Role::Root)
-    }
-
-    /// Connect with a specific role.
-    pub fn connect(&mut self, role: Role) -> Connection {
+    /// Connect with specific capability names (looked up in system.by_name).
+    pub fn connect_with(&mut self, capability_names: &[String]) -> Result<Connection, String> {
         let vat_id = self.fabric.create_vat();
-
-        // Grant capabilities based on role
-        let capabilities = match &role {
-            Role::Root => vec![
-                ("console".into(), self.system.console_obj),
-                ("fs".into(), self.system.fs_obj),
-                ("clock".into(), self.system.clock_obj),
-            ],
-            Role::Agent => vec![
-                ("clock".into(), self.system.clock_obj),
-                // Agent gets read-only fs (TODO: facet wrapping)
-                ("fs".into(), self.system.fs_obj),
-            ],
-            Role::Guest => vec![
-                ("clock".into(), self.system.clock_obj),
-                // Guest gets nothing else
-            ],
-        };
-
-        Connection {
-            vat_id,
-            role,
-            root_env: None,
-            capabilities,
+        let mut capabilities = Vec::new();
+        for name in capability_names {
+            if let Some(&obj_id) = self.system.by_name.get(name.as_str()) {
+                capabilities.push((name.clone(), obj_id));
+            }
         }
+        Ok(Connection { vat_id, root_env: None, capabilities })
+    }
+
+    /// Connect with ALL system capabilities (dev mode).
+    pub fn connect_all(&mut self) -> Connection {
+        let vat_id = self.fabric.create_vat();
+        let capabilities: Vec<(String, u32)> = self.system.by_name.iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        Connection { vat_id, root_env: None, capabilities }
     }
 
     // ── Lifecycle ──
 
-    /// Run one scheduler tick.
-    pub fn tick(&mut self) {
-        self.fabric.tick();
-    }
-
-    /// Register a handler invoker (language shells do this).
-    pub fn register_invoker(&mut self, invoker: Box<dyn HandlerInvoker>) {
-        self.fabric.register_invoker(invoker);
-    }
-
-    /// Access the fabric directly (for setup, bootstrapping).
-    pub fn fabric(&mut self) -> &mut Fabric {
-        &mut self.fabric
-    }
-
-    /// Intern a symbol.
-    pub fn intern(&mut self, name: &str) -> u32 {
-        self.fabric.intern(name)
-    }
-
-    /// Send a message synchronously.
-    pub fn send(&mut self, receiver: Value, selector: u32, args: &[Value]) -> Result<Value, String> {
-        self.fabric.send(receiver, selector, args)
-    }
+    pub fn tick(&mut self) { self.fabric.tick(); }
+    pub fn register_invoker(&mut self, invoker: Box<dyn HandlerInvoker>) { self.fabric.register_invoker(invoker); }
+    pub fn fabric(&mut self) -> &mut Fabric { &mut self.fabric }
+    pub fn intern(&mut self, name: &str) -> u32 { self.fabric.intern(name) }
 }
 
 impl Connection {
-    pub fn set_root_env(&mut self, env: u32) {
-        self.root_env = Some(env);
-    }
+    pub fn set_root_env(&mut self, env: u32) { self.root_env = Some(env); }
 
     /// Bind this connection's capabilities into an environment.
     pub fn bind_capabilities(&self, fabric: &mut Fabric, env: u32) {

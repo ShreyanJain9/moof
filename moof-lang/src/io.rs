@@ -13,9 +13,9 @@ pub fn register_system_handlers(server: &mut Server) {
     let mut native = NativeInvoker::new();
 
     // Read system object ids before borrowing fabric
-    let console_obj = server.system.console_obj;
-    let fs_obj = server.system.fs_obj;
-    let clock_obj = server.system.clock_obj;
+    let console_obj = server.system.Console;
+    let fs_obj = server.system.Filesystem;
+    let clock_obj = server.system.Clock;
 
     register_console(server.fabric(), console_obj, &mut native);
     register_filesystem(server.fabric(), fs_obj, &mut native);
