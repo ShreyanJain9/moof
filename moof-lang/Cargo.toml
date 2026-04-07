@@ -6,3 +6,4 @@ description = "The moof language shell. Reader, compiler, bytecode interpreter."
 
 [dependencies]
 moof-fabric = { path = "../moof-fabric" }
+moof-server = { path = "../moof-server" }

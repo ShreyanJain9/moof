@@ -1,53 +1,54 @@
-/// IO capability objects.
+/// IO capability handlers.
 ///
-/// IO is not a global function. It's a capability object your vat holds.
-/// [console writeLine: "hello"]. If you don't have console, you can't print.
-///
-/// Capabilities:
-/// - Console: writeLine:, write:, readLine
-/// - Filesystem: read:, write:to:
-/// - Clock: now
+/// System vats (console, filesystem, clock) are created by the server.
+/// This module registers handlers on their interface objects.
+/// User vats get references to these objects as capabilities.
 
 use moof_fabric::*;
+use moof_server::Server;
 use std::io::{self, BufRead, Write as IoWrite};
 
-/// Create IO capability objects and register their handlers.
-/// Returns (console_id, fs_id, clock_id) as object ids.
-pub fn create_capabilities(fabric: &mut Fabric, native: &mut NativeInvoker) -> IoCapabilities {
-    let console = create_console(fabric, native);
-    let fs = create_filesystem(fabric, native);
-    let clock = create_clock(fabric, native);
-    IoCapabilities { console, filesystem: fs, clock }
+/// Register handlers on the server's system vat objects.
+pub fn register_system_handlers(server: &mut Server) {
+    let mut native = NativeInvoker::new();
+
+    // Read system object ids before borrowing fabric
+    let console_obj = server.system.console_obj;
+    let fs_obj = server.system.fs_obj;
+    let clock_obj = server.system.clock_obj;
+
+    register_console(server.fabric(), console_obj, &mut native);
+    register_filesystem(server.fabric(), fs_obj, &mut native);
+    register_clock(server.fabric(), clock_obj, &mut native);
+
+    // One invoker for all system IO natives
+    server.register_invoker(Box::new(native));
 }
 
-pub struct IoCapabilities {
-    pub console: u32,
-    pub filesystem: u32,
-    pub clock: u32,
+fn reg(fabric: &mut Fabric, obj: u32, native: &mut NativeInvoker,
+       selector: &str, native_name: &str,
+       f: impl Fn(&mut Heap, &[Value]) -> Result<Value, String> + Send + 'static) {
+    native.register(native_name, Box::new(f));
+    let h = NativeInvoker::make_handler(&mut fabric.heap, native_name);
+    let s = fabric.intern(selector);
+    fabric.heap.add_handler(obj, s, Value::Object(h));
 }
 
-fn create_console(fabric: &mut Fabric, native: &mut NativeInvoker) -> u32 {
-    let obj = fabric.create_object(Value::Nil);
-
-    // writeLine: — print string + newline to stdout
-    native.register("Console.writeLine:", Box::new(|heap, args| {
+fn register_console(fabric: &mut Fabric, obj: u32, native: &mut NativeInvoker) {
+    reg(fabric, obj, native, "writeLine:", "Console.writeLine:", |heap, args| {
         let text = value_to_string(heap, args.get(1).copied().unwrap_or(Value::Nil));
         println!("{}", text);
         Ok(Value::Nil)
-    }));
-    fabric.add_native_handler(obj, "writeLine:", "Console.writeLine:");
+    });
 
-    // write: — print string without newline
-    native.register("Console.write:", Box::new(|heap, args| {
+    reg(fabric, obj, native, "write:", "Console.write:", |heap, args| {
         let text = value_to_string(heap, args.get(1).copied().unwrap_or(Value::Nil));
         print!("{}", text);
         let _ = io::stdout().flush();
         Ok(Value::Nil)
-    }));
-    fabric.add_native_handler(obj, "write:", "Console.write:");
+    });
 
-    // readLine — read a line from stdin
-    native.register("Console.readLine", Box::new(|heap, _args| {
+    reg(fabric, obj, native, "readLine", "Console.readLine", |heap, _args| {
         let stdin = io::stdin();
         let mut line = String::new();
         match stdin.lock().read_line(&mut line) {
@@ -59,91 +60,45 @@ fn create_console(fabric: &mut Fabric, native: &mut NativeInvoker) -> u32 {
             }
             Err(e) => Err(format!("readLine: {}", e)),
         }
-    }));
-    fabric.add_native_handler(obj, "readLine", "Console.readLine");
+    });
 
-    // describe
-    native.register("Console.describe", Box::new(|heap, _args| {
+    reg(fabric, obj, native, "describe", "Console.describe", |heap, _| {
         Ok(heap.alloc_string("<Console>"))
-    }));
-    fabric.add_native_handler(obj, "describe", "Console.describe");
-
-    obj
+    });
 }
 
-fn create_filesystem(fabric: &mut Fabric, native: &mut NativeInvoker) -> u32 {
-    let obj = fabric.create_object(Value::Nil);
+fn register_filesystem(fabric: &mut Fabric, obj: u32, native: &mut NativeInvoker) {
+    reg(fabric, obj, native, "read:", "Filesystem.read:", |heap, args| {
+        let path = extract_string(heap, args.get(1).copied().unwrap_or(Value::Nil))?;
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| format!("read: {}: {}", path, e))?;
+        Ok(heap.alloc_string(&content))
+    });
 
-    // read: — read file contents as string
-    native.register("Filesystem.read:", Box::new(|heap, args| {
-        let path = match args.get(1).copied().unwrap_or(Value::Nil) {
-            Value::Object(id) => match heap.get(id) {
-                HeapObject::String(s) => s.clone(),
-                _ => return Err("read: expects string path".into()),
-            },
-            _ => return Err("read: expects string path".into()),
-        };
-        match std::fs::read_to_string(&path) {
-            Ok(content) => Ok(heap.alloc_string(&content)),
-            Err(e) => Err(format!("read: {}: {}", path, e)),
-        }
-    }));
-    fabric.add_native_handler(obj, "read:", "Filesystem.read:");
-
-    // write:to: — write string to file
-    native.register("Filesystem.write:to:", Box::new(|heap, args| {
-        let content = match args.get(1).copied().unwrap_or(Value::Nil) {
-            Value::Object(id) => match heap.get(id) {
-                HeapObject::String(s) => s.clone(),
-                _ => return Err("write:to: expects string content".into()),
-            },
-            _ => return Err("write:to: expects string content".into()),
-        };
-        let path = match args.get(2).copied().unwrap_or(Value::Nil) {
-            Value::Object(id) => match heap.get(id) {
-                HeapObject::String(s) => s.clone(),
-                _ => return Err("write:to: expects string path".into()),
-            },
-            _ => return Err("write:to: expects string path".into()),
-        };
-        std::fs::write(&path, &content)
-            .map_err(|e| format!("write:to: {}: {}", path, e))?;
+    reg(fabric, obj, native, "write:to:", "Filesystem.write:to:", |heap, args| {
+        let content = extract_string(heap, args.get(1).copied().unwrap_or(Value::Nil))?;
+        let path = extract_string(heap, args.get(2).copied().unwrap_or(Value::Nil))?;
+        std::fs::write(&path, &content).map_err(|e| format!("write: {}: {}", path, e))?;
         Ok(Value::True)
-    }));
-    fabric.add_native_handler(obj, "write:to:", "Filesystem.write:to:");
+    });
 
-    // describe
-    native.register("Filesystem.describe", Box::new(|heap, _args| {
+    reg(fabric, obj, native, "describe", "Filesystem.describe", |heap, _| {
         Ok(heap.alloc_string("<Filesystem>"))
-    }));
-    fabric.add_native_handler(obj, "describe", "Filesystem.describe");
-
-    obj
+    });
 }
 
-fn create_clock(fabric: &mut Fabric, native: &mut NativeInvoker) -> u32 {
-    let obj = fabric.create_object(Value::Nil);
-
-    // now — current unix timestamp as integer
-    native.register("Clock.now", Box::new(|_heap, _args| {
+fn register_clock(fabric: &mut Fabric, obj: u32, native: &mut NativeInvoker) {
+    reg(fabric, obj, native, "now", "Clock.now", |_heap, _args| {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         Ok(Value::Integer(secs as i64))
-    }));
-    fabric.add_native_handler(obj, "now", "Clock.now");
+    });
 
-    native.register("Clock.describe", Box::new(|heap, _args| {
+    reg(fabric, obj, native, "describe", "Clock.describe", |heap, _| {
         Ok(heap.alloc_string("<Clock>"))
-    }));
-    fabric.add_native_handler(obj, "describe", "Clock.describe");
-
-    obj
+    });
 }
 
-/// Convert any value to a printable string.
 fn value_to_string(heap: &Heap, val: Value) -> String {
     match val {
         Value::Nil => "nil".into(),
@@ -156,5 +111,15 @@ fn value_to_string(heap: &Heap, val: Value) -> String {
             HeapObject::String(s) => s.clone(),
             _ => format!("<object #{}>", id),
         },
+    }
+}
+
+fn extract_string(heap: &Heap, val: Value) -> Result<String, String> {
+    match val {
+        Value::Object(id) => match heap.get(id) {
+            HeapObject::String(s) => Ok(s.clone()),
+            _ => Err("expected string".into()),
+        },
+        _ => Err("expected string".into()),
     }
 }

@@ -2001,6 +2001,7 @@ name = "moof-lang"
 version = "0.1.0"
 dependencies = [
  "moof-fabric",
+ "moof-server",
 ]
 
 [[package]]

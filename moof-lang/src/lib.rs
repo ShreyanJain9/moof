@@ -29,16 +29,13 @@ pub fn eval(fabric: &mut Fabric, source: &str, env_id: u32) -> Result<Value, Str
     Ok(result)
 }
 
-/// Set up the moof shell on a fabric: register invokers, create root env.
-/// Returns (root_env, io_capabilities).
+/// Set up the moof shell on a fabric: register type invokers, create root env.
+/// IO capabilities are registered separately on the server's system vats.
 pub fn setup(fabric: &mut Fabric) -> SetupResult {
     let mut native = NativeInvoker::new();
 
     // Register type conventions (Integer +, String length, etc.)
     conventions::register(fabric, &mut native);
-
-    // Create IO capability objects
-    let io_caps = io::create_capabilities(fabric, &mut native);
 
     // Register all invokers
     fabric.register_invoker(Box::new(native));
@@ -55,10 +52,9 @@ pub fn setup(fabric: &mut Fabric) -> SetupResult {
     let false_sym = fabric.intern("false");
     fabric.heap.env_define(root_env, false_sym, Value::False);
 
-    SetupResult { root_env, io: io_caps }
+    SetupResult { root_env }
 }
 
 pub struct SetupResult {
     pub root_env: u32,
-    pub io: io::IoCapabilities,
 }

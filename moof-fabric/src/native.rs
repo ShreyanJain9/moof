@@ -50,7 +50,14 @@ impl HandlerInvoker for NativeInvoker {
         if let Value::Object(id) = handler {
             if let HeapObject::Object { slots, .. } = heap.get(id) {
                 if let Some(sym) = heap.symbol_lookup_only("native-name") {
-                    return slots.iter().any(|(k, _)| *k == sym);
+                    // Read the actual name and check if THIS invoker has it
+                    if let Some((_, name_val)) = slots.iter().find(|(k, _)| *k == sym) {
+                        if let Value::Object(sid) = name_val {
+                            if let HeapObject::String(name) = heap.get(*sid) {
+                                return self.funcs.contains_key(name.as_str());
+                            }
+                        }
+                    }
                 }
             }
         }
