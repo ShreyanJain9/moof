@@ -1,5 +1,5 @@
 [workspace]
-members = ["moof-fabric", "."]
+members = ["moof-fabric", "moof-lang", "."]
 
 [package]
 name = "moof"

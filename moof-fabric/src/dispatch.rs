@@ -65,6 +65,7 @@ impl TypeProtos {
                 HeapObject::String(_) => self.string,
                 HeapObject::Cons { .. } => self.cons,
                 HeapObject::Bytes(_) => self.bytes,
+                HeapObject::Environment { .. } => None, // Environments use shell-registered handlers
                 HeapObject::Object { .. } => None, // Objects use their own handler table
             },
         }

@@ -212,6 +212,64 @@ impl Heap {
         }
     }
 
+    // ── Environments ──
+
+    pub fn alloc_env(&mut self, parent: Option<u32>) -> u32 {
+        self.alloc(HeapObject::Environment {
+            parent,
+            bindings: HashMap::new(),
+        })
+    }
+
+    pub fn env_define(&mut self, env_id: u32, sym: u32, val: Value) {
+        if let HeapObject::Environment { bindings, .. } = self.get_mut(env_id) {
+            bindings.insert(sym, val);
+        }
+    }
+
+    pub fn env_lookup(&self, env_id: u32, sym: u32) -> Option<Value> {
+        let mut current = Some(env_id);
+        while let Some(eid) = current {
+            match self.get(eid) {
+                HeapObject::Environment { parent, bindings } => {
+                    if let Some(val) = bindings.get(&sym) {
+                        return Some(*val);
+                    }
+                    current = *parent;
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    pub fn env_set(&mut self, env_id: u32, sym: u32, val: Value) -> bool {
+        // Walk the chain to find the binding, then mutate
+        let mut current = Some(env_id);
+        while let Some(eid) = current {
+            match self.get(eid) {
+                HeapObject::Environment { parent, bindings } => {
+                    if bindings.contains_key(&sym) {
+                        // Found it — mutate
+                        if let HeapObject::Environment { bindings, .. } = self.get_mut(eid) {
+                            bindings.insert(sym, val);
+                        }
+                        return true;
+                    }
+                    current = *parent;
+                }
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    pub fn env_remove(&mut self, env_id: u32, sym: u32) {
+        if let HeapObject::Environment { bindings, .. } = self.get_mut(env_id) {
+            bindings.remove(&sym);
+        }
+    }
+
     // ── Mutation helper ──
 
     pub fn mutate<F: FnOnce(&mut HeapObject)>(&mut self, id: u32, f: F) {

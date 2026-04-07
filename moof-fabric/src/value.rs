@@ -112,4 +112,13 @@ pub enum HeapObject {
     /// Opaque byte data. Bytecode, compiled code, binary blobs.
     /// The fabric doesn't interpret this — shells do.
     Bytes(Vec<u8>),
+
+    /// A first-class environment (lexical scope).
+    /// Universal concept — any language with closures needs this.
+    /// Parent is another environment id (or None for root).
+    /// Bindings map symbol ids to values.
+    Environment {
+        parent: Option<u32>,
+        bindings: std::collections::HashMap<u32, Value>,
+    },
 }

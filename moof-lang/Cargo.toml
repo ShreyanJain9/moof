@@ -1,0 +1,8 @@
+[package]
+name = "moof-lang"
+version = "0.1.0"
+edition = "2024"
+description = "The moof language shell. Reader, compiler, bytecode interpreter."
+
+[dependencies]
+moof-fabric = { path = "../moof-fabric" }
