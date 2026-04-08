@@ -305,9 +305,10 @@ impl<'a> Parser<'a> {
         // parse body (single expression)
         let body = self.parse_expr()?;
 
-        let block_sym = self.intern("%block");
+        // desugar |params| body → (fn (params) body)
+        let fn_sym = self.intern("fn");
         let param_list = self.heap.list(&params);
-        Ok(self.heap.list(&[block_sym, param_list, body]))
+        Ok(self.heap.list(&[fn_sym, param_list, body]))
     }
 
     fn parse_table_literal(&mut self) -> Result<Value, String> {

@@ -297,45 +297,6 @@ impl<'a> Compiler<'a> {
                     return Ok(());
                 }
 
-                "%block" => {
-                    // (%block (params) body) — compiles exactly like fn
-                    let items = self.heap.list_to_vec(expr);
-                    if items.len() < 3 { return Err("block: need params and body".into()); }
-                    let params = self.heap.list_to_vec(items[1]);
-                    let param_syms: Vec<u32> = params.iter()
-                        .map(|p| p.as_symbol().ok_or("block: param must be a symbol"))
-                        .collect::<Result<_, _>>()?;
-                    let arity = param_syms.len() as u8;
-                    let mut sub = Compiler::new(self.heap, "<block>");
-                    sub.parent_locals = self.locals.clone();
-                    sub.chunk.arity = arity;
-                    for &sym in &param_syms {
-                        let reg = sub.alloc_reg();
-                        sub.locals.push((sym, reg));
-                    }
-                    let body_dst = sub.alloc_reg();
-                    sub.compile_expr(items[2], body_dst)?;
-                    sub.chunk.emit(Op::Return, body_dst, 0, 0);
-                    let capture_names: Vec<u32> = sub.captures.iter().map(|(s, _, _)| *s).collect();
-                    let capture_parent_regs: Vec<u8> = sub.captures.iter().map(|(_, r, _)| *r).collect();
-                    let capture_local_regs: Vec<u8> = sub.captures.iter().map(|(_, _, lr)| *lr).collect();
-                    let sub_result = sub.finish();
-                    let desc = ClosureDesc {
-                        chunk: sub_result.chunk,
-                        param_names: param_syms,
-                        is_operative: false,
-                        capture_names,
-                        capture_parent_regs,
-                        capture_local_regs,
-                        capture_values: Vec::new(), desc_base: 0, rest_param_reg: None,
-                    };
-                    self.closure_descs.extend(sub_result.closure_descs);
-                    let idx = self.closure_descs.len();
-                    self.closure_descs.push(desc);
-                    self.chunk.emit(Op::MakeClosure, dst, (idx >> 8) as u8, idx as u8);
-                    return Ok(());
-                }
-
                 "fn" | "lambda" => {
                     // (fn (params...) body...) → compile body as a sub-chunk, emit MakeClosure
                     let items = self.heap.list_to_vec(expr);
