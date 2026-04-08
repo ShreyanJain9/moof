@@ -22,12 +22,15 @@ fn eval_source(vm: &mut VM, heap: &mut Heap, source: &str) -> Result<(), String>
 }
 
 fn load_bootstrap(vm: &mut VM, heap: &mut Heap) {
-    let paths = ["lib/bootstrap.moof", "bootstrap.moof"];
-    for path in &paths {
+    let files = [
+        "lib/bootstrap.moof",
+        "lib/core.moof",
+    ];
+    for path in &files {
         if let Ok(source) = std::fs::read_to_string(path) {
             match eval_source(vm, heap, &source) {
-                Ok(()) => { eprintln!("  loaded {path}"); return; }
-                Err(e) => { eprintln!("  ~ bootstrap error in {path}: {e}"); return; }
+                Ok(()) => eprintln!("  loaded {path}"),
+                Err(e) => { eprintln!("  ~ error in {path}: {e}"); return; }
             }
         }
     }

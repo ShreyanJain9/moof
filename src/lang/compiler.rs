@@ -952,6 +952,55 @@ pub fn register_type_protos(heap: &mut Heap) {
     let handle_with_sym = heap.intern("handle:with:");
     heap.get_mut(obj_id).handler_set(handle_with_sym, handle_with_handler);
 
+    // Object: handlerAt: — read a handler value by selector (for aliasing)
+    let h = heap.register_native("obj_handlerAt", |heap, receiver, args| {
+        let sel = args.first().and_then(|v| v.as_symbol()).ok_or("handlerAt: arg must be a symbol")?;
+        // walk the prototype chain looking for the handler
+        if let Some(id) = receiver.as_any_object() {
+            if let Some(handler) = heap.get(id).handler_get(sel) {
+                return Ok(handler);
+            }
+        }
+        // check type proto
+        let proto = heap.prototype_of(receiver);
+        if let Some(pid) = proto.as_any_object() {
+            let mut current = pid;
+            for _ in 0..256 {
+                if let Some(handler) = heap.get(current).handler_get(sel) {
+                    return Ok(handler);
+                }
+                match heap.get(current).parent().as_any_object() {
+                    Some(next) => current = next,
+                    None => break,
+                }
+            }
+        }
+        Ok(Value::NIL)
+    });
+    let handler_at_sym = heap.intern("handlerAt:");
+    heap.get_mut(obj_id).handler_set(handler_at_sym, h);
+
+    // Object: responds: — check if a handler exists
+    let h = heap.register_native("obj_responds", |heap, receiver, args| {
+        let sel = args.first().and_then(|v| v.as_symbol()).ok_or("responds: arg must be a symbol")?;
+        let names = heap.all_handler_names(receiver);
+        Ok(Value::boolean(names.contains(&sel)))
+    });
+    let responds_sym = heap.intern("responds:");
+    heap.get_mut(obj_id).handler_set(responds_sym, h);
+
+    // Object: clone — shallow copy
+    let h = heap.register_native("obj_clone", |heap, receiver, _args| {
+        if let Some(id) = receiver.as_any_object() {
+            let cloned = heap.get(id).clone();
+            Ok(heap.alloc_val(cloned))
+        } else {
+            Ok(receiver) // primitives are immutable, return self
+        }
+    });
+    let clone_sym = heap.intern("clone");
+    heap.get_mut(obj_id).handler_set(clone_sym, h);
+
     // Object: describe
     let describe_handler = heap.register_native("obj_describe", |heap, receiver, _args| {
         let s = heap.format_value(receiver);

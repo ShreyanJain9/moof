@@ -1,0 +1,271 @@
+; core.moof — type enhancements
+;
+; adds methods to built-in types that feel natural.
+; after this loads, you can write [5 even?] instead of (even? 5).
+
+; ── Object ─────────────────────────────────────────────
+
+(defmethod Object nil? () (eq self nil))
+(defmethod Object some? () (not [self nil?]))
+(defmethod Object tap: (block) (do (block self) self))
+(defmethod Object pipe: (f) (f self))
+
+; ── Integer ────────────────────────────────────────────
+
+(defmethod Integer even? () (eq [self % 2] 0))
+(defmethod Integer odd? () (not [self even?]))
+(defmethod Integer zero? () (eq self 0))
+(defmethod Integer positive? () [self > 0])
+(defmethod Integer negative? () [self < 0])
+(defmethod Integer abs () (if [self < 0] [0 - self] self))
+(defmethod Integer inc () [self + 1])
+(defmethod Integer dec () [self - 1])
+(defmethod Integer max: (other) (if [self > other] self other))
+(defmethod Integer min: (other) (if [self < other] self other))
+(defmethod Integer clamp:to: (lo hi) [[self max: lo] min: hi])
+(defmethod Integer between:and: (lo hi) (and [self >= lo] [self <= hi]))
+(defmethod Integer times: (block)
+  (let ((i 0))
+    (while [i < self]
+      (block i)
+      (:= i [i + 1]))))
+(defmethod Integer upto:do: (limit block)
+  (let ((i self))
+    (while [i <= limit]
+      (block i)
+      (:= i [i + 1]))))
+(defmethod Integer downto:do: (limit block)
+  (let ((i self))
+    (while [i >= limit]
+      (block i)
+      (:= i [i - 1]))))
+(defmethod Integer pow: (exp)
+  (let ((result 1) (i 0))
+    (while [i < exp]
+      (:= result [result * self])
+      (:= i [i + 1]))
+    result))
+(defmethod Integer toString () [self describe])
+
+; ── Float ──────────────────────────────────────────────
+
+(defmethod Float zero? () [self = 0.0])
+(defmethod Float positive? () [self > 0.0])
+(defmethod Float negative? () [self < 0.0])
+(defmethod Float abs () (if [self < 0.0] [0.0 - self] self))
+(defmethod Float max: (other) (if [self > other] self other))
+(defmethod Float min: (other) (if [self < other] self other))
+(defmethod Float clamp:to: (lo hi) [[self max: lo] min: hi])
+(defmethod Float between:and: (lo hi) (and [self >= lo] [self <= hi]))
+
+; ── Boolean ────────────────────────────────────────────
+
+(defmethod Boolean not () (if self false true))
+(defmethod Boolean ifTrue:ifFalse: (t f) (if self (t) (f)))
+(defmethod Boolean ifTrue: (block) (if self (block) nil))
+(defmethod Boolean ifFalse: (block) (if self nil (block)))
+(defmethod Boolean toString () (if self "true" "false"))
+
+; ── String ─────────────────────────────────────────────
+
+(defmethod String empty? () (eq [self length] 0))
+(defmethod String repeat: (n)
+  (let ((result "") (i 0))
+    (while [i < n]
+      (:= result [result ++ self])
+      (:= i [i + 1]))
+    result))
+(defmethod String chars ()
+  (let ((result nil) (i [[self length] - 1]))
+    (while [i >= 0]
+      (:= result (cons [self at: i] result))
+      (:= i [i - 1]))
+    result))
+(defmethod String lines () [self split: "\n"])
+(defmethod String words () [self split: " "])
+(defmethod String toString () self)
+(defmethod String reverse ()
+  (let ((chars [self chars])
+        (result ""))
+    (while (some? chars)
+      (:= result [result ++ [chars car]])
+      (:= chars [chars cdr]))
+    result))
+
+; ── Cons (linked list) ─────────────────────────────────
+
+(alias Cons first car)
+(alias Cons rest cdr)
+
+(defmethod Cons empty? () false)
+
+(defmethod Cons at: (n)
+  (if (eq n 0) [self car] [[self cdr] at: [n - 1]]))
+
+(defmethod Cons last ()
+  (if [self cdr nil?] [self car] [[self cdr] last]))
+
+(defmethod Cons cons: (x) (cons x self))
+
+(defmethod Cons append: (other)
+  (if [self cdr nil?]
+    (cons [self car] other)
+    (cons [self car] [[self cdr] append: other])))
+
+(defmethod Cons reverse ()
+  (let ((result nil) (current self))
+    (while (some? current)
+      (:= result (cons [current car] result))
+      (:= current [current cdr]))
+    result))
+
+(defmethod Cons each: (block)
+  (let ((current self))
+    (while (some? current)
+      (block [current car])
+      (:= current [current cdr]))))
+
+(defmethod Cons map: (f)
+  (if [self cdr nil?]
+    (cons (f [self car]) nil)
+    (cons (f [self car]) [[self cdr] map: f])))
+
+(defmethod Cons select: (f)
+  (if [self cdr nil?]
+    (if (f [self car]) (cons [self car] nil) nil)
+    (if (f [self car])
+      (cons [self car] [[self cdr] select: f])
+      [[self cdr] select: f])))
+
+(defmethod Cons reject: (f)
+  [self select: |x| (not (f x))])
+
+(defmethod Cons fold:with: (init f)
+  (let ((acc init) (current self))
+    (while (some? current)
+      (:= acc (f acc [current car]))
+      (:= current [current cdr]))
+    acc))
+
+(defmethod Cons reduce: (f)
+  [[self cdr] fold: [self car] with: f])
+
+(defmethod Cons any: (f)
+  (let ((current self) (found false))
+    (while (and (some? current) (not found))
+      (if (f [current car]) (:= found true) nil)
+      (:= current [current cdr]))
+    found))
+
+(defmethod Cons all: (f)
+  (not [self any: |x| (not (f x))]))
+
+(defmethod Cons none: (f)
+  (not [self any: f]))
+
+(defmethod Cons count ()
+  [self fold: 0 with: |a _| [a + 1]])
+
+(defmethod Cons count: (f)
+  [self fold: 0 with: |a x| (if (f x) [a + 1] a)])
+
+(defmethod Cons find: (f)
+  (let ((current self) (result nil))
+    (while (and (some? current) [result nil?])
+      (if (f [current car]) (:= result [current car]) nil)
+      (:= current [current cdr]))
+    result))
+
+(defmethod Cons includes: (x)
+  [self any: |el| [el equal: x]])
+
+(defmethod Cons sum ()
+  [self fold: 0 with: |a x| [a + x]])
+
+(defmethod Cons product ()
+  [self fold: 1 with: |a x| [a * x]])
+
+(defmethod Cons min ()
+  [self reduce: |a x| (if [x < a] x a)])
+
+(defmethod Cons max ()
+  [self reduce: |a x| (if [x > a] x a)])
+
+(defmethod Cons join: (sep)
+  (let ((result [[self car] describe]) (current [self cdr]))
+    (while (some? current)
+      (:= result [result ++ sep ++ [[current car] describe]])
+      (:= current [current cdr]))
+    result))
+
+(defmethod Cons join ()
+  [self join: ""])
+
+(defmethod Cons take: (n)
+  (if (or (eq n 0) [self nil?]) nil
+    (cons [self car] [[self cdr] take: [n - 1]])))
+
+(defmethod Cons drop: (n)
+  (if (or (eq n 0) [self nil?]) self
+    [[self cdr] drop: [n - 1]]))
+
+(defmethod Cons zip: (other)
+  (if (or [self nil?] [other nil?]) nil
+    (cons (cons [self car] [other car])
+          [[self cdr] zip: [other cdr]])))
+
+(defmethod Cons flat ()
+  (if [self nil?] nil
+    (if [self car nil?]
+      [[self cdr] flat]
+      [[self car] append: [[self cdr] flat]])))
+
+(defmethod Cons flatMap: (f)
+  [[self map: f] flat])
+
+(defmethod Cons distinct ()
+  (let ((seen nil) (result nil) (current self))
+    (while (some? current)
+      (unless (member? [current car] seen)
+        (:= result (cons [current car] result))
+        (:= seen (cons [current car] seen)))
+      (:= current [current cdr]))
+    [result reverse]))
+
+(defmethod Cons partition: (f)
+  (let ((yes nil) (no nil) (current self))
+    (while (some? current)
+      (if (f [current car])
+        (:= yes (cons [current car] yes))
+        (:= no (cons [current car] no)))
+      (:= current [current cdr]))
+    (cons [yes reverse] [no reverse])))
+
+(defmethod Cons sortBy: (f)
+  (if (or [self nil?] [[self cdr] nil?]) self
+    (let ((pivot (f [self car]))
+           (rest [self cdr])
+           (lo [rest select: |x| [(f x) < pivot]])
+           (hi [rest reject: |x| [(f x) < pivot]]))
+      [[lo sortBy: f] append: (cons [self car] [hi sortBy: f])])))
+
+(defmethod Cons sort ()
+  [self sortBy: |x| x])
+
+; smalltalk aliases
+(alias Cons filter: select:)
+(alias Cons collect: map:)
+(alias Cons detect: find:)
+(alias Cons inject:into: fold:with:)
+(alias Cons size count)
+(alias Cons do: each:)
+
+; ── Table ──────────────────────────────────────────────
+
+(defmethod Table empty? () (eq [self length] 0))
+
+(defmethod Table each: (block)
+  (let ((i 0))
+    (while [i < [self length]]
+      (block [self at: i])
+      (:= i [i + 1]))))
