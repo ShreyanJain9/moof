@@ -18,13 +18,15 @@ the things that make moof moof:
 
 1. **everything is an object.** integers, strings, booleans,
    functions, environments, errors, the module system, the agent.
-   objects have slots (private storage) and handlers (public
-   behavior). handlers delegate through prototype chains.
+   objects have slots (public data, fixed at creation) and handlers
+   (public behavior, extensible after creation). handlers delegate
+   through prototype chains. slots don't.
 
 2. **the only operation is send.** `[obj selector: arg]` is the
    one thing the VM does. function calls, arithmetic, slot access,
    control flow — all message sends. `(f x)` is `[f call: x]`.
    `[3 + 4]` is a send to an integer with selector `+`.
+   `obj.x` is `[obj slotAt: 'x]` — even slot access is a send.
 
 3. **vats are the unit of concurrency.** a vat is a single-threaded
    event loop that owns a set of objects. within a vat, sends are
@@ -249,15 +251,67 @@ Cons    { car: Value, cdr: Value }
 Blob    { tag: u8, bytes: [u8] }
 ```
 
-**Object**: the universal container. slots are private storage.
-handlers are public behavior. parent enables delegation. an
-environment is an Object (bindings are slots, parent env is parent).
-a lambda is an Object (code blob, params, captured env). there is
-no separate Lambda or Environment heap type — they're just Objects
-with certain slots.
+**Object**: the universal container. parent enables delegation.
 
-**Cons**: pairs. the AST is cons lists. function argument lists are
-cons lists. everything that's a sequence is cons cells.
+- **slots are public data.** anyone with a reference can read
+  any slot via `[obj slotAt: 'x]` (or the sugar `obj.x`).
+  slots are writable via `[obj slotAt: 'x put: v]`.
+
+- **slots are fixed at creation.** `{ Point x: 3 y: 4 }` creates
+  an object with exactly two slots: `x` and `y`. you cannot add
+  a slot `z` later. the *shape* of an object is immutable. only
+  the *values* in those slots can change.
+
+- **handlers are extensible.** you can add handlers to any object
+  at any time. `[pt handle: 'magnitude with: (fn () ...)]` adds
+  a new handler. handlers delegate through the parent chain.
+
+this split is the core of the object model:
+
+```
+slots    = data.     public. fixed set. values mutable.
+handlers = behavior. public. open set.  delegated via parent.
+```
+
+**why fixed slots?** four reasons:
+
+1. **shapes are known.** the VM can compute slot offsets at
+   creation time. `obj.x` is an array index, not a hash lookup.
+   this is what V8's hidden classes buy you, but we get it for
+   free from the language semantics.
+
+2. **objects are self-describing.** an object's slot names are
+   part of its identity. `{ x: 3 y: 4 }` and `{ x: 3 z: 4 }`
+   are different shapes. pattern matching on shapes is natural:
+   `(match obj ({ x: _ y: _ } ...) ({ r: _ theta: _ } ...))`.
+
+3. **serialization is trivial.** the shape is known, the slot
+   count is fixed. write the values in order. no dynamic field
+   discovery.
+
+4. **reasoning is possible.** if slots can't appear or disappear,
+   you can look at an object and know what data it has. no
+   spooky action at a distance. no `addSlot:` in a handler
+   somewhere silently changing an object's shape.
+
+**handlers are extensible because behavior should be open.** you
+should be able to say "all Points can now compute magnitude" by
+adding a handler to the Point prototype. this is ruby's open
+classes. this is the whole point of a live environment — you
+evolve behavior without restarting.
+
+**an environment is an Object.** bindings are slots (fixed at
+scope creation — a `let` with 3 bindings creates an object with
+3 slots). parent env is the parent. de bruijn indices become
+slot offsets. this is clean and it means the VM never does name
+lookup at runtime.
+
+**a lambda is an Object.** code blob in a slot, params in a slot,
+captured env reference in a slot. there is no separate Lambda heap
+type — it's just an Object with a `call:` handler.
+
+**Cons**: pairs. the AST is cons lists. argument lists are cons
+lists. everything sequential is cons cells.
 
 **Blob**: opaque bytes with a type tag. strings (tag 0), bytecode
 chunks (tag 1), raw bytes (tag 2). the VM knows how to interpret
@@ -294,6 +348,17 @@ there is no "HandlerInvoker trait." the VM knows what bytecode is
 and knows what native closures are. those are the two kinds of
 handler. if we ever need a third kind (wasm? python?), we add it
 to the VM. the VM is not a plugin host — it's the runtime.
+
+**slot access is a send.** `obj.x` desugars to `[obj slotAt: 'x]`.
+the default `slotAt:` handler on Object does a direct offset read
+(fast path). but because it's a send, membranes can intercept it.
+a faceted reference can deny slot reads. the capability model is
+complete — there is no back door around it.
+
+the VM optimizes the common case: if the receiver is a plain object
+(no membrane, no custom `slotAt:`), slot access compiles to a
+direct offset read. the optimization is invisible. the semantics
+are always "it's a send."
 
 ### the VM
 
@@ -394,35 +459,60 @@ optimization, same as JIT inline caches.)
 
 ### persistence
 
-the image persists. the question is how.
+the image persists. LMDB.
 
-the v1 persistence saga (four rewrites) taught us: don't overthink
-this. the simplest thing that works:
+v1 rewrote persistence four times because it kept trying to defer
+the decision. the lesson isn't "start simple" — it's "commit to
+something and stop rewriting." LMDB is the right something:
 
-**option A: bincode snapshot + WAL.** serialize the heap on
-checkpoint. append mutations to a write-ahead log between
-checkpoints. on startup: load snapshot, replay WAL. simple.
-proven. v1 had this and it worked before it got ripped out.
+- **instant startup.** `mmap()`. done. no deserialization. the
+  first `send()` touches the pages it needs; the OS loads them
+  on demand.
 
-**option B: LMDB.** memory-mapped B-tree. every mutation is a
-transaction. instant startup via mmap. concurrent readers.
+- **crash safety.** ACID transactions. power loss loses nothing.
+  no WAL to build, no corruption to handle, no recovery logic.
+  LMDB does all of this.
 
-**option C: just serialize on exit, load on start.** the simplest
-possible thing. if the process crashes, you lose work since last
-clean exit.
+- **concurrent readers.** the browser can read the object graph
+  while the VM is mutating it. the agent can read while the
+  REPL is running. readers never block writers. this is a hard
+  requirement for a live environment with a browser — you can't
+  lock the heap every time you repaint a panel.
 
-for v2: **start with option C. graduate to A when it hurts.**
-the persistence model is the thing that got rewritten four times
-in v1. the right move is to start simple and upgrade when there's
-a real reason, not to architect a cathedral up front.
+- **no custom serialization.** LMDB stores bytes. we store
+  bincode-serialized objects. the serialization format is simple
+  because object shapes are fixed (the slot set is known at
+  creation, we just serialize the values in order).
 
-the image is a single file. `moof.image`. bincode serialization
-of the heap: the object arena, the symbol table, the vat state.
-on clean exit: write. on startup: read. that's it.
+**the mutation cost.** LMDB writes are ~1μs each. that's fine for
+persistent state (user objects, handlers, definitions). it's NOT
+fine for VM temporaries (environments, stack frames, intermediate
+values). solution: **the nursery.**
 
-when "what if it crashes" becomes a real problem (not a theoretical
-one): add a WAL. when "startup takes too long" becomes a real
-problem: switch to LMDB. but not before.
+hot mutable state lives in a traditional in-memory arena — a
+`Vec<HeapObject>` indexed by u32. environments created by `let`,
+`fn`, etc. go here. they're fast. they're not persistent. they
+don't need to be.
+
+persistent state lives in LMDB. user-created objects, prototype
+handlers, module definitions. these are created infrequently and
+read often — the perfect LMDB workload.
+
+the Value type distinguishes the two:
+
+```
+tag 5 = store object  (LMDB, persistent, crash-safe)
+tag 6 = nursery object (in-memory, ephemeral, fast)
+```
+
+`send()` checks the tag and reads from the right place. promotion
+from nursery to store happens when an object is "anchored" —
+assigned to a slot on a store object, explicitly persisted, or
+returned from a vat's turn.
+
+this is a generational scheme. gen0 = nursery (RAM). gen1 = store
+(LMDB). "GC" of the nursery = at the end of a vat turn, anything
+not reachable from a store root is dead. simple. fast. no pause.
 
 ### the browser
 
@@ -475,13 +565,13 @@ they construct objects directly.
 ```
 moof/
   src/
-    value.rs        NaN-boxed values
-    object.rs       Object, Cons, Blob
-    heap.rs         arena allocator, symbol table
+    value.rs        NaN-boxed values (8 bytes, 7 tags)
+    object.rs       Object, Cons, Blob — the three heap types
+    store.rs        LMDB-backed persistent object store
+    nursery.rs      in-memory arena for VM temporaries
     dispatch.rs     send() — handler lookup + delegation + execution
     vm.rs           bytecode interpreter
     vat.rs          vats, scheduler, promises
-    persist.rs      image serialization (bincode, simple)
 
     lang/
       lexer.rs      tokenizer
@@ -515,25 +605,27 @@ without crate-level ceremony.
 
 - the six kernel primitives (vau, send, def, quote, cons, eq)
 - the surface syntax (three bracket species, keywords, sugar)
-- the object model (slots vs handlers, prototype delegation)
+- prototype delegation for behavior
 - capability security (vats, membranes, facets)
 - the bytecode approach (compile, don't interpret trees)
 - the introspection protocol (describe, interface, source)
-- the standard library structure (bootstrap, collections, etc)
 
 ## what we're killing from v1
 
 - the HandlerInvoker abstraction (the VM knows what it runs)
 - the three-crate split (one crate, clear modules)
 - the module system as a rust-side graph solver (modules are objects)
-- the four-attempt persistence architecture (start simple)
 - source projection (the image is the artifact)
 - the custom binary wire protocol (MCP for external, direct for internal)
 - nine heap object types (three: Object, Cons, Blob)
+- private slots (slots are public data now)
+- mutable slot sets (shape is fixed at creation)
 
 ## what's new in v2
 
-- the vat/scheduler model taken seriously (erlang-style concurrency)
+- **fixed-shape objects** with public slots (data) and open handlers (behavior)
+- **LMDB persistence** with nursery arena for VM temporaries
+- vat/scheduler model taken seriously (erlang-style concurrency)
 - eventual sends + promise pipelining (E-style async)
 - capabilities as the IO model (haskell-style effect tracking, but concrete)
 - vau stability analysis (compile-time expansion of static operatives)
@@ -541,6 +633,7 @@ without crate-level ceremony.
 - the agent as a vat co-inhabitant (not an API client)
 - register-based bytecode (simpler than v1's stack machine)
 - NaN-boxed values (8 bytes, zero-alloc for primitives)
+- slot access as send (membranes intercept everything)
 
 ---
 
@@ -548,31 +641,29 @@ without crate-level ceremony.
 
 ### phase 1: the runtime
 
-values, objects, heap, dispatch, VM. you can create objects, send
-messages, execute bytecode. `send(integer(3), sym("+"), &[integer(4)])`
-returns `integer(7)`. tests pass.
+NaN-boxed values. LMDB store. nursery arena. the three heap types
+with fixed-shape objects. `send()` with handler lookup, delegation,
+slot-access-as-send. type prototypes for Integer, Float, String.
+tests: create objects, send messages, persist across restarts.
 
 ### phase 2: the language
 
-lexer, parser, analyzer, compiler. you can parse `[3 + 4]`, compile
-it to bytecode, execute it. the bootstrap runs. `if`, `let`, `fn`,
+lexer, parser, analyzer, compiler, bytecode VM. parse `[3 + 4]`,
+compile it, execute it. the bootstrap runs. `if`, `let`, `fn`,
 `while`, `match` all work. the REPL works.
 
-### phase 3: persistence
-
-bincode serialize/deserialize. restart and resume. your definitions
-survive.
-
-### phase 4: vats
+### phase 3: vats
 
 the scheduler. spawn. eventual sends. promises. fuel-based
-preemption. multiple vats running concurrently.
+preemption. multiple vats running concurrently. nursery GC at
+turn boundaries.
 
-### phase 5: the browser
+### phase 4: the browser
 
-egui. object panels. navigation. eval bar. transcript.
+egui. object panels with public slots and handlers. navigation.
+eval bar. transcript. concurrent reads from LMDB while VM runs.
 
-### phase 6: the agent
+### phase 5: the agent
 
 LLM tool-use loop. membranes. facets. approval queue.
 
