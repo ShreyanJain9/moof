@@ -324,6 +324,86 @@ impl<'a> Compiler<'a> {
                     return Ok(());
                 }
 
+                "cons" => {
+                    let items = self.heap.list_to_vec(expr);
+                    if items.len() != 3 { return Err("cons: need car and cdr".into()); }
+                    let car_reg = self.alloc_reg();
+                    let cdr_reg = self.alloc_reg();
+                    self.compile_expr(items[1], car_reg)?;
+                    self.compile_expr(items[2], cdr_reg)?;
+                    self.chunk.emit(Op::Cons, dst, car_reg, cdr_reg);
+                    return Ok(());
+                }
+
+                "eq" => {
+                    let items = self.heap.list_to_vec(expr);
+                    if items.len() != 3 { return Err("eq: need two args".into()); }
+                    let a_reg = self.alloc_reg();
+                    let b_reg = self.alloc_reg();
+                    self.compile_expr(items[1], a_reg)?;
+                    self.compile_expr(items[2], b_reg)?;
+                    self.chunk.emit(Op::Eq, dst, a_reg, b_reg);
+                    return Ok(());
+                }
+
+                "list" => {
+                    let items = self.heap.list_to_vec(expr);
+                    self.chunk.emit(Op::LoadNil, dst, 0, 0);
+                    for i in (1..items.len()).rev() {
+                        let item_reg = self.alloc_reg();
+                        self.compile_expr(items[i], item_reg)?;
+                        self.chunk.emit(Op::Cons, dst, item_reg, dst);
+                    }
+                    return Ok(());
+                }
+
+                "not" => {
+                    let items = self.heap.list_to_vec(expr);
+                    if items.len() != 2 { return Err("not: need one arg".into()); }
+                    self.compile_expr(items[1], dst)?;
+                    let jmp = self.chunk.offset();
+                    self.chunk.emit(Op::JumpIfFalse, dst, 0, 0);
+                    self.chunk.emit(Op::LoadFalse, dst, 0, 0);
+                    let skip = self.chunk.offset();
+                    self.chunk.emit(Op::Jump, 0, 0, 0);
+                    let true_branch = self.chunk.offset();
+                    self.chunk.emit(Op::LoadTrue, dst, 0, 0);
+                    let end = self.chunk.offset();
+                    let d1 = (true_branch as i16 - jmp as i16 - 4).to_be_bytes();
+                    self.chunk.code[jmp + 2] = d1[0]; self.chunk.code[jmp + 3] = d1[1];
+                    let d2 = (end as i16 - skip as i16 - 4).to_be_bytes();
+                    self.chunk.code[skip + 1] = d2[0]; self.chunk.code[skip + 2] = d2[1];
+                    return Ok(());
+                }
+
+                "and" => {
+                    // (and a b) — short-circuit
+                    let items = self.heap.list_to_vec(expr);
+                    if items.len() != 3 { return Err("and: need two args".into()); }
+                    self.compile_expr(items[1], dst)?;
+                    let skip = self.chunk.offset();
+                    self.chunk.emit(Op::JumpIfFalse, dst, 0, 0);
+                    self.compile_expr(items[2], dst)?;
+                    let end = self.chunk.offset();
+                    let d = (end as i16 - skip as i16 - 4).to_be_bytes();
+                    self.chunk.code[skip + 2] = d[0]; self.chunk.code[skip + 3] = d[1];
+                    return Ok(());
+                }
+
+                "or" => {
+                    // (or a b) — short-circuit
+                    let items = self.heap.list_to_vec(expr);
+                    if items.len() != 3 { return Err("or: need two args".into()); }
+                    self.compile_expr(items[1], dst)?;
+                    let skip = self.chunk.offset();
+                    self.chunk.emit(Op::JumpIfTrue, dst, 0, 0);
+                    self.compile_expr(items[2], dst)?;
+                    let end = self.chunk.offset();
+                    let d = (end as i16 - skip as i16 - 4).to_be_bytes();
+                    self.chunk.code[skip + 2] = d[0]; self.chunk.code[skip + 3] = d[1];
+                    return Ok(());
+                }
+
                 ":=" => {
                     // (:= name value) — mutate a local or global binding
                     let items = self.heap.list_to_vec(expr);
@@ -677,4 +757,306 @@ pub fn register_type_protos(heap: &mut Heap) {
     });
     let describe_sym = heap.intern("describe");
     heap.get_mut(int_id).handler_set(describe_sym, describe_handler);
+
+    // -- Nil prototype (type_protos[0]) --
+    let nil_proto = heap.make_object(object_proto);
+    heap.type_protos[0] = nil_proto;
+    let nil_id = nil_proto.as_any_object().unwrap();
+
+    let h = heap.register_native("__nil_describe", |heap, _receiver, _args| {
+        Ok(heap.alloc_string("nil"))
+    });
+    heap.get_mut(nil_id).handler_set(describe_sym, h);
+
+    // -- Boolean prototype (type_protos[1]) --
+    let bool_proto = heap.make_object(object_proto);
+    heap.type_protos[1] = bool_proto;
+    let bool_id = bool_proto.as_any_object().unwrap();
+
+    let h = heap.register_native("__bool_not", |_heap, receiver, _args| {
+        Ok(Value::boolean(!receiver.is_truthy()))
+    });
+    let not_sym = heap.intern("not");
+    heap.get_mut(bool_id).handler_set(not_sym, h);
+
+    let h = heap.register_native("__bool_describe", |heap, receiver, _args| {
+        let s = if receiver.is_true() { "true" } else { "false" };
+        Ok(heap.alloc_string(s))
+    });
+    heap.get_mut(bool_id).handler_set(describe_sym, h);
+
+    let h = heap.register_native("__bool_if_true_false", |_heap, receiver, args| {
+        let true_val = args.first().copied().unwrap_or(Value::NIL);
+        let false_val = args.get(1).copied().unwrap_or(Value::NIL);
+        Ok(if receiver.is_truthy() { true_val } else { false_val })
+    });
+    let if_sym = heap.intern("ifTrue:ifFalse:");
+    heap.get_mut(bool_id).handler_set(if_sym, h);
+
+    // -- Float prototype (type_protos[3]) --
+    let float_proto = heap.make_object(object_proto);
+    heap.type_protos[3] = float_proto;
+    let float_id = float_proto.as_any_object().unwrap();
+
+    let h = heap.register_native("__float_add", |_heap, receiver, args| {
+        let a = receiver.as_float().ok_or("+ : receiver not a float")?;
+        let b = args.first().and_then(|v| v.as_float()).ok_or("+ : arg not numeric")?;
+        Ok(Value::float(a + b))
+    });
+    heap.get_mut(float_id).handler_set(plus_sym, h);
+
+    let h = heap.register_native("__float_sub", |_heap, receiver, args| {
+        let a = receiver.as_float().ok_or("- : receiver not a float")?;
+        let b = args.first().and_then(|v| v.as_float()).ok_or("- : arg not numeric")?;
+        Ok(Value::float(a - b))
+    });
+    heap.get_mut(float_id).handler_set(minus_sym, h);
+
+    let h = heap.register_native("__float_mul", |_heap, receiver, args| {
+        let a = receiver.as_float().ok_or("* : receiver not a float")?;
+        let b = args.first().and_then(|v| v.as_float()).ok_or("* : arg not numeric")?;
+        Ok(Value::float(a * b))
+    });
+    heap.get_mut(float_id).handler_set(mul_sym, h);
+
+    let h = heap.register_native("__float_div", |_heap, receiver, args| {
+        let a = receiver.as_float().ok_or("/ : receiver not a float")?;
+        let b = args.first().and_then(|v| v.as_float()).ok_or("/ : arg not numeric")?;
+        if b == 0.0 { return Err("division by zero".into()); }
+        Ok(Value::float(a / b))
+    });
+    heap.get_mut(float_id).handler_set(div_sym, h);
+
+    let h = heap.register_native("__float_lt", |_heap, receiver, args| {
+        let a = receiver.as_float().ok_or("< : receiver not a float")?;
+        let b = args.first().and_then(|v| v.as_float()).ok_or("< : arg not numeric")?;
+        Ok(Value::boolean(a < b))
+    });
+    heap.get_mut(float_id).handler_set(lt_sym, h);
+
+    let h = heap.register_native("__float_gt", |_heap, receiver, args| {
+        let a = receiver.as_float().ok_or("> : receiver not a float")?;
+        let b = args.first().and_then(|v| v.as_float()).ok_or("> : arg not numeric")?;
+        Ok(Value::boolean(a > b))
+    });
+    heap.get_mut(float_id).handler_set(gt_sym, h);
+
+    let h = heap.register_native("__float_eq", |_heap, receiver, args| {
+        let a = receiver.as_float().ok_or("= : receiver not a float")?;
+        let b = args.first().and_then(|v| v.as_float()).ok_or("= : arg not numeric")?;
+        Ok(Value::boolean(a == b))
+    });
+    heap.get_mut(float_id).handler_set(eq_sym, h);
+
+    let h = heap.register_native("__float_sqrt", |_heap, receiver, _args| {
+        let a = receiver.as_float().ok_or("sqrt: not numeric")?;
+        Ok(Value::float(a.sqrt()))
+    });
+    let sqrt_sym = heap.intern("sqrt");
+    heap.get_mut(float_id).handler_set(sqrt_sym, h);
+
+    let h = heap.register_native("__float_floor", |_heap, receiver, _args| {
+        let a = receiver.as_float().ok_or("floor: not numeric")?;
+        Ok(Value::float(a.floor()))
+    });
+    let floor_sym = heap.intern("floor");
+    heap.get_mut(float_id).handler_set(floor_sym, h);
+
+    let h = heap.register_native("__float_ceil", |_heap, receiver, _args| {
+        let a = receiver.as_float().ok_or("ceil: not numeric")?;
+        Ok(Value::float(a.ceil()))
+    });
+    let ceil_sym = heap.intern("ceil");
+    heap.get_mut(float_id).handler_set(ceil_sym, h);
+
+    let h = heap.register_native("__float_round", |_heap, receiver, _args| {
+        let a = receiver.as_float().ok_or("round: not numeric")?;
+        Ok(Value::float(a.round()))
+    });
+    let round_sym = heap.intern("round");
+    heap.get_mut(float_id).handler_set(round_sym, h);
+
+    let h = heap.register_native("__float_to_integer", |_heap, receiver, _args| {
+        let a = receiver.as_float().ok_or("toInteger: not numeric")?;
+        Ok(Value::integer(a as i64))
+    });
+    let to_int_sym = heap.intern("toInteger");
+    heap.get_mut(float_id).handler_set(to_int_sym, h);
+
+    let h = heap.register_native("__float_describe", |heap, receiver, _args| {
+        let a = receiver.as_float().ok_or("describe: not numeric")?;
+        Ok(heap.alloc_string(&format!("{}", a)))
+    });
+    heap.get_mut(float_id).handler_set(describe_sym, h);
+
+    // -- Cons prototype (type_protos[6]) --
+    let cons_proto = heap.make_object(object_proto);
+    heap.type_protos[6] = cons_proto;
+    let cons_id = cons_proto.as_any_object().unwrap();
+
+    let h = heap.register_native("__cons_car", |heap, receiver, _args| {
+        let id = receiver.as_any_object().ok_or("car: not a cons")?;
+        Ok(heap.car(id))
+    });
+    let car_sym = heap.intern("car");
+    heap.get_mut(cons_id).handler_set(car_sym, h);
+
+    let h = heap.register_native("__cons_cdr", |heap, receiver, _args| {
+        let id = receiver.as_any_object().ok_or("cdr: not a cons")?;
+        Ok(heap.cdr(id))
+    });
+    let cdr_sym = heap.intern("cdr");
+    heap.get_mut(cons_id).handler_set(cdr_sym, h);
+
+    let h = heap.register_native("__cons_length", |heap, receiver, _args| {
+        let mut count = 0i64;
+        let mut cur = receiver;
+        while let Some(id) = cur.as_any_object() {
+            match heap.get(id) {
+                HeapObject::Pair(_, cdr) => { count += 1; cur = *cdr; }
+                _ => break,
+            }
+        }
+        Ok(Value::integer(count))
+    });
+    let length_sym = heap.intern("length");
+    heap.get_mut(cons_id).handler_set(length_sym, h);
+
+    let h = heap.register_native("__cons_describe", |heap, receiver, _args| {
+        let s = heap.format_value(receiver);
+        Ok(heap.alloc_string(&s))
+    });
+    heap.get_mut(cons_id).handler_set(describe_sym, h);
+
+    // -- String prototype (type_protos[7]) --
+    let str_proto = heap.make_object(object_proto);
+    heap.type_protos[7] = str_proto;
+    let str_id = str_proto.as_any_object().unwrap();
+
+    let h = heap.register_native("__str_length", |heap, receiver, _args| {
+        let id = receiver.as_any_object().ok_or("length: not a string")?;
+        let s = heap.get_string(id).ok_or("length: not a Text object")?;
+        Ok(Value::integer(s.len() as i64))
+    });
+    heap.get_mut(str_id).handler_set(length_sym, h);
+
+    let h = heap.register_native("__str_at", |heap, receiver, args| {
+        let id = receiver.as_any_object().ok_or("at: not a string")?;
+        let s = heap.get_string(id).ok_or("at: not a Text object")?;
+        let idx = args.first().and_then(|v| v.as_integer()).ok_or("at: arg not an integer")? as usize;
+        let ch = s.chars().nth(idx).map(|c| c.to_string()).unwrap_or_default();
+        Ok(heap.alloc_string(&ch))
+    });
+    let at_sym = heap.intern("at:");
+    heap.get_mut(str_id).handler_set(at_sym, h);
+
+    let h = heap.register_native("__str_concat", |heap, receiver, args| {
+        let id = receiver.as_any_object().ok_or("++: not a string")?;
+        let a = heap.get_string(id).ok_or("++: not a Text object")?.to_string();
+        let arg = args.first().copied().unwrap_or(Value::NIL);
+        let b = if let Some(bid) = arg.as_any_object() {
+            heap.get_string(bid).map(|s| s.to_string()).unwrap_or_else(|| heap.format_value(arg))
+        } else {
+            heap.format_value(arg)
+        };
+        Ok(heap.alloc_string(&format!("{}{}", a, b)))
+    });
+    let concat_sym = heap.intern("++");
+    heap.get_mut(str_id).handler_set(concat_sym, h);
+
+    let h = heap.register_native("__str_substring_to", |heap, receiver, args| {
+        let id = receiver.as_any_object().ok_or("substring:to: not a string")?;
+        let s = heap.get_string(id).ok_or("substring:to: not a Text object")?;
+        let from = args.first().and_then(|v| v.as_integer()).ok_or("substring:to: arg0 not int")? as usize;
+        let to = args.get(1).and_then(|v| v.as_integer()).ok_or("substring:to: arg1 not int")? as usize;
+        let chars: Vec<char> = s.chars().collect();
+        let end = to.min(chars.len());
+        let start = from.min(end);
+        let sub: String = chars[start..end].iter().collect();
+        Ok(heap.alloc_string(&sub))
+    });
+    let substr_sym = heap.intern("substring:to:");
+    heap.get_mut(str_id).handler_set(substr_sym, h);
+
+    let h = heap.register_native("__str_split", |heap, receiver, args| {
+        let id = receiver.as_any_object().ok_or("split: not a string")?;
+        let s = heap.get_string(id).ok_or("split: not a Text object")?.to_string();
+        let delim_arg = args.first().copied().unwrap_or(Value::NIL);
+        let did = delim_arg.as_any_object().ok_or("split: arg not a string")?;
+        let delim = heap.get_string(did).ok_or("split: arg not a Text object")?.to_string();
+        let parts: Vec<Value> = s.split(&delim).map(|p| heap.alloc_string(p)).collect();
+        Ok(heap.list(&parts))
+    });
+    let split_sym = heap.intern("split:");
+    heap.get_mut(str_id).handler_set(split_sym, h);
+
+    let h = heap.register_native("__str_trim", |heap, receiver, _args| {
+        let id = receiver.as_any_object().ok_or("trim: not a string")?;
+        let s = heap.get_string(id).ok_or("trim: not a Text object")?.trim().to_string();
+        Ok(heap.alloc_string(&s))
+    });
+    let trim_sym = heap.intern("trim");
+    heap.get_mut(str_id).handler_set(trim_sym, h);
+
+    let h = heap.register_native("__str_contains", |heap, receiver, args| {
+        let id = receiver.as_any_object().ok_or("contains: not a string")?;
+        let s = heap.get_string(id).ok_or("contains: not a Text object")?.to_string();
+        let arg = args.first().copied().unwrap_or(Value::NIL);
+        let nid = arg.as_any_object().ok_or("contains: arg not a string")?;
+        let needle = heap.get_string(nid).ok_or("contains: arg not a Text object")?;
+        Ok(Value::boolean(s.contains(needle)))
+    });
+    let contains_sym = heap.intern("contains:");
+    heap.get_mut(str_id).handler_set(contains_sym, h);
+
+    let h = heap.register_native("__str_starts_with", |heap, receiver, args| {
+        let id = receiver.as_any_object().ok_or("startsWith: not a string")?;
+        let s = heap.get_string(id).ok_or("startsWith: not a Text object")?.to_string();
+        let arg = args.first().copied().unwrap_or(Value::NIL);
+        let pid = arg.as_any_object().ok_or("startsWith: arg not a string")?;
+        let prefix = heap.get_string(pid).ok_or("startsWith: arg not a Text object")?;
+        Ok(Value::boolean(s.starts_with(prefix)))
+    });
+    let starts_sym = heap.intern("startsWith:");
+    heap.get_mut(str_id).handler_set(starts_sym, h);
+
+    let h = heap.register_native("__str_ends_with", |heap, receiver, args| {
+        let id = receiver.as_any_object().ok_or("endsWith: not a string")?;
+        let s = heap.get_string(id).ok_or("endsWith: not a Text object")?.to_string();
+        let arg = args.first().copied().unwrap_or(Value::NIL);
+        let sid = arg.as_any_object().ok_or("endsWith: arg not a string")?;
+        let suffix = heap.get_string(sid).ok_or("endsWith: arg not a Text object")?;
+        Ok(Value::boolean(s.ends_with(suffix)))
+    });
+    let ends_sym = heap.intern("endsWith:");
+    heap.get_mut(str_id).handler_set(ends_sym, h);
+
+    let h = heap.register_native("__str_to_upper", |heap, receiver, _args| {
+        let id = receiver.as_any_object().ok_or("toUpper: not a string")?;
+        let s = heap.get_string(id).ok_or("toUpper: not a Text object")?;
+        Ok(heap.alloc_string(&s.to_uppercase()))
+    });
+    let upper_sym = heap.intern("toUpper");
+    heap.get_mut(str_id).handler_set(upper_sym, h);
+
+    let h = heap.register_native("__str_to_lower", |heap, receiver, _args| {
+        let id = receiver.as_any_object().ok_or("toLower: not a string")?;
+        let s = heap.get_string(id).ok_or("toLower: not a Text object")?;
+        Ok(heap.alloc_string(&s.to_lowercase()))
+    });
+    let lower_sym = heap.intern("toLower");
+    heap.get_mut(str_id).handler_set(lower_sym, h);
+
+    let h = heap.register_native("__str_to_integer", |heap, receiver, _args| {
+        let id = receiver.as_any_object().ok_or("toInteger: not a string")?;
+        let s = heap.get_string(id).ok_or("toInteger: not a Text object")?;
+        let n: i64 = s.trim().parse().map_err(|_| format!("toInteger: cannot parse '{}'", s))?;
+        Ok(Value::integer(n))
+    });
+    heap.get_mut(str_id).handler_set(to_int_sym, h);
+
+    let h = heap.register_native("__str_describe", |_heap, receiver, _args| {
+        Ok(receiver) // strings describe as themselves
+    });
+    heap.get_mut(str_id).handler_set(describe_sym, h);
 }
