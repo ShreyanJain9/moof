@@ -3,13 +3,13 @@
 (def Comparable (make-protocol "Comparable"
   (list '<)
   #[
-    '> => (fn (self other) (not [self < other]))
-    '<= => (fn (self other) (not [other < self]))
-    '>= => (fn (self other) (not [self < other]))
-    'between:and: => (fn (self lo hi) (and [self >= lo] [self <= hi]))
-    'clamp:to: => (fn (self lo hi) [[self max: lo] min: hi])
-    'min: => (fn (self other) (if [self < other] self other))
-    'max: => (fn (self other) (if [self > other] self other))
+    '> => (fn (this other) (not [this < other]))
+    '<= => (fn (this other) (not [other < this]))
+    '>= => (fn (this other) (not [this < other]))
+    'between:and: => (fn (this lo hi) (and [this >= lo] [this <= hi]))
+    'clamp:to: => (fn (this lo hi) [[this max: lo] min: hi])
+    'min: => (fn (this other) (if [this < other] this other))
+    'max: => (fn (this other) (if [this > other] this other))
   ]
   nil))
 

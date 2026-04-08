@@ -6,74 +6,74 @@
 (def Iterable (make-protocol "Iterable"
   (list 'each:)
   #[
-    'toList => (fn (self)
+    'toList => (fn (this)
       (let ((result nil))
         ; use Table cell for the one unavoidable mutation
         (let ((cell #["r" => nil]))
-          [self each: |x| [cell at: "r" put: (cons x [cell at: "r"])]]
+          [this each: |x| [cell at: "r" put: (cons x [cell at: "r"])]]
           [[cell at: "r"] reverse])))
 
-    'fold:with: => (fn (self init f)
+    'fold:with: => (fn (this init f)
       ; recursive fold over toList — no mutation needed
-      (let ((lst [self toList]))
+      (let ((lst [this toList]))
         (let ((go nil))
           (:= go (fn (acc remaining)
             (if (nil? remaining) acc
               (go (f acc [remaining car]) [remaining cdr]))))
           (go init lst))))
 
-    'reduce: => (fn (self f)
-      (let ((lst [self toList]))
+    'reduce: => (fn (this f)
+      (let ((lst [this toList]))
         (if (nil? lst) nil
           [[lst cdr] fold: [lst car] with: f])))
 
-    'sum => (fn (self) [self fold: 0 with: |a x| [a + x]])
-    'product => (fn (self) [self fold: 1 with: |a x| [a * x]])
-    'count => (fn (self) [self fold: 0 with: |a _| [a + 1]])
-    'count: => (fn (self f) [self fold: 0 with: |a x| (if (f x) [a + 1] a)])
+    'sum => (fn (this) [this fold: 0 with: |a x| [a + x]])
+    'product => (fn (this) [this fold: 1 with: |a x| [a * x]])
+    'count => (fn (this) [this fold: 0 with: |a _| [a + 1]])
+    'count: => (fn (this f) [this fold: 0 with: |a x| (if (f x) [a + 1] a)])
 
-    'map: => (fn (self f)
-      [[self fold: nil with: |acc x| (cons (f x) acc)] reverse])
+    'map: => (fn (this f)
+      [[this fold: nil with: |acc x| (cons (f x) acc)] reverse])
 
-    'select: => (fn (self f)
-      [[self fold: nil with: |acc x| (if (f x) (cons x acc) acc)] reverse])
+    'select: => (fn (this f)
+      [[this fold: nil with: |acc x| (if (f x) (cons x acc) acc)] reverse])
 
-    'reject: => (fn (self f) [self select: |x| (not (f x))])
+    'reject: => (fn (this f) [this select: |x| (not (f x))])
 
-    'find: => (fn (self f)
-      (let ((lst [self toList]) (go nil))
+    'find: => (fn (this f)
+      (let ((lst [this toList]) (go nil))
         (:= go (fn (remaining)
           (if (nil? remaining) nil
             (if (f [remaining car]) [remaining car]
               (go [remaining cdr])))))
         (go lst)))
 
-    'any: => (fn (self f) [self fold: false with: |found x| (if found true (f x))])
-    'all: => (fn (self f) [self fold: true with: |ok x| (if ok (f x) false)])
-    'none: => (fn (self f) (not [self any: f]))
-    'includes: => (fn (self x) [self any: |el| [el equal: x]])
-    'empty? => (fn (self) [self fold: true with: |_ _| false])
+    'any: => (fn (this f) [this fold: false with: |found x| (if found true (f x))])
+    'all: => (fn (this f) [this fold: true with: |ok x| (if ok (f x) false)])
+    'none: => (fn (this f) (not [this any: f]))
+    'includes: => (fn (this x) [this any: |el| [el equal: x]])
+    'empty? => (fn (this) [this fold: true with: |_ _| false])
 
-    'first => (fn (self) (let ((lst [self toList])) (if (nil? lst) nil [lst car])))
-    'last => (fn (self) (let ((lst [self toList])) (if (nil? lst) nil [lst last])))
+    'first => (fn (this) (let ((lst [this toList])) (if (nil? lst) nil [lst car])))
+    'last => (fn (this) (let ((lst [this toList])) (if (nil? lst) nil [lst last])))
 
-    'take: => (fn (self n)
-      (let ((lst [self toList]) (go nil))
+    'take: => (fn (this n)
+      (let ((lst [this toList]) (go nil))
         (:= go (fn (remaining count)
           (if (or (eq count 0) (nil? remaining)) nil
             (cons [remaining car] (go [remaining cdr] [count - 1])))))
         (go lst n)))
 
-    'drop: => (fn (self n)
-      (let ((lst [self toList]) (go nil))
+    'drop: => (fn (this n)
+      (let ((lst [this toList]) (go nil))
         (:= go (fn (remaining count)
           (if (nil? remaining) nil
             (if (eq count 0) remaining
               (go [remaining cdr] [count - 1])))))
         (go lst n)))
 
-    'takeWhile: => (fn (self f)
-      (let ((lst [self toList]) (go nil))
+    'takeWhile: => (fn (this f)
+      (let ((lst [this toList]) (go nil))
         (:= go (fn (remaining)
           (if (nil? remaining) nil
             (if (f [remaining car])
@@ -81,23 +81,23 @@
               nil))))
         (go lst)))
 
-    'dropWhile: => (fn (self f)
-      (let ((lst [self toList]) (go nil))
+    'dropWhile: => (fn (this f)
+      (let ((lst [this toList]) (go nil))
         (:= go (fn (remaining)
           (if (nil? remaining) nil
             (if (f [remaining car]) (go [remaining cdr])
               remaining))))
         (go lst)))
 
-    'min => (fn (self) [self reduce: |a x| (if [x < a] x a)])
-    'max => (fn (self) [self reduce: |a x| (if [x > a] x a)])
-    'minBy: => (fn (self f) [self reduce: |a x| (if [(f x) < (f a)] x a)])
-    'maxBy: => (fn (self f) [self reduce: |a x| (if [(f x) > (f a)] x a)])
-    'reverse => (fn (self) [self fold: nil with: |acc x| (cons x acc)])
+    'min => (fn (this) [this reduce: |a x| (if [x < a] x a)])
+    'max => (fn (this) [this reduce: |a x| (if [x > a] x a)])
+    'minBy: => (fn (this f) [this reduce: |a x| (if [(f x) < (f a)] x a)])
+    'maxBy: => (fn (this f) [this reduce: |a x| (if [(f x) > (f a)] x a)])
+    'reverse => (fn (this) [this fold: nil with: |acc x| (cons x acc)])
 
-    'sort => (fn (self) [[self toList] sortBy: |x| x])
-    'sortBy: => (fn (self f)
-      (let ((lst [self toList]))
+    'sort => (fn (this) [[this toList] sortBy: |x| x])
+    'sortBy: => (fn (this f)
+      (let ((lst [this toList]))
         (if (or [lst nil?] [[lst cdr] nil?]) lst
           (let ((pivot (f [lst car]))
                 (rest [lst cdr])
@@ -105,34 +105,34 @@
                 (hi [rest reject: |x| [(f x) < pivot]]))
             [[lo sortBy: f] append: (cons [lst car] [hi sortBy: f])]))))
 
-    'groupBy: => (fn (self f)
-      [self fold: #[] with: |groups x|
+    'groupBy: => (fn (this f)
+      [this fold: #[] with: |groups x|
         (let ((key (f x)) (existing [groups at: key]))
           [groups at: key put: (if (nil? existing) (cons x nil) (cons x existing))]
           groups)])
 
-    'partition: => (fn (self f)
-      (let ((pair [self fold: (cons nil nil) with: |p x|
+    'partition: => (fn (this f)
+      (let ((pair [this fold: (cons nil nil) with: |p x|
               (if (f x)
                 (cons (cons x [p car]) [p cdr])
                 (cons [p car] (cons x [p cdr])))]))
         (cons [[pair car] reverse] [[pair cdr] reverse])))
 
-    'tally => (fn (self)
-      [self fold: #[] with: |counts x|
+    'tally => (fn (this)
+      [this fold: #[] with: |counts x|
         (let ((n [counts at: x]))
           [counts at: x put: (if (nil? n) 1 [n + 1])]
           counts)])
 
-    'zip: => (fn (self other)
-      (let ((lst [self toList]) (olst [other toList]) (go nil))
+    'zip: => (fn (this other)
+      (let ((lst [this toList]) (olst [other toList]) (go nil))
         (:= go (fn (a b)
           (if (or (nil? a) (nil? b)) nil
             (cons (cons [a car] [b car]) (go [a cdr] [b cdr])))))
         (go lst olst)))
 
-    'intersperse: => (fn (self sep)
-      (let ((lst [self toList]) (go nil))
+    'intersperse: => (fn (this sep)
+      (let ((lst [this toList]) (go nil))
         (:= go (fn (remaining first-flag)
           (if (nil? remaining) nil
             (if first-flag
@@ -140,43 +140,43 @@
               (cons sep (cons [remaining car] (go [remaining cdr] false)))))))
         (go lst true)))
 
-    'join => (fn (self) [self fold: "" with: |acc x| [acc ++ [x describe]]])
-    'join: => (fn (self sep)
-      (let ((lst [self toList]))
+    'join => (fn (this) [this fold: "" with: |acc x| [acc ++ [x describe]]])
+    'join: => (fn (this sep)
+      (let ((lst [this toList]))
         (if (nil? lst) ""
           [[lst cdr] fold: [[lst car] describe] with:
             |acc x| [[acc ++ sep] ++ [x describe]]])))
 
-    'toTable => (fn (self)
-      (let ((t #[])) [self each: |x| [t push: x]] t))
+    'toTable => (fn (this)
+      (let ((t #[])) [this each: |x| [t push: x]] t))
 
-    'each:withIndex: => (fn (self f)
-      (let ((lst [self toList]) (go nil))
+    'each:withIndex: => (fn (this f)
+      (let ((lst [this toList]) (go nil))
         (:= go (fn (remaining i)
           (if (nil? remaining) nil
             (do (f [remaining car] i) (go [remaining cdr] [i + 1])))))
         (go lst 0)))
 
-    'distinct => (fn (self)
-      [[self fold: (cons nil nil) with: |state x|
+    'distinct => (fn (this)
+      [[this fold: (cons nil nil) with: |state x|
         (if (not (member? x [state cdr]))
           (cons (cons x [state car]) (cons x [state cdr]))
           state)] car reverse])
 
-    'flatMap: => (fn (self f)
-      [[self map: f] fold: nil with: |acc lst| [acc append: lst]])
+    'flatMap: => (fn (this f)
+      [[this map: f] fold: nil with: |acc lst| [acc append: lst]])
   ]
   nil))
 
 ; ── Cons: implement each: + fold:with: directly ───────
 
 (defmethod Cons each: (block)
-  (let ((current self))
+  (let ((current this))
     (while (some? current) (block [current car]) (:= current [current cdr]))))
 
 ; fold:with: on Cons uses efficient iteration, not toList
-[Cons handle: 'fold:with: with: (fn (self init f)
-  (let ((acc init) (current self))
+[Cons handle: 'fold:with: with: (fn (this init f)
+  (let ((acc init) (current this))
     (while (some? current)
       (:= acc (f acc [current car]))
       (:= current [current cdr]))
@@ -185,8 +185,8 @@
 (defmethod Cons toList () self)
 
 (defmethod Cons append: (other)
-  (if [[self cdr] nil?] (cons [self car] other)
-    (cons [self car] [[self cdr] append: other])))
+  (if [[this cdr] nil?] (cons [this car] other)
+    (cons [this car] [[this cdr] append: other])))
 
 (conform Cons Iterable)
 

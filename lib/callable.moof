@@ -3,10 +3,10 @@
 (def Callable (make-protocol "Callable"
   (list 'call:)
   #[
-    'compose: => (fn (self other) (fn (x) (self (other x))))
-    '>> => (fn (self other) (fn (x) (other (self x))))
-    'partial: => (fn (self arg) (fn (x) (self arg x)))
-    'flip => (fn (self) (fn (a b) (self b a)))
+    'compose: => (fn (this other) (fn (x) (this (other x))))
+    '>> => (fn (this other) (fn (x) (other (this x))))
+    'partial: => (fn (this arg) (fn (x) (this arg x)))
+    'flip => (fn (this) (fn (a b) (this b a)))
   ]
   nil))
 
