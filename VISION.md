@@ -858,6 +858,120 @@ Point, every existing Point-child gains it on the next send. no
 restart. no cache invalidation (the inline caches check handler
 identity, not prototype version).
 
+### code is data — source manipulation from within moof
+
+the AST is cons cells. cons cells are objects. therefore source
+code is objects. you can read it, walk it, transform it, and
+write it back — all from within moof. this is the homoiconicity
+payoff, made real.
+
+**every handler carries its source.** not just bytecode — the
+original AST and the human-readable source text (with comments,
+formatting, whitespace) both live on the handler object as slots:
+
+```
+(def mag [pt handlerOf: 'magnitude])
+
+[mag source]       ; => "(fn () [[@x * @x] + [@y * @y]])"
+[mag ast]          ; => the live cons-cell AST
+[mag bytecode]     ; => the compiled bytecode blob
+[mag sourceText]   ; => source with original formatting + comments
+```
+
+**read and manipulate the AST:**
+
+```
+(def tree [mag ast])
+; tree is: (fn () (send (send ...) + (send ...)))
+; it's cons cells. walk it, transform it, build new trees.
+
+[tree car]         ; => fn
+[tree cdr car]     ; => ()  (params)
+[tree cdr cdr car] ; => the body expression
+
+; build a new AST from scratch
+(def new-body `[[@x * @x] + [@y * @y] + [@z * @z]])
+(def new-ast `(fn () ,new-body))
+```
+
+**recompile and install:**
+
+```
+; replace a handler from its AST
+[pt handle: 'magnitude with: (eval new-ast)]
+
+; or from source text
+[pt handle: 'magnitude withSource: "(fn () [[@x * @x] + [@y * @y] + [@z * @z]])"]
+```
+
+`handle:withSource:` parses, compiles, installs, AND stores
+the source text on the handler — so the round-trip is
+lossless. comments survive.
+
+**programmatic code generation:**
+
+```
+; generate accessors for all slots on a prototype
+(def make-accessors (fn (proto)
+  [proto slotNames each: |name|
+    [proto handle: name
+      withSource: (str "(fn () @" name ")")]]))
+
+(make-accessors Point)
+; Point now has handlers 'x and 'y that return the slot values
+```
+
+**the agent modifies source.** when the agent adds a handler,
+it constructs source text (not raw ASTs — source text is what
+it's good at), and `handle:withSource:` does the parse-compile-
+install cycle. the source text is stored, so you can inspect
+what the agent wrote on the canvas, see the actual code, edit
+it, and reinstall.
+
+```
+; agent constructs this string:
+"(fn (other)
+  (let ((dx [@x - other.x])
+        (dy [@y - other.y]))
+    [[[dx * dx] + [dy * dy]] sqrt]))"
+
+; installed via:
+[Point handle: 'distanceTo: withSource: that-string]
+
+; later, inspect it:
+[Point sourceText: 'distanceTo:]
+; => the exact string the agent wrote, formatting preserved
+```
+
+**the canvas edits source.** when you click "edit handler" on
+the canvas, it opens the source text in an inline editor. when
+you save, it calls `handle:withSource:` — parse, compile,
+install, store. the handler is live immediately.
+
+**code transformation as a library.** because the AST is cons
+cells, you can write code that transforms code:
+
+```
+; add tracing to every handler on an object
+(def add-tracing (fn (obj)
+  [obj handlerNames each: |sel|
+    (let ((orig-ast [[obj handlerOf: sel] ast]))
+      [obj handle: sel with:
+        (eval `(fn args
+          [Console println: (str ">> " ,sel " called")]
+          (let ((result (apply ,(eval orig-ast) args)))
+            [Console println: (str "<< " ,sel " => " result)]
+            result)))])]))
+
+(add-tracing pt)
+; every send to pt now prints entry/exit traces
+```
+
+this is where `vau` and homoiconicity meet: you manipulate
+code as data, generate new code, compile and install it, all
+at runtime, all from within moof. no external tools. no
+restarting. the image modifies itself.
+
 ### errors are objects
 
 when a send fails (doesNotUnderstand, type error, assertion
