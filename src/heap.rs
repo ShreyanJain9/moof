@@ -217,7 +217,10 @@ impl Heap {
         if val.is_nil() { return "nil".into(); }
         if val.is_true() { return "true".into(); }
         if val.is_false() { return "false".into(); }
-        if let Some(n) = val.as_integer() { return n.to_string(); }
+        if let Some(n) = val.as_integer() {
+            if n < 0 { return "<fn>".into(); } // closure descriptor ref
+            return n.to_string();
+        }
         if val.is_float() { return format!("{}", f64::from_bits(val.to_bits())); }
         if let Some(id) = val.as_symbol() {
             return format!("'{}", self.symbol_name(id));

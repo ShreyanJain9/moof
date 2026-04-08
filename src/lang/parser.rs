@@ -95,6 +95,11 @@ impl<'a> Parser<'a> {
                 }
             }
 
+            Token::Arrow => {
+                self.advance();
+                Ok(self.intern("<-"))
+            }
+
             Token::Eof => Err("unexpected end of input".into()),
             ref tok => Err(format!("unexpected token: {tok:?}")),
         }

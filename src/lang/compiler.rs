@@ -246,6 +246,104 @@ impl<'a> Compiler<'a> {
                     return Ok(());
                 }
 
+                "let" => {
+                    // (let ((x 1) (y 2)) body...)
+                    let items = self.heap.list_to_vec(expr);
+                    if items.len() < 3 {
+                        return Err("let: need bindings and body".into());
+                    }
+                    let bindings_list = self.heap.list_to_vec(items[1]);
+                    let saved_locals_len = self.locals.len();
+
+                    // compile each binding and register as local
+                    for binding in &bindings_list {
+                        let pair = self.heap.list_to_vec(*binding);
+                        if pair.len() != 2 {
+                            return Err("let: each binding must be (name value)".into());
+                        }
+                        let name_sym = pair[0].as_symbol()
+                            .ok_or("let: binding name must be a symbol")?;
+                        let reg = self.alloc_reg();
+                        self.compile_expr(pair[1], reg)?;
+                        self.locals.push((name_sym, reg));
+                    }
+
+                    // compile body expressions, return last
+                    if items.len() == 3 {
+                        self.compile_expr(items[2], dst)?;
+                    } else {
+                        for i in 2..items.len() - 1 {
+                            let tmp = self.alloc_reg();
+                            self.compile_expr(items[i], tmp)?;
+                        }
+                        self.compile_expr(*items.last().unwrap(), dst)?;
+                    }
+
+                    // restore locals (let bindings go out of scope)
+                    self.locals.truncate(saved_locals_len);
+                    return Ok(());
+                }
+
+                "while" => {
+                    // (while cond body...) → loop: if !cond break; body; goto loop
+                    let items = self.heap.list_to_vec(expr);
+                    if items.len() < 3 {
+                        return Err("while: need condition and body".into());
+                    }
+
+                    let loop_start = self.chunk.offset();
+
+                    // compile condition
+                    let cond_reg = self.alloc_reg();
+                    self.compile_expr(items[1], cond_reg)?;
+
+                    // jump out if false
+                    let exit_jump = self.chunk.offset();
+                    self.chunk.emit(Op::JumpIfFalse, cond_reg, 0, 0);
+
+                    // compile body
+                    for i in 2..items.len() {
+                        let tmp = self.alloc_reg();
+                        self.compile_expr(items[i], tmp)?;
+                    }
+
+                    // jump back to loop start
+                    let back_offset = (loop_start as i16) - (self.chunk.offset() as i16) - 4;
+                    let back_bytes = back_offset.to_be_bytes();
+                    self.chunk.emit(Op::Jump, back_bytes[0], back_bytes[1], 0);
+
+                    // patch exit jump
+                    let exit_target = self.chunk.offset();
+                    let exit_offset = (exit_target as i16) - (exit_jump as i16) - 4;
+                    let exit_bytes = exit_offset.to_be_bytes();
+                    self.chunk.code[exit_jump + 2] = exit_bytes[0];
+                    self.chunk.code[exit_jump + 3] = exit_bytes[1];
+
+                    // while returns nil
+                    self.chunk.emit(Op::LoadNil, dst, 0, 0);
+                    return Ok(());
+                }
+
+                "<-" | "set!" => {
+                    // (<- name value) — mutate a local or global binding
+                    let items = self.heap.list_to_vec(expr);
+                    if items.len() != 3 {
+                        return Err("<-: need name and value".into());
+                    }
+                    let name_sym = items[1].as_symbol()
+                        .ok_or("<-: target must be a symbol")?;
+                    self.compile_expr(items[2], dst)?;
+                    if let Some(reg) = self.find_local(name_sym) {
+                        // mutate local
+                        self.chunk.emit(Op::Move, reg, dst, 0);
+                    } else {
+                        // mutate global
+                        let idx = self.add_sym_const(name_sym);
+                        self.chunk.emit(Op::DefGlobal, (idx >> 8) as u8, idx as u8, dst);
+                    }
+                    return Ok(());
+                }
+
                 "if" => {
                     // (if cond then else)
                     let items = self.heap.list_to_vec(expr);
