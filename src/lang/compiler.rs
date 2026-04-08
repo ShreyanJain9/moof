@@ -1576,4 +1576,12 @@ pub fn register_type_protos(heap: &mut Heap) {
     });
     let type_sym = heap.intern("type");
     heap.get_mut(obj_id).handler_set(type_sym, h);
+
+    // equal? — content equality (like Ruby's eql?)
+    let h = heap.register_native("obj_equal", |heap, receiver, args| {
+        let other = args.first().copied().unwrap_or(Value::NIL);
+        Ok(Value::boolean(heap.values_equal(receiver, other)))
+    });
+    let equal_sym = heap.intern("equal:");
+    heap.get_mut(obj_id).handler_set(equal_sym, h);
 }

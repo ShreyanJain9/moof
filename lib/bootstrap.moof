@@ -231,3 +231,27 @@
   (cons (quote each:) nil)
   nil
   nil))
+
+; ── pattern matching ───────────────────────────────────
+
+(def match-pattern? (fn (val pattern)
+  (if (eq pattern (quote _)) true
+    [val equal: pattern])))
+
+(def match (vau (expr c1 c2) $e
+  (let ((val (eval expr)))
+    (if (match-pattern? val [c1 car])
+      (eval [[c1 cdr] car])
+      (if (match-pattern? val [c2 car])
+        (eval [[c2 cdr] car])
+        nil)))))
+
+(def match3 (vau (expr c1 c2 c3) $e
+  (let ((val (eval expr)))
+    (if (match-pattern? val [c1 car])
+      (eval [[c1 cdr] car])
+      (if (match-pattern? val [c2 car])
+        (eval [[c2 cdr] car])
+        (if (match-pattern? val [c3 car])
+          (eval [[c3 cdr] car])
+          nil))))))
