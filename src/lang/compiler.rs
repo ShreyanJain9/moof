@@ -281,8 +281,29 @@ impl<'a> Compiler<'a> {
                     let capture_local_regs: Vec<u8> = sub.captures.iter().map(|(_, _, lr)| *lr).collect();
                     let sub_result = sub.finish();
 
+                    let sub_descs_offset = self.closure_descs.len();
+                    let n_sub_descs = sub_result.closure_descs.len();
+                    self.closure_descs.extend(sub_result.closure_descs);
+
+                    let mut chunk = sub_result.chunk;
+                    if n_sub_descs > 0 {
+                        let mut pc = 0;
+                        while pc + 3 < chunk.code.len() {
+                            if crate::opcodes::Op::from_u8(chunk.code[pc]) == Some(crate::opcodes::Op::MakeClosure) {
+                                let old = u16::from_be_bytes([chunk.code[pc + 2], chunk.code[pc + 3]]);
+                                let new_idx = old + sub_descs_offset as u16;
+                                chunk.code[pc + 2] = (new_idx >> 8) as u8;
+                                chunk.code[pc + 3] = new_idx as u8;
+                            }
+                            pc += 4;
+                            if pc >= 4 && crate::opcodes::Op::from_u8(chunk.code[pc - 4]) == Some(crate::opcodes::Op::Send) {
+                                pc += 4;
+                            }
+                        }
+                    }
+
                     let desc = ClosureDesc {
-                        chunk: sub_result.chunk,
+                        chunk,
                         param_names: param_syms,
                         is_operative: true,
                         capture_names,
@@ -290,7 +311,6 @@ impl<'a> Compiler<'a> {
                         capture_local_regs,
                         capture_values: Vec::new(), desc_base: 0, rest_param_reg: None,
                     };
-                    self.closure_descs.extend(sub_result.closure_descs);
                     let idx = self.closure_descs.len();
                     self.closure_descs.push(desc);
                     self.chunk.emit(Op::MakeClosure, dst, (idx >> 8) as u8, idx as u8);
@@ -338,8 +358,34 @@ impl<'a> Compiler<'a> {
                     let capture_local_regs: Vec<u8> = sub.captures.iter().map(|(_, _, lr)| *lr).collect();
                     let sub_result = sub.finish();
 
+                    // pull up nested closure descs, patching the fn's chunk
+                    let sub_descs_offset = self.closure_descs.len();
+                    let n_sub_descs = sub_result.closure_descs.len();
+                    self.closure_descs.extend(sub_result.closure_descs);
+
+                    // patch MakeClosure indices inside the fn's chunk
+                    // they were compiled relative to sub_index 0, but in the
+                    // parent they start at sub_descs_offset
+                    let mut chunk = sub_result.chunk;
+                    if n_sub_descs > 0 {
+                        let mut pc = 0;
+                        while pc + 3 < chunk.code.len() {
+                            if crate::opcodes::Op::from_u8(chunk.code[pc]) == Some(crate::opcodes::Op::MakeClosure) {
+                                let old = u16::from_be_bytes([chunk.code[pc + 2], chunk.code[pc + 3]]);
+                                let new_idx = old + sub_descs_offset as u16;
+                                chunk.code[pc + 2] = (new_idx >> 8) as u8;
+                                chunk.code[pc + 3] = new_idx as u8;
+                            }
+                            pc += 4;
+                            // skip SEND trailing data
+                            if pc >= 4 && crate::opcodes::Op::from_u8(chunk.code[pc - 4]) == Some(crate::opcodes::Op::Send) {
+                                pc += 4;
+                            }
+                        }
+                    }
+
                     let desc = ClosureDesc {
-                        chunk: sub_result.chunk,
+                        chunk,
                         param_names: positional,
                         is_operative: false,
                         capture_names,
@@ -347,8 +393,6 @@ impl<'a> Compiler<'a> {
                         capture_local_regs,
                         capture_values: Vec::new(), desc_base: 0, rest_param_reg: rest_reg,
                     };
-                    // pull up any nested closure descs
-                    self.closure_descs.extend(sub_result.closure_descs);
                     let idx = self.closure_descs.len();
                     self.closure_descs.push(desc);
                     // emit MakeClosure with index

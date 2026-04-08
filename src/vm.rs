@@ -233,7 +233,6 @@ impl VM {
                         let is_op = desc.is_operative;
                         let parent_regs = desc.capture_parent_regs.clone();
                         let capture_names = desc.capture_names.clone();
-                        // capture values from current registers
                         let cap_pairs: Vec<(u32, Value)> = capture_names.iter().zip(parent_regs.iter())
                             .map(|(&name, &r)| (name, self.registers[base + r as usize]))
                             .collect();
