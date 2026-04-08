@@ -144,6 +144,32 @@ the things that make moof moof:
   message sends on collections. the object model IS the query
   language.
 
+### git
+
+- **content-addressed storage.** every object state has a hash
+  (of shape + slots + handler refs). identical content = same
+  hash. history is a chain of hashes. undo = restore a hash.
+
+- **merkle DAGs for sync.** two images compare root hashes. if
+  they differ, recurse into children. exchange only what changed.
+  this is how git fetch works. it's how moof sync works.
+
+- **snapshots as tags.** "save a checkpoint" = record the root
+  hash. "restore" = reconstruct. like `git tag` / `git reset`.
+
+### IPLD / the web
+
+- **URIs as universal identifiers.** every object has a URI.
+  `moof://host/obj/47` for identity-based,
+  `moof:hash:bafyreie...` for content-addressed. URIs are
+  values, storable in slots, passable as arguments, clickable
+  on the canvas.
+
+- **federation as hyperlinking.** a far reference to a remote
+  object is a hyperlink. click it on the canvas → remote
+  inspector. send it a message → goes over the network.
+  the web of objects.
+
 ---
 
 ## the object model
@@ -1179,6 +1205,312 @@ layout is messaging: `[container add: child at: position]`.
 
 ---
 
+## the image as database
+
+your moof image IS your personal database. not "backed by a
+database" — IS one. your notes, tasks, contacts, bookmarks,
+code, conversations, projects — all objects with fixed shapes,
+all queryable, all persistent, all on the canvas.
+
+### search
+
+full-text search across the objectspace:
+
+```
+[Image search: "protocol"]
+; => all objects with "protocol" in any string slot
+
+[Image where: |o| [o conforms: Printable] matching: "moof"]
+; => all Printable objects whose describe contains "moof"
+
+[Notes where: |n| [n.tags contains: "design"]]
+; => all Note objects tagged "design"
+
+[Image recent: 10]
+; => the 10 most recently created/modified objects
+```
+
+the Index is an object. it conforms to Observable — when a
+Searchable object's slots change, the index updates. full-text
+indexing is maintained reactively, not rebuilt on query.
+
+```
+[Index rebuild]              ; force reindex
+[Index stats]                ; => { objects: 4200, terms: 18000 }
+[Index objectsMatching: "vau" inSlot: 'sourceText]
+; => all handlers mentioning vau
+```
+
+### the Searchable protocol
+
+```
+(def Searchable (protocol
+  requires: '(searchableSlots)
+  provides:
+    (searchText (fn ()
+      [[self searchableSlots] map: |s| [self slotAt: s]]
+       |> [join: " "]))))
+```
+
+conform to Searchable, declare which slots should be indexed,
+and the Index picks them up automatically via Observable.
+
+```
+(conform Note Searchable
+  searchableSlots: || '(title body tags))
+```
+
+### collections as tables
+
+this is the query model from earlier, but now it's also your
+data model. your image IS your database:
+
+```
+(def contacts [Image where: |o| [o conforms: Contact]])
+[contacts where: |c| [c.city = "portland"]]
+[contacts groupBy: 'company]
+[contacts select: '(name email) orderBy: 'name]
+```
+
+no import/export. no ORM. the objects are the rows. the image
+is the database. `where:` is your SELECT. `groupBy:` is your
+GROUP BY. the protocols make it work.
+
+---
+
+## the distributed image
+
+this is where content-addressing, capability security, and the
+vat model converge into something bigger: a network of moof
+images that collaborate through the same messaging model used
+locally.
+
+### content-addressing: the git idea
+
+**every object state has a content hash.** the hash of an
+object's shape + slot values + handler references. this is
+computed lazily (not on every mutation — on snapshot, on share,
+on demand).
+
+```
+[obj contentHash]   ; => "bafyreie7x..." (CID-style multihash)
+[obj history]       ; => stream of { hash, timestamp, author, slots }
+[obj atHash: "bafyreie7x..."]  ; => the object state at that hash
+```
+
+this gives you several things for free, even on a single
+local image:
+
+**undo and version history.** every mutation (that goes through
+the membrane) records the old state's content hash. `[obj history]`
+is a stream of past states. undo = restore a previous hash.
+
+```
+[pt undo]                    ; revert to the previous state
+[pt history take: 5]         ; last 5 states
+[pt atVersion: 3]            ; the state as it was at version 3
+[pt diff: [pt atVersion: 3]] ; what changed since version 3
+```
+
+**deduplication.** two objects with identical content have the
+same hash. the store can share their storage. this matters when
+you have thousands of similar objects (rows in a table, nodes
+in a graph).
+
+**integrity.** verify an object hasn't been corrupted:
+`[obj verify]` recomputes the hash and compares.
+
+**snapshots.** "save a checkpoint" = record the root object's
+content hash. "restore" = reconstruct from that hash. like a
+git tag.
+
+```
+(def checkpoint [Image snapshot])
+; ... do stuff ...
+[Image restore: checkpoint]  ; roll back everything
+```
+
+### URIs: every object has an address
+
+every object has a URI. not a URL (location-dependent) — a URI
+(identity-based, stable).
+
+```
+moof://localhost/obj/47               ; local object by ID
+moof://alice.example.com/obj/47       ; remote object by ID
+moof:hash:bafyreie7x...              ; content-addressed (any image)
+```
+
+URIs are values in the system. you can store them in slots, pass
+them as arguments, send them over the network. they're how objects
+refer to things outside their own image.
+
+```
+[obj uri]                ; => "moof://localhost/obj/47"
+[URI resolve: "moof://alice.example.com/obj/47"]
+; => a far reference to alice's object
+```
+
+on the canvas, URIs are hyperlinks. click a URI → navigate
+there. if it's a local object, the canvas pans to it. if it's
+a remote object, a remote inspector opens.
+
+### federation: images talk to each other
+
+the vat model already handles async messaging with promises.
+federation extends this across the network. a remote vat looks
+like a local vat — it's just farther away.
+
+**granting access:**
+
+```
+; alice shares a faceted reference with bob
+(def bob-view [myDoc facet: '(read: describe sections)])
+[Federation grant: bob-view to: "moof://bob.example.com"]
+```
+
+bob's image receives a **far reference**. it looks like a local
+object but sends go over the network:
+
+```
+; in bob's image:
+[alice-doc describe]             ; => "alice's design doc"
+[alice-doc sections]             ; => ("intro" "design" "impl")
+[alice-doc <- read: "intro"]     ; eventual send, returns promise
+```
+
+all sends through the far reference go through alice's membrane.
+she controls what bob can do. she can revoke access at any time.
+
+**the protocol is MCP.** federation messages are MCP JSON-RPC
+over HTTPS (or WebSocket for streaming). this means any MCP
+client can talk to a moof image — not just other moof images.
+claude desktop, custom apps, scripts. the federation protocol
+and the AI protocol are the same protocol.
+
+### collaboration: shared objects
+
+alice and bob are both working on a design document. alice
+creates a SharedDoc object and grants bob write access:
+
+```
+(def doc { SharedDoc
+  title: "moof v2 design"
+  body: "..."
+  authors: (list "alice" "bob") })
+
+[Federation grant: [doc facet: '(read: write: describe)] to: bob]
+```
+
+**conflict resolution** uses per-slot merge strategies, declared
+by protocol conformance:
+
+```
+(def Mergeable (protocol
+  requires: '(mergeStrategy:)))
+
+(conform SharedDoc Mergeable
+  mergeStrategy:: (fn (slot)
+    (match slot
+      ('title 'last-write-wins)
+      ('body  'crdt-text)          ; operational transform / CRDT
+      ('authors 'grow-set)         ; set union, never shrinks
+      ('version 'monotonic)        ; max wins
+      (_ 'last-write-wins))))
+```
+
+when bob's write conflicts with alice's:
+- `title` — last write wins (simple, good enough for names)
+- `body` — CRDT text merge (both edits preserved, interleaved)
+- `authors` — grow-only set (additions from both sides merge)
+- `version` — monotonic counter (highest number wins)
+
+objects that conform to Mergeable can be shared without fear
+of data loss. objects that don't get last-write-wins by default
+(or explicit conflict resolution through the canvas).
+
+### pinning: offline collaboration
+
+bob can **pin** alice's object — download the content-addressed
+snapshot into his local image:
+
+```
+[alice-doc pin]  ; downloads current state to bob's LMDB
+```
+
+now bob has a local copy. reads are local (fast). writes go to
+his local copy. when he reconnects, changes sync:
+
+```
+[alice-doc sync]  ; merge local changes with remote
+; uses the Mergeable protocol for conflict resolution
+```
+
+pinned objects carry their content hash, so sync can diff
+efficiently — only exchange what changed (merkle DAG comparison,
+like git).
+
+### the personal web
+
+your moof image is your website. every object with a `render:`
+handler can be served as HTML. every object with a `describe`
+handler can be served as a resource. the MCP/HTTP interface
+serves your objectspace to the world, mediated by capabilities.
+
+```
+; make a public-facing page
+(def homepage { Page
+  title: "alice's moof"
+  body: "welcome to my objectspace"
+  public: true })
+
+[Federation publish: homepage at: "/"]
+; now https://alice.example.com/ serves homepage.render
+```
+
+the capability model means you control exactly what's visible.
+`public: true` objects are served to anyone. everything else
+requires a granted reference. your personal database and your
+public website are the same objectspace, separated by
+capabilities.
+
+### what this looks like in practice
+
+**alice's daily workflow:**
+
+1. open moof. the canvas shows her objectspace. notes, tasks,
+   code, design docs, contacts. everything where she left it.
+
+2. she types "moof protocol" in the search bar. the Index
+   returns her design notes, the protocol definition objects,
+   and three handlers that mention "protocol" in their source.
+
+3. she clicks into her design doc. edits the body. the edit is
+   versioned automatically (content hash). observable fires. the
+   canvas updates. the index re-indexes the changed text.
+
+4. she shares the doc with bob:
+   `[Federation grant: [doc facet: '(read: write:)] to: bob]`
+
+5. bob opens it in his image. makes edits. the CRDT text merge
+   interleaves both their changes. no conflicts. no lock files.
+   no git branches.
+
+6. the agent in alice's image notices the changes bob made and
+   says "bob added a section on federation — want me to review
+   it?" the agent reads bob's additions through its Mirror,
+   summarizes them, and proposes edits through the membrane.
+
+7. alice approves the agent's edits on the canvas. the doc
+   updates. the content hash advances. bob's image picks up
+   the new state on next sync.
+
+8. alice closes moof. nothing to save. everything persisted.
+   the content hashes are the version history. the capability
+   grants are the access control. the objects are the data.
+
+---
+
 ## the crate structure
 
 ```
@@ -1255,6 +1587,18 @@ system. clear module boundaries, no crate-level ceremony.
   auto-updates on mutation
 - **compiler and evaluator as objects** — intercept compilation,
   intercept evaluation, the reflective tower
+- **the image as database** — full-text search, Searchable
+  protocol, reactive indexing, collections-as-tables
+- **content-addressing** — every object state has a hash. undo,
+  versioning, deduplication, integrity, snapshots — all free
+- **URIs** — every object has a stable address. hyperlinks in
+  the canvas. deep linking across images
+- **federation** — images talk to each other via MCP over HTTPS.
+  far references, capability-mediated sharing, offline pinning
+- **Mergeable protocol** — per-slot conflict resolution (CRDT
+  text, grow-sets, last-write-wins, monotonic counters)
+- **the personal web** — your image is your website, mediated
+  by capabilities
 
 ## what we're killing from v1
 
@@ -1313,6 +1657,24 @@ browsing. transcript.
 
 LLM tool-use loop in a vat. membranes. facets. approval queue
 on the canvas. agent memory as objects.
+
+### phase 8: the database
+
+Searchable protocol. Index object with reactive updates via
+Observable. full-text search. collections-as-tables with the
+full Queryable suite.
+
+### phase 9: content-addressing + versioning
+
+content hashes on object states. history as a stream of hashes.
+undo/redo. snapshots. deduplication. URIs for every object.
+
+### phase 10: federation
+
+MCP over HTTPS for inter-image messaging. far references.
+Federation object for granting/revoking access. Mergeable
+protocol with per-slot strategies. pinning for offline work.
+sync with merkle DAG diffing. publish objects as web pages.
 
 ---
 
