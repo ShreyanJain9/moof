@@ -1,0 +1,9 @@
+[package]
+name = "moof-lang"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "the moof language: lexer, parser, compiler, bytecode interpreter"
+
+[dependencies]
+moof-fabric = { path = "../fabric" }

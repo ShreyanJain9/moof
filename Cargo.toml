@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/fabric",
+    "crates/lang",
+    "crates/shell",
+]
+
+[workspace.package]
+version = "2.0.0-alpha.1"
+edition = "2024"
+license = "MIT"
+
+[[bin]]
+name = "moof"
+path = "src/bin/moof.rs"
+
+[dependencies]
+moof-fabric = { path = "crates/fabric" }
+moof-lang = { path = "crates/lang" }
+moof-shell = { path = "crates/shell" }
+clap = { version = "4", features = ["derive"] }
+
+[package]
+name = "moof"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
