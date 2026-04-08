@@ -284,6 +284,108 @@ impl Heap {
             format!("({} . {})", items.join(" "), self.format_value(tail))
         }
     }
+
+    /// Rich display for the REPL — shows the nature of things.
+    pub fn display_value(&self, val: Value) -> String {
+        if val.is_nil() { return "nil".into(); }
+        if val.is_true() { return "true".into(); }
+        if val.is_false() { return "false".into(); }
+        if let Some(n) = val.as_integer() {
+            if n < 0 { return "<fn>".into(); }
+            return format!("{n}  : Integer");
+        }
+        if val.is_float() {
+            return format!("{}  : Float", f64::from_bits(val.to_bits()));
+        }
+        if let Some(id) = val.as_symbol() {
+            return format!("'{}", self.symbol_name(id));
+        }
+        if let Some(id) = val.as_any_object() {
+            return self.display_object(id);
+        }
+        format!("?{:#018x}", val.to_bits())
+    }
+
+    fn display_object(&self, id: u32) -> String {
+        match self.get(id) {
+            HeapObject::Pair(_, _) => {
+                let formatted = self.format_list(id);
+                let len = self.list_len(id);
+                format!("{formatted}  : Cons ({len} elements)")
+            }
+            HeapObject::Text(s) => {
+                if s.len() > 60 {
+                    format!("\"{}...\"  : String ({} chars)", &s[..57], s.len())
+                } else {
+                    format!("\"{s}\"  : String")
+                }
+            }
+            HeapObject::Buffer(b) => format!("<{} bytes>  : Bytes", b.len()),
+            HeapObject::Table { seq, map } => {
+                let mut parts = Vec::new();
+                for v in seq { parts.push(self.format_value(*v)); }
+                for (k, v) in map {
+                    parts.push(format!("{} => {}", self.format_value(*k), self.format_value(*v)));
+                }
+                format!("#[{}]  : Table ({} seq, {} map)", parts.join(" "), seq.len(), map.len())
+            }
+            HeapObject::General { parent: _, slot_names, slot_values, handlers } => {
+                if slot_names.is_empty() && handlers.is_empty() {
+                    return format!("<object#{id}>");
+                }
+                let nslots = slot_names.len();
+                let nhandlers = handlers.len();
+
+                // compact display for small objects
+                if nslots <= 4 && nhandlers == 0 {
+                    let slots: Vec<_> = slot_names.iter().zip(slot_values.iter())
+                        .map(|(n, v)| format!("{}: {}", self.symbol_name(*n), self.format_value(*v)))
+                        .collect();
+                    return format!("{{ {} }}", slots.join(", "));
+                }
+
+                // rich multi-line display
+                let mut lines = Vec::new();
+                for (n, v) in slot_names.iter().zip(slot_values.iter()) {
+                    lines.push(format!("    {}: {}", self.symbol_name(*n), self.format_value(*v)));
+                }
+                let handler_names: Vec<_> = handlers.iter()
+                    .map(|(s, _)| self.symbol_name(*s).to_string())
+                    .collect();
+
+                let handler_info = if nhandlers == 0 {
+                    String::new()
+                } else if nhandlers <= 6 {
+                    format!("\n    responds to: {}", handler_names.join(", "))
+                } else {
+                    format!("\n    responds to: {}, ... ({nhandlers} total)",
+                        handler_names[..4].join(", "))
+                };
+
+                format!("  {{ {nslots} slots, {nhandlers} handlers{handler_info}\n{}\n  }}", lines.join("\n"))
+            }
+        }
+    }
+
+    fn list_len(&self, mut id: u32) -> usize {
+        let mut count = 0;
+        loop {
+            match self.get(id) {
+                HeapObject::Pair(_, cdr) => {
+                    count += 1;
+                    if let Some(next) = cdr.as_any_object() {
+                        if matches!(self.get(next), HeapObject::Pair(_, _)) {
+                            id = next;
+                            continue;
+                        }
+                    }
+                    break;
+                }
+                _ => break,
+            }
+        }
+        count
+    }
 }
 
 #[cfg(test)]
