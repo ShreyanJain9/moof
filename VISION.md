@@ -513,8 +513,11 @@ Object                    Printable
   Promise                 Printable
   Membrane
   Facet
-  Canvas                  Renderable
-  Protocol                Printable
+  Mirror                  Printable, Iterable
+  Error                   Printable
+  Continuation            Printable
+  Canvas                  Renderable, Observable
+  Protocol                Printable, Iterable
 ```
 
 every one of these is an object. every one responds to messages.
@@ -712,6 +715,305 @@ not reachable from a store root is dead.
 
 ---
 
+## liveness
+
+this is where moof stops being a language and becomes an
+environment. everything is introspectable. everything is
+modifiable at runtime. the system is never "stopped."
+
+### mirrors: safe reflection
+
+a Mirror is a reflective handle on any object. read-only by
+default. the browser, the agent, and the debugger all work
+through mirrors — they never touch objects directly.
+
+```
+(def m [Mirror on: pt])
+
+[m slots]                ; => {x: 3, y: 4}
+[m handlers]             ; => (describe, distanceTo:, magnitude)
+[m parent]               ; => <Mirror on: Point>
+[m protocols]            ; => (Printable, Comparable)
+[m source: 'magnitude]   ; => "(fn () [[@x * @x] + [@y * @y]])"
+[m bytecode: 'magnitude] ; => <Bytes: 24 instructions>
+[m vat]                  ; => <Mirror on: Vat#0>
+[m shape]                ; => (x y) — the slot names
+[m persistent?]          ; => true (in LMDB, not nursery)
+```
+
+mirrors are objects. they conform to Printable and Iterable
+(iterate over slots). the canvas renders mirrors as inspector
+panels. the agent uses mirrors to understand objects before
+modifying them.
+
+**writable mirrors.** `[Mirror writable: pt]` returns a mirror
+that can also modify. modification goes through the membrane
+(if one is active), so the agent's writable mirrors still get
+audited.
+
+```
+(def wm [Mirror writable: pt])
+[wm setSlot: 'x to: 99]
+[wm addHandler: 'magnitude with: (fn () ...)]
+[wm removeHandler: 'magnitude]
+[wm setParent: NewPoint]
+[wm conform: Renderable with: (render:: (fn (c) ...))]
+```
+
+### everything is inspectable
+
+there is no hidden state in the objectspace. anything the VM
+knows, you can ask about:
+
+**objects:**
+
+```
+[obj slotNames]          ; => (x y)
+[obj handlerNames]       ; => (describe distanceTo: magnitude)
+[obj parent]             ; => Point
+[obj protocols]          ; => (Printable Comparable)
+[obj conforms: Iterable] ; => false
+[obj identity]           ; => 47 (the object's unique ID)
+[obj vat]                ; => <Vat#0>
+[obj persistent?]        ; => true
+[obj describe]           ; => "(3, 4)"
+[obj interface]          ; => handler signatures + docs
+```
+
+**handlers:**
+
+```
+[obj source: 'magnitude]  ; => the source AST
+[obj bytecode: 'magnitude]; => the compiled bytecode blob
+[obj arity: 'magnitude]   ; => 0
+[obj handlerOf: 'magnitude]; => the lambda/native object itself
+```
+
+**environments:**
+
+```
+[env bindings]           ; => ((x . 3) (y . 4))
+[env parent]             ; => <enclosing env>
+[env depth]              ; => 2 (nesting level)
+```
+
+**vats:**
+
+```
+[vat objects]            ; => all objects in this vat
+[vat mailbox]            ; => pending messages
+[vat fuel]               ; => remaining reductions
+[vat capabilities]       ; => faceted references
+[vat status]             ; => 'running, 'suspended, 'dead
+```
+
+**protocols:**
+
+```
+[Protocol all]           ; => every protocol in the image
+[Iterable required]      ; => (each:)
+[Iterable provided]      ; => (map: filter: fold:inject: ...)
+[Iterable conformers]    ; => all objects that conform
+[Iterable includes]      ; => ()
+[Queryable includes]     ; => (Iterable)
+```
+
+**the compiler and evaluator:**
+
+```
+[Compiler current]       ; => the live compiler object
+[Compiler parse: "(+ 1 2)"]  ; => AST
+[Compiler compile: ast]  ; => bytecode blob
+[Compiler analyze: ast]  ; => stability classification
+
+[Evaluator current]      ; => the live evaluator
+[Evaluator eval: ast in: env] ; => result
+```
+
+### everything is modifiable
+
+handler modification is live and immediate:
+
+```
+; change how Points describe themselves — every Point instantly affected
+[Point handle: 'describe with: (fn () (str "Point(" @x ", " @y ")"))]
+
+; add a protocol conformance at runtime
+(conform Integer Iterable
+  each:: (fn (block) [self times: block]))
+
+; change a protocol's provided methods
+[Iterable addProvided: 'tally with: (fn () [self fold: 0 inject: |acc _| [acc + 1]])]
+
+; change the parent chain
+[pt setParent: Point3D]
+```
+
+**handler replacement is atomic.** the old handler stays active for
+any in-progress sends. the next send uses the new handler. this is
+erlang's hot code swapping semantics.
+
+**prototype modification propagates instantly.** add a handler to
+Point, every existing Point-child gains it on the next send. no
+restart. no cache invalidation (the inline caches check handler
+identity, not prototype version).
+
+### errors are objects
+
+when a send fails (doesNotUnderstand, type error, assertion
+failure), the error is an object:
+
+```
+Error {
+  selector: 'magnitude
+  receiver: <Mirror on: obj>
+  args: ()
+  message: "does not understand 'magnitude'"
+  continuation: <Continuation>
+  vat: <Vat#0>
+  timestamp: 1712534400
+}
+```
+
+the continuation is a first-class object representing the
+suspended computation. you can inspect it:
+
+```
+[error continuation]         ; => <Continuation>
+[error continuation frames]  ; => stack frames as objects
+[error continuation env]     ; => the environment at the error
+
+(let ((frame [[error continuation frames] first]))
+  [frame selector]           ; => 'magnitude
+  [frame receiver]           ; => the object that failed
+  [frame locals]             ; => local bindings
+  [frame source])            ; => source location
+```
+
+### fix and proceed
+
+this is smalltalk's greatest UX idea. when an error occurs in
+a vat, the vat is **suspended, not killed.** the continuation
+object is live. you can:
+
+1. **inspect** — look at the stack, the environment, the
+   receiver, the args. understand what went wrong.
+
+2. **fix** — add the missing handler, fix the broken handler,
+   change a slot value. the fix is live — you're modifying the
+   actual objects involved.
+
+3. **proceed** — resume the suspended continuation. the send
+   retries with the fixed handler. the computation continues
+   from where it left off.
+
+```
+; an error occurred: pt doesn't understand 'magnitude'
+; the vat is suspended. the error is in the transcript.
+
+; fix it:
+[Point handle: 'magnitude with: (fn () [[@x * @x] + [@y * @y]])]
+
+; resume:
+[error proceed]
+; => 25 — the computation continues as if the error never happened
+```
+
+this is not "restart from the beginning." this is "resume from
+the exact point of failure." the continuation holds the entire
+state. the fix is applied to the live objects. the computation
+picks up where it left off.
+
+the canvas shows suspended vats with their error objects. you
+can fix and proceed from the GUI. the agent can fix and proceed
+too (with approval through the membrane).
+
+### doesNotUnderstand: as extension point
+
+`doesNotUnderstand:` is a handler like any other. the default
+raises an error. override it for:
+
+```
+; forwarding proxy
+(def proxy { Object
+  target: realObj })
+[proxy handle: 'doesNotUnderstand: with:
+  (fn (msg) [msg.target send: msg.selector with: msg.args])]
+
+; method synthesis
+[MyDSL handle: 'doesNotUnderstand: with:
+  (fn (msg)
+    (if [msg.selector startsWith: "find_by_"]
+      (let ((field [msg.selector substring: 8]))
+        [self where: |o| [[o slotAt: field] = [msg.args first]]])
+      [Error raise: msg]))]
+
+; now you can say:
+[people find_by_name: "alice"]
+; doesNotUnderstand catches it, synthesizes a where: query
+```
+
+this is ruby's `method_missing` and it's how rails' ActiveRecord
+works. in moof it's a message, not a hook — it goes through the
+same dispatch, the same membranes, the same audit trail.
+
+### Observable: reactive liveness
+
+the Observable protocol connects mutation to reaction:
+
+```
+[pt watch: 'x with: |old new| [Console println: (str "x changed: " old " → " new)]]
+[pt slotAt: 'x put: 99]
+; prints: "x changed: 3 → 99"
+```
+
+the canvas uses Observable to re-render objects when their slots
+change. you modify a slot in the REPL → the canvas updates. you
+modify a slot through the agent → the canvas updates. no manual
+refresh. the objectspace is always live.
+
+Observable works on handlers too:
+
+```
+[Point watch: 'handlers with: |sel handler|
+  [Console println: (str "Point gained handler: " sel)]]
+
+[Point handle: 'area with: (fn () [@x * @y])]
+; prints: "Point gained handler: area"
+```
+
+### the compiler and evaluator are objects
+
+the compiler is an object. you can intercept compilation:
+
+```
+; add a custom syntax pass
+[Compiler addPass: |ast|
+  (if [ast is: '(trace ...)]
+    `(do [Console println: ,(ast-to-string [ast cdr])]
+         ,[ast cdr car])
+    ast)]
+```
+
+the evaluator is an object. you can intercept evaluation — this
+is the reflective tower from the design doc. an environment can
+override how expressions are evaluated within it:
+
+```
+(def tracing-env [Environment extend: root-env
+  eval: (fn (expr env)
+    [Console println: (str "eval: " expr)]
+    [env parent eval: expr env])])
+
+; now expressions evaluated in tracing-env log themselves
+```
+
+this is 3-Lisp / Black territory — the meta-level is just more
+objects. not a day-one feature, but the architecture never
+forecloses it.
+
+---
+
 ## the canvas
 
 the browser is not a panel layout. it's a **zoomable infinite
@@ -830,6 +1132,15 @@ system. clear module boundaries, no crate-level ceremony.
 - NaN-boxed values (8 bytes, zero-alloc for primitives)
 - slot access as send (membranes intercept everything)
 - pattern matching on object shapes, arrays, hashmaps
+- **mirrors** — safe reflection handles for introspection
+- **fix and proceed** — errors suspend vats, not kill them.
+  inspect, fix, resume from the exact point of failure
+- **errors and continuations as objects** — inspect stack
+  frames, environments, resume suspended computations
+- **Observable** — reactive slot/handler watching, canvas
+  auto-updates on mutation
+- **compiler and evaluator as objects** — intercept compilation,
+  intercept evaluation, the reflective tower
 
 ## what we're killing from v1
 
