@@ -1,0 +1,17 @@
+; comparable.moof — implement <, get 7 methods free
+
+(def Comparable (make-protocol "Comparable"
+  (list (quote <))
+  #[
+    (quote >) => (fn (self other) (not [self < other]))
+    (quote <=) => (fn (self other) (not [other < self]))
+    (quote >=) => (fn (self other) (not [self < other]))
+    (quote between:and:) => (fn (self lo hi) (and [self >= lo] [self <= hi]))
+    (quote clamp:to:) => (fn (self lo hi) [[self max: lo] min: hi])
+    (quote min:) => (fn (self other) (if [self < other] self other))
+    (quote max:) => (fn (self other) (if [self > other] self other))
+  ]
+  nil))
+
+(conform Number Comparable)
+(conform String Comparable)

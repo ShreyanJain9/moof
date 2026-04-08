@@ -1,0 +1,96 @@
+; types.moof — remaining type-specific methods
+
+; ── Object ─────────────────────────────────────────────
+
+(defmethod Object nil? () false)
+(defmethod Object some? () true)
+(defmethod Object tap: (block) (do (block self) self))
+(defmethod Object pipe: (f) (f self))
+(defmethod Object then: (f) (f self))
+(defmethod Object is: (type) (let ((p [self parent]))
+  (if (eq p type) true
+    (if (nil? p) false [p is: type]))))
+
+; ── Nil ────────────────────────────────────────────────
+
+(defmethod Nil nil? () true)
+(defmethod Nil some? () false)
+(defmethod Nil empty? () true)
+(defmethod Nil ifNil: (block) (block))
+(defmethod Nil each: (f) nil)
+(defmethod Nil map: (f) nil)
+(defmethod Nil select: (f) nil)
+(defmethod Nil fold:with: (init f) init)
+(defmethod Nil count () 0)
+(defmethod Nil toList () nil)
+(defmethod Nil reverse () nil)
+(defmethod Nil includes: (x) false)
+(defmethod Nil any: (f) false)
+(defmethod Nil all: (f) true)
+(defmethod Nil append: (other) other)
+
+; ── Boolean ────────────────────────────────────────────
+
+(defmethod Boolean ifTrue: (block) (if self (block) nil))
+(defmethod Boolean ifFalse: (block) (if self nil (block)))
+(defmethod Boolean ifTrue:ifFalse: (t f) (if self (t) (f)))
+(defmethod Boolean toString () (if self "true" "false"))
+
+; ── String extras ──────────────────────────────────────
+
+(defmethod String empty? () (eq [self length] 0))
+(defmethod String chars ()
+  (let ((result nil) (i [[self length] - 1]))
+    (while [i >= 0]
+      (:= result (cons [self at: i] result))
+      (:= i [i - 1]))
+    result))
+(defmethod String lines () [self split: "\n"])
+(defmethod String words () [self split: " "])
+(defmethod String repeat: (n)
+  (let ((result "") (i 0))
+    (while [i < n] (:= result [result ++ self]) (:= i [i + 1]))
+    result))
+(defmethod String reverse ()
+  (let ((result "") (i [[self length] - 1]))
+    (while [i >= 0]
+      (:= result [result ++ [self at: i]])
+      (:= i [i - 1]))
+    result))
+(defmethod String capitalize ()
+  (if [self empty?] self
+    [[[self at: 0] toUpper] ++ [self substring: 1 to: [self length]]]))
+(defmethod String toString () self)
+
+; ── Cons extras ────────────────────────────────────────
+
+(alias Cons first car)
+(alias Cons rest cdr)
+(defmethod Cons second () [[self cdr] car])
+(defmethod Cons third () [[[self cdr] cdr] car])
+(defmethod Cons cons: (x) (cons x self))
+(defmethod Cons prepend: (x) (cons x self))
+(defmethod Cons at: (n)
+  (if (eq n 0) [self car] [[self cdr] at: [n - 1]]))
+(defmethod Cons last ()
+  (if [[self cdr] nil?] [self car] [[self cdr] last]))
+(defmethod Cons append: (other)
+  (if [[self cdr] nil?] (cons [self car] other)
+    (cons [self car] [[self cdr] append: other])))
+
+; ── Table extras ───────────────────────────────────────
+
+(defmethod Table has: (key) [self contains: key])
+(defmethod Table empty? () (eq [self length] 0))
+(defmethod Table entries ()
+  [[self keys] map: |k| (cons k [self at: k])])
+(defmethod Table merge: (other)
+  (let ((result [self clone]))
+    [[other keys] each: |k| [result at: k put: [other at: k]]]
+    result))
+(defmethod Table eachEntry: (f)
+  [[self keys] each: |k| (f k [self at: k])])
+(defmethod Table mapValues: (f)
+  (let ((result #[]))
+    [self eachEntry: |k v| [result at: k put: (f v)]]
+    result))

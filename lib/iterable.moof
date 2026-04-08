@@ -1,0 +1,189 @@
+; iterable.moof — implement each:, get ~40 methods free
+
+(def Iterable (make-protocol "Iterable"
+  (list (quote each:))
+  #[
+    ; fold:with: uses a mutable Table cell to work around
+    ; closure capture-by-value. the Table is shared between
+    ; the fold closure and the enclosing scope.
+    (quote fold:with:) => (fn (self init f)
+      (let ((cell #["v" => init]))
+        [self each: |x| [cell at: "v" put: (f [cell at: "v"] x)]]
+        [cell at: "v"]))
+
+    (quote reduce:) => (fn (self f)
+      (let ((cell #["v" => nil "first" => true]))
+        [self each: |x|
+          (if [cell at: "first"]
+            (do [cell at: "v" put: x] [cell at: "first" put: false])
+            [cell at: "v" put: (f [cell at: "v"] x)])]
+        [cell at: "v"]))
+
+    (quote sum) => (fn (self) [self fold: 0 with: |a x| [a + x]])
+    (quote product) => (fn (self) [self fold: 1 with: |a x| [a * x]])
+    (quote count) => (fn (self) [self fold: 0 with: |a _| [a + 1]])
+    (quote count:) => (fn (self f) [self fold: 0 with: |a x| (if (f x) [a + 1] a)])
+
+    (quote map:) => (fn (self f)
+      [[self fold: nil with: |acc x| (cons (f x) acc)] reverse])
+
+    (quote flatMap:) => (fn (self f)
+      [[self map: f] fold: nil with: |acc lst| [acc append: lst]])
+
+    (quote select:) => (fn (self f)
+      [[self fold: nil with: |acc x| (if (f x) (cons x acc) acc)] reverse])
+
+    (quote reject:) => (fn (self f)
+      [self select: |x| (not (f x))])
+
+    (quote find:) => (fn (self f)
+      (let ((result nil) (done false))
+        [self each: |x| (unless done (when (f x) (do (:= result x) (:= done true))))]
+        result))
+
+    (quote any:) => (fn (self f)
+      [self fold: false with: |found x| (if found true (f x))])
+
+    (quote all:) => (fn (self f)
+      [self fold: true with: |ok x| (if ok (f x) false)])
+
+    (quote none:) => (fn (self f) (not [self any: f]))
+
+    (quote includes:) => (fn (self x)
+      [self any: |el| [el equal: x]])
+
+    (quote empty?) => (fn (self)
+      [self fold: true with: |_ _| false])
+
+    (quote first) => (fn (self)
+      (let ((result nil) (done false))
+        [self each: |x| (unless done (:= result x) (:= done true))]
+        result))
+
+    (quote last) => (fn (self)
+      (let ((result nil)) [self each: |x| (:= result x)] result))
+
+    (quote take:) => (fn (self n)
+      (let ((i 0) (result nil))
+        [self each: |x| (when [i < n] (:= result (cons x result)) (:= i [i + 1]))]
+        [result reverse]))
+
+    (quote drop:) => (fn (self n)
+      (let ((i 0) (result nil))
+        [self each: |x| (if [i >= n] (:= result (cons x result)) nil) (:= i [i + 1])]
+        [result reverse]))
+
+    (quote takeWhile:) => (fn (self f)
+      (let ((result nil) (done false))
+        [self each: |x| (unless done (if (f x) (:= result (cons x result)) (:= done true)))]
+        [result reverse]))
+
+    (quote dropWhile:) => (fn (self f)
+      (let ((dropping true) (result nil))
+        [self each: |x|
+          (if dropping
+            (unless (f x) (do (:= dropping false) (:= result (cons x result))))
+            (:= result (cons x result)))]
+        [result reverse]))
+
+    (quote min) => (fn (self) [self reduce: |a x| (if [x < a] x a)])
+    (quote max) => (fn (self) [self reduce: |a x| (if [x > a] x a)])
+    (quote minBy:) => (fn (self f) [self reduce: |a x| (if [(f x) < (f a)] x a)])
+    (quote maxBy:) => (fn (self f) [self reduce: |a x| (if [(f x) > (f a)] x a)])
+    (quote reverse) => (fn (self) [self fold: nil with: |acc x| (cons x acc)])
+
+    (quote sort) => (fn (self) [[self toList] sortBy: |x| x])
+    (quote sortBy:) => (fn (self f)
+      (let ((lst [self toList]))
+        (if (or [lst nil?] [[lst cdr] nil?]) lst
+          (let ((pivot (f [lst car]))
+                (rest [lst cdr])
+                (lo [rest select: |x| [(f x) < pivot]])
+                (hi [rest reject: |x| [(f x) < pivot]]))
+            [[lo sortBy: f] append: (cons [lst car] [hi sortBy: f])]))))
+
+    (quote groupBy:) => (fn (self f)
+      [self fold: #[] with: |groups x|
+        (let ((key (f x)) (existing [groups at: key]))
+          [groups at: key put: (if (nil? existing) (cons x nil) (cons x existing))]
+          groups)])
+
+    (quote partition:) => (fn (self f)
+      (let ((yes nil) (no nil))
+        [self each: |x| (if (f x) (:= yes (cons x yes)) (:= no (cons x no)))]
+        (cons [yes reverse] [no reverse])))
+
+    (quote tally) => (fn (self)
+      [self fold: #[] with: |counts x|
+        (let ((n [counts at: x]))
+          [counts at: x put: (if (nil? n) 1 [n + 1])]
+          counts)])
+
+    (quote zip:) => (fn (self other)
+      (let ((other-list [other toList]) (result nil))
+        [self each: |x|
+          (let ((y (if (some? other-list) [other-list car] nil)))
+            (:= result (cons (cons x y) result))
+            (when (some? other-list) (:= other-list [other-list cdr])))]
+        [result reverse]))
+
+    (quote intersperse:) => (fn (self sep)
+      (let ((first-flag true) (result nil))
+        [self each: |x|
+          (if first-flag (:= first-flag false) (:= result (cons sep result)))
+          (:= result (cons x result))]
+        [result reverse]))
+
+    (quote join) => (fn (self) [self fold: "" with: |acc x| [acc ++ [x describe]]])
+
+    (quote join:) => (fn (self sep)
+      (let ((first-flag true) (result ""))
+        [self each: |x|
+          (if first-flag
+            (do (:= first-flag false) (:= result [x describe]))
+            (:= result [[result ++ sep] ++ [x describe]]))]
+        result))
+
+    (quote toList) => (fn (self) [[self fold: nil with: |acc x| (cons x acc)] reverse])
+
+    (quote toTable) => (fn (self)
+      (let ((t #[])) [self each: |x| [t push: x]] t))
+
+    (quote each:withIndex:) => (fn (self f)
+      (let ((i 0)) [self each: |x| (f x i) (:= i [i + 1])]))
+
+    (quote distinct) => (fn (self)
+      (let ((seen nil) (result nil))
+        [self each: |x|
+          (unless (member? x seen)
+            (:= seen (cons x seen))
+            (:= result (cons x result)))]
+        [result reverse]))
+  ]
+  nil))
+
+; Cons: define each: and fold:with: directly (fold needs mutation which
+; closures can't do across scopes), then conform for the rest
+(defmethod Cons each: (block)
+  (let ((current self))
+    (while (some? current) (block [current car]) (:= current [current cdr]))))
+
+; fold:with: needs direct installation because defmethod can't handle
+; multi-keyword selectors yet
+[Cons handle: (quote fold:with:) with: (fn (self init f)
+  (let ((acc init) (current self))
+    (while (some? current)
+      (:= acc (f acc [current car]))
+      (:= current [current cdr]))
+    acc))]
+
+(defmethod Cons toList () self)
+
+(conform Cons Iterable)
+
+; smalltalk/ruby aliases
+(alias Cons filter: select:)
+(alias Cons collect: map:)
+(alias Cons detect: find:)
+(alias Cons do: each:)
+(alias Cons size count)

@@ -1,0 +1,32 @@
+; protocols.moof — protocol infrastructure
+
+(def Protocol { name: "Protocol" requires: nil provides: nil includes: nil })
+
+(defn make-protocol (name requires provides includes)
+  { Protocol name: name requires: requires provides: provides includes: includes })
+
+; conform: install provided handlers from a protocol onto a type
+(defn conform (proto prot)
+  (let ((provs [prot slotAt: (quote provides)]))
+    (if (nil? provs) nil
+      (let ((ks [provs keys])
+            (current ks))
+        (while (some? current)
+          (let ((sel [current car])
+                (handler [provs at: sel])
+                (already [proto responds: sel]))
+            (if (not already)
+              [proto handle: sel with: handler]
+              nil))
+          (:= current [current cdr])))))
+  proto)
+
+(defn conforms? (obj prot)
+  (let ((reqs [prot slotAt: (quote requires)]))
+    (if (nil? reqs) true
+      (let ((current reqs) (ok true))
+        (while (if (some? current) ok false)
+          (if (not [obj responds: [current car]])
+            (:= ok false) nil)
+          (:= current [current cdr]))
+        ok))))

@@ -24,7 +24,13 @@ fn eval_source(vm: &mut VM, heap: &mut Heap, source: &str) -> Result<(), String>
 fn load_bootstrap(vm: &mut VM, heap: &mut Heap) {
     let files = [
         "lib/bootstrap.moof",
-        "lib/core.moof",
+        "lib/protocols.moof",
+        "lib/comparable.moof",
+        "lib/numeric.moof",
+        "lib/iterable.moof",
+        "lib/indexable.moof",
+        "lib/callable.moof",
+        "lib/types.moof",
     ];
     for path in &files {
         if let Ok(source) = std::fs::read_to_string(path) {

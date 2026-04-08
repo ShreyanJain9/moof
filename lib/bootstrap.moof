@@ -1,11 +1,9 @@
-; bootstrap.moof — the moof grimoire
+; bootstrap.moof — kernel syntax forms
 ;
-; kernel forms (provided by the compiler):
-;   quote def if fn let while do := cons eq eval send vau quasiquote
-;
-; everything below is derived from those.
+; compiler provides: quote def if fn let while do := cons eq eval send vau quasiquote
+; everything here extends those with vau-based syntactic forms.
 
-; ── core syntax (vau-based) ────────────────────────────
+; ── control flow (vau-based) ───────────────────────────
 
 (def and (vau (a b) $e
   (if (eval a $e) (eval b $e) false)))
@@ -19,198 +17,65 @@
 (def unless (vau (test body) $e
   (if (eval test $e) nil (eval body $e))))
 
-; defn: define a named function (single-expression body)
-; (defn greet (name) ["hello " ++ name])
+; ── definition forms ───────────────────────────────────
+
 (def defn (vau (name params body) $e
   (eval `(def ,name (fn ,params ,body)) $e)))
 
-; defmethod: add a handler to a prototype
-; (defmethod Point magnitude () [[self.x * self.x] + [self.y * self.y]])
-; selector is a bare symbol — NOT quoted. vau captures it unevaluated.
 (def defmethod (vau (proto selector params body) $e
   (let ((p (eval proto $e))
         (handler (eval `(fn ,(cons (quote self) params) ,body) $e)))
     [p handle: selector with: handler])))
 
-; alias: copy a handler under a new name
-; (alias Point mag magnitude)  — mag now does what magnitude does
 (def alias (vau (proto new-sel existing-sel) $e
-  (let ((p (eval proto))
+  (let ((p (eval proto $e))
         (handler [p handlerAt: existing-sel]))
     [p handle: new-sel with: handler])))
 
-; ── variadic list ──────────────────────────────────────
+; ── variadic list + string ─────────────────────────────
 
 (def list (fn args args))
 
-; ── boolean & type predicates ──────────────────────────
+(def str (fn args
+  (let ((result "") (remaining args))
+    (while (not (eq remaining nil))
+      (:= result [result ++ [[remaining car] describe]])
+      (:= remaining [remaining cdr]))
+    result)))
+
+; ── standalone utilities ───────────────────────────────
 
 (def not (fn (x) (if x false true)))
 (def nil? (fn (x) (eq x nil)))
 (def some? (fn (x) (not (eq x nil))))
-
-; ── arithmetic ─────────────────────────────────────────
-
-(def abs (fn (x) (if [x < 0] [0 - x] x)))
-(def max (fn (a b) (if [a > b] a b)))
-(def min (fn (a b) (if [a < b] a b)))
-(def zero? (fn (x) (eq x 0)))
-(def positive? (fn (x) [x > 0]))
-(def negative? (fn (x) [x < 0]))
-(def even? (fn (x) (eq [x % 2] 0)))
-(def odd? (fn (x) (not (even? x))))
-(def inc (fn (x) [x + 1]))
-(def dec (fn (x) [x - 1]))
-(def clamp (fn (x lo hi) (min (max x lo) hi)))
-
-; ── list operations ────────────────────────────────────
-
-(def map (fn (f lst)
-  (if (eq lst nil) nil
-    (cons (f [lst car]) (map f [lst cdr])))))
-
-(def filter (fn (f lst)
-  (if (eq lst nil) nil
-    (if (f [lst car])
-      (cons [lst car] (filter f [lst cdr]))
-      (filter f [lst cdr])))))
-
-(def fold (fn (f init lst)
-  (if (eq lst nil) init
-    (fold f (f init [lst car]) [lst cdr]))))
-
-(def reduce (fn (f lst)
-  (fold f [lst car] [lst cdr])))
-
-(def for-each (fn (f lst)
-  (if (eq lst nil) nil
-    (do (f [lst car]) (for-each f [lst cdr])))))
-
-(def reverse (fn (lst)
-  (fold |acc x| (cons x acc) nil lst)))
-
-(def append (fn (a b)
-  (if (eq a nil) b
-    (cons [a car] (append [a cdr] b)))))
-
-(def length (fn (lst)
-  (fold |acc _| [acc + 1] 0 lst)))
-
-(def nth (fn (lst n)
-  (if (eq n 0) [lst car] (nth [lst cdr] [n - 1]))))
-
-(def last (fn (lst)
-  (if (eq [lst cdr] nil) [lst car] (last [lst cdr]))))
-
-(def take (fn (n lst)
-  (if (or (eq n 0) (eq lst nil)) nil
-    (cons [lst car] (take [n - 1] [lst cdr])))))
-
-(def drop (fn (n lst)
-  (if (or (eq n 0) (eq lst nil)) lst
-    (drop [n - 1] [lst cdr]))))
-
-(def zip (fn (a b)
-  (if (or (eq a nil) (eq b nil)) nil
-    (cons (cons [a car] [b car]) (zip [a cdr] [b cdr])))))
-
-(def any? (fn (f lst)
-  (if (eq lst nil) false
-    (if (f [lst car]) true (any? f [lst cdr])))))
-
-(def every? (fn (f lst)
-  (if (eq lst nil) true
-    (if (f [lst car]) (every? f [lst cdr]) false))))
-
-(def find (fn (f lst)
-  (if (eq lst nil) nil
-    (if (f [lst car]) [lst car] (find f [lst cdr])))))
-
 (def member? (fn (x lst)
   (if (eq lst nil) false
     (if (eq x [lst car]) true (member? x [lst cdr])))))
-
 (def range (fn (n)
   (let ((result nil) (i [n - 1]))
     (while [i >= 0] (:= result (cons i result)) (:= i [i - 1]))
     result)))
-
-(def sum (fn (lst) (fold |a x| [a + x] 0 lst)))
-(def product (fn (lst) (fold |a x| [a * x] 1 lst)))
-
-; ── string ─────────────────────────────────────────────
-
-(def str (fn args
-  (fold |acc x| [acc ++ [x describe]] "" args)))
-
-; ── functional combinators ─────────────────────────────
-
-(def id (fn (x) x))
-(def compose (fn (f g) (fn (x) (f (g x)))))
-(def constantly (fn (x) (fn args x)))
-(def flip (fn (f) (fn (a b) (f b a))))
-(def twice (fn (f) (fn (x) (f (f x)))))
-
-; ── protocols ──────────────────────────────────────────
-
-(def Protocol { requires: nil provides: nil includes: nil name: "Protocol" })
-
-(def protocol (fn (name requires provides includes)
-  { Protocol name: name requires: requires provides: provides includes: includes }))
-
-(def has-handlers? (fn (obj required)
-  (if (eq required nil) true
-    (if (member? [required car] [obj handlerNames])
-      (has-handlers? obj [required cdr])
-      false))))
-
-(def conform (fn (proto prot)
-  (let ((provided [prot slotAt: (quote provides)])
-        (remaining nil))
-    (:= remaining provided)
-    (while (some? remaining)
-      (let ((sel [remaining car])
-            (handler [[remaining cdr] car]))
-        (if (not (member? sel [proto handlerNames]))
-          [proto handle: sel with: handler]
-          nil)
-        (:= remaining [[remaining cdr] cdr]))))
-  proto))
-
-(def conforms? (fn (obj prot)
-  (has-handlers? obj [prot slotAt: (quote requires)])))
-
-; ── standard protocols ─────────────────────────────────
-
-(def Comparable (protocol "Comparable"
-  (list (quote <))
-  (list (quote >) (fn (self other) (not [self < other])))
-  nil))
-
-(def Iterable (protocol "Iterable"
-  (list (quote each:))
-  nil nil))
+(def apply (fn (f args) (eval (cons f args))))
 
 ; ── pattern matching ───────────────────────────────────
 
 (def match-pattern? (fn (val pattern)
-  (if (eq pattern (quote _)) true
-    [val equal: pattern])))
+  (if (eq pattern (quote _)) true [val equal: pattern])))
 
 (def match (vau (expr c1 c2) $e
-  (let ((val (eval expr)))
+  (let ((val (eval expr $e)))
     (if (match-pattern? val [c1 car])
-      (eval [[c1 cdr] car])
+      (eval [[c1 cdr] car] $e)
       (if (match-pattern? val [c2 car])
-        (eval [[c2 cdr] car])
+        (eval [[c2 cdr] car] $e)
         nil)))))
 
 (def match3 (vau (expr c1 c2 c3) $e
-  (let ((val (eval expr)))
+  (let ((val (eval expr $e)))
     (if (match-pattern? val [c1 car])
-      (eval [[c1 cdr] car])
+      (eval [[c1 cdr] car] $e)
       (if (match-pattern? val [c2 car])
-        (eval [[c2 cdr] car])
+        (eval [[c2 cdr] car] $e)
         (if (match-pattern? val [c3 car])
-          (eval [[c3 cdr] car])
+          (eval [[c3 cdr] car] $e)
           nil))))))
