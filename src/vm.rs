@@ -108,29 +108,15 @@ impl VM {
                 }
 
                 Op::Call => {
+                    // legacy: (f a b c) now compiles to SEND call:, but keep
+                    // this opcode for tests. just delegates to dispatch_send.
                     let dst = a as usize;
                     let func = self.registers[base + b as usize];
                     let nargs = c as usize;
-
                     let mut args = Vec::with_capacity(nargs);
                     for i in 0..nargs {
                         args.push(self.registers[base + b as usize + 1 + i]);
                     }
-
-                    // check if func is a closure object
-                    if let Some((code_idx, _)) = heap.as_closure(func) {
-                        let result = self.call_closure_obj(heap, func, code_idx, &args)?;
-                        self.registers[base + dst] = result;
-                        continue;
-                    }
-
-                    // check if func is a native
-                    if dispatch::is_native(heap, func) {
-                        let result = dispatch::call_native(heap, func, Value::NIL, &args)?;
-                        self.registers[base + dst] = result;
-                        continue;
-                    }
-
                     let result = self.dispatch_send(heap, func, heap.sym_call, &args)?;
                     self.registers[base + dst] = result;
                 }
@@ -322,9 +308,11 @@ impl VM {
         self.desc_base = closure_desc_base;
 
         // use a LOCAL register array
-        let mut regs = vec![Value::NIL; chunk.num_regs as usize + 16]; // extra room for captures
-        // load args into param registers
-        for (i, arg) in args.iter().enumerate() {
+        let mut regs = vec![Value::NIL; chunk.num_regs as usize + 16];
+        // args[0] is the cons list of actual arguments — unpack into param registers
+        let arg_list = args.first().copied().unwrap_or(Value::NIL);
+        let unpacked = heap.list_to_vec(arg_list);
+        for (i, arg) in unpacked.iter().enumerate() {
             if i < regs.len() {
                 regs[i] = *arg;
             }
@@ -402,22 +390,13 @@ impl VM {
                     regs[base + dst] = result;
                 }
                 Op::Call => {
+                    // legacy — just delegate to send call:
                     let dst = a as usize;
                     let func = regs[base + b as usize];
                     let nargs = c as usize;
                     let mut call_args = Vec::with_capacity(nargs);
                     for i in 0..nargs {
                         call_args.push(regs[base + b as usize + 1 + i]);
-                    }
-                    if let Some((code_idx, _)) = heap.as_closure(func) {
-                        let res = self.call_closure_obj(heap, func, code_idx, &call_args)?;
-                        regs[base + dst] = res;
-                        continue;
-                    }
-                    if dispatch::is_native(heap, func) {
-                        let res = dispatch::call_native(heap, func, Value::NIL, &call_args)?;
-                        regs[base + dst] = res;
-                        continue;
                     }
                     let res = self.dispatch_send(heap, func, heap.sym_call, &call_args)?;
                     regs[base + dst] = res;
@@ -548,10 +527,16 @@ impl VM {
         if dispatch::is_native(heap, handler) {
             dispatch::call_native(heap, handler, receiver, args)
         } else if let Some((code_idx, _)) = heap.as_closure(handler) {
-            // closure handler — prepend receiver as first arg (self)
-            let mut full_args = vec![receiver];
-            full_args.extend_from_slice(args);
-            self.call_closure_obj(heap, handler, code_idx, &full_args)
+            if selector == heap.sym_call {
+                // call: — args[0] is the args list, pass directly
+                self.call_closure_obj(heap, handler, code_idx, args)
+            } else {
+                // method dispatch — prepend receiver as self, wrap in list
+                let mut full_args = vec![receiver];
+                full_args.extend_from_slice(args);
+                let arg_list = heap.list(&full_args);
+                self.call_closure_obj(heap, handler, code_idx, &[arg_list])
+            }
         } else {
             Err(format!("handler {:?} is not callable", handler))
         }

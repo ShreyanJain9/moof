@@ -776,50 +776,54 @@ impl<'a> Compiler<'a> {
         // ... actually, the operative expects individual params, not a list.
         // let's pass the args as individual values (quoted) + env as last
 
-        // simpler: just pass the raw AST values + nil env
-        // the operative's params match 1:1 with the args
-        // rebuild as contiguous registers:
-        // [func_reg, arg1_quoted, arg2_quoted, ..., env_reg]
-        let base = self.next_reg;
-        let func_reg2 = self.alloc_reg();
-        self.chunk.emit(Op::Move, func_reg2, func_reg, 0);
-
-        let mut n_params = 0;
-        for i in 1..items.len() {
+        // build a cons list: (ast-arg1 ast-arg2 ... env)
+        // operative params destructure from this list
+        let list_reg = self.alloc_reg();
+        self.chunk.emit(Op::LoadNil, list_reg, 0, 0);
+        // env is last element
+        self.chunk.emit(Op::Cons, list_reg, env_reg, list_reg);
+        // args in reverse order (so they end up in correct list order)
+        for i in (1..items.len()).rev() {
             let r = self.alloc_reg();
             self.emit_load_const(r, items[i]); // raw AST, not compiled
-            n_params += 1;
+            self.chunk.emit(Op::Cons, list_reg, r, list_reg);
         }
-        // env as last param
-        let env_r = self.alloc_reg();
-        self.chunk.emit(Op::LoadNil, env_r, 0, 0);
-        n_params += 1;
 
-        self.chunk.emit(Op::Call, dst, func_reg2, n_params as u8);
+        // emit [operative call: args-list]
+        let call_const = self.add_sym_const(self.heap.sym_call);
+        self.chunk.emit(Op::Send, dst, func_reg, call_const as u8);
+        self.chunk.code.push(1);
+        self.chunk.code.push(list_reg);
+        self.chunk.code.push(0);
+        self.chunk.code.push(0);
         Ok(())
     }
 
     fn compile_call(&mut self, expr: Value, dst: u8) -> Result<(), String> {
+        // (f a b c) → [f call: (cons a (cons b (cons c nil)))]
+        // call: takes ONE arg — a list of arguments
         let items = self.heap.list_to_vec(expr);
         if items.is_empty() { return Err("empty call".into()); }
 
-        // allocate a contiguous window: [func, arg0, arg1, ...]
-        let window_start = self.next_reg;
-        let func_reg = self.alloc_reg();
-        let nargs = items.len() - 1;
-        let mut arg_regs = Vec::with_capacity(nargs);
-        for _ in 0..nargs {
-            arg_regs.push(self.alloc_reg());
+        let recv_reg = self.alloc_reg();
+        self.compile_expr(items[0], recv_reg)?;
+
+        // build the args list as a cons chain
+        let list_reg = self.alloc_reg();
+        self.chunk.emit(Op::LoadNil, list_reg, 0, 0);
+        for i in (1..items.len()).rev() {
+            let arg_reg = self.alloc_reg();
+            self.compile_expr(items[i], arg_reg)?;
+            self.chunk.emit(Op::Cons, list_reg, arg_reg, list_reg);
         }
 
-        // compile func and args into the contiguous window
-        self.compile_expr(items[0], func_reg)?;
-        for i in 0..nargs {
-            self.compile_expr(items[i + 1], arg_regs[i])?;
-        }
-
-        // emit CALL dst, func, nargs — args must be in func+1..func+nargs
-        self.chunk.emit(Op::Call, dst, func_reg, nargs as u8);
+        // emit SEND recv, call:, (the list)
+        let call_const = self.add_sym_const(self.heap.sym_call);
+        self.chunk.emit(Op::Send, dst, recv_reg, call_const as u8);
+        self.chunk.code.push(1); // nargs = 1 (the list)
+        self.chunk.code.push(list_reg);
+        self.chunk.code.push(0);
+        self.chunk.code.push(0);
 
         Ok(())
     }

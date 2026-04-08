@@ -252,7 +252,12 @@ impl Heap {
             slot_names.push(name);
             slot_values.push(val);
         }
-        self.alloc_val(HeapObject::new_general(Value::NIL, slot_names, slot_values))
+        let id = self.alloc(HeapObject::new_general(Value::NIL, slot_names, slot_values));
+        let val = Value::nursery(id);
+        // set call: handler to self — dispatch recognizes closures by __code_idx
+        let call_sym = self.sym_call;
+        self.get_mut(id).handler_set(call_sym, val);
+        val
     }
 
     /// Check if a value is a closure object. Returns (code_idx, is_operative) if so.
