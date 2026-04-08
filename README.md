@@ -1,35 +1,31 @@
-# MOOF v2: Moof Open Objectspace Fabric
+# moof: a living objectspace
 
 > *"clarus the dogcow lives again"*
 
-a ground-up rewrite of the moof objectspace. same soul, better bones.
+moof is a place, not a language. you open it and you're *somewhere* — a
+persistent, introspectable objectspace where objects are clickable,
+editable, and alive. an AI agent lives inside the image as a co-inhabitant.
+the REPL is the escape hatch, not the front door.
 
-see [SYNTHESIS.md](SYNTHESIS.md) for what v1 was and [VISION.md](VISION.md) for what v2 aims to be.
+**[SYNTHESIS.md](SYNTHESIS.md)** — what v1 was, what went right, what went wrong
+**[VISION.md](VISION.md)** — the full v2 design: browser-first, agent-native, LMDB-persistent
 
-the v1 codebase is preserved on the `archive/v1` branch and tagged `v1-final`.
+the v1 codebase is preserved on `archive/v1` (tagged `v1-final`).
 
-## architecture
+## the idea in 30 seconds
 
-```
-crates/
-  fabric/    the substrate: objects, messaging, LMDB persistence (~800 lines)
-  lang/      the moof language: lexer, parser, compiler, VM (~1500 lines)
-  shell/     the interactive surface: repl, inspector, mcp (~400 lines)
-```
-
-the fabric is language-agnostic. moof-lang is one frontend. the fabric doesn't know about bytecode, ASTs, or s-expressions.
+- **three heap types**: Object, Cons, Blob. that's it.
+- **one operation**: `send(receiver, selector, args)`. everything is messaging.
+- **six kernel forms**: `vau`, `send`, `def`, `quote`, `cons`, `eq`. everything else is derived.
+- **LMDB persistence**: the heap IS the database. no save, no load, no bootstrap after first run.
+- **browser-first**: egui spatial graph of objects. click, inspect, edit. the environment IS the IDE.
+- **agent-native**: an LLM lives in a vat with faceted capabilities. its actions are visible and revocable.
+- **capability security**: vats, membranes, facets. a reference is a capability.
 
 ## status
 
-v2 is in early development. the skeleton compiles, the NaN-boxed value type works, the lexer and parser produce cons-cell ASTs, and the register-based VM executes basic bytecode. the LMDB-backed object store is functional.
-
-what's next: wiring the compiler to the VM, bootstrapping the kernel forms, and reaching REPL parity with v1.
-
-## quick start
-
-```bash
-cargo run
-```
+v2 is in the vision/design phase. no code yet — we're getting the
+architecture right before writing a line. see VISION.md for the full plan.
 
 ## license
 
