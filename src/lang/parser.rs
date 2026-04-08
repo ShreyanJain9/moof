@@ -130,6 +130,12 @@ impl<'a> Parser<'a> {
                 Ok(self.intern(":="))
             }
 
+            Token::Keyword(ref k) => {
+                // keywords in expression context are just symbols
+                let k = k.clone(); self.advance();
+                Ok(self.intern(&k))
+            }
+
             Token::Hash => {
                 self.advance();
                 if self.peek() == &Token::LBracket {

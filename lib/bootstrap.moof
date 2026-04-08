@@ -164,3 +164,70 @@
 (def constantly (fn (x) (fn (a) x)))
 (def flip (fn (f) (fn (a b) (f b a))))
 (def twice (fn (f) (fn (x) (f (f x)))))
+
+; ── list membership ────────────────────────────────────
+
+(def member? (fn (x lst)
+  (if (eq lst nil) false
+    (if (eq x [lst car]) true
+      (member? x [lst cdr])))))
+
+; ── protocols ──────────────────────────────────────────
+;
+; a protocol is an object with:
+;   requires:  list of selector symbols that must exist
+;   provides:  list of (selector handler) pairs that get mixed in
+;   includes:  list of other protocols
+;
+; (protocol requires: '(each:) provides: (list2 'map (fn ...)))
+; (conform Point Comparable <: |self other| ...)
+
+(def Protocol { requires: nil provides: nil includes: nil name: "Protocol" })
+
+; create a new protocol
+(def protocol (fn (name requires provides includes)
+  { Protocol
+    name: name
+    requires: requires
+    provides: provides
+    includes: includes }))
+
+; check if an object has all required handlers
+(def has-handlers? (fn (obj required)
+  (if (eq required nil) true
+    (if (member? [required car] [obj handlerNames])
+      (has-handlers? obj [required cdr])
+      false))))
+
+; conform: mix in provided handlers from a protocol
+(def conform (fn (proto prot)
+  ; mix in provided handlers (flat list: sel1 handler1 sel2 handler2 ...)
+  (let ((provided [prot slotAt: (quote provides)])
+        (remaining nil))
+    (:= remaining provided)
+    (while (some? remaining)
+      (let ((sel [remaining car])
+            (handler [[remaining cdr] car]))
+        (if (not (member? sel [proto handlerNames]))
+          [proto handle: sel with: handler]
+          nil)
+        (:= remaining [[remaining cdr] cdr]))))
+  proto))
+
+; check conformance
+(def conforms? (fn (obj prot)
+  (has-handlers? obj [prot slotAt: (quote requires)])))
+
+; ── standard protocols ─────────────────────────────────
+
+; Comparable: requires <
+(def Comparable (protocol "Comparable"
+  (list1 (quote <))
+  (cons (quote >) (cons (fn (self other) (not [self < other])) nil))
+  nil))
+
+; Iterable: requires each:
+(def Iterable (protocol "Iterable"
+  (cons (quote each:) nil)
+  nil
+  nil))
