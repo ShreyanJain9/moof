@@ -23,6 +23,7 @@ pub struct VM {
     registers: Vec<Value>,
     frames: Vec<Frame>,
     closure_descs: Vec<ClosureDesc>,
+    desc_base: usize, // offset added to MakeClosure indices at runtime
 }
 
 impl VM {
@@ -31,6 +32,7 @@ impl VM {
             registers: vec![Value::NIL; 256],
             frames: Vec::new(),
             closure_descs: Vec::new(),
+            desc_base: 0,
         }
     }
 
@@ -232,12 +234,17 @@ impl VM {
                 }
 
                 Op::MakeClosure => {
-                    // index into closure_descs
-                    let idx = u16::from_be_bytes([b, c]) as usize;
-                    // store a tagged closure reference (using integer as a hack for now)
-                    // the Call handler will look this up
+                    let raw_idx = u16::from_be_bytes([b, c]) as usize;
+                    let idx = raw_idx + self.desc_base;
+                    // capture values from current registers
+                    if idx < self.closure_descs.len() {
+                        let parent_regs = self.closure_descs[idx].capture_parent_regs.clone();
+                        let captures: Vec<Value> = parent_regs.iter()
+                            .map(|&r| self.registers[base + r as usize])
+                            .collect();
+                        self.closure_descs[idx].capture_values = captures;
+                    }
                     self.registers[base + a as usize] = Value::integer(-(idx as i64) - 1);
-                    // negative integer = closure desc index (hack until we have proper closure objects)
                 }
 
                 Op::Eval => {
@@ -286,15 +293,33 @@ impl VM {
         if desc_idx >= self.closure_descs.len() {
             return Err(format!("closure index {} out of bounds (have {})", desc_idx, self.closure_descs.len()));
         }
-        // clone chunk data to avoid borrow conflicts with self
+        // clone chunk + capture data to avoid borrow conflicts
         let chunk = self.closure_descs[desc_idx].chunk.clone();
+        let captures = self.closure_descs[desc_idx].capture_values.clone();
+        let closure_desc_base = self.closure_descs[desc_idx].desc_base;
+        let capture_local_regs = self.closure_descs[desc_idx].capture_local_regs.clone();
+        // save and set desc_base for this closure's context
+        let saved_desc_base = self.desc_base;
+        self.desc_base = closure_desc_base;
 
-        // use a LOCAL register array — don't touch self.registers
-        // this avoids corruption when eval_result/execute recurse
-        let mut regs = vec![Value::NIL; chunk.num_regs as usize + 1];
+        // use a LOCAL register array
+        let mut regs = vec![Value::NIL; chunk.num_regs as usize + 16]; // extra room for captures
+        // load args into param registers
         for (i, arg) in args.iter().enumerate() {
             if i < regs.len() {
                 regs[i] = *arg;
+            }
+        }
+        // load captured values into their allocated registers
+        // (the compiler allocated local regs for captured vars after params)
+        // find where the capture regs start — they were allocated AFTER params
+        // load captured values into their actual compiler-assigned registers
+        for (i, val) in captures.iter().enumerate() {
+            if i < capture_local_regs.len() {
+                let reg = capture_local_regs[i] as usize;
+                if reg < regs.len() {
+                    regs[reg] = *val;
+                }
             }
         }
 
@@ -480,13 +505,24 @@ impl VM {
                     heap.get_mut(obj_id).handler_set(sel_sym, handler);
                 }
                 Op::MakeClosure => {
-                    let idx = u16::from_be_bytes([b, c]) as usize;
+                    let raw_idx = u16::from_be_bytes([b, c]) as usize;
+                    let idx = raw_idx + self.desc_base;
+                    // capture from LOCAL regs
+                    if idx < self.closure_descs.len() {
+                        let parent_regs = self.closure_descs[idx].capture_parent_regs.clone();
+                        let captures: Vec<Value> = parent_regs.iter()
+                            .map(|&r| regs[base + r as usize])
+                            .collect();
+                        self.closure_descs[idx].capture_values = captures;
+                    } else {
+                    }
                     regs[base + a as usize] = Value::integer(-(idx as i64) - 1);
                 }
                 _ => break Err(format!("unimplemented in closure: {opcode:?}")),
             }
         };
 
+        self.desc_base = saved_desc_base;
         result
     }
 
@@ -521,24 +557,12 @@ impl VM {
         // if base_idx > 0 we'd need to patch MakeClosure operands, but for now
         // each compile_toplevel starts from 0 — we rely on the compiler
         // producing indices relative to its own descs, then offset here
-        let mut chunk = result.chunk;
-        if base_idx > 0 {
-            // patch MakeClosure instructions to offset their indices
-            let mut pc = 0;
-            while pc + 3 < chunk.code.len() {
-                if Op::from_u8(chunk.code[pc]) == Some(Op::MakeClosure) {
-                    let old_idx = u16::from_be_bytes([chunk.code[pc + 2], chunk.code[pc + 3]]);
-                    let new_idx = old_idx + base_idx as u16;
-                    chunk.code[pc + 2] = (new_idx >> 8) as u8;
-                    chunk.code[pc + 3] = new_idx as u8;
-                }
-                pc += 4;
-                // skip extra data for Send instructions
-                if pc >= 4 && Op::from_u8(chunk.code[pc - 4]) == Some(Op::Send) {
-                    pc += 4;
-                }
-            }
+        let chunk = result.chunk;
+        // set desc_base on each newly added desc
+        for i in base_idx..self.closure_descs.len() {
+            self.closure_descs[i].desc_base = base_idx;
         }
+        self.desc_base = base_idx;
         self.execute(heap, &chunk, Value::NIL)
     }
 }

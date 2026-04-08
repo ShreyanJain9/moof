@@ -12,6 +12,11 @@ pub struct ClosureDesc {
     pub chunk: Chunk,
     pub param_names: Vec<u32>,
     pub is_operative: bool,
+    pub capture_names: Vec<u32>,
+    pub capture_parent_regs: Vec<u8>,  // which parent registers to read
+    pub capture_local_regs: Vec<u8>,   // which local registers to write captures into
+    pub capture_values: Vec<Value>,
+    pub desc_base: usize,  // the desc_base when this closure was compiled
 }
 
 pub struct CompileResult {
@@ -24,7 +29,9 @@ pub struct Compiler<'a> {
     chunk: Chunk,
     next_reg: u8,
     pub closure_descs: Vec<ClosureDesc>,
-    locals: Vec<(u32, u8)>, // (symbol_id, register) — local variable bindings
+    locals: Vec<(u32, u8)>,
+    captures: Vec<(u32, u8, u8)>, // (symbol_id, parent_reg, local_reg)
+    parent_locals: Vec<(u32, u8)>, // locals from the enclosing compiler
 }
 
 impl<'a> Compiler<'a> {
@@ -35,6 +42,8 @@ impl<'a> Compiler<'a> {
             next_reg: 0,
             closure_descs: Vec::new(),
             locals: Vec::new(),
+            captures: Vec::new(),
+            parent_locals: Vec::new(),
         }
     }
 
@@ -47,9 +56,24 @@ impl<'a> Compiler<'a> {
         r
     }
 
-    fn find_local(&self, sym_id: u32) -> Option<u8> {
-        // search locals from the end (most recent binding wins)
-        self.locals.iter().rev().find(|(s, _)| *s == sym_id).map(|(_, r)| *r)
+    fn find_local(&mut self, sym_id: u32) -> Option<u8> {
+        // search own locals first
+        if let Some((_, r)) = self.locals.iter().rev().find(|(s, _)| *s == sym_id) {
+            return Some(*r);
+        }
+        // check if already captured
+        if let Some((_, _, lr)) = self.captures.iter().find(|(s, _, _)| *s == sym_id) {
+            return Some(*lr);
+        }
+        // check parent locals — if found, add as a capture
+        if let Some((_, parent_reg)) = self.parent_locals.iter().rev().find(|(s, _)| *s == sym_id) {
+            let parent_reg = *parent_reg;
+            let local_reg = self.alloc_reg();
+            self.captures.push((sym_id, parent_reg, local_reg));
+            self.locals.push((sym_id, local_reg));
+            return Some(local_reg);
+        }
+        None
     }
 
     fn add_sym_const(&mut self, sym_id: u32) -> u16 {
@@ -234,6 +258,7 @@ impl<'a> Compiler<'a> {
 
                     // compile body
                     let mut sub = Compiler::new(self.heap, "<vau>");
+                    sub.parent_locals = self.locals.clone();
                     sub.chunk.arity = arity;
                     for &sym in &param_syms {
                         let reg = sub.alloc_reg();
@@ -250,12 +275,19 @@ impl<'a> Compiler<'a> {
                         sub.compile_expr(*items.last().unwrap(), body_dst)?;
                     }
                     sub.chunk.emit(Op::Return, body_dst, 0, 0);
+                    let capture_names: Vec<u32> = sub.captures.iter().map(|(s, _, _)| *s).collect();
+                    let capture_parent_regs: Vec<u8> = sub.captures.iter().map(|(_, r, _)| *r).collect();
+                    let capture_local_regs: Vec<u8> = sub.captures.iter().map(|(_, _, lr)| *lr).collect();
                     let sub_result = sub.finish();
 
                     let desc = ClosureDesc {
                         chunk: sub_result.chunk,
                         param_names: param_syms,
                         is_operative: true,
+                        capture_names,
+                        capture_parent_regs,
+                        capture_local_regs,
+                        capture_values: Vec::new(), desc_base: 0,
                     };
                     self.closure_descs.extend(sub_result.closure_descs);
                     let idx = self.closure_descs.len();
@@ -279,6 +311,7 @@ impl<'a> Compiler<'a> {
 
                     // compile body as a sub-chunk
                     let mut sub = Compiler::new(self.heap, "<fn>");
+                    sub.parent_locals = self.locals.clone();
                     sub.chunk.arity = arity;
                     // allocate registers for params and register them as locals
                     for &sym in &param_syms {
@@ -298,12 +331,19 @@ impl<'a> Compiler<'a> {
                         sub.compile_expr(*items.last().unwrap(), body_dst)?;
                     }
                     sub.chunk.emit(Op::Return, body_dst, 0, 0);
+                    let capture_names: Vec<u32> = sub.captures.iter().map(|(s, _, _)| *s).collect();
+                    let capture_parent_regs: Vec<u8> = sub.captures.iter().map(|(_, r, _)| *r).collect();
+                    let capture_local_regs: Vec<u8> = sub.captures.iter().map(|(_, _, lr)| *lr).collect();
                     let sub_result = sub.finish();
 
                     let desc = ClosureDesc {
                         chunk: sub_result.chunk,
                         param_names: param_syms,
                         is_operative: false,
+                        capture_names,
+                        capture_parent_regs,
+                        capture_local_regs,
+                        capture_values: Vec::new(), desc_base: 0,
                     };
                     // pull up any nested closure descs
                     self.closure_descs.extend(sub_result.closure_descs);
@@ -923,8 +963,40 @@ pub fn register_type_protos(heap: &mut Heap) {
     let eq_sym = heap.intern("=");
     heap.get_mut(int_id).handler_set(eq_sym, eq_handler);
 
+    let h = heap.register_native("__int_gte", |_heap, receiver, args| {
+        let a = receiver.as_integer().ok_or(">= : not int")?;
+        let b = args.first().and_then(|v| v.as_integer()).ok_or(">= : arg not int")?;
+        Ok(Value::boolean(a >= b))
+    });
+    let gte_sym = heap.intern(">=");
+    heap.get_mut(int_id).handler_set(gte_sym, h);
+
+    let h = heap.register_native("__int_lte", |_heap, receiver, args| {
+        let a = receiver.as_integer().ok_or("<= : not int")?;
+        let b = args.first().and_then(|v| v.as_integer()).ok_or("<= : arg not int")?;
+        Ok(Value::boolean(a <= b))
+    });
+    let lte_sym = heap.intern("<=");
+    heap.get_mut(int_id).handler_set(lte_sym, h);
+
+    let h = heap.register_native("__int_mod", |_heap, receiver, args| {
+        let a = receiver.as_integer().ok_or("% : not int")?;
+        let b = args.first().and_then(|v| v.as_integer()).ok_or("% : arg not int")?;
+        if b == 0 { return Err("modulo by zero".into()); }
+        Ok(Value::integer(a % b))
+    });
+    let mod_sym = heap.intern("%");
+    heap.get_mut(int_id).handler_set(mod_sym, h);
+
+    let h = heap.register_native("__int_negate", |_heap, receiver, _args| {
+        let a = receiver.as_integer().ok_or("negate: not int")?;
+        Ok(Value::integer(-a))
+    });
+    let neg_sym = heap.intern("negate");
+    heap.get_mut(int_id).handler_set(neg_sym, h);
+
     let describe_handler = heap.register_native("__int_describe", |_heap, receiver, _args| {
-        Ok(receiver) // integers describe as themselves
+        Ok(receiver)
     });
     let describe_sym = heap.intern("describe");
     heap.get_mut(int_id).handler_set(describe_sym, describe_handler);
@@ -1018,6 +1090,20 @@ pub fn register_type_protos(heap: &mut Heap) {
         Ok(Value::boolean(a == b))
     });
     heap.get_mut(float_id).handler_set(eq_sym, h);
+
+    let h = heap.register_native("__float_gte", |_heap, receiver, args| {
+        let a = receiver.as_float().ok_or(">= : not numeric")?;
+        let b = args.first().and_then(|v| v.as_float()).ok_or(">= : arg not numeric")?;
+        Ok(Value::boolean(a >= b))
+    });
+    heap.get_mut(float_id).handler_set(gte_sym, h);
+
+    let h = heap.register_native("__float_lte", |_heap, receiver, args| {
+        let a = receiver.as_float().ok_or("<= : not numeric")?;
+        let b = args.first().and_then(|v| v.as_float()).ok_or("<= : arg not numeric")?;
+        Ok(Value::boolean(a <= b))
+    });
+    heap.get_mut(float_id).handler_set(lte_sym, h);
 
     let h = heap.register_native("__float_sqrt", |_heap, receiver, _args| {
         let a = receiver.as_float().ok_or("sqrt: not numeric")?;

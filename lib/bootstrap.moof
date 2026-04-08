@@ -49,7 +49,7 @@
 (def zero? (fn (x) (eq x 0)))
 (def positive? (fn (x) [x > 0]))
 (def negative? (fn (x) [x < 0]))
-(def even? (fn (x) (eq [x - [[x / 2] * 2]] 0)))
+(def even? (fn (x) (eq [x % 2] 0)))
 (def odd? (fn (x) (not (even? x))))
 (def inc (fn (x) [x + 1]))
 (def dec (fn (x) [x - 1]))
