@@ -1,483 +1,585 @@
-# moof v2: the real redesign
+# moof v2
 
-> what if we actually meant "not a programming language"?
-
----
-
-## the diagnosis
-
-v1 said "moof is not a programming language" and then built a programming
-language. a good one! bytecode VM, operatives, prototype objects, module
-system. but at the end of the day you type s-expressions into a REPL and
-get values back. that's a programming language.
-
-the design doc's own section 10 describes Browser, Inspector, Workspace,
-Transcript, Debugger — a full live environment where objects are
-clickable, editable, wirable. none of that exists. what exists is a
-text REPL. the gap between the vision and the artifact is the actual
-problem, not the implementation quality.
-
-so the question isn't "how do we build a better VM." the question is:
-**what does it feel like to live inside a moof image?**
+> a persistent, concurrent objectspace with capability security
+> and a lisp-shaped surface syntax.
 
 ---
 
-## the thesis
+## what moof is
 
-moof is a **place**. not a language, not a tool, not an app.
+moof is a runtime. like the BEAM is erlang's runtime, moof is
+moof's runtime. it's not a "language-agnostic substrate" and it's
+not a "pluggable fabric." it knows what it is. it knows how to
+run code. the surface syntax is separate — but the computational
+model (objects, messaging, vats, operatives, persistence) is the
+runtime. inseparable.
 
-you open moof and you're *somewhere*. there are objects around you.
-you can look at them, touch them, talk to them. some of them are
-data (a number, a string, a list). some of them are behavior (a
-handler, a method, a rule). some of them are alive (an agent, a
-process, a subscription). the boundary between these categories is
-blurry on purpose.
+the things that make moof moof:
 
-the keyboard is one way in. but it's not the primary way. the
-primary way is *pointing and speaking* — clicking on objects in a
-spatial browser, and telling an AI agent what you want. the REPL
-is the power-user escape hatch, not the front door.
+1. **everything is an object.** integers, strings, booleans,
+   functions, environments, errors, the module system, the agent.
+   objects have slots (private storage) and handlers (public
+   behavior). handlers delegate through prototype chains.
 
-this changes everything about the implementation priorities.
+2. **the only operation is send.** `[obj selector: arg]` is the
+   one thing the VM does. function calls, arithmetic, slot access,
+   control flow — all message sends. `(f x)` is `[f call: x]`.
+   `[3 + 4]` is a send to an integer with selector `+`.
 
----
+3. **vats are the unit of concurrency.** a vat is a single-threaded
+   event loop that owns a set of objects. within a vat, sends are
+   synchronous. across vats, sends are asynchronous and return
+   promises. this is E's model. this is erlang's model. no shared
+   mutable state. no locks. ever.
 
-## what changes
+4. **a reference is a capability.** if you hold a reference to an
+   object, you can send it messages. if you don't, the object
+   doesn't exist in your world. there is no global namespace, no
+   ambient authority, no way to conjure a reference from a name.
+   this is E's capability model, applied everywhere.
 
-### 1. the browser is the primary interface, not the REPL
+5. **the image persists.** when you define an object, it survives
+   restarts. there is no "save." there is no "load." the objects
+   are just there. the image is the program is the data is the
+   state.
 
-v1 built the VM first and treated the browser as a nice-to-have.
-v2 inverts this: **the browser is the first thing that works.**
-
-the browser shows the objectspace as a spatial graph. objects are
-nodes. references are edges. you click an object, you see its
-slots and handlers. you click a handler, you see its source. you
-can edit a slot value inline. you can drag a reference from one
-object to another.
-
-this means the browser isn't an afterthought bolted onto the VM.
-the browser IS the environment. the VM exists to make the browser's
-objects come alive.
-
-implementation: egui. not a TUI, not a web app. a native window
-that feels like a tool you reach for, not a website you visit.
-
-### 2. the agent is a co-inhabitant, not an API client
-
-v1 had an MCP server that let an AI poke at the image from outside.
-that's the wrong topology. the agent should be *inside* the image,
-in its own vat, with its own objects, seeing the same objectspace
-you see in the browser.
-
-when you're looking at an object in the browser and you say "make
-this sortable," the agent sees the same object, creates a handler,
-and you watch it appear in real time. the agent's work is visible,
-auditable, and reversible because it's just objects in the image.
-
-the agent isn't called via MCP. the agent IS an object. it responds
-to messages. it has a mailbox. it has capabilities (faceted
-references). you can inspect the agent's memory, its pending
-actions, its history — because those are objects too.
-
-implementation: the agent's vat runs an LLM tool-use loop. its
-"tools" are the handlers on the objects it holds references to.
-every tool call is a message send. every message send goes through
-the membrane. the membrane can log, rate-limit, require approval,
-or deny. this is capability security doing real work.
-
-### 3. persistence is structural, not serialized
-
-v1 agonized over persistence: binary snapshots? source files?
-WAL? four rewrites. the core issue: treating the heap as a thing
-that needs to be "saved" — as if it were a document.
-
-v2 approach: **the heap IS the database.** not "backed by a
-database" — IS one. every mutation is a transaction. there is no
-"save" operation because there is no unsaved state. if the process
-crashes, you lose nothing. if the power goes out, you lose nothing.
-
-this isn't LMDB as a storage backend for a traditional heap. this
-is the heap *being* an LMDB environment. objects don't live in
-memory and get flushed to disk. objects live in the memory-mapped
-file and get paged into RAM by the OS on demand.
-
-the implication: startup is instantaneous (mmap, done). there is
-no bootstrap. there is no "loading modules." the objects are already
-there. the first time you start, you build the image; after that,
-you just open it.
-
-### 4. vau gets a reality check
-
-vau is beautiful. vau is also an optimization cliff. every call
-site that might receive unevaluated arguments is a call site the
-compiler can't reason about. the v1 design doc waves at "inline
-caching and operative specialization at the JIT level" but that
-JIT will take person-years to build and might never happen.
-
-here's the uncomfortable truth: 95% of operative usage is `if`,
-`let`, `when`, `unless`, `cond`, `match`, `while` — forms that
-are defined once and never redefined. they don't NEED to be
-operatives at runtime. they need to be operatives at DESIGN time
-(so the language stays minimal and the user has compiler-level
-power) but they can compile to normal control flow.
-
-v2 approach: **vau is a compile-time construct by default.**
-
-the compiler knows which operatives are "stable" (bound at the
-top level, never reassigned). stable operatives are expanded at
-compile time, like macros — but they're defined with vau syntax,
-so they have full access to the AST and the environment. the
-result is normal bytecode: branches, loops, calls.
-
-for the rare case where you actually want a runtime operative
-(metaprogramming, DSL construction, reflective tower), you mark
-it `(vau/dynamic ...)`. this tells the compiler "yes, really,
-reify the environment at this call site." this is the slow path.
-it's there when you need it. you almost never need it.
-
-this means `(if cond then else)` compiles to a conditional jump,
-not a function call. `(let ((x 1)) body)` compiles to a local
-binding, not an environment allocation. the 95% case is fast.
-the 5% case is possible.
-
-### 5. the object model simplifies
-
-v1 has: Object, Cons, String, Bytes, Environment, Lambda,
-Operative, BytecodeChunk, NativeFunction. nine heap object types.
-that's too many. most of them are just Objects with specific slots.
-
-v2 has three heap types:
-
-```
-Object  { parent, slots, handlers }
-Cons    { car, cdr }
-Blob    { bytes }
-```
-
-that's it. strings are Blobs with a type tag. bytecode is a Blob.
-environments are Objects (bindings are slots, parent env is parent).
-lambdas are Objects (code is a Blob slot, params is a slot).
-native functions are Objects (name is a symbol slot).
-
-the dispatch system doesn't need to know about any of this. it
-sees handlers (values in the handler table) and asks the registered
-invokers "can you run this?" the bytecode invoker knows that a
-handler pointing to an Object with a `code` slot is a lambda. the
-native invoker knows that a handler pointing to a symbol is a
-native. they coexist.
-
-### 6. the wire protocol is MCP
-
-v1 defined a custom binary wire protocol. why? MCP already exists.
-it's JSON-RPC over stdio or HTTP. every AI tool already speaks it.
-
-v2's external protocol IS MCP. the fabric speaks MCP natively.
-when a remote client connects, it gets an MCP session. `tools/list`
-returns the handlers on the objects in its vat. `tools/call` is a
-message send. `resources/list` returns objects with `describe`.
-`resources/read` returns slot data.
-
-this means: every moof image is an MCP server out of the box.
-claude desktop can connect to it. any MCP client can connect to it.
-the protocol for "AI agent talks to moof" and "remote moof talks to
-moof" and "custom app talks to moof" is the same protocol.
-
-for in-process communication (the browser, the REPL), we skip the
-JSON serialization and call directly. but the API surface is the
-same: send a message, get a result.
-
-### 7. the surface syntax is just one frontend
-
-v1's syntax is good. keep it. `()` `[]` `{}`, keywords, dot
-access, `@self`, `'quote`. it's readable and it's elegant.
-
-but the syntax is not the environment. the syntax is one way to
-produce ASTs. the browser is another (click "add handler," type
-the body). the agent is another (it constructs ASTs from tool
-calls). a hypothetical lua or python frontend is another.
-
-v2 makes this real by putting the parser in the `lang` crate and
-keeping it out of the `fabric` and `shell` crates entirely. the
-browser and the agent don't parse s-expressions. they construct
-objects directly.
+6. **vau gives user code compiler power.** an operative receives
+   its arguments unevaluated and the caller's environment as a
+   first-class value. `if`, `let`, `while`, `match` are library
+   functions, not special forms. the user has the same expressive
+   power as the compiler.
 
 ---
 
-## the new architecture
+## the debts
+
+every design choice comes from somewhere. these are the systems
+moof is stealing from and what specifically it takes:
+
+### erlang / BEAM
+
+the most important influence on v2.
+
+- **processes everywhere.** in erlang, everything runs in a
+  process. processes are cheap (thousands, millions). they
+  communicate by message passing. they don't share memory. if
+  one crashes, the others don't.
+
+  in moof: vats are processes. objects live in vats. cross-vat
+  sends are async messages. a vat crash is isolated. the
+  scheduler is preemptive (fuel-based, like BEAM's reductions).
+
+- **let it crash.** erlang doesn't try to prevent errors. it
+  lets processes crash and restarts them from a known-good state.
+  supervisors monitor processes and restart them on failure.
+
+  in moof: `doesNotUnderstand:` is not a bug — it's a message.
+  a vat can crash without taking down the image. supervisor
+  objects can monitor vats and restart them. the image persists
+  through crashes.
+
+- **hot code swapping.** in erlang, you can replace a module's
+  code while the system is running. the old code keeps serving
+  existing calls; new calls use the new code.
+
+  in moof: handlers are just slots on prototype objects. change
+  a handler, and the next send uses the new code. no restart.
+  the image is always live.
+
+- **distribution is transparent.** in erlang, sending a message
+  to a process on another node looks the same as sending to a
+  local process. the runtime handles serialization.
+
+  in moof: a reference to an object in a remote image looks
+  like a local reference. send goes over the network. the vat
+  model already has async messaging — remote is just "more async."
+
+### E language (mark miller)
+
+the capability security model and the concurrency model.
+
+- **near refs and far refs.** a near ref is to an object in your
+  vat — sends are synchronous, immediate. a far ref is to an
+  object in another vat — sends are asynchronous, return promises.
+
+  in moof: same-vat sends use `[obj selector: arg]` (synchronous).
+  cross-vat sends use `[obj <- selector: arg]` (eventual, returns
+  a promise). the syntax makes the distinction visible.
+
+- **promise pipelining.** in E, `x <- foo() <- bar()` sends
+  `bar` to the *promise* of `x.foo()`, not to the resolved value.
+  the messages queue up and execute in order when the promise
+  resolves. this avoids round-trip latency.
+
+  in moof: `[[obj <- foo] <- bar: x]` pipelines. the second send
+  attaches to the promise of the first. the scheduler delivers
+  them in order.
+
+- **membranes.** a membrane wraps an object graph and intercepts
+  all sends crossing the boundary. used for: logging, access
+  control, revocation, attenuation.
+
+  in moof: membranes are objects with `on-send:` handlers. wrap
+  any object. intercept any message. log, allow, deny, transform.
+  the agent lives behind a membrane. always.
+
+- **facets.** a facet is a restricted view of an object that
+  exposes only named selectors. `[obj facet: '(read: list:)]`
+  gives you a read-only view.
+
+  in moof: facets compose with membranes. the agent gets faceted
+  references wrapped in a logging membrane. it can do exactly
+  what the facets allow, and every action is recorded.
+
+### haskell
+
+not the type system. the thinking about effects.
+
+- **effects are visible.** in haskell, a function that does IO
+  has `IO` in its type. you can't accidentally do IO in pure code.
+  effects are tracked, not hidden.
+
+  in moof: IO is a capability. if your vat doesn't hold a
+  reference to the Console or Filesystem object, you can't do IO.
+  period. capabilities are haskell's IO monad made concrete — not
+  a type-level constraint but an object-level one. you physically
+  cannot print unless someone gave you the printer.
+
+- **laziness.** haskell evaluates expressions only when needed.
+  infinite data structures are fine.
+
+  in moof: streams. `[integers from: 1]` returns a lazy infinite
+  stream. `[[integers from: 1] take: 10]` materializes the first
+  10. streams are objects with a `next` handler that computes on
+  demand. not pervasive laziness (that's too hard to reason about)
+  but explicit lazy objects where you want them.
+
+- **pattern matching.** haskell's case expressions destructure
+  data cleanly.
+
+  in moof: `match` as a derived form from vau. pattern matching
+  on message arguments, on object structure, on type. this is
+  where vau earns its keep — `match` is a library function that
+  inspects its arguments unevaluated and compiles to efficient
+  dispatch.
+
+### ruby
+
+the vibes.
+
+- **everything is an object.** `3.times { |i| puts i }` — the
+  integer 3 is an object, `times` is a method, the block is a
+  closure. no primitives. no special cases.
+
+  moof takes this literally. `[3 times: { :i [Console println: i] }]`
+  is a message send to an integer. the integer's `times:` handler
+  iterates and calls the block. no special syntax. no special case.
+
+- **blocks.** ruby's blocks are closures you pass to methods.
+  `array.each { |x| process(x) }`. the method receives the block
+  and calls it when ready.
+
+  in moof: blocks are objects with a `call:` handler. `{ :x [x + 1] }`
+  is an object. you pass it as an argument. the receiving handler
+  sends `call:` to it. blocks close over their environment.
+
+- **method_missing.** in ruby, if an object doesn't have a method,
+  `method_missing` is called. you can override it. proxies,
+  delegation, DSLs — all built on this.
+
+  in moof: `doesNotUnderstand:`. same idea. when handler lookup
+  fails (including the full delegation chain), the receiver gets
+  a `doesNotUnderstand:` message with the selector and args. the
+  default handler raises an error. override it for proxies,
+  forwarding, dynamic dispatch, whatever.
+
+- **open classes.** in ruby, you can reopen any class and add
+  methods. `class Integer; def prime?; ...; end; end`.
+
+  in moof: handlers are slots on prototype objects. add a handler
+  to Integer's prototype and every integer gains that behavior.
+  `[Integer handle: 'prime? with: (fn (self) ...)]`. no ceremony.
+  the image is always malleable.
+
+### self
+
+the object model and the live environment.
+
+- **prototypes, not classes.** objects delegate to other objects.
+  no class/metaclass distinction. create an object by cloning
+  another and modifying it.
+
+  in moof: same. `{ Point x: 3 y: 4 }` creates an object with
+  Point as parent. Point delegates to Object. no classes anywhere.
+
+- **the live environment.** self had an IDE where objects were
+  visual things you could click on, inspect, modify. the
+  environment was the language was the IDE.
+
+  in moof: the browser. objects are panels. click, inspect, edit.
+  the agent lives there too.
+
+---
+
+## the runtime
+
+### values
+
+NaN-boxed, 8 bytes each. no heap allocation for common values.
 
 ```
-                         moof process
- ┌──────────────────────────────────────────────────────────┐
- │                                                          │
- │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
- │  │  browser      │  │  repl        │  │  mcp server  │   │
- │  │  (egui)       │  │  (readline)  │  │  (stdio/tcp) │   │
- │  │               │  │              │  │              │   │
- │  │  spatial graph │  │  text in/out │  │  json-rpc    │   │
- │  │  click-edit   │  │  parse-eval  │  │  tool calls  │   │
- │  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘   │
- │         │                 │                 │            │
- │         ▼                 ▼                 ▼            │
- │  ┌─────────────────────────────────────────────────┐     │
- │  │               moof-lang                          │     │
- │  │  lexer -> parser -> analyzer -> compiler -> vm   │     │
- │  │                                                   │     │
- │  │  the moof language. one frontend among many.      │     │
- │  │  registers BytecodeInvoker with the fabric.       │     │
- │  └─────────────────────┬───────────────────────────┘     │
- │                        │                                  │
- │                        ▼                                  │
- │  ┌─────────────────────────────────────────────────┐     │
- │  │               moof-fabric                        │     │
- │  │                                                   │     │
- │  │  the substrate. language-agnostic.                │     │
- │  │                                                   │     │
- │  │  ┌─────────┐ ┌─────────┐ ┌───────┐ ┌─────────┐  │     │
- │  │  │ objects  │ │  send   │ │ vats  │ │  store  │  │     │
- │  │  │ (3 types)│ │ dispatch│ │ sched │ │ (LMDB)  │  │     │
- │  │  └─────────┘ └─────────┘ └───────┘ └─────────┘  │     │
- │  │                                                   │     │
- │  │  no bytecode. no ASTs. no syntax. no language.    │     │
- │  └───────────────────────────────────────────────────┘     │
- │                                                          │
- └──────────────────────────────────────────────────────────┘
+nil, true, false          — singleton tags
+integer (48-bit signed)   — inline in the NaN payload
+float (64-bit)            — the non-NaN bit patterns
+symbol (32-bit interned)  — inline in the NaN payload
+object reference (32-bit) — inline in the NaN payload
 ```
 
-### the fabric (~800 lines)
+everything that isn't an object is a tagged immediate. this means
+arithmetic never allocates. comparisons never allocate. symbol
+lookup never allocates.
 
-three object types. one operation (send). one store (LMDB).
-one scheduler (vats + mailboxes). one extension point
-(HandlerInvoker trait).
+### objects
 
-```rust
-enum HeapObject {
-    Object { parent: Value, slots: Vec<(u32, Value)>, handlers: Vec<(u32, Value)> },
-    Cons { car: Value, cdr: Value },
-    Blob(Vec<u8>),
+three kinds of heap entity:
+
+```
+Object  { parent: Value, slots: [(sym, val)], handlers: [(sym, val)] }
+Cons    { car: Value, cdr: Value }
+Blob    { tag: u8, bytes: [u8] }
+```
+
+**Object**: the universal container. slots are private storage.
+handlers are public behavior. parent enables delegation. an
+environment is an Object (bindings are slots, parent env is parent).
+a lambda is an Object (code blob, params, captured env). there is
+no separate Lambda or Environment heap type — they're just Objects
+with certain slots.
+
+**Cons**: pairs. the AST is cons lists. function argument lists are
+cons lists. everything that's a sequence is cons cells.
+
+**Blob**: opaque bytes with a type tag. strings (tag 0), bytecode
+chunks (tag 1), raw bytes (tag 2). the VM knows how to interpret
+bytecode blobs. everything else is opaque data.
+
+### send
+
+the heart. the only operation.
+
+```
+send(receiver, selector, args) → result
+
+1. if receiver is an object:
+   a. look in receiver's handler table for selector
+   b. if not found, recurse on receiver's parent (delegation)
+   c. depth limit: 256 levels
+
+2. if receiver is a primitive (int, float, symbol, bool, nil):
+   a. look in the type prototype's handler table
+   b. Integer prototype has +, -, *, /, etc.
+   c. String prototype has length, at:, etc.
+
+3. if handler found:
+   a. if handler is a bytecode object → execute in VM
+   b. if handler is a native → call the rust closure
+   c. handler receives (self, args...)
+
+4. if no handler found:
+   a. send doesNotUnderstand: to receiver with selector + args
+   b. default doesNotUnderstand: raises an error
+```
+
+there is no "HandlerInvoker trait." the VM knows what bytecode is
+and knows what native closures are. those are the two kinds of
+handler. if we ever need a third kind (wasm? python?), we add it
+to the VM. the VM is not a plugin host — it's the runtime.
+
+### the VM
+
+register-based bytecode. the interpreter is a loop over a flat
+instruction array. each instruction is 4 bytes: opcode + 3 operands.
+
+the key opcodes:
+
+```
+LOAD_CONST    r, const    — load a constant into register r
+LOAD_LOCAL    r, depth, slot — load from enclosing scope (de bruijn)
+STORE_LOCAL   depth, slot, r — store into enclosing scope
+SEND          dst, recv, sel, nargs — message send
+CALL          dst, func, nargs — applicative call (sugar for send call:)
+TAIL_CALL     func, nargs  — replace current frame
+JUMP          offset       — unconditional
+JUMP_FALSE    r, offset    — conditional
+MAKE_OBJECT   dst, parent  — create object
+SET_SLOT      obj, sym, val
+SET_HANDLER   obj, sym, val
+CLOSURE       dst, code    — capture current environment
+RETURN        r
+```
+
+environments are Objects on the heap. closures capture a reference
+to the defining environment's Object. de bruijn indices mean the
+compiler resolves variable names at compile time — the VM never
+does name lookup.
+
+**tail calls are real.** `TAIL_CALL` replaces the current frame.
+recursive loops don't grow the stack. this is not optional — it's
+how `while`, `loop`, `map`, `fold` work without stack overflow.
+
+### vats
+
+every vat is a single-threaded event loop. objects belong to
+exactly one vat. sends within a vat are synchronous (direct call).
+sends across vats are eventual (message queued to target vat's
+mailbox, returns a promise).
+
+```
+Vat {
+    id: u32,
+    objects: Set<ObjectId>,  — which objects live here
+    mailbox: Queue<Message>, — pending incoming messages
+    capabilities: [Value],   — faceted refs given at creation
+    fuel: u32,               — reductions before preemption
 }
 ```
 
-values are NaN-boxed: 8 bytes, zero allocation for nil/bool/int/
-float/symbol/objref. the store is LMDB. persistence is free —
-every mutation is a transaction.
+the scheduler runs vats round-robin with fuel-based preemption
+(like BEAM's reduction counting). each vat gets N sends per tick.
+when fuel runs out, the scheduler moves to the next vat. this
+means a runaway computation in one vat doesn't starve others.
 
-### the language (~1500 lines)
+**spawn.** `(spawn (fn () ...))` creates a new vat, runs the
+function in it, returns a far reference. the new vat has only
+the capabilities explicitly passed to it.
 
-lexer, parser, analyzer, compiler, bytecode invoker. the analyzer
-is the key new piece: it classifies vau call sites as static or
-dynamic, enabling real compilation of control flow.
+**eventual sends.** `[obj <- selector: arg]` enqueues a message
+on the target's vat and returns a promise. the promise resolves
+when the message is processed.
 
-register-based bytecode. de bruijn indices for environment access
-(no runtime name lookup). inline caches on send sites.
+**promise pipelining.** `[[obj <- foo] <- bar: x]` sends `bar:`
+to the promise of `foo`. when `foo` resolves, `bar:` is delivered
+to the result. no explicit `.then()` chaining.
 
-### the browser (~1500 lines, the big new piece)
+### vau and compilation
 
-egui application. shows the objectspace as a navigable graph.
-objects are panels. slots and handlers are rows. references are
-clickable links. values are inline-editable.
+vau is a feature of the language, compiled by the compiler,
+executed by the VM. it's not a mystery to the runtime.
 
-features:
-- **object inspector**: slots, handlers, parent chain, history
-- **graph view**: objects as nodes, references as edges
-- **eval bar**: type an expression, see the result
-- **agent panel**: the AI agent's view, pending actions, approvals
-- **transcript**: log of all message sends, filterable
+the compiler classifies every operative call site:
 
-the browser reads the LMDB store directly (concurrent reader).
-mutations go through the fabric's send path. the browser never
-blocks the VM.
+**static operatives** — the binding is top-level, never reassigned,
+and the body follows a known pattern (evaluate some args, branch,
+bind, loop). the compiler expands these at compile time. `if`
+becomes a conditional jump. `let` becomes local bindings. `while`
+becomes a loop. `fn` becomes a closure. 95% of vau usage.
 
-### the agent (~500 lines of glue)
+**dynamic operatives** — the binding could change, or the body
+does genuinely dynamic things with the captured environment. the
+compiler emits a full operative call: push unevaluated args as a
+cons list, push the caller's environment object, call the
+operative. 5% of usage.
 
-an LLM tool-use loop running in its own vat. its tools are
-derived from the `interface` handlers on the objects it can see.
-every tool call is a message send. the membrane logs everything.
+the `vau` form itself always works — you can always write
+`(vau (args) $env body)` and it will do the right thing. the
+optimization is transparent. you don't need to annotate anything.
+the compiler figures out which operatives are static by analyzing
+the code.
 
-the agent doesn't have its own protocol. it uses the same send()
-as everything else. the difference is: its vat has faceted
-references (read-only, or requiring human approval for writes).
+(for the rare case where the compiler gets it wrong — an operative
+that looks static but actually depends on runtime environment
+state — the compiler inserts a guard check. if the guard fails,
+it falls back to the dynamic path. this is speculative
+optimization, same as JIT inline caches.)
 
-### the shell (~300 lines)
+### persistence
 
-readline REPL. parse, compile, send, print. the simplest frontend.
-also: MCP stdio server for external AI clients.
+the image persists. the question is how.
+
+the v1 persistence saga (four rewrites) taught us: don't overthink
+this. the simplest thing that works:
+
+**option A: bincode snapshot + WAL.** serialize the heap on
+checkpoint. append mutations to a write-ahead log between
+checkpoints. on startup: load snapshot, replay WAL. simple.
+proven. v1 had this and it worked before it got ripped out.
+
+**option B: LMDB.** memory-mapped B-tree. every mutation is a
+transaction. instant startup via mmap. concurrent readers.
+
+**option C: just serialize on exit, load on start.** the simplest
+possible thing. if the process crashes, you lose work since last
+clean exit.
+
+for v2: **start with option C. graduate to A when it hurts.**
+the persistence model is the thing that got rewritten four times
+in v1. the right move is to start simple and upgrade when there's
+a real reason, not to architect a cathedral up front.
+
+the image is a single file. `moof.image`. bincode serialization
+of the heap: the object arena, the symbol table, the vat state.
+on clean exit: write. on startup: read. that's it.
+
+when "what if it crashes" becomes a real problem (not a theoretical
+one): add a WAL. when "startup takes too long" becomes a real
+problem: switch to LMDB. but not before.
+
+### the browser
+
+egui. objects as panels. click to navigate. edit slots inline.
+eval bar at the bottom. transcript of message sends.
+
+the browser is a vat. it holds references to the objects it's
+showing. it sends messages to read slot values and handler names.
+it's not special — it's a normal vat with read-mostly capabilities.
+
+the browser is important but it's not a prerequisite for the VM.
+the REPL comes first (it's simpler). the browser comes second
+(it's the real interface). the agent comes third (it needs the
+browser for the approval UI).
+
+### the agent
+
+an LLM tool-use loop running in a vat. its tools are derived from
+the handlers on the objects it can see (the `interface` protocol).
+every tool call is a message send through a membrane. the membrane
+logs, allows, requires approval, or denies.
+
+the agent's memory is objects in its vat. inspectable, editable,
+deletable. the agent is just another user of the objectspace —
+a user with limited permissions and full auditability.
+
+### the syntax
+
+unchanged from v1. it's good.
+
+```
+(f a b c)            ; applicative call → [f call: a b c]
+[obj selector: arg]  ; message send
+{ Parent x: 10 }    ; object literal
+'symbol              ; quoted symbol
+obj.x                ; slot access
+@x                   ; self slot access
+{ :x [x + 1] }      ; block (closure)
+```
+
+the parser lives in its own module. it produces cons-cell ASTs.
+the compiler turns those into bytecode. the VM executes the
+bytecode. the browser and the agent don't go through the parser —
+they construct objects directly.
 
 ---
 
-## the bootstrap story
+## the crate structure
 
-1. first run: empty LMDB. fabric creates the root object.
-2. moof-lang registers its BytecodeInvoker.
-3. moof-lang evaluates `lib/bootstrap.moof`: defines the six
-   kernel forms, derives lambda/if/let/etc, creates type
-   prototypes (Integer, String, etc), creates the standard
-   library.
-4. LMDB commits. bootstrap complete. image exists.
-5. every subsequent run: open LMDB. re-register invokers (they're
-   rust closures, can't persist). done. no parsing, no compiling.
-   the objects are already there.
+```
+moof/
+  src/
+    value.rs        NaN-boxed values
+    object.rs       Object, Cons, Blob
+    heap.rs         arena allocator, symbol table
+    dispatch.rs     send() — handler lookup + delegation + execution
+    vm.rs           bytecode interpreter
+    vat.rs          vats, scheduler, promises
+    persist.rs      image serialization (bincode, simple)
 
-step 3 takes maybe 200ms. step 5 takes <1ms.
+    lang/
+      lexer.rs      tokenizer
+      parser.rs     cons-cell AST builder
+      analyzer.rs   vau stability classification
+      compiler.rs   AST → register bytecode
 
----
+    shell/
+      repl.rs       readline REPL
+      browser.rs    egui object browser
+      agent.rs      LLM tool-use loop
+      mcp.rs        MCP protocol adapter
 
-## what this feels like
+    main.rs         CLI entry point
+```
 
-you run `moof` for the first time. a window opens. it shows a
-mostly-empty space with a few foundational objects: Object, Integer,
-String, Cons, Modules. you click on Integer. you see its handlers:
-`+`, `-`, `*`, `/`, `describe`, `asString`, `asFloat`. you click
-on `+`. you see its source.
+one crate. not three. the "fabric is separate from the language"
+split was architecture astronautics. the VM IS the fabric. the
+compiler IS part of the system. splitting them into separate crates
+bought nothing except indirection.
 
-there's an eval bar at the bottom. you type `{ Point x: 3 y: 4 }`.
-a new object appears in the graph. you click on it. you see slots
-`x: 3`, `y: 4` and parent `Object`. you right-click and select
-"add handler." you type `describe` for the selector and
-`(str "(" @x ", " @y ")")` for the body. the handler appears.
-
-there's an agent panel on the right. you type "make Point respond
-to distanceTo: another point." the agent constructs the handler,
-you see it appear in the approval queue, you click approve, and
-it's on the object. you test it in the eval bar:
-`[pt distanceTo: { Point x: 0 y: 0 }]`. the result appears.
-
-you close the window. you open it tomorrow. everything is exactly
-where you left it. there was no save. there was no load. it's just
-*there*.
-
-that's what "not a programming language" means.
+the module structure within the crate is clean enough. `src/` is
+the runtime (objects, dispatch, VM, vats, persistence). `src/lang/`
+is the language frontend (parser, compiler). `src/shell/` is the
+interactive surface (REPL, browser, agent). clear boundaries
+without crate-level ceremony.
 
 ---
 
-## the uncomfortable questions
+## what we're keeping from v1
 
-### isn't this just smalltalk?
+- the six kernel primitives (vau, send, def, quote, cons, eq)
+- the surface syntax (three bracket species, keywords, sugar)
+- the object model (slots vs handlers, prototype delegation)
+- capability security (vats, membranes, facets)
+- the bytecode approach (compile, don't interpret trees)
+- the introspection protocol (describe, interface, source)
+- the standard library structure (bootstrap, collections, etc)
 
-yes and no. smalltalk had the image, the browser, the inspector,
-the live environment. moof steals all of that shamelessly.
-the differences:
+## what we're killing from v1
 
-1. **vau instead of classes.** smalltalk's class/metaclass hierarchy
-   is replaced by prototypes + operatives. simpler, more uniform,
-   and gives user code compiler-level power.
+- the HandlerInvoker abstraction (the VM knows what it runs)
+- the three-crate split (one crate, clear modules)
+- the module system as a rust-side graph solver (modules are objects)
+- the four-attempt persistence architecture (start simple)
+- source projection (the image is the artifact)
+- the custom binary wire protocol (MCP for external, direct for internal)
+- nine heap object types (three: Object, Cons, Blob)
 
-2. **capability security.** smalltalk images are wide open. any
-   object can reach any other. moof's vat/membrane/facet model
-   means the agent can be a real participant without being a
-   security nightmare.
+## what's new in v2
 
-3. **AI-native.** the agent isn't bolted on. it's a first-class
-   co-inhabitant of the objectspace. smalltalk had nothing like
-   this because it was built in 1980.
-
-4. **persistence is transactional.** smalltalk images are fragile
-   binary snapshots. moof's LMDB store is ACID. crash-safe.
-   concurrent-reader-safe.
-
-### isn't egui too limited for a real environment?
-
-maybe. but it's the right trade: native, fast, cross-platform, and
-we can ship something in weeks instead of months. if egui hits a
-wall, the fabric doesn't care — the browser is a frontend, not a
-kernel component.
-
-### can you really build this?
-
-the fabric is ~800 lines. the language is ~1500 lines (v1 proved
-this works). the browser is ~1500 lines of egui (this is the new
-work). the agent glue is ~500 lines.
-
-total: ~4300 lines. v1 was ~5500. this is smaller AND more
-ambitious because the browser replaces mountains of REPL command
-infrastructure.
-
-### what about the web?
-
-not yet. egui can compile to wasm+webgl. when the desktop version
-works, the web version is a recompile, not a rewrite. but the
-desktop is first because latency matters for a live environment.
-
-### what about federation?
-
-the fabric's vat model + MCP protocol means "connect to a remote
-moof image and send messages to its objects" is architecturally
-trivial. an object in a remote vat looks like a local object with
-a network transport. this is future work but the architecture
-doesn't foreclose it.
+- the vat/scheduler model taken seriously (erlang-style concurrency)
+- eventual sends + promise pipelining (E-style async)
+- capabilities as the IO model (haskell-style effect tracking, but concrete)
+- vau stability analysis (compile-time expansion of static operatives)
+- the browser as a first-class interface (self-style live environment)
+- the agent as a vat co-inhabitant (not an API client)
+- register-based bytecode (simpler than v1's stack machine)
+- NaN-boxed values (8 bytes, zero-alloc for primitives)
 
 ---
 
 ## implementation order
 
-### phase 1: the fabric (week 1)
+### phase 1: the runtime
 
-NaN-boxed values. LMDB store. three heap object types. send()
-with delegation. HandlerInvoker trait. NativeInvoker. basic vats.
+values, objects, heap, dispatch, VM. you can create objects, send
+messages, execute bytecode. `send(integer(3), sym("+"), &[integer(4)])`
+returns `integer(7)`. tests pass.
 
-deliverable: `cargo test` passes. you can create objects, set
-slots and handlers, dispatch messages, and persist across restarts.
+### phase 2: the language
 
-### phase 2: the language (week 2)
+lexer, parser, analyzer, compiler. you can parse `[3 + 4]`, compile
+it to bytecode, execute it. the bootstrap runs. `if`, `let`, `fn`,
+`while`, `match` all work. the REPL works.
 
-port the lexer and parser from v1 (they're solid). write the
-analyzer (vau classification). write the register compiler. write
-the VM. bootstrap the kernel.
+### phase 3: persistence
 
-deliverable: you can evaluate `[2 + 3]` and get `5`. the full
-bootstrap runs. type prototypes work.
+bincode serialize/deserialize. restart and resume. your definitions
+survive.
 
-### phase 3: the browser (weeks 3-4)
+### phase 4: vats
 
-egui window. object inspector. graph view. eval bar. live updates
-from the LMDB store.
+the scheduler. spawn. eventual sends. promises. fuel-based
+preemption. multiple vats running concurrently.
 
-deliverable: you can click through the objectspace, inspect
-objects, edit slot values, evaluate expressions, and see changes
-reflected immediately.
+### phase 5: the browser
 
-### phase 4: the agent (week 5)
+egui. object panels. navigation. eval bar. transcript.
 
-LLM tool-use loop in a vat. faceted references. membrane logging.
-approval queue in the browser.
+### phase 6: the agent
 
-deliverable: you can tell the agent "define a handler on this
-object" and watch it happen, with approval.
-
-### phase 5: the living image (week 6+)
-
-workspace persistence. module organization (in moof, not rust).
-standard library. MCP server. documentation-as-objects.
-
-deliverable: you can use moof as a daily tool for something real
-— notes, code sketches, data exploration, agent-assisted
-programming.
+LLM tool-use loop. membranes. facets. approval queue.
 
 ---
 
-## what we're NOT building (yet)
+*moof is a runtime for a world where objects are alive,
+messages are the only operation, capabilities are the only
+security, and the image never dies.*
 
-- JIT compiler (register bytecode is designed for it but it's later)
-- federation (architecture supports it, implementation is later)
-- CRDTs (ditto)
-- web interface (egui to wasm is a future recompile)
-- multiple language frontends (the fabric supports it but one
-  language is enough for now)
-
-## what we're killing from v1
-
-- the module system as a rust-side graph solver (modules are just
-  moof objects with ordered definition lists)
-- the TUI inspector (the egui browser replaces it)
-- the binary wire protocol (MCP replaces it)
-- source projection (the image is the only artifact)
-- `__dunder` VM escape hatches (native handlers through the
-  proper HandlerInvoker path)
-- the custom persistence stack (LMDB replaces snapshot/WAL/GC)
-
----
-
-*v1 was a programming language that wanted to be an environment.
-v2 is an environment that happens to have a programming language
-in it.*
-
-*clarus lives. moof.*
+*clarus lives.*
