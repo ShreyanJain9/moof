@@ -324,8 +324,8 @@ impl<'a> Compiler<'a> {
                     return Ok(());
                 }
 
-                "<-" | "set!" => {
-                    // (<- name value) — mutate a local or global binding
+                ":=" => {
+                    // (:= name value) — mutate a local or global binding
                     let items = self.heap.list_to_vec(expr);
                     if items.len() != 3 {
                         return Err("<-: need name and value".into());
@@ -392,6 +392,46 @@ impl<'a> Compiler<'a> {
                         let bytes = delta.to_be_bytes();
                         self.chunk.code[jump_to_else + 2] = bytes[0];
                         self.chunk.code[jump_to_else + 3] = bytes[1];
+                    }
+
+                    return Ok(());
+                }
+
+                "%object-literal" => {
+                    // (%object-literal parent (name1 name2...) val1 val2...)
+                    let items = self.heap.list_to_vec(expr);
+                    if items.len() < 3 {
+                        return Err("object literal: need parent and slot names".into());
+                    }
+
+                    // compile parent
+                    let parent_reg = self.alloc_reg();
+                    self.compile_expr(items[1], parent_reg)?;
+
+                    // get slot names from the list
+                    let name_list = self.heap.list_to_vec(items[2]);
+                    let nslots = name_list.len();
+
+                    // compile slot values
+                    let mut val_regs = Vec::with_capacity(nslots);
+                    for i in 0..nslots {
+                        let r = self.alloc_reg();
+                        self.compile_expr(items[3 + i], r)?;
+                        val_regs.push(r);
+                    }
+
+                    // emit MAKE_OBJ dst, parent, nslots
+                    self.chunk.emit(Op::MakeObj, dst, parent_reg, nslots as u8);
+
+                    // emit slot name/value pairs as trailing data
+                    for i in 0..nslots {
+                        let name_sym = self.extract_quoted(name_list[i])?
+                            .as_symbol().ok_or("object literal: slot name must be a symbol")?;
+                        let name_const = self.add_sym_const(name_sym);
+                        self.chunk.code.push((name_const >> 8) as u8);
+                        self.chunk.code.push(name_const as u8);
+                        self.chunk.code.push(val_regs[i]);
+                        self.chunk.code.push(0); // padding to 4 bytes
                     }
 
                     return Ok(());
@@ -500,6 +540,74 @@ pub fn register_type_protos(heap: &mut Heap) {
     // create the Object prototype (root of all delegation)
     let object_proto = heap.make_object(Value::NIL);
     heap.type_protos[5] = object_proto; // object type
+    let obj_id = object_proto.as_any_object().unwrap();
+
+    // Object: slotAt:
+    let slot_at_handler = heap.register_native("__obj_slotAt", |heap, receiver, args| {
+        let id = receiver.as_any_object().ok_or("slotAt: receiver not an object")?;
+        let name = args.first().and_then(|v| v.as_symbol()).ok_or("slotAt: arg must be a symbol")?;
+        Ok(heap.get(id).slot_get(name).unwrap_or(Value::NIL))
+    });
+    let slot_at_sym = heap.sym_slot_at;
+    heap.get_mut(obj_id).handler_set(slot_at_sym, slot_at_handler);
+
+    // Object: slotAt:put:
+    let slot_at_put_handler = heap.register_native("__obj_slotAtPut", |heap, receiver, args| {
+        let id = receiver.as_any_object().ok_or("slotAt:put: receiver not an object")?;
+        let name = args.first().and_then(|v| v.as_symbol()).ok_or("slotAt:put: arg0 must be a symbol")?;
+        let val = args.get(1).copied().unwrap_or(Value::NIL);
+        heap.get_mut(id).slot_set(name, val);
+        Ok(val)
+    });
+    let slot_at_put_sym = heap.sym_slot_at_put;
+    heap.get_mut(obj_id).handler_set(slot_at_put_sym, slot_at_put_handler);
+
+    // Object: parent
+    let parent_handler = heap.register_native("__obj_parent", |heap, receiver, _args| {
+        let id = receiver.as_any_object().ok_or("parent: not an object")?;
+        Ok(heap.get(id).parent())
+    });
+    let parent_sym = heap.sym_parent;
+    heap.get_mut(obj_id).handler_set(parent_sym, parent_handler);
+
+    // Object: slotNames
+    let slot_names_handler = heap.register_native("__obj_slotNames", |heap, receiver, _args| {
+        let id = receiver.as_any_object().ok_or("slotNames: not an object")?;
+        let names = heap.get(id).slot_names();
+        let syms: Vec<Value> = names.into_iter().map(Value::symbol).collect();
+        Ok(heap.list(&syms))
+    });
+    let slot_names_sym = heap.sym_slot_names;
+    heap.get_mut(obj_id).handler_set(slot_names_sym, slot_names_handler);
+
+    // Object: handlerNames
+    let handler_names_handler = heap.register_native("__obj_handlerNames", |heap, receiver, _args| {
+        let id = receiver.as_any_object().ok_or("handlerNames: not an object")?;
+        let names = heap.get(id).handler_names();
+        let syms: Vec<Value> = names.into_iter().map(Value::symbol).collect();
+        Ok(heap.list(&syms))
+    });
+    let handler_names_sym = heap.sym_handler_names;
+    heap.get_mut(obj_id).handler_set(handler_names_sym, handler_names_handler);
+
+    // Object: handle:with:
+    let handle_with_handler = heap.register_native("__obj_handleWith", |heap, receiver, args| {
+        let id = receiver.as_any_object().ok_or("handle:with: not an object")?;
+        let sel = args.first().and_then(|v| v.as_symbol()).ok_or("handle:with: selector must be a symbol")?;
+        let handler = args.get(1).copied().ok_or("handle:with: need handler value")?;
+        heap.get_mut(id).handler_set(sel, handler);
+        Ok(receiver)
+    });
+    let handle_with_sym = heap.intern("handle:with:");
+    heap.get_mut(obj_id).handler_set(handle_with_sym, handle_with_handler);
+
+    // Object: describe
+    let describe_handler = heap.register_native("__obj_describe", |heap, receiver, _args| {
+        let s = heap.format_value(receiver);
+        Ok(heap.alloc_string(&s))
+    });
+    let describe_sym = heap.sym_describe;
+    heap.get_mut(obj_id).handler_set(describe_sym, describe_handler);
 
     // Integer prototype
     let int_proto = heap.make_object(object_proto);

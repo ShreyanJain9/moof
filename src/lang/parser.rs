@@ -100,6 +100,11 @@ impl<'a> Parser<'a> {
                 Ok(self.intern("<-"))
             }
 
+            Token::Keyword(ref k) if k == ":=" => {
+                self.advance();
+                Ok(self.intern(":="))
+            }
+
             Token::Eof => Err("unexpected end of input".into()),
             ref tok => Err(format!("unexpected token: {tok:?}")),
         }
@@ -202,19 +207,41 @@ impl<'a> Parser<'a> {
 
     fn parse_object_literal(&mut self) -> Result<Value, String> {
         self.advance(); // {
-        let obj_sym = self.intern("%object-literal");
-        let mut items = Vec::new();
 
+        // { Parent? key: val key: val ... }
+        // first non-keyword expr is the parent (optional)
+        // then keyword-value pairs are slots
+
+        let obj_sym = self.intern("%object-literal");
+        let mut parent = Value::NIL; // default parent
+        let mut slot_names: Vec<Value> = Vec::new();
+        let mut slot_values: Vec<Value> = Vec::new();
+
+        // check if first item is a parent (non-keyword expression)
+        if !matches!(self.peek(), Token::RBrace | Token::Keyword(_)) {
+            parent = self.parse_expr()?;
+        }
+
+        // parse keyword: value pairs
         loop {
             match self.peek().clone() {
                 Token::RBrace => { self.advance(); break; }
+                Token::Keyword(ref k) => {
+                    let name = k.trim_end_matches(':').to_string();
+                    self.advance();
+                    let name_sym = self.intern(&name);
+                    slot_names.push(self.quoted(name_sym));
+                    slot_values.push(self.parse_expr()?);
+                }
                 Token::Eof => return Err("unterminated object literal".into()),
-                _ => items.push(self.parse_expr()?),
+                ref tok => return Err(format!("expected keyword: or }} in object literal, got {tok:?}")),
             }
         }
 
-        let mut all = vec![obj_sym];
-        all.extend(items);
+        // emit: (%object-literal parent (name1 name2...) val1 val2...)
+        let names_list = self.heap.list(&slot_names);
+        let mut all = vec![obj_sym, parent, names_list];
+        all.extend(slot_values);
         Ok(self.heap.list(&all))
     }
 
