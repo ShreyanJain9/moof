@@ -1537,47 +1537,43 @@ pub fn register_type_protos(heap: &mut Heap) {
     let table_sym = heap.intern("Table");
     heap.globals.insert(table_sym, table_proto);
 
-    // -- global utility natives --
+    // -- handlers on Object prototype (inherited by everything) --
 
-    // print: outputs a value and returns it
-    let print_handler = heap.register_native("__print", |heap, _receiver, args| {
-        let val = args.first().copied().unwrap_or(Value::NIL);
-        println!("{}", heap.format_value(val));
-        Ok(val)
+    // print — [obj print] outputs and returns self
+    let h = heap.register_native("obj_print", |heap, receiver, _args| {
+        println!("{}", heap.format_value(receiver));
+        Ok(receiver)
     });
     let print_sym = heap.intern("print");
-    heap.globals.insert(print_sym, print_handler);
+    heap.get_mut(obj_id).handler_set(print_sym, h);
 
-    // println: like print but adds newline context
-    let println_handler = heap.register_native("__println", |heap, _receiver, args| {
-        let val = args.first().copied().unwrap_or(Value::NIL);
-        println!("{}", heap.format_value(val));
+    // println — [obj println] outputs and returns nil
+    let h = heap.register_native("obj_println", |heap, receiver, _args| {
+        println!("{}", heap.format_value(receiver));
         Ok(Value::NIL)
     });
     let println_sym = heap.intern("println");
-    heap.globals.insert(println_sym, println_handler);
+    heap.get_mut(obj_id).handler_set(println_sym, h);
 
-    // type-of: returns a symbol for the type
-    let typeof_handler = heap.register_native("__typeof", |heap, _receiver, args| {
-        let val = args.first().copied().unwrap_or(Value::NIL);
-        let name = if val.is_nil() { "Nil" }
-            else if val.is_bool() { "Boolean" }
-            else if val.is_integer() {
-                if val.as_integer().unwrap() < 0 { "Fn" } else { "Integer" }
-            }
-            else if val.is_float() { "Float" }
-            else if val.is_symbol() { "Symbol" }
-            else if let Some(id) = val.as_any_object() {
-                match heap.get(id) {
+    // type — [obj type] returns a symbol for the type
+    let h = heap.register_native("obj_type", |heap, receiver, _args| {
+        let name = if receiver.is_nil() { "Nil" }
+            else if receiver.is_bool() { "Boolean" }
+            else if receiver.is_integer() { "Integer" }
+            else if receiver.is_float() { "Float" }
+            else if receiver.is_symbol() { "Symbol" }
+            else if let Some(id) = receiver.as_any_object() {
+                if heap.as_closure(receiver).is_some() { "Fn" }
+                else { match heap.get(id) {
                     HeapObject::General { .. } => "Object",
                     HeapObject::Pair(_, _) => "Cons",
                     HeapObject::Text(_) => "String",
                     HeapObject::Buffer(_) => "Bytes",
                     HeapObject::Table { .. } => "Table",
-                }
+                }}
             } else { "Unknown" };
         Ok(Value::symbol(heap.intern(name)))
     });
-    let typeof_sym = heap.intern("type-of");
-    heap.globals.insert(typeof_sym, typeof_handler);
+    let type_sym = heap.intern("type");
+    heap.get_mut(obj_id).handler_set(type_sym, h);
 }
