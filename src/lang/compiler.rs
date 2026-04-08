@@ -877,17 +877,30 @@ pub fn register_type_protos(heap: &mut Heap) {
     let obj_id = object_proto.as_any_object().unwrap();
 
     // Object: slotAt:
-    let slot_at_handler = heap.register_native("__obj_slotAt", |heap, receiver, args| {
-        let id = receiver.as_any_object().ok_or("slotAt: receiver not an object")?;
+    let slot_at_handler = heap.register_native("obj_slotAt", |heap, receiver, args| {
         let name = args.first().and_then(|v| v.as_symbol()).ok_or("slotAt: arg must be a symbol")?;
-        Ok(heap.get(id).slot_get(name).unwrap_or(Value::NIL))
+        if let Some(id) = receiver.as_any_object() {
+            // for Pair, support car/cdr as virtual slots
+            match heap.get(id) {
+                HeapObject::Pair(car, cdr) => {
+                    let car_v = *car; let cdr_v = *cdr;
+                    if name == heap.sym_car { return Ok(car_v); }
+                    if name == heap.sym_cdr { return Ok(cdr_v); }
+                    return Ok(Value::NIL);
+                }
+                _ => {}
+            }
+            Ok(heap.get(id).slot_get(name).unwrap_or(Value::NIL))
+        } else {
+            Ok(Value::NIL) // primitives have no slots
+        }
     });
     let slot_at_sym = heap.sym_slot_at;
     heap.get_mut(obj_id).handler_set(slot_at_sym, slot_at_handler);
 
     // Object: slotAt:put:
-    let slot_at_put_handler = heap.register_native("__obj_slotAtPut", |heap, receiver, args| {
-        let id = receiver.as_any_object().ok_or("slotAt:put: receiver not an object")?;
+    let slot_at_put_handler = heap.register_native("obj_slotAtPut", |heap, receiver, args| {
+        let id = receiver.as_any_object().ok_or("slotAt:put: receiver is not a mutable object")?;
         let name = args.first().and_then(|v| v.as_symbol()).ok_or("slotAt:put: arg0 must be a symbol")?;
         let val = args.get(1).copied().unwrap_or(Value::NIL);
         heap.get_mut(id).slot_set(name, val);
@@ -897,27 +910,29 @@ pub fn register_type_protos(heap: &mut Heap) {
     heap.get_mut(obj_id).handler_set(slot_at_put_sym, slot_at_put_handler);
 
     // Object: parent
-    let parent_handler = heap.register_native("__obj_parent", |heap, receiver, _args| {
-        let id = receiver.as_any_object().ok_or("parent: not an object")?;
-        Ok(heap.get(id).parent())
+    // Object: parent — works for ALL types (primitives, optimized variants, general objects)
+    let parent_handler = heap.register_native("obj_parent", |heap, receiver, _args| {
+        Ok(heap.prototype_of(receiver))
     });
     let parent_sym = heap.sym_parent;
     heap.get_mut(obj_id).handler_set(parent_sym, parent_handler);
 
-    // Object: slotNames
-    let slot_names_handler = heap.register_native("__obj_slotNames", |heap, receiver, _args| {
-        let id = receiver.as_any_object().ok_or("slotNames: not an object")?;
-        let names = heap.get(id).slot_names();
-        let syms: Vec<Value> = names.into_iter().map(Value::symbol).collect();
-        Ok(heap.list(&syms))
+    // Object: slotNames — works for ALL types
+    let slot_names_handler = heap.register_native("obj_slotNames", |heap, receiver, _args| {
+        if let Some(id) = receiver.as_any_object() {
+            let names = heap.get(id).slot_names();
+            let syms: Vec<Value> = names.into_iter().map(Value::symbol).collect();
+            Ok(heap.list(&syms))
+        } else {
+            Ok(Value::NIL) // primitives have no slots
+        }
     });
     let slot_names_sym = heap.sym_slot_names;
     heap.get_mut(obj_id).handler_set(slot_names_sym, slot_names_handler);
 
-    // Object: handlerNames
-    let handler_names_handler = heap.register_native("__obj_handlerNames", |heap, receiver, _args| {
-        let id = receiver.as_any_object().ok_or("handlerNames: not an object")?;
-        let names = heap.get(id).handler_names();
+    // Object: handlerNames — walks the full prototype chain for ALL types
+    let handler_names_handler = heap.register_native("obj_handlerNames", |heap, receiver, _args| {
+        let names = heap.all_handler_names(receiver);
         let syms: Vec<Value> = names.into_iter().map(Value::symbol).collect();
         Ok(heap.list(&syms))
     });
@@ -925,8 +940,8 @@ pub fn register_type_protos(heap: &mut Heap) {
     heap.get_mut(obj_id).handler_set(handler_names_sym, handler_names_handler);
 
     // Object: handle:with:
-    let handle_with_handler = heap.register_native("__obj_handleWith", |heap, receiver, args| {
-        let id = receiver.as_any_object().ok_or("handle:with: not an object")?;
+    let handle_with_handler = heap.register_native("obj_handleWith", |heap, receiver, args| {
+        let id = receiver.as_any_object().ok_or("handle:with: receiver is not a mutable object")?;
         let sel = args.first().and_then(|v| v.as_symbol()).ok_or("handle:with: selector must be a symbol")?;
         let handler = args.get(1).copied().ok_or("handle:with: need handler value")?;
         heap.get_mut(id).handler_set(sel, handler);
@@ -936,7 +951,7 @@ pub fn register_type_protos(heap: &mut Heap) {
     heap.get_mut(obj_id).handler_set(handle_with_sym, handle_with_handler);
 
     // Object: describe
-    let describe_handler = heap.register_native("__obj_describe", |heap, receiver, _args| {
+    let describe_handler = heap.register_native("obj_describe", |heap, receiver, _args| {
         let s = heap.format_value(receiver);
         Ok(heap.alloc_string(&s))
     });

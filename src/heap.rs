@@ -349,6 +349,57 @@ impl Heap {
         Some(h)
     }
 
+    /// Get the prototype for any value (including primitives and optimized types).
+    pub fn prototype_of(&self, val: Value) -> Value {
+        // for heap objects, check the variant first
+        if let Some(id) = val.as_any_object() {
+            match self.get(id) {
+                HeapObject::General { parent, .. } => return *parent,
+                HeapObject::Pair(_, _) => return self.type_protos.get(6).copied().unwrap_or(Value::NIL),
+                HeapObject::Text(_) => return self.type_protos.get(7).copied().unwrap_or(Value::NIL),
+                HeapObject::Buffer(_) => return self.type_protos.get(8).copied().unwrap_or(Value::NIL),
+                HeapObject::Table { .. } => return self.type_protos.get(9).copied().unwrap_or(Value::NIL),
+            }
+        }
+        // for primitives, use type_protos by tag
+        let tag = val.type_tag() as usize;
+        self.type_protos.get(tag).copied().unwrap_or(Value::NIL)
+    }
+
+    /// Get all handler names for any value (walks the full delegation chain).
+    pub fn all_handler_names(&self, val: Value) -> Vec<u32> {
+        let mut names = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        // for heap general objects, start with own handlers
+        if let Some(id) = val.as_any_object() {
+            if let HeapObject::General { handlers, .. } = self.get(id) {
+                for &(sel, _) in handlers {
+                    if seen.insert(sel) { names.push(sel); }
+                }
+            }
+        }
+
+        // walk the prototype chain
+        let mut proto = self.prototype_of(val);
+        for _ in 0..256 {
+            if proto.is_nil() { break; }
+            if let Some(id) = proto.as_any_object() {
+                if let HeapObject::General { handlers, parent, .. } = self.get(id) {
+                    for &(sel, _) in handlers {
+                        if seen.insert(sel) { names.push(sel); }
+                    }
+                    proto = *parent;
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        names
+    }
+
     /// Total object count (for stats).
     pub fn object_count(&self) -> usize { self.objects.len() }
 
