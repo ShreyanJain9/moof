@@ -4,6 +4,39 @@ use crate::lang::parser::Parser;
 use crate::lang::compiler::Compiler;
 use crate::vm::VM;
 
+fn eval_source(vm: &mut VM, heap: &mut Heap, source: &str) -> Result<(), String> {
+    let tokens = lexer::tokenize(source).map_err(|e| format!("lex: {e}"))?;
+    let mut parser = Parser::new(&tokens, heap);
+    let exprs = parser.parse_all().map_err(|e| format!("parse: {e}"))?;
+    for expr in &exprs {
+        let result = Compiler::compile_toplevel(heap, *expr)
+            .map_err(|e| format!("compile: {e}"))?;
+        vm.eval_result(heap, result)
+            .map_err(|e| format!("eval: {e}"))?;
+    }
+    Ok(())
+}
+
+fn load_bootstrap(vm: &mut VM, heap: &mut Heap) {
+    // try loading lib/bootstrap.moof
+    let paths = ["lib/bootstrap.moof", "bootstrap.moof"];
+    for path in &paths {
+        if let Ok(source) = std::fs::read_to_string(path) {
+            match eval_source(vm, heap, &source) {
+                Ok(()) => {
+                    eprintln!("  loaded {path}");
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("  ~ bootstrap error in {path}: {e}");
+                    return;
+                }
+            }
+        }
+    }
+    // no bootstrap file found — that's ok, run with just builtins
+}
+
 pub fn run() {
     let mut heap = Heap::new();
     let mut vm = VM::new();
@@ -13,6 +46,8 @@ pub fn run() {
     println!("  .  *  .        m o o f        .  *  .");
     println!("       ~ a living objectspace ~");
     println!("    clarus the dogcow lives again");
+
+    load_bootstrap(&mut vm, &mut heap);
     println!();
 
     let mut rl = match rustyline::DefaultEditor::new() {

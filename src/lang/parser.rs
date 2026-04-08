@@ -8,6 +8,7 @@
 //   (%dot obj 'field)                   — from obj.field
 //   (%block (params) body)              — from |x| expr
 //   (%object-literal items...)          — from { Parent x: 10 }
+//   (%table-literal (seq...) (k1 v1 k2 v2...)) — from #[1 2 "x" => 3]
 
 use crate::heap::Heap;
 use crate::lang::lexer::Token;
@@ -59,6 +60,30 @@ impl<'a> Parser<'a> {
 
             Token::Quote => { self.advance(); let e = self.parse_expr()?; Ok(self.quoted(e)) }
 
+            Token::Backtick => {
+                self.advance();
+                let form = self.parse_expr()?;
+                let qq = self.intern("quasiquote");
+                let inner = self.heap.cons(form, Value::NIL);
+                Ok(self.heap.cons(qq, inner))
+            }
+
+            Token::Comma => {
+                self.advance();
+                let expr = self.parse_expr()?;
+                let uq = self.intern("unquote");
+                let inner = self.heap.cons(expr, Value::NIL);
+                Ok(self.heap.cons(uq, inner))
+            }
+
+            Token::CommaAt => {
+                self.advance();
+                let expr = self.parse_expr()?;
+                let uqs = self.intern("unquote-splicing");
+                let inner = self.heap.cons(expr, Value::NIL);
+                Ok(self.heap.cons(uqs, inner))
+            }
+
             Token::Integer(n) => { self.advance(); Ok(Value::integer(n)) }
             Token::Float(f) => { self.advance(); Ok(Value::float(f)) }
 
@@ -103,6 +128,15 @@ impl<'a> Parser<'a> {
             Token::Keyword(ref k) if k == ":=" => {
                 self.advance();
                 Ok(self.intern(":="))
+            }
+
+            Token::Hash => {
+                self.advance();
+                if self.peek() == &Token::LBracket {
+                    self.parse_table_literal()
+                } else {
+                    Err("expected [ after #".into())
+                }
             }
 
             Token::Eof => Err("unexpected end of input".into()),
@@ -268,6 +302,37 @@ impl<'a> Parser<'a> {
         let block_sym = self.intern("%block");
         let param_list = self.heap.list(&params);
         Ok(self.heap.list(&[block_sym, param_list, body]))
+    }
+
+    fn parse_table_literal(&mut self) -> Result<Value, String> {
+        self.advance(); // [
+
+        let mut seq_items = Vec::new();
+        let mut kv_items = Vec::new(); // flat: key, val, key, val, ...
+
+        loop {
+            match self.peek() {
+                Token::RBracket => { self.advance(); break; }
+                Token::Eof => return Err("unterminated table literal".into()),
+                _ => {
+                    let expr = self.parse_expr()?;
+                    // check if next token is => (a Symbol with value "=>")
+                    if matches!(self.peek(), Token::Symbol(s) if s == "=>") {
+                        self.advance(); // consume =>
+                        let val = self.parse_expr()?;
+                        kv_items.push(expr);
+                        kv_items.push(val);
+                    } else {
+                        seq_items.push(expr);
+                    }
+                }
+            }
+        }
+
+        let table_sym = self.intern("%table-literal");
+        let seq_list = self.heap.list(&seq_items);
+        let kv_list = self.heap.list(&kv_items);
+        Ok(self.heap.list(&[table_sym, seq_list, kv_list]))
     }
 
     pub fn parse_all(&mut self) -> Result<Vec<Value>, String> {

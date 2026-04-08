@@ -83,7 +83,7 @@ impl<'a> Compiler<'a> {
             let sym_id = expr.as_symbol().unwrap();
             let name = self.heap.symbol_name(sym_id);
             // skip well-known internal symbols
-            if name == "send" || name == "%dot" || name == "%block" || name == "%object-literal" || name == "%eventual-send" {
+            if name == "send" || name == "%dot" || name == "%block" || name == "%object-literal" || name == "%eventual-send" || name == "%table-literal" {
                 self.emit_load_const(dst, expr);
             } else if let Some(reg) = self.find_local(sym_id) {
                 // local variable — just copy from its register
@@ -125,6 +125,18 @@ impl<'a> Compiler<'a> {
                     let arg = self.first_arg(cdr_val)?;
                     self.emit_load_const(dst, arg);
                     return Ok(());
+                }
+
+                "quasiquote" => {
+                    // (quasiquote form) — build AST with unquote interpolation
+                    let arg = self.first_arg(cdr_val)?;
+                    self.compile_quasiquote(arg, dst)?;
+                    return Ok(());
+                }
+
+                "unquote" => {
+                    // (unquote expr) — only valid inside quasiquote
+                    return Err("unquote outside of quasiquote".into());
                 }
 
                 "send" => {
@@ -346,61 +358,14 @@ impl<'a> Compiler<'a> {
                     return Ok(());
                 }
 
-                "list" => {
+                "eval" => {
+                    // (eval expr) — compile and execute expr at runtime
+                    // expr must be an AST (cons cells from quote or quasiquote)
                     let items = self.heap.list_to_vec(expr);
-                    self.chunk.emit(Op::LoadNil, dst, 0, 0);
-                    for i in (1..items.len()).rev() {
-                        let item_reg = self.alloc_reg();
-                        self.compile_expr(items[i], item_reg)?;
-                        self.chunk.emit(Op::Cons, dst, item_reg, dst);
-                    }
-                    return Ok(());
-                }
-
-                "not" => {
-                    let items = self.heap.list_to_vec(expr);
-                    if items.len() != 2 { return Err("not: need one arg".into()); }
+                    if items.len() != 2 { return Err("eval: need one arg".into()); }
                     self.compile_expr(items[1], dst)?;
-                    let jmp = self.chunk.offset();
-                    self.chunk.emit(Op::JumpIfFalse, dst, 0, 0);
-                    self.chunk.emit(Op::LoadFalse, dst, 0, 0);
-                    let skip = self.chunk.offset();
-                    self.chunk.emit(Op::Jump, 0, 0, 0);
-                    let true_branch = self.chunk.offset();
-                    self.chunk.emit(Op::LoadTrue, dst, 0, 0);
-                    let end = self.chunk.offset();
-                    let d1 = (true_branch as i16 - jmp as i16 - 4).to_be_bytes();
-                    self.chunk.code[jmp + 2] = d1[0]; self.chunk.code[jmp + 3] = d1[1];
-                    let d2 = (end as i16 - skip as i16 - 4).to_be_bytes();
-                    self.chunk.code[skip + 1] = d2[0]; self.chunk.code[skip + 2] = d2[1];
-                    return Ok(());
-                }
-
-                "and" => {
-                    // (and a b) — short-circuit
-                    let items = self.heap.list_to_vec(expr);
-                    if items.len() != 3 { return Err("and: need two args".into()); }
-                    self.compile_expr(items[1], dst)?;
-                    let skip = self.chunk.offset();
-                    self.chunk.emit(Op::JumpIfFalse, dst, 0, 0);
-                    self.compile_expr(items[2], dst)?;
-                    let end = self.chunk.offset();
-                    let d = (end as i16 - skip as i16 - 4).to_be_bytes();
-                    self.chunk.code[skip + 2] = d[0]; self.chunk.code[skip + 3] = d[1];
-                    return Ok(());
-                }
-
-                "or" => {
-                    // (or a b) — short-circuit
-                    let items = self.heap.list_to_vec(expr);
-                    if items.len() != 3 { return Err("or: need two args".into()); }
-                    self.compile_expr(items[1], dst)?;
-                    let skip = self.chunk.offset();
-                    self.chunk.emit(Op::JumpIfTrue, dst, 0, 0);
-                    self.compile_expr(items[2], dst)?;
-                    let end = self.chunk.offset();
-                    let d = (end as i16 - skip as i16 - 4).to_be_bytes();
-                    self.chunk.code[skip + 2] = d[0]; self.chunk.code[skip + 3] = d[1];
+                    // emit EVAL opcode — the VM handles compilation + execution
+                    self.chunk.emit(Op::Eval, dst, dst, 0);
                     return Ok(());
                 }
 
@@ -473,6 +438,51 @@ impl<'a> Compiler<'a> {
                         self.chunk.code[jump_to_else + 2] = bytes[0];
                         self.chunk.code[jump_to_else + 3] = bytes[1];
                     }
+
+                    return Ok(());
+                }
+
+                "%table-literal" => {
+                    // (%table-literal (seq...) (k1 v1 k2 v2...))
+                    let items = self.heap.list_to_vec(expr);
+                    if items.len() != 3 {
+                        return Err("table literal: need seq and kv lists".into());
+                    }
+
+                    let seq_items = self.heap.list_to_vec(items[1]);
+                    let kv_items = self.heap.list_to_vec(items[2]);
+                    let nseq = seq_items.len();
+                    let nmap = kv_items.len() / 2;
+
+                    // compile all seq values into registers
+                    let mut seq_regs = Vec::with_capacity(nseq);
+                    for item in &seq_items {
+                        let r = self.alloc_reg();
+                        self.compile_expr(*item, r)?;
+                        seq_regs.push(r);
+                    }
+
+                    // compile all kv pairs into registers
+                    let mut kv_regs = Vec::with_capacity(kv_items.len());
+                    for item in &kv_items {
+                        let r = self.alloc_reg();
+                        self.compile_expr(*item, r)?;
+                        kv_regs.push(r);
+                    }
+
+                    // emit MakeTable dst, nseq, nmap
+                    self.chunk.emit(Op::MakeTable, dst, nseq as u8, nmap as u8);
+
+                    // trailing data: seq regs, then kv regs (padded to 4-byte alignment)
+                    let total_regs = seq_regs.len() + kv_regs.len();
+                    let mut trailing = Vec::with_capacity(total_regs);
+                    trailing.extend_from_slice(&seq_regs);
+                    trailing.extend_from_slice(&kv_regs);
+                    // pad to multiple of 4
+                    while trailing.len() % 4 != 0 {
+                        trailing.push(0);
+                    }
+                    self.chunk.code.extend_from_slice(&trailing);
 
                     return Ok(());
                 }
@@ -551,6 +561,48 @@ impl<'a> Compiler<'a> {
         self.compile_call(expr, dst)
     }
 
+    fn compile_quasiquote(&mut self, form: Value, dst: u8) -> Result<(), String> {
+        // atoms: load as constants
+        if form.is_nil() || form.is_true() || form.is_false()
+            || form.is_integer() || form.is_float() || form.is_symbol() {
+            self.emit_load_const(dst, form);
+            return Ok(());
+        }
+
+        let id = form.as_any_object().ok_or("quasiquote: unexpected value")?;
+        match self.heap.get(id) {
+            crate::object::HeapObject::Text(_) | crate::object::HeapObject::Buffer(_)
+            | crate::object::HeapObject::Table { .. } => {
+                self.emit_load_const(dst, form);
+                return Ok(());
+            }
+            crate::object::HeapObject::General { .. } => {
+                self.emit_load_const(dst, form);
+                return Ok(());
+            }
+            crate::object::HeapObject::Pair(car, cdr) => {
+                let car = *car;
+                let cdr = *cdr;
+                // check for (unquote expr) — evaluate expr normally
+                if let Some(sym) = car.as_symbol() {
+                    if self.heap.symbol_name(sym) == "unquote" {
+                        let arg_id = cdr.as_any_object().ok_or("unquote: missing arg")?;
+                        let arg = self.heap.car(arg_id);
+                        self.compile_expr(arg, dst)?;
+                        return Ok(());
+                    }
+                }
+                // recursively quasiquote car and cdr, then cons
+                let car_reg = self.alloc_reg();
+                let cdr_reg = self.alloc_reg();
+                self.compile_quasiquote(car, car_reg)?;
+                self.compile_quasiquote(cdr, cdr_reg)?;
+                self.chunk.emit(Op::Cons, dst, car_reg, cdr_reg);
+                Ok(())
+            }
+        }
+    }
+
     fn compile_call(&mut self, expr: Value, dst: u8) -> Result<(), String> {
         let items = self.heap.list_to_vec(expr);
         if items.is_empty() { return Err("empty call".into()); }
@@ -617,6 +669,8 @@ impl<'a> Compiler<'a> {
 
 /// Register type prototypes and native handlers on the heap.
 pub fn register_type_protos(heap: &mut Heap) {
+    // pre-intern symbols used by the compiler's defmethod
+    heap.intern("self");
     // create the Object prototype (root of all delegation)
     let object_proto = heap.make_object(Value::NIL);
     heap.type_protos[5] = object_proto; // object type
@@ -1060,6 +1114,158 @@ pub fn register_type_protos(heap: &mut Heap) {
     });
     heap.get_mut(str_id).handler_set(describe_sym, h);
 
+    // -- Table prototype (type_protos[9]) --
+    let table_proto = heap.make_object(object_proto);
+    heap.type_protos[9] = table_proto;
+    let table_id = table_proto.as_any_object().unwrap();
+
+    // Table: at:
+    let h = heap.register_native("__table_at", |heap, receiver, args| {
+        let id = receiver.as_any_object().ok_or("at: not a table")?;
+        let key = args.first().copied().unwrap_or(Value::NIL);
+        match heap.get(id) {
+            HeapObject::Table { seq, map } => {
+                // try integer index into seq first
+                if let Some(idx) = key.as_integer() {
+                    if idx >= 0 && (idx as usize) < seq.len() {
+                        return Ok(seq[idx as usize]);
+                    }
+                }
+                // then check map
+                for (k, v) in map {
+                    if *k == key { return Ok(*v); }
+                }
+                Ok(Value::NIL)
+            }
+            _ => Err("at: not a Table".into()),
+        }
+    });
+    heap.get_mut(table_id).handler_set(at_sym, h);
+
+    // Table: at:put:
+    let at_put_sym = heap.intern("at:put:");
+    let h = heap.register_native("__table_at_put", |heap, receiver, args| {
+        let id = receiver.as_any_object().ok_or("at:put: not a table")?;
+        let key = args.first().copied().unwrap_or(Value::NIL);
+        let val = args.get(1).copied().unwrap_or(Value::NIL);
+        match heap.get_mut(id) {
+            HeapObject::Table { seq, map } => {
+                // try integer index into seq
+                if let Some(idx) = key.as_integer() {
+                    if idx >= 0 && (idx as usize) < seq.len() {
+                        seq[idx as usize] = val;
+                        return Ok(val);
+                    }
+                }
+                // update or insert in map
+                for entry in map.iter_mut() {
+                    if entry.0 == key {
+                        entry.1 = val;
+                        return Ok(val);
+                    }
+                }
+                map.push((key, val));
+                Ok(val)
+            }
+            _ => Err("at:put: not a Table".into()),
+        }
+    });
+    heap.get_mut(table_id).handler_set(at_put_sym, h);
+
+    // Table: push:
+    let push_sym = heap.intern("push:");
+    let h = heap.register_native("__table_push", |heap, receiver, args| {
+        let id = receiver.as_any_object().ok_or("push: not a table")?;
+        let val = args.first().copied().unwrap_or(Value::NIL);
+        match heap.get_mut(id) {
+            HeapObject::Table { seq, .. } => {
+                seq.push(val);
+                Ok(val)
+            }
+            _ => Err("push: not a Table".into()),
+        }
+    });
+    heap.get_mut(table_id).handler_set(push_sym, h);
+
+    // Table: length
+    let h = heap.register_native("__table_length", |heap, receiver, _args| {
+        let id = receiver.as_any_object().ok_or("length: not a table")?;
+        match heap.get(id) {
+            HeapObject::Table { seq, .. } => Ok(Value::integer(seq.len() as i64)),
+            _ => Err("length: not a Table".into()),
+        }
+    });
+    heap.get_mut(table_id).handler_set(length_sym, h);
+
+    // Table: keys
+    let keys_sym = heap.intern("keys");
+    let h = heap.register_native("__table_keys", |heap, receiver, _args| {
+        let id = receiver.as_any_object().ok_or("keys: not a table")?;
+        let keys: Vec<Value> = match heap.get(id) {
+            HeapObject::Table { map, .. } => map.iter().map(|(k, _)| *k).collect(),
+            _ => return Err("keys: not a Table".into()),
+        };
+        Ok(heap.list(&keys))
+    });
+    heap.get_mut(table_id).handler_set(keys_sym, h);
+
+    // Table: values
+    let values_sym = heap.intern("values");
+    let h = heap.register_native("__table_values", |heap, receiver, _args| {
+        let id = receiver.as_any_object().ok_or("values: not a table")?;
+        let vals: Vec<Value> = match heap.get(id) {
+            HeapObject::Table { map, .. } => map.iter().map(|(_, v)| *v).collect(),
+            _ => return Err("values: not a Table".into()),
+        };
+        Ok(heap.list(&vals))
+    });
+    heap.get_mut(table_id).handler_set(values_sym, h);
+
+    // Table: describe
+    let h = heap.register_native("__table_describe", |heap, receiver, _args| {
+        let s = heap.format_value(receiver);
+        Ok(heap.alloc_string(&s))
+    });
+    heap.get_mut(table_id).handler_set(describe_sym, h);
+
+    // Table: contains:
+    let h = heap.register_native("__table_contains", |heap, receiver, args| {
+        let id = receiver.as_any_object().ok_or("contains: not a table")?;
+        let key = args.first().copied().unwrap_or(Value::NIL);
+        match heap.get(id) {
+            HeapObject::Table { seq, map } => {
+                // check seq for value
+                if seq.contains(&key) { return Ok(Value::TRUE); }
+                // check map for key
+                for (k, _) in map {
+                    if *k == key { return Ok(Value::TRUE); }
+                }
+                Ok(Value::FALSE)
+            }
+            _ => Err("contains: not a Table".into()),
+        }
+    });
+    heap.get_mut(table_id).handler_set(contains_sym, h);
+
+    // Table: remove:
+    let remove_sym = heap.intern("remove:");
+    let h = heap.register_native("__table_remove", |heap, receiver, args| {
+        let id = receiver.as_any_object().ok_or("remove: not a table")?;
+        let key = args.first().copied().unwrap_or(Value::NIL);
+        match heap.get_mut(id) {
+            HeapObject::Table { map, .. } => {
+                if let Some(pos) = map.iter().position(|(k, _)| *k == key) {
+                    let (_, val) = map.remove(pos);
+                    Ok(val)
+                } else {
+                    Ok(Value::NIL)
+                }
+            }
+            _ => Err("remove: not a Table".into()),
+        }
+    });
+    heap.get_mut(table_id).handler_set(remove_sym, h);
+
     // -- register all prototypes as globals so they're accessible by name --
     let obj_sym = heap.intern("Object");
     heap.globals.insert(obj_sym, object_proto);
@@ -1075,4 +1281,6 @@ pub fn register_type_protos(heap: &mut Heap) {
     heap.globals.insert(cons_sym, cons_proto);
     let string_sym = heap.intern("String");
     heap.globals.insert(string_sym, str_proto);
+    let table_sym = heap.intern("Table");
+    heap.globals.insert(table_sym, table_proto);
 }

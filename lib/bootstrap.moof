@@ -1,0 +1,72 @@
+; bootstrap.moof — derived forms, defined in moof itself.
+;
+; the compiler provides: quote, def, if, fn, let, while, do, :=,
+;                        cons, eq, eval, send, quasiquote
+;
+; everything else is defined here using those primitives.
+; this file is loaded at startup before the REPL.
+
+; -- boolean logic --
+
+(def not (fn (x) (if x false true)))
+
+; and/or take blocks for short-circuit evaluation:
+;   (and || [x > 0] || [x < 10])
+; but for simple two-arg cases we use if directly.
+; these evaluate both args (no short-circuit without vau/blocks):
+(def and2 (fn (a b) (if a (if b true false) false)))
+(def or2 (fn (a b) (if a true (if b true false))))
+
+; -- list operations --
+
+(def list0 nil)
+(def list1 (fn (a) (cons a nil)))
+(def list2 (fn (a b) (cons a (cons b nil))))
+(def list3 (fn (a b c) (cons a (cons b (cons c nil)))))
+(def list4 (fn (a b c d) (cons a (cons b (cons c (cons d nil))))))
+
+; -- higher-order functions on cons lists --
+
+(def map (fn (f lst)
+  (if (eq lst nil) nil
+    (cons (f [(cons lst nil) car])
+          (map f [(cons lst nil) cdr])))))
+
+; -- defmethod: add a handler to a prototype --
+; (defmethod Proto selector (params) body)
+; desugars to: [Proto handle: 'selector with: (fn (self params...) body)]
+;
+; since we don't have full vau yet, defmethod takes the handler
+; as an explicit fn with self as first param:
+;   (defmethod Point 'magnitude (fn (self) [[self.x * self.x] + [self.y * self.y]]))
+
+(def defmethod (fn (proto selector handler)
+  [proto handle: selector with: handler]))
+
+; -- when / unless --
+; these take a block (thunk) as the body for lazy evaluation:
+;   (when [x > 0] || (do-stuff))
+
+(def when (fn (test thunk) (if test (thunk) nil)))
+(def unless (fn (test thunk) (if test nil (thunk))))
+
+; -- string utilities --
+
+(def str2 (fn (a b) [[a describe] ++ [b describe]]))
+(def str3 (fn (a b c) [[[a describe] ++ [b describe]] ++ [c describe]]))
+
+; -- identity and type checking --
+
+(def nil? (fn (x) (eq x nil)))
+(def some? (fn (x) (not (eq x nil))))
+
+; -- arithmetic helpers --
+
+(def abs (fn (x) (if [x < 0] [0 - x] x)))
+(def max (fn (a b) (if [a > b] a b)))
+(def min (fn (a b) (if [a < b] a b)))
+(def zero? (fn (x) (eq x 0)))
+(def positive? (fn (x) [x > 0]))
+(def negative? (fn (x) [x < 0]))
+(def even? (fn (x) (eq [x - [[x / 2] * 2]] 0)))
+(def odd? (fn (x) (not (even? x))))

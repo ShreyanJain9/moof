@@ -91,6 +91,11 @@ impl Heap {
         &self.symbols[id as usize]
     }
 
+    /// Look up a symbol ID by name without interning. Returns None if not found.
+    pub fn find_symbol(&self, name: &str) -> Option<u32> {
+        self.sym_reverse.get(name).copied()
+    }
+
     // -- object allocation --
 
     pub fn alloc(&mut self, obj: HeapObject) -> u32 {

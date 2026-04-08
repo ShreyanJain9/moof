@@ -31,6 +31,7 @@ pub enum Token {
     At,
     Pipe,
     Arrow, // <-
+    Hash,  // #
 
     Eof,
 }
@@ -94,6 +95,7 @@ impl Lexer {
                     }
                 }
                 '@' => { tokens.push(Token::At); self.pos += 1; }
+                '#' => { tokens.push(Token::Hash); self.pos += 1; }
                 '|' => { tokens.push(Token::Pipe); self.pos += 1; }
                 '.' => {
                     if self.prev_was_space {
@@ -210,7 +212,7 @@ impl Lexer {
 fn is_symbol_char(c: char) -> bool {
     !c.is_ascii_whitespace()
         && !matches!(c, '(' | ')' | '[' | ']' | '{' | '}')
-        && !matches!(c, '\'' | '`' | ',' | ';' | '@' | '|' | '.' | '"')
+        && !matches!(c, '\'' | '`' | ',' | ';' | '@' | '|' | '.' | '"' | '#')
 }
 
 /// Convenience: tokenize a string in one call.

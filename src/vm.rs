@@ -200,6 +200,30 @@ impl VM {
                     heap.get_mut(obj_id).handler_set(sel_sym, handler);
                 }
 
+                Op::MakeTable => {
+                    let nseq = b as usize;
+                    let nmap = c as usize;
+                    let total_regs = nseq + nmap * 2;
+                    let padded = (total_regs + 3) & !3; // round up to 4
+
+                    let mut seq = Vec::with_capacity(nseq);
+                    for i in 0..nseq {
+                        seq.push(self.registers[base + code[pc + i] as usize]);
+                    }
+                    let mut map = Vec::with_capacity(nmap);
+                    for i in 0..nmap {
+                        let ki = nseq + i * 2;
+                        let vi = nseq + i * 2 + 1;
+                        let key = self.registers[base + code[pc + ki] as usize];
+                        let val = self.registers[base + code[pc + vi] as usize];
+                        map.push((key, val));
+                    }
+                    pc += padded;
+
+                    self.registers[base + a as usize] =
+                        heap.alloc_val(crate::object::HeapObject::Table { seq, map });
+                }
+
                 Op::MakeClosure => {
                     // index into closure_descs
                     let idx = u16::from_be_bytes([b, c]) as usize;
@@ -207,6 +231,14 @@ impl VM {
                     // the Call handler will look this up
                     self.registers[base + a as usize] = Value::integer(-(idx as i64) - 1);
                     // negative integer = closure desc index (hack until we have proper closure objects)
+                }
+
+                Op::Eval => {
+                    let ast = self.registers[base + b as usize];
+                    let compile_result = crate::lang::compiler::Compiler::compile_toplevel(heap, ast)
+                        .map_err(|e| format!("eval compile: {e}"))?;
+                    let result = self.eval_result(heap, compile_result)?;
+                    self.registers[base + a as usize] = result;
                 }
 
                 Op::GetGlobal => {
@@ -355,6 +387,27 @@ impl VM {
                 Op::Jump => {
                     let offset = i16::from_be_bytes([a, b]) as isize;
                     pc = (pc as isize + offset) as usize;
+                }
+                Op::MakeTable => {
+                    let nseq = b as usize;
+                    let nmap = c as usize;
+                    let total_regs = nseq + nmap * 2;
+                    let padded = (total_regs + 3) & !3;
+                    let mut seq = Vec::with_capacity(nseq);
+                    for i in 0..nseq {
+                        seq.push(self.registers[base + code[pc + i] as usize]);
+                    }
+                    let mut map = Vec::with_capacity(nmap);
+                    for i in 0..nmap {
+                        let ki = nseq + i * 2;
+                        let vi = nseq + i * 2 + 1;
+                        let key = self.registers[base + code[pc + ki] as usize];
+                        let val = self.registers[base + code[pc + vi] as usize];
+                        map.push((key, val));
+                    }
+                    pc += padded;
+                    self.registers[base + a as usize] =
+                        heap.alloc_val(crate::object::HeapObject::Table { seq, map });
                 }
                 _ => break Err(format!("unimplemented in closure: {opcode:?}")),
             }
