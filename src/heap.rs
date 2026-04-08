@@ -210,6 +210,19 @@ impl Heap {
         self.natives.iter().position(|(s, _)| *s == sym)
     }
 
+    /// Value equality (like Ruby's eql?). Compares content for strings.
+    pub fn values_equal(&self, a: Value, b: Value) -> bool {
+        if a == b { return true; } // identity match (covers ints, symbols, bools, nil, same obj)
+        // content equality for strings
+        if let (Some(aid), Some(bid)) = (a.as_any_object(), b.as_any_object()) {
+            match (self.get(aid), self.get(bid)) {
+                (HeapObject::Text(sa), HeapObject::Text(sb)) => return sa == sb,
+                _ => {}
+            }
+        }
+        false
+    }
+
     /// Total object count (for stats).
     pub fn object_count(&self) -> usize {
         self.objects.len()

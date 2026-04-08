@@ -1248,9 +1248,9 @@ pub fn register_type_protos(heap: &mut Heap) {
                         return Ok(seq[idx as usize]);
                     }
                 }
-                // then check map
+                // then check map (content equality for strings)
                 for (k, v) in map {
-                    if *k == key { return Ok(*v); }
+                    if heap.values_equal(*k, key) { return Ok(*v); }
                 }
                 Ok(Value::NIL)
             }
@@ -1265,23 +1265,26 @@ pub fn register_type_protos(heap: &mut Heap) {
         let id = receiver.as_any_object().ok_or("at:put: not a table")?;
         let key = args.first().copied().unwrap_or(Value::NIL);
         let val = args.get(1).copied().unwrap_or(Value::NIL);
+        // find existing key index using content equality (before mutable borrow)
+        let existing_idx = match heap.get(id) {
+            HeapObject::Table { map, .. } => {
+                map.iter().position(|(k, _)| heap.values_equal(*k, key))
+            }
+            _ => return Err("at:put: not a Table".into()),
+        };
         match heap.get_mut(id) {
             HeapObject::Table { seq, map } => {
-                // try integer index into seq
                 if let Some(idx) = key.as_integer() {
                     if idx >= 0 && (idx as usize) < seq.len() {
                         seq[idx as usize] = val;
                         return Ok(val);
                     }
                 }
-                // update or insert in map
-                for entry in map.iter_mut() {
-                    if entry.0 == key {
-                        entry.1 = val;
-                        return Ok(val);
-                    }
+                if let Some(pos) = existing_idx {
+                    map[pos].1 = val;
+                } else {
+                    map.push((key, val));
                 }
-                map.push((key, val));
                 Ok(val)
             }
             _ => Err("at:put: not a Table".into()),
@@ -1351,11 +1354,11 @@ pub fn register_type_protos(heap: &mut Heap) {
         let key = args.first().copied().unwrap_or(Value::NIL);
         match heap.get(id) {
             HeapObject::Table { seq, map } => {
-                // check seq for value
-                if seq.contains(&key) { return Ok(Value::TRUE); }
-                // check map for key
+                for v in seq {
+                    if heap.values_equal(*v, key) { return Ok(Value::TRUE); }
+                }
                 for (k, _) in map {
-                    if *k == key { return Ok(Value::TRUE); }
+                    if heap.values_equal(*k, key) { return Ok(Value::TRUE); }
                 }
                 Ok(Value::FALSE)
             }
@@ -1369,9 +1372,13 @@ pub fn register_type_protos(heap: &mut Heap) {
     let h = heap.register_native("__table_remove", |heap, receiver, args| {
         let id = receiver.as_any_object().ok_or("remove: not a table")?;
         let key = args.first().copied().unwrap_or(Value::NIL);
+        let pos = match heap.get(id) {
+            HeapObject::Table { map, .. } => map.iter().position(|(k, _)| heap.values_equal(*k, key)),
+            _ => return Err("remove: not a Table".into()),
+        };
         match heap.get_mut(id) {
             HeapObject::Table { map, .. } => {
-                if let Some(pos) = map.iter().position(|(k, _)| *k == key) {
+                if let Some(pos) = pos {
                     let (_, val) = map.remove(pos);
                     Ok(val)
                 } else {
