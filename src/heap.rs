@@ -400,6 +400,41 @@ impl Heap {
         names
     }
 
+    /// Extract params from a possibly-dotted list.
+    /// Returns (positional_params, optional_rest_param).
+    /// (a b c) → ([a, b, c], None)
+    /// (a b . rest) → ([a, b], Some(rest))
+    /// just-a-symbol → ([], Some(symbol))
+    pub fn extract_params(&self, form: Value) -> (Vec<u32>, Option<u32>) {
+        // single symbol = all-capturing rest param
+        if let Some(sym) = form.as_symbol() {
+            return (Vec::new(), Some(sym));
+        }
+        let mut positional = Vec::new();
+        let mut current = form;
+        loop {
+            if current.is_nil() { break; }
+            if let Some(sym) = current.as_symbol() {
+                // dotted tail — rest param
+                return (positional, Some(sym));
+            }
+            if let Some(id) = current.as_any_object() {
+                match self.get(id) {
+                    HeapObject::Pair(car, cdr) => {
+                        if let Some(sym) = car.as_symbol() {
+                            positional.push(sym);
+                        }
+                        current = *cdr;
+                    }
+                    _ => break,
+                }
+            } else {
+                break;
+            }
+        }
+        (positional, None)
+    }
+
     /// Total object count (for stats).
     pub fn object_count(&self) -> usize { self.objects.len() }
 

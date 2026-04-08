@@ -95,6 +95,7 @@ impl Store {
                 capture_parent_regs: d.capture_parent_regs.clone(),
                 capture_local_regs: d.capture_local_regs.clone(),
                 desc_base: d.desc_base,
+                rest_param_reg: d.rest_param_reg,
             }
         }).collect();
         let desc_bytes = bincode::serialize(&desc_data).map_err(|e| format!("serialize descs: {e}"))?;
@@ -165,4 +166,5 @@ pub struct SerializableClosureDesc {
     pub capture_parent_regs: Vec<u8>,
     pub capture_local_regs: Vec<u8>,
     pub desc_base: usize,
+    pub rest_param_reg: Option<u8>,
 }

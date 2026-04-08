@@ -16,7 +16,8 @@ pub struct ClosureDesc {
     pub capture_parent_regs: Vec<u8>,  // which parent registers to read
     pub capture_local_regs: Vec<u8>,   // which local registers to write captures into
     pub capture_values: Vec<Value>,
-    pub desc_base: usize,  // the desc_base when this closure was compiled
+    pub desc_base: usize,
+    pub rest_param_reg: Option<u8>,  // if set, extra args go here as a list
 }
 
 pub struct CompileResult {
@@ -287,7 +288,7 @@ impl<'a> Compiler<'a> {
                         capture_names,
                         capture_parent_regs,
                         capture_local_regs,
-                        capture_values: Vec::new(), desc_base: 0,
+                        capture_values: Vec::new(), desc_base: 0, rest_param_reg: None,
                     };
                     self.closure_descs.extend(sub_result.closure_descs);
                     let idx = self.closure_descs.len();
@@ -326,7 +327,7 @@ impl<'a> Compiler<'a> {
                         capture_names,
                         capture_parent_regs,
                         capture_local_regs,
-                        capture_values: Vec::new(), desc_base: 0,
+                        capture_values: Vec::new(), desc_base: 0, rest_param_reg: None,
                     };
                     self.closure_descs.extend(sub_result.closure_descs);
                     let idx = self.closure_descs.len();
@@ -341,22 +342,23 @@ impl<'a> Compiler<'a> {
                     if items.len() < 3 {
                         return Err("fn: need params and body".into());
                     }
-                    // extract param names
-                    let params = self.heap.list_to_vec(items[1]);
-                    let param_syms: Vec<u32> = params.iter()
-                        .map(|p| p.as_symbol().ok_or("fn: param must be a symbol"))
-                        .collect::<Result<_, _>>()?;
-                    let arity = param_syms.len() as u8;
+                    // extract param names (with optional rest param)
+                    let (positional, rest_param) = self.heap.extract_params(items[1]);
+                    let arity = positional.len() as u8;
 
-                    // compile body as a sub-chunk
                     let mut sub = Compiler::new(self.heap, "<fn>");
                     sub.parent_locals = self.locals.clone();
                     sub.chunk.arity = arity;
-                    // allocate registers for params and register them as locals
-                    for &sym in &param_syms {
+                    for &sym in &positional {
                         let reg = sub.alloc_reg();
                         sub.locals.push((sym, reg));
                     }
+                    // rest param gets its own register (filled by VM)
+                    let rest_reg = if let Some(rest_sym) = rest_param {
+                        let reg = sub.alloc_reg();
+                        sub.locals.push((rest_sym, reg));
+                        Some(reg)
+                    } else { None };
                     let body_dst = sub.alloc_reg();
                     // if multiple body exprs, wrap in do
                     if items.len() == 3 {
@@ -377,12 +379,12 @@ impl<'a> Compiler<'a> {
 
                     let desc = ClosureDesc {
                         chunk: sub_result.chunk,
-                        param_names: param_syms,
+                        param_names: positional,
                         is_operative: false,
                         capture_names,
                         capture_parent_regs,
                         capture_local_regs,
-                        capture_values: Vec::new(), desc_base: 0,
+                        capture_values: Vec::new(), desc_base: 0, rest_param_reg: rest_reg,
                     };
                     // pull up any nested closure descs
                     self.closure_descs.extend(sub_result.closure_descs);

@@ -316,14 +316,21 @@ impl VM {
         self.desc_base = closure_desc_base;
 
         // use a LOCAL register array
+        let arity = chunk.arity as usize;
+        let rest_reg = self.closure_descs[desc_idx].rest_param_reg;
         let mut regs = vec![Value::NIL; chunk.num_regs as usize + 16];
         // args[0] is the cons list of actual arguments — unpack into param registers
         let arg_list = args.first().copied().unwrap_or(Value::NIL);
         let unpacked = heap.list_to_vec(arg_list);
-        for (i, arg) in unpacked.iter().enumerate() {
-            if i < regs.len() {
-                regs[i] = *arg;
-            }
+        // load positional params
+        for i in 0..arity.min(unpacked.len()) {
+            regs[i] = unpacked[i];
+        }
+        // load rest param if present
+        if let Some(rest_r) = rest_reg {
+            // collect remaining args into a cons list
+            let rest_args: Vec<Value> = unpacked.iter().skip(arity).copied().collect();
+            regs[rest_r as usize] = heap.list(&rest_args);
         }
         // load captured values into their allocated registers
         // (the compiler allocated local regs for captured vars after params)

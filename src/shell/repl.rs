@@ -79,6 +79,7 @@ pub fn run() {
                 capture_local_regs: desc.capture_local_regs,
                 capture_values: Vec::new(),
                 desc_base: desc.desc_base,
+                rest_param_reg: desc.rest_param_reg,
             });
         }
         eprintln!("  restored from image ({} objects)", heap.object_count());
