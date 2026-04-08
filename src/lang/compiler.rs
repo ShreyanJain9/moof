@@ -11,6 +11,7 @@ use crate::value::Value;
 pub struct ClosureDesc {
     pub chunk: Chunk,
     pub param_names: Vec<u32>,
+    pub is_operative: bool,
 }
 
 pub struct CompileResult {
@@ -208,6 +209,61 @@ impl<'a> Compiler<'a> {
                     return Ok(());
                 }
 
+                "vau" => {
+                    // (vau (params) $env body...)
+                    // creates an operative — receives unevaluated args + caller env
+                    // params bind to the raw AST args, $env binds to caller env
+                    let items = self.heap.list_to_vec(expr);
+                    if items.len() < 4 {
+                        return Err("vau: need (params) $env body".into());
+                    }
+                    let params = self.heap.list_to_vec(items[1]);
+                    let mut param_syms: Vec<u32> = params.iter()
+                        .map(|p| p.as_symbol().ok_or("vau: param must be a symbol"))
+                        .collect::<Result<_, _>>()?;
+
+                    // $env param (items[2]) — must start with $
+                    let env_sym = items[2].as_symbol()
+                        .ok_or("vau: env param must be a symbol")?;
+                    let env_name = self.heap.symbol_name(env_sym);
+                    if !env_name.starts_with('$') {
+                        return Err("vau: env param must start with $".into());
+                    }
+                    param_syms.push(env_sym); // env is last param
+                    let arity = param_syms.len() as u8;
+
+                    // compile body
+                    let mut sub = Compiler::new(self.heap, "<vau>");
+                    sub.chunk.arity = arity;
+                    for &sym in &param_syms {
+                        let reg = sub.alloc_reg();
+                        sub.locals.push((sym, reg));
+                    }
+                    let body_dst = sub.alloc_reg();
+                    if items.len() == 4 {
+                        sub.compile_expr(items[3], body_dst)?;
+                    } else {
+                        for i in 3..items.len() - 1 {
+                            let tmp = sub.alloc_reg();
+                            sub.compile_expr(items[i], tmp)?;
+                        }
+                        sub.compile_expr(*items.last().unwrap(), body_dst)?;
+                    }
+                    sub.chunk.emit(Op::Return, body_dst, 0, 0);
+                    let sub_result = sub.finish();
+
+                    let desc = ClosureDesc {
+                        chunk: sub_result.chunk,
+                        param_names: param_syms,
+                        is_operative: true,
+                    };
+                    self.closure_descs.extend(sub_result.closure_descs);
+                    let idx = self.closure_descs.len();
+                    self.closure_descs.push(desc);
+                    self.chunk.emit(Op::MakeClosure, dst, (idx >> 8) as u8, idx as u8);
+                    return Ok(());
+                }
+
                 "fn" | "lambda" => {
                     // (fn (params...) body...) → compile body as a sub-chunk, emit MakeClosure
                     let items = self.heap.list_to_vec(expr);
@@ -247,6 +303,7 @@ impl<'a> Compiler<'a> {
                     let desc = ClosureDesc {
                         chunk: sub_result.chunk,
                         param_names: param_syms,
+                        is_operative: false,
                     };
                     // pull up any nested closure descs
                     self.closure_descs.extend(sub_result.closure_descs);
@@ -551,6 +608,10 @@ impl<'a> Compiler<'a> {
                 }
 
                 _ => {
+                    // check if this is a known operative
+                    if self.heap.operatives.contains(&sym_id) {
+                        return self.compile_operative_call(expr, sym_id, dst);
+                    }
                     // generic applicative call: (f a b c) → send call: to f
                     return self.compile_call(expr, dst);
                 }
@@ -601,6 +662,62 @@ impl<'a> Compiler<'a> {
                 Ok(())
             }
         }
+    }
+
+    /// Compile a call to a known operative — quote args, pass as list + env.
+    fn compile_operative_call(&mut self, expr: Value, operative_sym: u32, dst: u8) -> Result<(), String> {
+        let items = self.heap.list_to_vec(expr);
+        // items[0] is the operative name, items[1..] are unevaluated args
+
+        // load the operative itself
+        let window_start = self.next_reg;
+        let func_reg = self.alloc_reg();
+        let func_const = self.add_sym_const(operative_sym);
+        self.chunk.emit(Op::GetGlobal, func_reg, (func_const >> 8) as u8, func_const as u8);
+
+        // build a cons list of the unevaluated args as AST data
+        // each arg is stored as a constant (it's already a Value — a cons cell or literal)
+        let args_reg = self.alloc_reg();
+        self.chunk.emit(Op::LoadNil, args_reg, 0, 0);
+        for i in (1..items.len()).rev() {
+            let arg_reg = self.alloc_reg();
+            // store the raw AST as a constant — DON'T compile it
+            self.emit_load_const(arg_reg, items[i]);
+            self.chunk.emit(Op::Cons, args_reg, arg_reg, args_reg);
+        }
+
+        // env placeholder (nil for now — real first-class envs later)
+        let env_reg = self.alloc_reg();
+        self.chunk.emit(Op::LoadNil, env_reg, 0, 0);
+
+        // call the operative with (args-list, env)
+        // operative's params are (user-params... $env)
+        // we pass: the args list as first param, env as second
+        // the operative body destructures from the args list
+        // ... actually, the operative expects individual params, not a list.
+        // let's pass the args as individual values (quoted) + env as last
+
+        // simpler: just pass the raw AST values + nil env
+        // the operative's params match 1:1 with the args
+        // rebuild as contiguous registers:
+        // [func_reg, arg1_quoted, arg2_quoted, ..., env_reg]
+        let base = self.next_reg;
+        let func_reg2 = self.alloc_reg();
+        self.chunk.emit(Op::Move, func_reg2, func_reg, 0);
+
+        let mut n_params = 0;
+        for i in 1..items.len() {
+            let r = self.alloc_reg();
+            self.emit_load_const(r, items[i]); // raw AST, not compiled
+            n_params += 1;
+        }
+        // env as last param
+        let env_r = self.alloc_reg();
+        self.chunk.emit(Op::LoadNil, env_r, 0, 0);
+        n_params += 1;
+
+        self.chunk.emit(Op::Call, dst, func_reg2, n_params as u8);
+        Ok(())
     }
 
     fn compile_call(&mut self, expr: Value, dst: u8) -> Result<(), String> {

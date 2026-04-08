@@ -256,7 +256,15 @@ impl VM {
                         .ok_or("def_global: name constant is not a symbol")?;
                     let val = self.registers[base + c as usize];
                     heap.globals.insert(name_sym, val);
-                    // leave the value in the dst register (def returns the value)
+                    // check if the value is an operative closure — mark it
+                    if let Some(n) = val.as_integer() {
+                        if n < 0 {
+                            let idx = (-(n + 1)) as usize;
+                            if idx < self.closure_descs.len() && self.closure_descs[idx].is_operative {
+                                heap.operatives.insert(name_sym);
+                            }
+                        }
+                    }
                 }
 
                 _ => {
@@ -268,17 +276,18 @@ impl VM {
 
     /// Call a closure by its descriptor index.
     fn call_closure(&mut self, heap: &mut Heap, desc_idx: usize, args: &[Value]) -> Result<Value, String> {
+        if desc_idx >= self.closure_descs.len() {
+            return Err(format!("closure index {} out of bounds (have {})", desc_idx, self.closure_descs.len()));
+        }
         // clone chunk data to avoid borrow conflicts with self
         let chunk = self.closure_descs[desc_idx].chunk.clone();
 
-        // save registers
-        let saved_regs: Vec<Value> = self.registers.clone();
-
-        // set up args in registers
-        self.registers.resize(chunk.num_regs as usize + 1, Value::NIL);
+        // use a LOCAL register array — don't touch self.registers
+        // this avoids corruption when eval_result/execute recurse
+        let mut regs = vec![Value::NIL; chunk.num_regs as usize + 1];
         for (i, arg) in args.iter().enumerate() {
-            if i < chunk.num_regs as usize {
-                self.registers[i] = *arg;
+            if i < regs.len() {
+                regs[i] = *arg;
             }
         }
 
@@ -290,7 +299,7 @@ impl VM {
 
         let result = loop {
             if pc + 3 >= code.len() {
-                break Ok(self.registers[0]);
+                break Ok(regs[0]);
             }
             let op = code[pc];
             let a = code[pc + 1];
@@ -303,30 +312,30 @@ impl VM {
             };
 
             match opcode {
-                Op::Return => break Ok(self.registers[base + a as usize]),
+                Op::Return => break Ok(regs[base + a as usize]),
                 Op::LoadConst => {
                     let idx = u16::from_be_bytes([b, c]) as usize;
-                    self.registers[base + a as usize] = Value::from_bits(constants[idx]);
+                    regs[base + a as usize] = Value::from_bits(constants[idx]);
                 }
-                Op::LoadNil => self.registers[base + a as usize] = Value::NIL,
-                Op::LoadTrue => self.registers[base + a as usize] = Value::TRUE,
-                Op::LoadFalse => self.registers[base + a as usize] = Value::FALSE,
+                Op::LoadNil => regs[base + a as usize] = Value::NIL,
+                Op::LoadTrue => regs[base + a as usize] = Value::TRUE,
+                Op::LoadFalse => regs[base + a as usize] = Value::FALSE,
                 Op::LoadInt => {
                     let val = i16::from_be_bytes([b, c]) as i64;
-                    self.registers[base + a as usize] = Value::integer(val);
+                    regs[base + a as usize] = Value::integer(val);
                 }
-                Op::Move => self.registers[base + a as usize] = self.registers[base + b as usize],
+                Op::Move => regs[base + a as usize] = regs[base + b as usize],
                 Op::GetGlobal => {
                     let idx = u16::from_be_bytes([b, c]) as usize;
                     let name_sym = Value::from_bits(constants[idx]).as_symbol()
                         .ok_or("get_global: not a symbol")?;
                     let val = heap.globals.get(&name_sym).copied()
                         .ok_or_else(|| format!("unbound: '{}'", heap.symbol_name(name_sym)))?;
-                    self.registers[base + a as usize] = val;
+                    regs[base + a as usize] = val;
                 }
                 Op::Send => {
                     let dst = a as usize;
-                    let recv = self.registers[base + b as usize];
+                    let recv = regs[base + b as usize];
                     let sel_idx = c as usize;
                     let sel_sym = Value::from_bits(constants[sel_idx]).as_symbol()
                         .ok_or("send: selector not a symbol")?;
@@ -336,49 +345,49 @@ impl VM {
                     pc += 4;
                     let mut send_args = Vec::with_capacity(nargs);
                     for i in 0..nargs.min(3) {
-                        send_args.push(self.registers[base + code[arg_start + i] as usize]);
+                        send_args.push(regs[base + code[arg_start + i] as usize]);
                     }
                     let result = self.dispatch_send(heap, recv, sel_sym, &send_args)?;
-                    self.registers[base + dst] = result;
+                    regs[base + dst] = result;
                 }
                 Op::Call => {
                     let dst = a as usize;
-                    let func = self.registers[base + b as usize];
+                    let func = regs[base + b as usize];
                     let nargs = c as usize;
                     let mut call_args = Vec::with_capacity(nargs);
                     for i in 0..nargs {
-                        call_args.push(self.registers[base + b as usize + 1 + i]);
+                        call_args.push(regs[base + b as usize + 1 + i]);
                     }
                     if let Some(n) = func.as_integer() {
                         if n < 0 {
                             let idx = (-(n + 1)) as usize;
                             let res = self.call_closure(heap, idx, &call_args)?;
-                            self.registers[base + dst] = res;
+                            regs[base + dst] = res;
                             continue;
                         }
                     }
                     let res = self.dispatch_send(heap, func, heap.sym_call, &call_args)?;
-                    self.registers[base + dst] = res;
+                    regs[base + dst] = res;
                 }
                 Op::Eq => {
-                    let va = self.registers[base + b as usize];
-                    let vb = self.registers[base + c as usize];
-                    self.registers[base + a as usize] = Value::boolean(va == vb);
+                    let va = regs[base + b as usize];
+                    let vb = regs[base + c as usize];
+                    regs[base + a as usize] = Value::boolean(va == vb);
                 }
                 Op::Cons => {
-                    let car = self.registers[base + b as usize];
-                    let cdr = self.registers[base + c as usize];
-                    self.registers[base + a as usize] = heap.cons(car, cdr);
+                    let car = regs[base + b as usize];
+                    let cdr = regs[base + c as usize];
+                    regs[base + a as usize] = heap.cons(car, cdr);
                 }
                 Op::JumpIfFalse => {
-                    let test = self.registers[base + a as usize];
+                    let test = regs[base + a as usize];
                     if !test.is_truthy() {
                         let offset = i16::from_be_bytes([b, c]) as isize;
                         pc = (pc as isize + offset) as usize;
                     }
                 }
                 Op::JumpIfTrue => {
-                    let test = self.registers[base + a as usize];
+                    let test = regs[base + a as usize];
                     if test.is_truthy() {
                         let offset = i16::from_be_bytes([b, c]) as isize;
                         pc = (pc as isize + offset) as usize;
@@ -395,26 +404,77 @@ impl VM {
                     let padded = (total_regs + 3) & !3;
                     let mut seq = Vec::with_capacity(nseq);
                     for i in 0..nseq {
-                        seq.push(self.registers[base + code[pc + i] as usize]);
+                        seq.push(regs[base + code[pc + i] as usize]);
                     }
                     let mut map = Vec::with_capacity(nmap);
                     for i in 0..nmap {
                         let ki = nseq + i * 2;
                         let vi = nseq + i * 2 + 1;
-                        let key = self.registers[base + code[pc + ki] as usize];
-                        let val = self.registers[base + code[pc + vi] as usize];
+                        let key = regs[base + code[pc + ki] as usize];
+                        let val = regs[base + code[pc + vi] as usize];
                         map.push((key, val));
                     }
                     pc += padded;
-                    self.registers[base + a as usize] =
+                    regs[base + a as usize] =
                         heap.alloc_val(crate::object::HeapObject::Table { seq, map });
+                }
+                Op::Eval => {
+                    let ast = regs[base + b as usize];
+                    let compile_result = crate::lang::compiler::Compiler::compile_toplevel(heap, ast)
+                        .map_err(|e| format!("eval compile: {e}"))?;
+                    let result = self.eval_result(heap, compile_result)?;
+                    regs[base + a as usize] = result;
+                }
+                Op::DefGlobal => {
+                    let idx = u16::from_be_bytes([a, b]) as usize;
+                    let name_sym = Value::from_bits(constants[idx]).as_symbol()
+                        .ok_or("def_global: not a symbol")?;
+                    let val = regs[base + c as usize];
+                    heap.globals.insert(name_sym, val);
+                    if let Some(n) = val.as_integer() {
+                        if n < 0 {
+                            let ci = (-(n + 1)) as usize;
+                            if ci < self.closure_descs.len() && self.closure_descs[ci].is_operative {
+                                heap.operatives.insert(name_sym);
+                            }
+                        }
+                    }
+                }
+                Op::MakeObj => {
+                    let parent = regs[base + b as usize];
+                    let nslots = c as usize;
+                    let mut slot_names = Vec::with_capacity(nslots);
+                    let mut slot_values = Vec::with_capacity(nslots);
+                    for _ in 0..nslots {
+                        if pc + 3 >= code.len() { break; }
+                        let nc = u16::from_be_bytes([code[pc], code[pc + 1]]) as usize;
+                        let vr = code[pc + 2] as usize;
+                        pc += 4;
+                        let ns = Value::from_bits(constants[nc]).as_symbol()
+                            .ok_or("make_obj: slot name not a symbol")?;
+                        slot_names.push(ns);
+                        slot_values.push(regs[base + vr]);
+                    }
+                    regs[base + a as usize] =
+                        heap.make_object_with_slots(parent, slot_names, slot_values);
+                }
+                Op::SetHandler => {
+                    let obj_id = regs[base + a as usize].as_any_object()
+                        .ok_or("set_handler: not an object")?;
+                    let sel_const = b as usize;
+                    let sel_sym = Value::from_bits(constants[sel_const]).as_symbol()
+                        .ok_or("set_handler: selector not a symbol")?;
+                    let handler = regs[base + c as usize];
+                    heap.get_mut(obj_id).handler_set(sel_sym, handler);
+                }
+                Op::MakeClosure => {
+                    let idx = u16::from_be_bytes([b, c]) as usize;
+                    regs[base + a as usize] = Value::integer(-(idx as i64) - 1);
                 }
                 _ => break Err(format!("unimplemented in closure: {opcode:?}")),
             }
         };
 
-        // restore registers
-        self.registers = saved_regs;
         result
     }
 
