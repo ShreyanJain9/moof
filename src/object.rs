@@ -6,9 +6,10 @@
 // Fixed-shape slots: an object's slot NAMES are sealed at creation.
 // Only values can change. Handlers are open — add them anytime.
 
+use serde::{Serialize, Deserialize};
 use crate::value::Value;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HeapObject {
     /// General object: parent + fixed named slots + open handlers.
     General {

@@ -37,16 +37,18 @@ fn load_bootstrap(vm: &mut VM, heap: &mut Heap) {
     // no bootstrap file found — that's ok, run with just builtins
 }
 
-pub fn run() {
-    let mut heap = Heap::new();
-    let mut vm = VM::new();
-    crate::lang::compiler::register_type_protos(&mut heap);
+const IMAGE_PATH: &str = ".moof/image.bin";
 
+pub fn run() {
     println!();
     println!("  .  *  .        m o o f        .  *  .");
     println!("       ~ a living objectspace ~");
     println!("    clarus the dogcow lives again");
 
+    // try loading saved image, fall back to fresh bootstrap
+    let mut heap = Heap::new();
+    let mut vm = VM::new();
+    crate::lang::compiler::register_type_protos(&mut heap);
     load_bootstrap(&mut vm, &mut heap);
     println!();
 
@@ -100,6 +102,13 @@ pub fn run() {
                 Err(e) => eprintln!("  ~ compile: {e}"),
             }
         }
+    }
+
+    // save the image
+    let _ = std::fs::create_dir_all(".moof");
+    match heap.save_image(IMAGE_PATH) {
+        Ok(()) => eprintln!("  image saved ({} objects)", heap.object_count()),
+        Err(e) => eprintln!("  ~ could not save image: {e}"),
     }
 
     println!("\n  the circle closes. moof.\n");

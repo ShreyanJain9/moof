@@ -27,7 +27,7 @@ const TAG_SYM: u64 = 4;
 const TAG_OBJ: u64 = 5;
 const TAG_NURSERY: u64 = 6;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[repr(transparent)]
 pub struct Value(u64);
 

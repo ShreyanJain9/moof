@@ -6,8 +6,17 @@
 // Eventually, persistent objects will be promoted to LMDB (Value::object).
 // For now, everything lives in the nursery.
 
+use serde::{Serialize, Deserialize};
 use crate::object::HeapObject;
 use crate::value::Value;
+
+#[derive(Serialize, Deserialize)]
+pub struct HeapImage {
+    pub objects: Vec<HeapObject>,
+    pub symbols: Vec<String>,
+    pub globals: Vec<(String, u64)>, // name → value bits
+    pub operatives: Vec<String>,     // operative symbol names
+}
 
 pub struct Heap {
     objects: Vec<HeapObject>,
@@ -270,6 +279,69 @@ impl Heap {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// Save the heap to a file.
+    pub fn save_image(&self, path: &str) -> Result<(), String> {
+        let globals: Vec<(String, u64)> = self.globals.iter()
+            .map(|(&sym, &val)| (self.symbol_name(sym).to_string(), val.to_bits()))
+            .collect();
+        let operatives: Vec<String> = self.operatives.iter()
+            .map(|&sym| self.symbol_name(sym).to_string())
+            .collect();
+        let image = HeapImage {
+            objects: self.objects.clone(),
+            symbols: self.symbols.clone(),
+            globals,
+            operatives,
+        };
+        let bytes = bincode::serialize(&image).map_err(|e| format!("serialize: {e}"))?;
+        std::fs::write(path, bytes).map_err(|e| format!("write: {e}"))?;
+        Ok(())
+    }
+
+    /// Load a heap from a file. Returns None if file doesn't exist.
+    pub fn load_image(path: &str) -> Option<Self> {
+        let bytes = std::fs::read(path).ok()?;
+        let image: HeapImage = bincode::deserialize(&bytes).ok()?;
+
+        let mut h = Heap::new();
+        h.objects = image.objects;
+        h.symbols = image.symbols;
+        // rebuild sym_reverse
+        h.sym_reverse.clear();
+        for (i, name) in h.symbols.iter().enumerate() {
+            h.sym_reverse.insert(name.clone(), i as u32);
+        }
+        // restore globals
+        for (name, bits) in &image.globals {
+            let sym = *h.sym_reverse.get(name.as_str())?;
+            h.globals.insert(sym, Value::from_bits(*bits));
+        }
+        // restore operatives
+        for name in &image.operatives {
+            if let Some(&sym) = h.sym_reverse.get(name.as_str()) {
+                h.operatives.insert(sym);
+            }
+        }
+        // re-intern well-known symbols (they should already exist)
+        h.sym_car = *h.sym_reverse.get("car")?;
+        h.sym_cdr = *h.sym_reverse.get("cdr")?;
+        h.sym_call = *h.sym_reverse.get("call:")?;
+        h.sym_slot_at = *h.sym_reverse.get("slotAt:")?;
+        h.sym_slot_at_put = *h.sym_reverse.get("slotAt:put:")?;
+        h.sym_slot_names = *h.sym_reverse.get("slotNames")?;
+        h.sym_handler_names = *h.sym_reverse.get("handlerNames")?;
+        h.sym_parent = *h.sym_reverse.get("parent")?;
+        h.sym_describe = *h.sym_reverse.get("describe")?;
+        h.sym_dnu = *h.sym_reverse.get("doesNotUnderstand:")?;
+        h.sym_length = *h.sym_reverse.get("length")?;
+        h.sym_at = *h.sym_reverse.get("at:")?;
+        h.sym_at_put = *h.sym_reverse.get("at:put:")?;
+        h.sym_code_idx = *h.sym_reverse.get("__code_idx")?;
+        h.sym_arity = *h.sym_reverse.get("__arity")?;
+        h.sym_operative = *h.sym_reverse.get("__operative")?;
+        Some(h)
     }
 
     /// Total object count (for stats).
