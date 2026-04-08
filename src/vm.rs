@@ -117,17 +117,14 @@ impl VM {
                         args.push(self.registers[base + b as usize + 1 + i]);
                     }
 
-                    // check if func is a closure (negative integer hack)
-                    if let Some(n) = func.as_integer() {
-                        if n < 0 {
-                            let idx = (-(n + 1)) as usize;
-                            let result = self.call_closure(heap, idx, &args)?;
-                            self.registers[base + dst] = result;
-                            continue;
-                        }
+                    // check if func is a closure object
+                    if let Some((code_idx, _)) = heap.as_closure(func) {
+                        let result = self.call_closure_obj(heap, func, code_idx, &args)?;
+                        self.registers[base + dst] = result;
+                        continue;
                     }
 
-                    // check if func is a native (symbol pointing to a registered native)
+                    // check if func is a native
                     if dispatch::is_native(heap, func) {
                         let result = dispatch::call_native(heap, func, Value::NIL, &args)?;
                         self.registers[base + dst] = result;
@@ -236,15 +233,21 @@ impl VM {
                 Op::MakeClosure => {
                     let raw_idx = u16::from_be_bytes([b, c]) as usize;
                     let idx = raw_idx + self.desc_base;
-                    // capture values from current registers
                     if idx < self.closure_descs.len() {
-                        let parent_regs = self.closure_descs[idx].capture_parent_regs.clone();
-                        let captures: Vec<Value> = parent_regs.iter()
-                            .map(|&r| self.registers[base + r as usize])
+                        let desc = &self.closure_descs[idx];
+                        let arity = desc.chunk.arity;
+                        let is_op = desc.is_operative;
+                        let parent_regs = desc.capture_parent_regs.clone();
+                        let capture_names = desc.capture_names.clone();
+                        // capture values from current registers
+                        let cap_pairs: Vec<(u32, Value)> = capture_names.iter().zip(parent_regs.iter())
+                            .map(|(&name, &r)| (name, self.registers[base + r as usize]))
                             .collect();
-                        self.closure_descs[idx].capture_values = captures;
+                        let closure = heap.make_closure(idx, arity, is_op, &cap_pairs);
+                        self.registers[base + a as usize] = closure;
+                    } else {
+                        return Err(format!("MakeClosure: desc index {idx} out of bounds"));
                     }
-                    self.registers[base + a as usize] = Value::integer(-(idx as i64) - 1);
                 }
 
                 Op::Eval => {
@@ -271,13 +274,8 @@ impl VM {
                     let val = self.registers[base + c as usize];
                     heap.globals.insert(name_sym, val);
                     // check if the value is an operative closure — mark it
-                    if let Some(n) = val.as_integer() {
-                        if n < 0 {
-                            let idx = (-(n + 1)) as usize;
-                            if idx < self.closure_descs.len() && self.closure_descs[idx].is_operative {
-                                heap.operatives.insert(name_sym);
-                            }
-                        }
+                    if let Some((_, true)) = heap.as_closure(val) {
+                        heap.operatives.insert(name_sym);
                     }
                 }
 
@@ -286,6 +284,27 @@ impl VM {
                 }
             }
         }
+    }
+
+    /// Call a closure that is a heap object.
+    fn call_closure_obj(&mut self, heap: &mut Heap, closure_val: Value, code_idx: usize, args: &[Value]) -> Result<Value, String> {
+        if code_idx >= self.closure_descs.len() {
+            return Err(format!("closure code_idx {} out of bounds (have {})", code_idx, self.closure_descs.len()));
+        }
+
+        // read captures from the heap object, build (local_reg, value) pairs
+        let capture_local_regs = self.closure_descs[code_idx].capture_local_regs.clone();
+        let captures_from_obj = heap.closure_captures(closure_val);
+        let mut cap_reg_vals: Vec<(u8, Value)> = Vec::new();
+        for (i, (_, val)) in captures_from_obj.iter().enumerate() {
+            if i < capture_local_regs.len() {
+                cap_reg_vals.push((capture_local_regs[i], *val));
+            }
+        }
+
+        // delegate to call_closure with captures pre-loaded
+        self.closure_descs[code_idx].capture_values = captures_from_obj.iter().map(|(_, v)| *v).collect();
+        self.call_closure(heap, code_idx, args)
     }
 
     /// Call a closure by its descriptor index.
@@ -390,13 +409,10 @@ impl VM {
                     for i in 0..nargs {
                         call_args.push(regs[base + b as usize + 1 + i]);
                     }
-                    if let Some(n) = func.as_integer() {
-                        if n < 0 {
-                            let idx = (-(n + 1)) as usize;
-                            let res = self.call_closure(heap, idx, &call_args)?;
-                            regs[base + dst] = res;
-                            continue;
-                        }
+                    if let Some((code_idx, _)) = heap.as_closure(func) {
+                        let res = self.call_closure_obj(heap, func, code_idx, &call_args)?;
+                        regs[base + dst] = res;
+                        continue;
                     }
                     if dispatch::is_native(heap, func) {
                         let res = dispatch::call_native(heap, func, Value::NIL, &call_args)?;
@@ -468,13 +484,8 @@ impl VM {
                         .ok_or("def_global: not a symbol")?;
                     let val = regs[base + c as usize];
                     heap.globals.insert(name_sym, val);
-                    if let Some(n) = val.as_integer() {
-                        if n < 0 {
-                            let ci = (-(n + 1)) as usize;
-                            if ci < self.closure_descs.len() && self.closure_descs[ci].is_operative {
-                                heap.operatives.insert(name_sym);
-                            }
-                        }
+                    if let Some((_, true)) = heap.as_closure(val) {
+                        heap.operatives.insert(name_sym);
                     }
                 }
                 Op::MakeObj => {
@@ -507,16 +518,20 @@ impl VM {
                 Op::MakeClosure => {
                     let raw_idx = u16::from_be_bytes([b, c]) as usize;
                     let idx = raw_idx + self.desc_base;
-                    // capture from LOCAL regs
                     if idx < self.closure_descs.len() {
-                        let parent_regs = self.closure_descs[idx].capture_parent_regs.clone();
-                        let captures: Vec<Value> = parent_regs.iter()
-                            .map(|&r| regs[base + r as usize])
+                        let desc = &self.closure_descs[idx];
+                        let arity = desc.chunk.arity;
+                        let is_op = desc.is_operative;
+                        let parent_regs_v = desc.capture_parent_regs.clone();
+                        let capture_names_v = desc.capture_names.clone();
+                        let cap_pairs: Vec<(u32, Value)> = capture_names_v.iter().zip(parent_regs_v.iter())
+                            .map(|(&name, &r)| (name, regs[base + r as usize]))
                             .collect();
-                        self.closure_descs[idx].capture_values = captures;
+                        let closure = heap.make_closure(idx, arity, is_op, &cap_pairs);
+                        regs[base + a as usize] = closure;
                     } else {
+                        break Err(format!("MakeClosure: idx {idx} out of bounds"));
                     }
-                    regs[base + a as usize] = Value::integer(-(idx as i64) - 1);
                 }
                 _ => break Err(format!("unimplemented in closure: {opcode:?}")),
             }
@@ -532,16 +547,11 @@ impl VM {
 
         if dispatch::is_native(heap, handler) {
             dispatch::call_native(heap, handler, receiver, args)
-        } else if let Some(n) = handler.as_integer() {
-            if n < 0 {
-                // closure handler — prepend receiver as first arg (self)
-                let idx = (-(n + 1)) as usize;
-                let mut full_args = vec![receiver];
-                full_args.extend_from_slice(args);
-                self.call_closure(heap, idx, &full_args)
-            } else {
-                Err(format!("handler is integer {n}, not callable"))
-            }
+        } else if let Some((code_idx, _)) = heap.as_closure(handler) {
+            // closure handler — prepend receiver as first arg (self)
+            let mut full_args = vec![receiver];
+            full_args.extend_from_slice(args);
+            self.call_closure_obj(heap, handler, code_idx, &full_args)
         } else {
             Err(format!("handler {:?} is not callable", handler))
         }

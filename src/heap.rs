@@ -30,6 +30,9 @@ pub struct Heap {
     pub sym_length: u32,
     pub sym_at: u32,
     pub sym_at_put: u32,
+    pub sym_code_idx: u32,    // __code_idx — closure code index
+    pub sym_arity: u32,       // __arity
+    pub sym_operative: u32,   // __operative
 
     // type prototypes: indexed by Value::type_tag()
     // 0=nil, 1=bool, 2=int, 3=float, 4=symbol, 5=object
@@ -55,6 +58,7 @@ impl Heap {
             sym_slot_names: 0, sym_handler_names: 0,
             sym_parent: 0, sym_describe: 0, sym_dnu: 0,
             sym_length: 0, sym_at: 0, sym_at_put: 0,
+            sym_code_idx: 0, sym_arity: 0, sym_operative: 0,
             type_protos: [Value::NIL; 12],
             natives: Vec::new(),
         };
@@ -73,6 +77,9 @@ impl Heap {
         h.sym_length = h.intern("length");
         h.sym_at = h.intern("at:");
         h.sym_at_put = h.intern("at:put:");
+        h.sym_code_idx = h.intern("__code_idx");
+        h.sym_arity = h.intern("__arity");
+        h.sym_operative = h.intern("__operative");
 
         h
     }
@@ -223,6 +230,48 @@ impl Heap {
         false
     }
 
+    /// Create a closure object. Returns a nursery Value.
+    pub fn make_closure(&mut self, code_idx: usize, arity: u8, is_operative: bool, captures: &[(u32, Value)]) -> Value {
+        let mut slot_names = vec![self.sym_code_idx, self.sym_arity, self.sym_operative];
+        let mut slot_values: Vec<Value> = vec![
+            Value::integer(code_idx as i64),
+            Value::integer(arity as i64),
+            Value::boolean(is_operative),
+        ];
+        // add captured values as named slots
+        for &(name, val) in captures {
+            slot_names.push(name);
+            slot_values.push(val);
+        }
+        self.alloc_val(HeapObject::new_general(Value::NIL, slot_names, slot_values))
+    }
+
+    /// Check if a value is a closure object. Returns (code_idx, is_operative) if so.
+    pub fn as_closure(&self, val: Value) -> Option<(usize, bool)> {
+        let id = val.as_any_object()?;
+        let code_idx_val = self.get(id).slot_get(self.sym_code_idx)?;
+        let code_idx = code_idx_val.as_integer()?;
+        if code_idx < 0 { return None; }
+        let is_operative = self.get(id).slot_get(self.sym_operative)
+            .map(|v| v.is_true()).unwrap_or(false);
+        Some((code_idx as usize, is_operative))
+    }
+
+    /// Get the captured values from a closure object (slots beyond __code_idx, __arity, __operative).
+    pub fn closure_captures(&self, val: Value) -> Vec<(u32, Value)> {
+        let Some(id) = val.as_any_object() else { return Vec::new(); };
+        match self.get(id) {
+            HeapObject::General { slot_names, slot_values, .. } => {
+                // skip the first 3 slots (__code_idx, __arity, __operative)
+                slot_names.iter().zip(slot_values.iter())
+                    .skip(3)
+                    .map(|(&n, &v)| (n, v))
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// Total object count (for stats).
     pub fn object_count(&self) -> usize {
         self.objects.len()
@@ -237,10 +286,9 @@ impl Heap {
         if val.is_nil() { return "nil".into(); }
         if val.is_true() { return "true".into(); }
         if val.is_false() { return "false".into(); }
-        if let Some(n) = val.as_integer() {
-            if n < 0 { return "<fn>".into(); } // closure descriptor ref
-            return n.to_string();
-        }
+        if let Some(n) = val.as_integer() { return n.to_string(); }
+        // check if it's a closure object before generic object formatting
+        if self.as_closure(val).is_some() { return "<fn>".into(); }
         if val.is_float() { return format!("{}", f64::from_bits(val.to_bits())); }
         if let Some(id) = val.as_symbol() {
             return format!("'{}", self.symbol_name(id));
@@ -310,10 +358,8 @@ impl Heap {
         if val.is_nil() { return "nil".into(); }
         if val.is_true() { return "true".into(); }
         if val.is_false() { return "false".into(); }
-        if let Some(n) = val.as_integer() {
-            if n < 0 { return "<fn>".into(); }
-            return format!("{n}  : Integer");
-        }
+        if let Some(n) = val.as_integer() { return format!("{n}  : Integer"); }
+        if self.as_closure(val).is_some() { return "<fn>".into(); }
         if val.is_float() {
             return format!("{}  : Float", f64::from_bits(val.to_bits()));
         }
