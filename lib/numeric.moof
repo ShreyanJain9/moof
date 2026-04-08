@@ -1,13 +1,13 @@
 ; numeric.moof — implement +/-/*/negate, get 5 methods free
 
 (def Numeric (make-protocol "Numeric"
-  (list (quote +) (quote -) (quote *) (quote negate))
+  (list '+ '- '* 'negate)
   #[
-    (quote abs) => (fn (self) (if [self negative?] [self negate] self))
-    (quote sign) => (fn (self) (if [self positive?] 1 (if [self negative?] -1 0)))
-    (quote zero?) => (fn (self) [self = 0])
-    (quote positive?) => (fn (self) [self > 0])
-    (quote negative?) => (fn (self) [self < 0])
+    'abs => (fn (self) (if [self negative?] [self negate] self))
+    'sign => (fn (self) (if [self positive?] 1 (if [self negative?] -1 0)))
+    'zero? => (fn (self) [self = 0])
+    'positive? => (fn (self) [self > 0])
+    'negative? => (fn (self) [self < 0])
   ]
   nil))
 
@@ -23,16 +23,13 @@
 (alias Integer pred dec)
 
 (defmethod Integer times: (block)
-  (let ((i 0))
-    (while [i < self] (block i) (:= i [i + 1]))))
+  (let ((i 0)) (while [i < self] (block i) (:= i [i + 1]))))
 
 (defmethod Integer upto:do: (limit block)
-  (let ((i self))
-    (while [i <= limit] (block i) (:= i [i + 1]))))
+  (let ((i self)) (while [i <= limit] (block i) (:= i [i + 1]))))
 
 (defmethod Integer downto:do: (limit block)
-  (let ((i self))
-    (while [i >= limit] (block i) (:= i [i - 1]))))
+  (let ((i self)) (while [i >= limit] (block i) (:= i [i - 1]))))
 
 (defmethod Integer pow: (exp)
   (let ((result 1) (i 0))
@@ -60,5 +57,4 @@
 (defmethod Integer factorial ()
   (if [self <= 1] 1 [self * [[self dec] factorial]]))
 
-(defmethod Integer multiple?: (other) (eq [self % other] 0))
 (defmethod Integer toString () [self describe])

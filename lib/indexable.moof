@@ -1,17 +1,15 @@
 ; indexable.moof — implement at: + length, get Iterable for free
 
 (def Indexable (make-protocol "Indexable"
-  (list (quote at:) (quote length))
+  (list 'at: 'length)
   #[
-    (quote each:) => (fn (self block)
+    'each: => (fn (self block)
       (let ((i 0) (len [self length]))
         (while [i < len] (block [self at: i]) (:= i [i + 1]))))
-
-    (quote first) => (fn (self) (if [[self length] > 0] [self at: 0] nil))
-    (quote last) => (fn (self) (if [[self length] > 0] [self at: [[self length] - 1]] nil))
-    (quote empty?) => (fn (self) (eq [self length] 0))
-
-    (quote indexOf:) => (fn (self x)
+    'first => (fn (self) (if [[self length] > 0] [self at: 0] nil))
+    'last => (fn (self) (if [[self length] > 0] [self at: [[self length] - 1]] nil))
+    'empty? => (fn (self) (eq [self length] 0))
+    'indexOf: => (fn (self x)
       (let ((i 0) (len [self length]) (result nil))
         (while (and [i < len] [result nil?])
           (when [[self at: i] equal: x] (:= result i))
