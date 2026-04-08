@@ -36,6 +36,14 @@ impl VM {
         }
     }
 
+    pub fn add_closure_desc(&mut self, desc: crate::lang::compiler::ClosureDesc) {
+        self.closure_descs.push(desc);
+    }
+
+    pub fn closure_descs_ref(&self) -> &[crate::lang::compiler::ClosureDesc] {
+        &self.closure_descs
+    }
+
     /// Execute a chunk in the given environment, returning the result.
     pub fn execute(&mut self, heap: &mut Heap, chunk: &Chunk, env: Value) -> Result<Value, String> {
         let base = 0;

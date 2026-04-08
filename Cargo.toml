@@ -9,3 +9,4 @@ description = "a persistent, concurrent objectspace"
 rustyline = "15"
 serde = { version = "1", features = ["derive"] }
 bincode = "1"
+heed = "0.22"

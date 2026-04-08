@@ -350,8 +350,45 @@ impl Heap {
     }
 
     /// Total object count (for stats).
-    pub fn object_count(&self) -> usize {
-        self.objects.len()
+    pub fn object_count(&self) -> usize { self.objects.len() }
+
+    pub fn objects_ref(&self) -> &[HeapObject] { &self.objects }
+    pub fn symbols_ref(&self) -> &[String] { &self.symbols }
+
+    /// Restore a heap from saved data.
+    pub fn restore(
+        objects: Vec<HeapObject>,
+        symbols: Vec<String>,
+        globals: std::collections::HashMap<u32, Value>,
+        operatives: std::collections::HashSet<u32>,
+    ) -> Self {
+        let mut h = Heap::new();
+        h.objects = objects;
+        h.symbols = symbols;
+        h.sym_reverse.clear();
+        for (i, name) in h.symbols.iter().enumerate() {
+            h.sym_reverse.insert(name.clone(), i as u32);
+        }
+        h.globals = globals;
+        h.operatives = operatives;
+        // re-resolve well-known symbols
+        h.sym_car = h.sym_reverse.get("car").copied().unwrap_or(0);
+        h.sym_cdr = h.sym_reverse.get("cdr").copied().unwrap_or(0);
+        h.sym_call = h.sym_reverse.get("call:").copied().unwrap_or(0);
+        h.sym_slot_at = h.sym_reverse.get("slotAt:").copied().unwrap_or(0);
+        h.sym_slot_at_put = h.sym_reverse.get("slotAt:put:").copied().unwrap_or(0);
+        h.sym_slot_names = h.sym_reverse.get("slotNames").copied().unwrap_or(0);
+        h.sym_handler_names = h.sym_reverse.get("handlerNames").copied().unwrap_or(0);
+        h.sym_parent = h.sym_reverse.get("parent").copied().unwrap_or(0);
+        h.sym_describe = h.sym_reverse.get("describe").copied().unwrap_or(0);
+        h.sym_dnu = h.sym_reverse.get("doesNotUnderstand:").copied().unwrap_or(0);
+        h.sym_length = h.sym_reverse.get("length").copied().unwrap_or(0);
+        h.sym_at = h.sym_reverse.get("at:").copied().unwrap_or(0);
+        h.sym_at_put = h.sym_reverse.get("at:put:").copied().unwrap_or(0);
+        h.sym_code_idx = h.sym_reverse.get("__code_idx").copied().unwrap_or(0);
+        h.sym_arity = h.sym_reverse.get("__arity").copied().unwrap_or(0);
+        h.sym_operative = h.sym_reverse.get("__operative").copied().unwrap_or(0);
+        h
     }
 }
 

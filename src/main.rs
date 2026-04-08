@@ -4,6 +4,7 @@ mod heap;
 mod dispatch;
 mod opcodes;
 mod vm;
+mod store;
 mod lang;
 mod shell;
 
