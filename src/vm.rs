@@ -371,9 +371,18 @@ impl VM {
 
         if dispatch::is_native(heap, handler) {
             dispatch::call_native(heap, handler, receiver, args)
+        } else if let Some(n) = handler.as_integer() {
+            if n < 0 {
+                // closure handler — prepend receiver as first arg (self)
+                let idx = (-(n + 1)) as usize;
+                let mut full_args = vec![receiver];
+                full_args.extend_from_slice(args);
+                self.call_closure(heap, idx, &full_args)
+            } else {
+                Err(format!("handler is integer {n}, not callable"))
+            }
         } else {
-            // TODO: bytecode handler execution (call into the handler's chunk)
-            Err(format!("bytecode handler execution not yet implemented"))
+            Err(format!("handler {:?} is not callable", handler))
         }
     }
 }

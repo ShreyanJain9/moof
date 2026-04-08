@@ -213,7 +213,7 @@ impl<'a> Parser<'a> {
         // then keyword-value pairs are slots
 
         let obj_sym = self.intern("%object-literal");
-        let mut parent = Value::NIL; // default parent
+        let mut parent = self.intern("Object"); // default parent
         let mut slot_names: Vec<Value> = Vec::new();
         let mut slot_values: Vec<Value> = Vec::new();
 

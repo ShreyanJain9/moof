@@ -1059,4 +1059,20 @@ pub fn register_type_protos(heap: &mut Heap) {
         Ok(receiver) // strings describe as themselves
     });
     heap.get_mut(str_id).handler_set(describe_sym, h);
+
+    // -- register all prototypes as globals so they're accessible by name --
+    let obj_sym = heap.intern("Object");
+    heap.globals.insert(obj_sym, object_proto);
+    let int_sym = heap.intern("Integer");
+    heap.globals.insert(int_sym, int_proto);
+    let nil_sym = heap.intern("Nil");
+    heap.globals.insert(nil_sym, nil_proto);
+    let bool_sym = heap.intern("Boolean");
+    heap.globals.insert(bool_sym, bool_proto);
+    let float_sym = heap.intern("Float");
+    heap.globals.insert(float_sym, float_proto);
+    let cons_sym = heap.intern("Cons");
+    heap.globals.insert(cons_sym, cons_proto);
+    let string_sym = heap.intern("String");
+    heap.globals.insert(string_sym, str_proto);
 }
