@@ -1039,8 +1039,48 @@ pub fn register_type_protos(heap: &mut Heap) {
     let describe_sym = heap.sym_describe;
     heap.get_mut(obj_id).handler_set(describe_sym, describe_handler);
 
-    // Integer prototype
-    let int_proto = heap.make_object(object_proto);
+    // Number prototype (shared parent for Integer and Float)
+    let number_proto = heap.make_object(object_proto);
+    heap.type_protos[10] = number_proto;
+
+    // Symbol prototype
+    let sym_proto = heap.make_object(object_proto);
+    heap.type_protos[4] = sym_proto;
+    let sym_proto_id = sym_proto.as_any_object().unwrap();
+
+    // Symbol: name — the string name of the symbol
+    let h = heap.register_native("sym_name", |heap, receiver, _args| {
+        let sym_id = receiver.as_symbol().ok_or("name: not a symbol")?;
+        let name = heap.symbol_name(sym_id).to_string();
+        Ok(heap.alloc_string(&name))
+    });
+    let name_sym = heap.intern("name");
+    heap.get_mut(sym_proto_id).handler_set(name_sym, h);
+
+    // Symbol: toString — alias for name
+    let to_string_sym = heap.intern("toString");
+    let name_handler = heap.get(sym_proto_id).handler_get(name_sym).unwrap();
+    heap.get_mut(sym_proto_id).handler_set(to_string_sym, name_handler);
+
+    // Symbol: describe
+    let h = heap.register_native("sym_describe", |heap, receiver, _args| {
+        let sym_id = receiver.as_symbol().ok_or("describe: not a symbol")?;
+        let name = heap.symbol_name(sym_id).to_string();
+        Ok(heap.alloc_string(&name))
+    });
+    heap.get_mut(sym_proto_id).handler_set(describe_sym, h);
+
+    // Symbol: show
+    let h = heap.register_native("sym_show", |heap, receiver, _args| {
+        let sym_id = receiver.as_symbol().ok_or("show: not a symbol")?;
+        let name = heap.symbol_name(sym_id).to_string();
+        Ok(heap.alloc_string(&format!("'{name}")))
+    });
+    let show_sym = heap.intern("show");
+    heap.get_mut(sym_proto_id).handler_set(show_sym, h);
+
+    // Integer prototype (parent: Number, not Object)
+    let int_proto = heap.make_object(number_proto);
     heap.type_protos[2] = int_proto;
 
     // register native handlers for integer arithmetic
@@ -1175,8 +1215,8 @@ pub fn register_type_protos(heap: &mut Heap) {
     let if_sym = heap.intern("ifTrue:ifFalse:");
     heap.get_mut(bool_id).handler_set(if_sym, h);
 
-    // -- Float prototype (type_protos[3]) --
-    let float_proto = heap.make_object(object_proto);
+    // -- Float prototype (parent: Number) --
+    let float_proto = heap.make_object(number_proto);
     heap.type_protos[3] = float_proto;
     let float_id = float_proto.as_any_object().unwrap();
 
@@ -1632,6 +1672,22 @@ pub fn register_type_protos(heap: &mut Heap) {
     heap.globals.insert(string_sym, str_proto);
     let table_sym = heap.intern("Table");
     heap.globals.insert(table_sym, table_proto);
+    let number_sym = heap.intern("Number");
+    heap.globals.insert(number_sym, number_proto);
+    let symbol_sym = heap.intern("Symbol");
+    heap.globals.insert(symbol_sym, sym_proto);
+
+    // -- String: native < for Comparable --
+    let h = heap.register_native("str_lt", |heap, receiver, args| {
+        let a_id = receiver.as_any_object().ok_or("< : not a string")?;
+        let b_id = args.first().and_then(|v| v.as_any_object()).ok_or("< : arg not a string")?;
+        match (heap.get(a_id), heap.get(b_id)) {
+            (HeapObject::Text(a), HeapObject::Text(b)) => Ok(Value::boolean(a < b)),
+            _ => Err("< : not strings".into()),
+        }
+    });
+    let lt_sym = heap.intern("<");
+    heap.get_mut(str_id).handler_set(lt_sym, h);
 
     // -- handlers on Object prototype (inherited by everything) --
 
