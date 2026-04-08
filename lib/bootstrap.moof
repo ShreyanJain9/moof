@@ -1,41 +1,69 @@
-; bootstrap.moof — minimal, vau-based
+; bootstrap.moof — the moof grimoire
+;
+; everything here is conjured from the kernel:
+;   quote, def, if, fn, let, while, do, :=, cons, eq,
+;   eval, send, vau, quasiquote
+;
+; vau gives us the power to define our own incantations —
+; forms that receive unevaluated arguments, the raw spell-text,
+; and choose what to weave from it.
 
-; (and a b) — short-circuit via vau
+; ── vau-based control flow ──────────────────────────────
+
+; (and a b) — short-circuit: b is never touched if a is false
 (def and (vau (a b) $e
   (if (eval a) (eval b) false)))
 
-; (or a b)
+; (or a b) — short-circuit: b is never touched if a is true
 (def or (vau (a b) $e
   (if (eval a) true (eval b))))
 
-; not — just a fn
+; (when test body) — only eval body if test is truthy
+(def when (vau (test body) $e
+  (if (eval test) (eval body) nil)))
+
+; (unless test body)
+(def unless (vau (test body) $e
+  (if (eval test) nil (eval body))))
+
+; (-> val f1 f2 f3) — threading macro, pipe a value through functions
+; (-> 5 double [+ 1]) etc. — future work, needs more quasiquote power
+
+; ── boolean & logic ─────────────────────────────────────
+
 (def not (fn (x) (if x false true)))
 
-; -- type predicates --
+; ── type predicates ─────────────────────────────────────
+
 (def nil? (fn (x) (eq x nil)))
 (def some? (fn (x) (not (eq x nil))))
+(def pair? (fn (x)
+  (if (eq x nil) false
+    (if [x describe] true false))))
 
-; -- arithmetic --
+; ── arithmetic ──────────────────────────────────────────
+
 (def abs (fn (x) (if [x < 0] [0 - x] x)))
 (def max (fn (a b) (if [a > b] a b)))
 (def min (fn (a b) (if [a < b] a b)))
 (def zero? (fn (x) (eq x 0)))
+(def positive? (fn (x) [x > 0]))
+(def negative? (fn (x) [x < 0]))
 (def even? (fn (x) (eq [x - [[x / 2] * 2]] 0)))
 (def odd? (fn (x) (not (even? x))))
+(def inc (fn (x) [x + 1]))
+(def dec (fn (x) [x - 1]))
+(def clamp (fn (x lo hi) (min (max x lo) hi)))
 
-; -- when / unless via vau --
-(def when (vau (test body) $e
-  (if (eval test) (eval body) nil)))
+; ── list construction ───────────────────────────────────
 
-(def unless (vau (test body) $e
-  (if (eval test) nil (eval body))))
-
-; -- list helpers --
 (def list1 (fn (a) (cons a nil)))
 (def list2 (fn (a b) (cons a (cons b nil))))
 (def list3 (fn (a b c) (cons a (cons b (cons c nil)))))
+(def list4 (fn (a b c d) (cons a (cons b (cons c (cons d nil))))))
 
-; -- higher-order functions --
+; ── higher-order functions on lists ─────────────────────
+
 (def map (fn (f lst)
   (if (eq lst nil) nil
     (cons (f [lst car]) (map f [lst cdr])))))
@@ -50,20 +78,89 @@
   (if (eq lst nil) init
     (fold f (f init [lst car]) [lst cdr]))))
 
-(def reverse (fn (lst)
-  (fold (fn (acc x) (cons x acc)) nil lst)))
+(def reduce (fn (f lst)
+  (if (eq lst nil) nil
+    (fold f [lst car] [lst cdr]))))
 
 (def for-each (fn (f lst)
   (if (eq lst nil) nil
     (do (f [lst car]) (for-each f [lst cdr])))))
 
-; -- defmethod --
+(def reverse (fn (lst)
+  (fold (fn (acc x) (cons x acc)) nil lst)))
+
+(def append (fn (a b)
+  (if (eq a nil) b
+    (cons [a car] (append [a cdr] b)))))
+
+(def length (fn (lst)
+  (fold (fn (acc x) [acc + 1]) 0 lst)))
+
+(def nth (fn (lst n)
+  (if (eq n 0) [lst car]
+    (nth [lst cdr] [n - 1]))))
+
+(def last (fn (lst)
+  (if (eq [lst cdr] nil) [lst car]
+    (last [lst cdr]))))
+
+(def take (fn (n lst)
+  (if (or (eq n 0) (eq lst nil)) nil
+    (cons [lst car] (take [n - 1] [lst cdr])))))
+
+(def drop (fn (n lst)
+  (if (or (eq n 0) (eq lst nil)) lst
+    (drop [n - 1] [lst cdr]))))
+
+(def zip (fn (a b)
+  (if (or (eq a nil) (eq b nil)) nil
+    (cons (cons [a car] [b car])
+          (zip [a cdr] [b cdr])))))
+
+(def any? (fn (f lst)
+  (if (eq lst nil) false
+    (if (f [lst car]) true
+      (any? f [lst cdr])))))
+
+(def every? (fn (f lst)
+  (if (eq lst nil) true
+    (if (f [lst car]) (every? f [lst cdr])
+      false))))
+
+(def find (fn (f lst)
+  (if (eq lst nil) nil
+    (if (f [lst car]) [lst car]
+      (find f [lst cdr])))))
+
+(def flatten (fn (lst)
+  (if (eq lst nil) nil
+    (if (eq [lst car] nil) (flatten [lst cdr])
+      (append [lst car] (flatten [lst cdr]))))))
+
+(def range (fn (n)
+  (let ((result nil) (i [n - 1]))
+    (while [i >= 0]
+      (:= result (cons i result))
+      (:= i [i - 1]))
+    result)))
+
+(def sum (fn (lst) (fold (fn (a x) [a + x]) 0 lst)))
+(def product (fn (lst) (fold (fn (a x) [a * x]) 1 lst)))
+
+; ── object construction helpers ─────────────────────────
+
 (def defmethod (fn (proto selector handler)
   [proto handle: selector with: handler]))
 
-; -- string --
-(def str2 (fn (a b) [[a describe] ++ [b describe]]))
+; ── string ──────────────────────────────────────────────
 
-; -- identity --
+(def str2 (fn (a b) [[a describe] ++ [b describe]]))
+(def str3 (fn (a b c) [[[a describe] ++ [b describe]] ++ [c describe]]))
+
+; ── functional combinators ──────────────────────────────
+
 (def id (fn (x) x))
 (def compose (fn (f g) (fn (x) (f (g x)))))
+(def constantly (fn (x) (fn (a) x)))
+(def flip (fn (f) (fn (a b) (f b a))))
+(def twice (fn (f) (fn (x) (f (f x)))))

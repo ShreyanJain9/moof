@@ -125,6 +125,13 @@ impl VM {
                         }
                     }
 
+                    // check if func is a native (symbol pointing to a registered native)
+                    if dispatch::is_native(heap, func) {
+                        let result = dispatch::call_native(heap, func, Value::NIL, &args)?;
+                        self.registers[base + dst] = result;
+                        continue;
+                    }
+
                     let result = self.dispatch_send(heap, func, heap.sym_call, &args)?;
                     self.registers[base + dst] = result;
                 }
@@ -365,6 +372,11 @@ impl VM {
                             regs[base + dst] = res;
                             continue;
                         }
+                    }
+                    if dispatch::is_native(heap, func) {
+                        let res = dispatch::call_native(heap, func, Value::NIL, &call_args)?;
+                        regs[base + dst] = res;
+                        continue;
                     }
                     let res = self.dispatch_send(heap, func, heap.sym_call, &call_args)?;
                     regs[base + dst] = res;
