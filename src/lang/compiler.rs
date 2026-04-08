@@ -8,10 +8,22 @@ use crate::object::HeapObject;
 use crate::opcodes::{Chunk, Op};
 use crate::value::Value;
 
+pub struct ClosureDesc {
+    pub chunk: Chunk,
+    pub param_names: Vec<u32>,
+}
+
+pub struct CompileResult {
+    pub chunk: Chunk,
+    pub closure_descs: Vec<ClosureDesc>,
+}
+
 pub struct Compiler<'a> {
     heap: &'a Heap,
     chunk: Chunk,
     next_reg: u8,
+    pub closure_descs: Vec<ClosureDesc>,
+    locals: Vec<(u32, u8)>, // (symbol_id, register) — local variable bindings
 }
 
 impl<'a> Compiler<'a> {
@@ -20,6 +32,8 @@ impl<'a> Compiler<'a> {
             heap,
             chunk: Chunk::new(name, 0, 0),
             next_reg: 0,
+            closure_descs: Vec::new(),
+            locals: Vec::new(),
         }
     }
 
@@ -30,6 +44,11 @@ impl<'a> Compiler<'a> {
             self.chunk.num_regs = self.next_reg;
         }
         r
+    }
+
+    fn find_local(&self, sym_id: u32) -> Option<u8> {
+        // search locals from the end (most recent binding wins)
+        self.locals.iter().rev().find(|(s, _)| *s == sym_id).map(|(_, r)| *r)
     }
 
     fn add_sym_const(&mut self, sym_id: u32) -> u16 {
@@ -59,9 +78,23 @@ impl<'a> Compiler<'a> {
         }
         if expr.is_float() { self.emit_load_const(dst, expr); return Ok(()); }
 
-        // symbol reference → load as constant (resolved at runtime by the VM)
+        // symbol reference → check locals first, then globals
         if expr.is_symbol() {
-            self.emit_load_const(dst, expr);
+            let sym_id = expr.as_symbol().unwrap();
+            let name = self.heap.symbol_name(sym_id);
+            // skip well-known internal symbols
+            if name == "send" || name == "%dot" || name == "%block" || name == "%object-literal" || name == "%eventual-send" {
+                self.emit_load_const(dst, expr);
+            } else if let Some(reg) = self.find_local(sym_id) {
+                // local variable — just copy from its register
+                if reg != dst {
+                    self.chunk.emit(Op::Move, dst, reg, 0);
+                }
+            } else {
+                // global variable
+                let idx = self.add_sym_const(sym_id);
+                self.chunk.emit(Op::GetGlobal, dst, (idx >> 8) as u8, idx as u8);
+            }
             return Ok(());
         }
 
@@ -133,13 +166,83 @@ impl<'a> Compiler<'a> {
                 }
 
                 "def" => {
-                    // (def name value) — for now, just compile the value
+                    // (def name value) → compile value, then DEF_GLOBAL
                     let items = self.heap.list_to_vec(expr);
                     if items.len() != 3 {
                         return Err("def: need name and value".into());
                     }
-                    // compile the value
+                    let name_sym = items[1].as_symbol()
+                        .ok_or("def: name must be a symbol")?;
+                    // compile the value into dst
                     self.compile_expr(items[2], dst)?;
+                    // emit DEF_GLOBAL
+                    let idx = self.add_sym_const(name_sym);
+                    self.chunk.emit(Op::DefGlobal, (idx >> 8) as u8, idx as u8, dst);
+                    return Ok(());
+                }
+
+                "do" => {
+                    // (do expr1 expr2 ... exprN) → compile all, return last
+                    let items = self.heap.list_to_vec(expr);
+                    if items.len() < 2 {
+                        self.chunk.emit(Op::LoadNil, dst, 0, 0);
+                        return Ok(());
+                    }
+                    for i in 1..items.len() - 1 {
+                        let tmp = self.alloc_reg();
+                        self.compile_expr(items[i], tmp)?;
+                    }
+                    self.compile_expr(*items.last().unwrap(), dst)?;
+                    return Ok(());
+                }
+
+                "fn" | "lambda" => {
+                    // (fn (params...) body...) → compile body as a sub-chunk, emit MakeClosure
+                    let items = self.heap.list_to_vec(expr);
+                    if items.len() < 3 {
+                        return Err("fn: need params and body".into());
+                    }
+                    // extract param names
+                    let params = self.heap.list_to_vec(items[1]);
+                    let param_syms: Vec<u32> = params.iter()
+                        .map(|p| p.as_symbol().ok_or("fn: param must be a symbol"))
+                        .collect::<Result<_, _>>()?;
+                    let arity = param_syms.len() as u8;
+
+                    // compile body as a sub-chunk
+                    let mut sub = Compiler::new(self.heap, "<fn>");
+                    sub.chunk.arity = arity;
+                    // allocate registers for params and register them as locals
+                    for &sym in &param_syms {
+                        let reg = sub.alloc_reg();
+                        sub.locals.push((sym, reg));
+                    }
+                    let body_dst = sub.alloc_reg();
+                    // if multiple body exprs, wrap in do
+                    if items.len() == 3 {
+                        sub.compile_expr(items[2], body_dst)?;
+                    } else {
+                        // multiple body expressions — compile each, return last
+                        for i in 2..items.len() - 1 {
+                            let tmp = sub.alloc_reg();
+                            sub.compile_expr(items[i], tmp)?;
+                        }
+                        sub.compile_expr(*items.last().unwrap(), body_dst)?;
+                    }
+                    sub.chunk.emit(Op::Return, body_dst, 0, 0);
+                    let sub_result = sub.finish();
+
+                    let desc = ClosureDesc {
+                        chunk: sub_result.chunk,
+                        param_names: param_syms,
+                    };
+                    // pull up any nested closure descs
+                    self.closure_descs.extend(sub_result.closure_descs);
+                    let idx = self.closure_descs.len();
+                    self.closure_descs.push(desc);
+                    // emit MakeClosure with index
+                    self.chunk.emit(Op::MakeClosure, dst, (idx >> 8) as u8, idx as u8);
+
                     return Ok(());
                 }
 
@@ -234,20 +337,25 @@ impl<'a> Compiler<'a> {
         let items = self.heap.list_to_vec(expr);
         if items.is_empty() { return Err("empty call".into()); }
 
+        // allocate a contiguous window: [func, arg0, arg1, ...]
+        let window_start = self.next_reg;
         let func_reg = self.alloc_reg();
-        self.compile_expr(items[0], func_reg)?;
-
-        let mut arg_regs = Vec::new();
-        for i in 1..items.len() {
-            let r = self.alloc_reg();
-            self.compile_expr(items[i], r)?;
-            arg_regs.push(r);
+        let nargs = items.len() - 1;
+        let mut arg_regs = Vec::with_capacity(nargs);
+        for _ in 0..nargs {
+            arg_regs.push(self.alloc_reg());
         }
 
-        // emit CALL dst, func, nargs
-        self.chunk.emit(Op::Call, dst, func_reg, arg_regs.len() as u8);
+        // compile func and args into the contiguous window
+        self.compile_expr(items[0], func_reg)?;
+        for i in 0..nargs {
+            self.compile_expr(items[i + 1], arg_regs[i])?;
+        }
 
-        return Ok(());
+        // emit CALL dst, func, nargs — args must be in func+1..func+nargs
+        self.chunk.emit(Op::Call, dst, func_reg, nargs as u8);
+
+        Ok(())
     }
 
     fn first_arg(&self, cdr: Value) -> Result<Value, String> {
@@ -272,12 +380,15 @@ impl<'a> Compiler<'a> {
         Ok(val)
     }
 
-    fn finish(self) -> Chunk {
-        self.chunk
+    fn finish(self) -> CompileResult {
+        CompileResult {
+            chunk: self.chunk,
+            closure_descs: self.closure_descs,
+        }
     }
 
-    /// Compile a top-level expression into a Chunk.
-    pub fn compile_toplevel(heap: &Heap, expr: Value) -> Result<Chunk, String> {
+    /// Compile a top-level expression.
+    pub fn compile_toplevel(heap: &Heap, expr: Value) -> Result<CompileResult, String> {
         let mut c = Compiler::new(heap, "<toplevel>");
         let dst = c.alloc_reg();
         c.compile_expr(expr, dst)?;

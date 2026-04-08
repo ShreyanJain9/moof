@@ -13,6 +13,7 @@ pub struct Heap {
     objects: Vec<HeapObject>,
     symbols: Vec<String>,
     sym_reverse: std::collections::HashMap<String, u32>,
+    pub globals: std::collections::HashMap<u32, Value>, // top-level defs
 
     // well-known symbols (interned at startup)
     pub sym_car: u32,
@@ -46,6 +47,7 @@ impl Heap {
             objects: Vec::new(),
             symbols: Vec::new(),
             sym_reverse: std::collections::HashMap::new(),
+            globals: std::collections::HashMap::new(),
             sym_car: 0, sym_cdr: 0, sym_call: 0,
             sym_slot_at: 0, sym_slot_at_put: 0,
             sym_slot_names: 0, sym_handler_names: 0,
@@ -131,8 +133,8 @@ impl Heap {
         self.alloc_val(HeapObject::Buffer(data))
     }
 
-    pub fn alloc_array(&mut self, items: Vec<Value>) -> Value {
-        self.alloc_val(HeapObject::Array(items))
+    pub fn alloc_table_seq(&mut self, items: Vec<Value>) -> Value {
+        self.alloc_val(HeapObject::Table { seq: items, map: Vec::new() })
     }
 
     // -- object access helpers --
@@ -231,15 +233,13 @@ impl Heap {
             HeapObject::Pair(_, _) => self.format_list(id),
             HeapObject::Text(s) => format!("\"{}\"", s.replace('"', "\\\"")),
             HeapObject::Buffer(b) => format!("<bytes:{}>", b.len()),
-            HeapObject::Array(items) => {
-                let inner: Vec<_> = items.iter().map(|v| self.format_value(*v)).collect();
-                format!("[{}]", inner.join(", "))
-            }
-            HeapObject::Map(entries) => {
-                let inner: Vec<_> = entries.iter()
-                    .map(|(k, v)| format!("{} => {}", self.format_value(*k), self.format_value(*v)))
-                    .collect();
-                format!("{{| {} |}}", inner.join(", "))
+            HeapObject::Table { seq, map } => {
+                let mut parts = Vec::new();
+                for v in seq { parts.push(self.format_value(*v)); }
+                for (k, v) in map {
+                    parts.push(format!("{} => {}", self.format_value(*k), self.format_value(*v)));
+                }
+                format!("#[{}]", parts.join(" "))
             }
             HeapObject::General { parent, slot_names, slot_values, .. } => {
                 if slot_names.is_empty() {

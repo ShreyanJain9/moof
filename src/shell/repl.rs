@@ -2,10 +2,11 @@ use crate::heap::Heap;
 use crate::lang::lexer;
 use crate::lang::parser::Parser;
 use crate::lang::compiler::Compiler;
-use crate::vm;
+use crate::vm::VM;
 
 pub fn run() {
     let mut heap = Heap::new();
+    let mut vm = VM::new();
     crate::lang::compiler::register_type_protos(&mut heap);
 
     println!("moof v2 — Moof Open Objectspace Fabric");
@@ -53,8 +54,8 @@ pub fn run() {
         // compile and eval each expression
         for expr in &exprs {
             match Compiler::compile_toplevel(&heap, *expr) {
-                Ok(chunk) => {
-                    match vm::eval_chunk(&mut heap, &chunk) {
+                Ok(result) => {
+                    match vm.eval_result(&mut heap, result) {
                         Ok(val) => println!("=> {}", heap.format_value(val)),
                         Err(e) => eprintln!("!! {e}"),
                     }

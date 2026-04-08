@@ -8,6 +8,7 @@
 
 use crate::dispatch;
 use crate::heap::Heap;
+use crate::lang::compiler::{ClosureDesc, CompileResult};
 use crate::opcodes::{Chunk, Op};
 use crate::value::Value;
 
@@ -21,6 +22,7 @@ struct Frame {
 pub struct VM {
     registers: Vec<Value>,
     frames: Vec<Frame>,
+    closure_descs: Vec<ClosureDesc>,
 }
 
 impl VM {
@@ -28,6 +30,7 @@ impl VM {
         VM {
             registers: vec![Value::NIL; 256],
             frames: Vec::new(),
+            closure_descs: Vec::new(),
         }
     }
 
@@ -112,6 +115,16 @@ impl VM {
                         args.push(self.registers[base + b as usize + 1 + i]);
                     }
 
+                    // check if func is a closure (negative integer hack)
+                    if let Some(n) = func.as_integer() {
+                        if n < 0 {
+                            let idx = (-(n + 1)) as usize;
+                            let result = self.call_closure(heap, idx, &args)?;
+                            self.registers[base + dst] = result;
+                            continue;
+                        }
+                    }
+
                     let result = self.dispatch_send(heap, func, heap.sym_call, &args)?;
                     self.registers[base + dst] = result;
                 }
@@ -188,10 +201,30 @@ impl VM {
                 }
 
                 Op::MakeClosure => {
-                    // For now, closures are just the code constant loaded as-is.
-                    // A real implementation would capture the environment.
+                    // index into closure_descs
                     let idx = u16::from_be_bytes([b, c]) as usize;
-                    self.registers[base + a as usize] = Value::from_bits(constants[idx]);
+                    // store a tagged closure reference (using integer as a hack for now)
+                    // the Call handler will look this up
+                    self.registers[base + a as usize] = Value::integer(-(idx as i64) - 1);
+                    // negative integer = closure desc index (hack until we have proper closure objects)
+                }
+
+                Op::GetGlobal => {
+                    let idx = u16::from_be_bytes([b, c]) as usize;
+                    let name_sym = Value::from_bits(constants[idx]).as_symbol()
+                        .ok_or("get_global: name constant is not a symbol")?;
+                    let val = heap.globals.get(&name_sym).copied()
+                        .ok_or_else(|| format!("unbound: '{}'", heap.symbol_name(name_sym)))?;
+                    self.registers[base + a as usize] = val;
+                }
+
+                Op::DefGlobal => {
+                    let idx = u16::from_be_bytes([a, b]) as usize;
+                    let name_sym = Value::from_bits(constants[idx]).as_symbol()
+                        .ok_or("def_global: name constant is not a symbol")?;
+                    let val = self.registers[base + c as usize];
+                    heap.globals.insert(name_sym, val);
+                    // leave the value in the dst register (def returns the value)
                 }
 
                 _ => {
@@ -199,6 +232,137 @@ impl VM {
                 }
             }
         }
+    }
+
+    /// Call a closure by its descriptor index.
+    fn call_closure(&mut self, heap: &mut Heap, desc_idx: usize, args: &[Value]) -> Result<Value, String> {
+        // clone chunk data to avoid borrow conflicts with self
+        let chunk = self.closure_descs[desc_idx].chunk.clone();
+
+        // save registers
+        let saved_regs: Vec<Value> = self.registers.clone();
+
+        // set up args in registers
+        self.registers.resize(chunk.num_regs as usize + 1, Value::NIL);
+        for (i, arg) in args.iter().enumerate() {
+            if i < chunk.num_regs as usize {
+                self.registers[i] = *arg;
+            }
+        }
+
+        // execute the closure's chunk
+        let mut pc = 0;
+        let code = &chunk.code;
+        let constants = &chunk.constants;
+        let base = 0;
+
+        let result = loop {
+            if pc + 3 >= code.len() {
+                break Ok(self.registers[0]);
+            }
+            let op = code[pc];
+            let a = code[pc + 1];
+            let b = code[pc + 2];
+            let c = code[pc + 3];
+            pc += 4;
+
+            let Some(opcode) = Op::from_u8(op) else {
+                break Err(format!("unknown opcode in closure: {op}"));
+            };
+
+            match opcode {
+                Op::Return => break Ok(self.registers[base + a as usize]),
+                Op::LoadConst => {
+                    let idx = u16::from_be_bytes([b, c]) as usize;
+                    self.registers[base + a as usize] = Value::from_bits(constants[idx]);
+                }
+                Op::LoadNil => self.registers[base + a as usize] = Value::NIL,
+                Op::LoadTrue => self.registers[base + a as usize] = Value::TRUE,
+                Op::LoadFalse => self.registers[base + a as usize] = Value::FALSE,
+                Op::LoadInt => {
+                    let val = i16::from_be_bytes([b, c]) as i64;
+                    self.registers[base + a as usize] = Value::integer(val);
+                }
+                Op::Move => self.registers[base + a as usize] = self.registers[base + b as usize],
+                Op::GetGlobal => {
+                    let idx = u16::from_be_bytes([b, c]) as usize;
+                    let name_sym = Value::from_bits(constants[idx]).as_symbol()
+                        .ok_or("get_global: not a symbol")?;
+                    let val = heap.globals.get(&name_sym).copied()
+                        .ok_or_else(|| format!("unbound: '{}'", heap.symbol_name(name_sym)))?;
+                    self.registers[base + a as usize] = val;
+                }
+                Op::Send => {
+                    let dst = a as usize;
+                    let recv = self.registers[base + b as usize];
+                    let sel_idx = c as usize;
+                    let sel_sym = Value::from_bits(constants[sel_idx]).as_symbol()
+                        .ok_or("send: selector not a symbol")?;
+                    if pc + 3 >= code.len() { break Err("send: truncated".into()); }
+                    let nargs = code[pc] as usize;
+                    let arg_start = pc + 1;
+                    pc += 4;
+                    let mut send_args = Vec::with_capacity(nargs);
+                    for i in 0..nargs.min(3) {
+                        send_args.push(self.registers[base + code[arg_start + i] as usize]);
+                    }
+                    let result = self.dispatch_send(heap, recv, sel_sym, &send_args)?;
+                    self.registers[base + dst] = result;
+                }
+                Op::Call => {
+                    let dst = a as usize;
+                    let func = self.registers[base + b as usize];
+                    let nargs = c as usize;
+                    let mut call_args = Vec::with_capacity(nargs);
+                    for i in 0..nargs {
+                        call_args.push(self.registers[base + b as usize + 1 + i]);
+                    }
+                    if let Some(n) = func.as_integer() {
+                        if n < 0 {
+                            let idx = (-(n + 1)) as usize;
+                            let res = self.call_closure(heap, idx, &call_args)?;
+                            self.registers[base + dst] = res;
+                            continue;
+                        }
+                    }
+                    let res = self.dispatch_send(heap, func, heap.sym_call, &call_args)?;
+                    self.registers[base + dst] = res;
+                }
+                Op::Eq => {
+                    let va = self.registers[base + b as usize];
+                    let vb = self.registers[base + c as usize];
+                    self.registers[base + a as usize] = Value::boolean(va == vb);
+                }
+                Op::Cons => {
+                    let car = self.registers[base + b as usize];
+                    let cdr = self.registers[base + c as usize];
+                    self.registers[base + a as usize] = heap.cons(car, cdr);
+                }
+                Op::JumpIfFalse => {
+                    let test = self.registers[base + a as usize];
+                    if !test.is_truthy() {
+                        let offset = i16::from_be_bytes([b, c]) as isize;
+                        pc = (pc as isize + offset) as usize;
+                    }
+                }
+                Op::JumpIfTrue => {
+                    let test = self.registers[base + a as usize];
+                    if test.is_truthy() {
+                        let offset = i16::from_be_bytes([b, c]) as isize;
+                        pc = (pc as isize + offset) as usize;
+                    }
+                }
+                Op::Jump => {
+                    let offset = i16::from_be_bytes([a, b]) as isize;
+                    pc = (pc as isize + offset) as usize;
+                }
+                _ => break Err(format!("unimplemented in closure: {opcode:?}")),
+            }
+        };
+
+        // restore registers
+        self.registers = saved_regs;
+        result
     }
 
     /// Dispatch a message send, handling both native and bytecode handlers.
@@ -214,7 +378,38 @@ impl VM {
     }
 }
 
-/// Convenience: evaluate a chunk in a fresh VM.
+impl VM {
+    /// Evaluate a CompileResult, accumulating closure descs across calls.
+    pub fn eval_result(&mut self, heap: &mut Heap, result: CompileResult) -> Result<Value, String> {
+        // merge new closure descs — offset any MakeClosure indices in the chunk
+        let base_idx = self.closure_descs.len();
+        self.closure_descs.extend(result.closure_descs);
+        // if base_idx > 0 we'd need to patch MakeClosure operands, but for now
+        // each compile_toplevel starts from 0 — we rely on the compiler
+        // producing indices relative to its own descs, then offset here
+        let mut chunk = result.chunk;
+        if base_idx > 0 {
+            // patch MakeClosure instructions to offset their indices
+            let mut pc = 0;
+            while pc + 3 < chunk.code.len() {
+                if Op::from_u8(chunk.code[pc]) == Some(Op::MakeClosure) {
+                    let old_idx = u16::from_be_bytes([chunk.code[pc + 2], chunk.code[pc + 3]]);
+                    let new_idx = old_idx + base_idx as u16;
+                    chunk.code[pc + 2] = (new_idx >> 8) as u8;
+                    chunk.code[pc + 3] = new_idx as u8;
+                }
+                pc += 4;
+                // skip extra data for Send instructions
+                if pc >= 4 && Op::from_u8(chunk.code[pc - 4]) == Some(Op::Send) {
+                    pc += 4;
+                }
+            }
+        }
+        self.execute(heap, &chunk, Value::NIL)
+    }
+}
+
+/// Convenience: evaluate a chunk in a fresh VM (for tests).
 pub fn eval_chunk(heap: &mut Heap, chunk: &Chunk) -> Result<Value, String> {
     let mut vm = VM::new();
     vm.execute(heap, chunk, Value::NIL)

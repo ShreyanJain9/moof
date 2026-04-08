@@ -35,6 +35,8 @@ pub enum Op {
     SetHandler   = 0x42, // obj, sel_const, handler
     MakeClosure  = 0x50, // dst, code_const_hi, code_const_lo
     LoadInt      = 0x51, // dst, value_hi, value_lo
+    GetGlobal    = 0x60, // dst, name_hi, name_lo  (name is symbol constant index)
+    DefGlobal    = 0x61, // name_hi, name_lo, src  (bind name to register value)
 }
 
 impl Op {
@@ -62,6 +64,8 @@ impl Op {
             0x42 => Some(Op::SetHandler),
             0x50 => Some(Op::MakeClosure),
             0x51 => Some(Op::LoadInt),
+            0x60 => Some(Op::GetGlobal),
+            0x61 => Some(Op::DefGlobal),
             _ => None,
         }
     }

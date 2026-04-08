@@ -27,11 +27,12 @@ pub enum HeapObject {
     /// Optimized byte buffer (bytecode, raw data, etc.).
     Buffer(Vec<u8>),
 
-    /// Mutable indexed collection.
-    Array(Vec<Value>),
-
-    /// Mutable key-value collection.
-    Map(Vec<(Value, Value)>),
+    /// Lua-style table: sequential part + keyed part.
+    /// One data structure replaces both Array and HashMap.
+    Table {
+        seq: Vec<Value>,              // sequential (integer-indexed, 0-based)
+        map: Vec<(Value, Value)>,     // keyed (arbitrary key-value pairs)
+    },
 }
 
 impl HeapObject {

@@ -14,7 +14,7 @@ computational model is the runtime. inseparable.
 the things that make moof moof:
 
 1. **everything is an object.** integers, strings, booleans,
-   cons cells, arrays, hashmaps, lambdas, vats, the canvas, the
+   cons cells, tables, lambdas, vats, the canvas, the
    agent — all objects. objects have slots (public data, fixed at
    creation) and handlers (public behavior, extensible anytime).
    handlers delegate through prototype chains. slots don't.
@@ -101,8 +101,8 @@ the things that make moof moof:
   made concrete — not a type constraint but an object constraint.
 
 - **pattern matching.** `match` as a derived form from vau.
-  destructure objects by shape, arrays by contents, hashmaps
-  by keys. match on protocol conformance.
+  destructure objects by shape, tables by contents and keys.
+  match on protocol conformance.
 
 - **laziness where you want it.** streams are objects with a
   `next` handler that computes on demand. infinite sequences
@@ -187,8 +187,7 @@ Object     — general: parent + named slots + handlers
 Cons       — optimized pair: parent Cons, slots car/cdr
 String     — optimized text: parent String, internal bytes
 Bytes      — optimized blob: parent Bytes, internal bytes
-Array      — mutable indexed collection: parent Array
-HashMap    — mutable key-value collection: parent HashMap
+Table      — mutable collection: sequential + keyed parts (Lua-style)
 ```
 
 a Cons cell is stored internally as two Values (16 bytes), not
@@ -217,12 +216,12 @@ an object's **slots** are its data. they are:
     ({ r: r theta: t } [Console println: (str "polar: " r " @ " t)]))
   ```
 
-  arrays and hashmaps destructure too:
+  tables destructure too:
 
   ```
   (match data
-    ([first second . rest] ...)    ; array destructure
-    ({| "name" => n "age" => a |} ...))  ; hashmap destructure
+    ([first second . rest] ...)              ; sequential destructure
+    (#["name" => n "age" => a] ...))         ; keyed destructure
   ```
 
 **why fixed?** shapes are known at creation → slot access is
@@ -356,7 +355,7 @@ provides: abs, sign, zero?, positive?, negative?,
 
 ```
 requires: hash
-provides: (enables use as HashMap key)
+provides: (enables use as Table key)
 ```
 
 **Iterable** — the big one. this is ruby's Enumerable.
@@ -488,32 +487,40 @@ protocols are objects. you can inspect them, query them, extend
 them. the agent uses `[obj protocols]` and `[Protocol required]`
 to understand what an object can do.
 
-### mutable collections: Array and HashMap
+### mutable collections: Table
 
 fixed-shape objects cover the 90% case. for the other 10% — when
-you need runtime-mutable indexed or keyed data — the lang provides
-Array and HashMap as built-in object types:
+you need runtime-mutable collections — the lang provides Table as
+a built-in object type. one data structure with two parts: a
+sequential part (integer-indexed, 1-based like Lua) and a keyed
+part (arbitrary key-value pairs).
 
 ```
-(def a [Array of: 1 2 3])
-[a push: 4]              ; => [1, 2, 3, 4]
-[a at: 0]                ; => 1
-[a length]               ; => 4
+(def t #[1 2 3])                        ; sequential
+(def m #["x" => 10 "y" => 20])          ; keyed
+(def mixed #[1 2 3 "name" => "alice"])   ; both
 
-(def m [HashMap of: "x" 10 "y" 20])
+[t at: 1]                ; => 1
+[t push: 4]              ; => #[1 2 3 4]
+[t length]               ; => 4
+
 [m at: "x"]              ; => 10
-[m at: "z" put: 30]      ; => {x: 10, y: 20, z: 30}
-[m keys]                 ; => ["x", "y", "z"]
+[m at: "z" put: 30]      ; keyed insert
+[m keys]                 ; => ("x" "y" "z")
+
+[mixed at: 1]            ; => 1 (sequential part)
+[mixed at: "name"]       ; => "alice" (keyed part)
 ```
 
-these are objects. they respond to messages. they delegate to the
-Array and HashMap prototypes. they're destructurable. they persist
-in LMDB. they're just objects with internal storage that the VM
-knows how to handle efficiently.
+tables are objects (of course). they delegate to the Table
+prototype. they conform to Iterable, Indexable, Queryable. they're
+destructurable. they persist in LMDB. they're just objects with
+internal storage that the VM knows how to handle efficiently.
 
-Array and HashMap are how you escape fixed shapes when you
-genuinely need dynamic data. but fixed-shape objects remain the
-default, the common case, the thing the whole system optimizes for.
+Table is the escape hatch from fixed-shape objects when you
+genuinely need runtime-mutable collections. but fixed-shape objects
+remain the default, the common case, the thing the whole system
+optimizes for.
 
 ### the type hierarchy
 
@@ -530,8 +537,7 @@ Object                    Printable
   Cons                    Printable, Iterable, Indexable
   String                  Printable, Comparable, Hashable, Indexable, Iterable
   Bytes                   Indexable
-  Array                   Printable, Iterable, Indexable, Queryable
-  HashMap                 Printable, Iterable
+  Table                   Printable, Iterable, Indexable, Queryable
   Stream                  Iterable
   Block                   Callable
   Environment
@@ -1562,14 +1568,14 @@ system. clear module boundaries, no crate-level ceremony.
 
 ## what's new in v2
 
-- **one semantic type: Object.** cons, string, array, hashmap,
-  vat, canvas — all objects. VM has optimized representations
+- **one semantic type: Object.** cons, string, table, vat,
+  canvas — all objects. VM has optimized representations
   but semantics are uniform
 - **protocols** — the type system. require handlers, provide
   defaults, mix in on conformance. Iterable gives 30 methods
   from one. protocol-based typing used everywhere.
 - **fixed-shape slots** (public data) + open handlers (behavior)
-- **Array and HashMap** for runtime-mutable collections
+- **Table (Lua-style unified array+hashmap)** for runtime-mutable collections
 - **query operations** on collections (where, select, groupBy,
   join, aggregate) — objects-as-rows, sends-as-queries, built
   on the Queryable protocol
@@ -1584,7 +1590,7 @@ system. clear module boundaries, no crate-level ceremony.
 - register-based bytecode + vau stability analysis
 - NaN-boxed values (8 bytes, zero-alloc for primitives)
 - slot access as send (membranes intercept everything)
-- pattern matching on object shapes, arrays, hashmaps
+- pattern matching on object shapes, tables
 - **mirrors** — safe reflection handles for introspection
 - **fix and proceed** — errors suspend vats, not kill them.
   inspect, fix, resume from the exact point of failure
@@ -1628,7 +1634,7 @@ system. clear module boundaries, no crate-level ceremony.
 ### phase 1: the runtime
 
 NaN-boxed values. LMDB store + nursery arena. Object with
-optimized variants (general, pair, string, bytes, array, map).
+optimized variants (general, pair, string, bytes, table).
 `send()` with delegation and slot-access-as-send. type prototypes.
 tests.
 
@@ -1652,9 +1658,9 @@ fuel-based preemption. nursery GC at turn boundaries.
 
 ### phase 5: data
 
-Array, HashMap with full message interfaces. query operations
-via Queryable protocol: where, select, groupBy, orderBy, join,
-aggregate. destructuring/pattern matching on all types.
+Table with full message interface. query operations via Queryable
+protocol: where, select, groupBy, orderBy, join, aggregate.
+destructuring/pattern matching on all types.
 
 ### phase 6: the canvas
 
