@@ -45,8 +45,8 @@ pub struct Heap {
 
     // type prototypes: indexed by Value::type_tag()
     // 0=nil, 1=bool, 2=int, 3=float, 4=symbol, 5=object
-    // plus: 6=cons, 7=string, 8=bytes, 9=array, 10=map, 11=block
-    pub type_protos: [Value; 12],
+    // plus: 6=cons, 7=string, 8=bytes, 9=table, 10=number, 11=block
+    pub type_protos: [Value; 13],
 
     // native handlers: name_sym → Rust closure
     pub natives: Vec<(u32, NativeFn)>,
@@ -68,7 +68,7 @@ impl Heap {
             sym_parent: 0, sym_describe: 0, sym_dnu: 0,
             sym_length: 0, sym_at: 0, sym_at_put: 0,
             sym_code_idx: 0, sym_arity: 0, sym_operative: 0,
-            type_protos: [Value::NIL; 12],
+            type_protos: [Value::NIL; 13],
             natives: Vec::new(),
         };
 
