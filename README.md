@@ -39,8 +39,8 @@ is `send`.
   `where:`, `groupBy:`, `join:on:` — queries as message sends.
 - **content-addressed:** every object state has a hash. undo, versioning,
   deduplication, snapshots — all free. even locally.
-- **federated:** images talk to each other via MCP. far references,
-  capability-mediated sharing, CRDT-based merging, offline pinning.
+- **federated:** images talk via moof's own wire protocol (send,
+  serialized). far refs, capability-mediated, CRDT merging, pinning.
 - **your website:** publish objects as web pages. capabilities control
   what's public. your database and your website are the same image.
 - **vau:** user code has compiler-level power. `if` is a library function.

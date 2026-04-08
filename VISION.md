@@ -1382,11 +1382,18 @@ object but sends go over the network:
 all sends through the far reference go through alice's membrane.
 she controls what bob can do. she can revoke access at any time.
 
-**the protocol is MCP.** federation messages are MCP JSON-RPC
-over HTTPS (or WebSocket for streaming). this means any MCP
-client can talk to a moof image — not just other moof images.
-claude desktop, custom apps, scripts. the federation protocol
-and the AI protocol are the same protocol.
+**the protocol is moof's own.** the wire format is the
+messaging model, serialized: `send(receiver, selector, args)
+→ result`. binary, compact, content-addressed when possible.
+this is the same operation used internally — federation is
+just "send, but over a socket." no impedance mismatch. no
+translation layer. the internal model IS the protocol.
+
+external protocols (MCP, HTTP, WebSocket) are **adapters** —
+bridge objects that translate external requests into sends.
+an MCP adapter lets claude talk to moof. an HTTP adapter
+serves objects as web pages. they're not the substrate. they're
+frontends, like the REPL and the canvas.
 
 ### collaboration: shared objects
 
@@ -1454,8 +1461,8 @@ like git).
 
 your moof image is your website. every object with a `render:`
 handler can be served as HTML. every object with a `describe`
-handler can be served as a resource. the MCP/HTTP interface
-serves your objectspace to the world, mediated by capabilities.
+handler can be served as a resource. the HTTP adapter serves
+your objectspace to the world, mediated by capabilities.
 
 ```
 ; make a public-facing page
@@ -1534,7 +1541,7 @@ moof/
       repl.rs       readline REPL
       canvas.rs     egui zoomable spatial browser
       agent.rs      LLM tool-use loop in a vat
-      mcp.rs        MCP protocol adapter
+      adapters.rs   protocol adapters (MCP, HTTP, etc.)
 
     main.rs         CLI entry point
 ```
@@ -1593,8 +1600,9 @@ system. clear module boundaries, no crate-level ceremony.
   versioning, deduplication, integrity, snapshots — all free
 - **URIs** — every object has a stable address. hyperlinks in
   the canvas. deep linking across images
-- **federation** — images talk to each other via MCP over HTTPS.
-  far references, capability-mediated sharing, offline pinning
+- **federation** — images talk to each other via moof's own
+  wire protocol (send, serialized). far references, capability-
+  mediated sharing, offline pinning. MCP/HTTP as adapters.
 - **Mergeable protocol** — per-slot conflict resolution (CRDT
   text, grow-sets, last-write-wins, monotonic counters)
 - **the personal web** — your image is your website, mediated
@@ -1610,7 +1618,8 @@ system. clear module boundaries, no crate-level ceremony.
 - the three-crate split
 - the module system as a rust-side graph solver
 - source projection
-- the custom binary wire protocol
+- the custom binary wire protocol (native send-based protocol now,
+  MCP/HTTP as adapters)
 
 ---
 
@@ -1671,10 +1680,12 @@ undo/redo. snapshots. deduplication. URIs for every object.
 
 ### phase 10: federation
 
-MCP over HTTPS for inter-image messaging. far references.
-Federation object for granting/revoking access. Mergeable
-protocol with per-slot strategies. pinning for offline work.
-sync with merkle DAG diffing. publish objects as web pages.
+native wire protocol (send, serialized) for inter-image
+messaging. far references. Federation object for granting/
+revoking access. Mergeable protocol with per-slot strategies.
+pinning for offline work. sync with merkle DAG diffing.
+protocol adapters: MCP (for AI tools), HTTP (for web serving).
+publish objects as web pages.
 
 ---
 
