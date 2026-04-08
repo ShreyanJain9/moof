@@ -1,0 +1,370 @@
+// The nursery: in-memory arena for all heap objects.
+//
+// Objects are allocated here and indexed by u32 ID.
+// Value::nursery(id) references objects in this arena.
+//
+// Eventually, persistent objects will be promoted to LMDB (Value::object).
+// For now, everything lives in the nursery.
+
+use crate::object::HeapObject;
+use crate::value::Value;
+
+pub struct Heap {
+    objects: Vec<HeapObject>,
+    symbols: Vec<String>,
+    sym_reverse: std::collections::HashMap<String, u32>,
+
+    // well-known symbols (interned at startup)
+    pub sym_car: u32,
+    pub sym_cdr: u32,
+    pub sym_call: u32,
+    pub sym_slot_at: u32,
+    pub sym_slot_at_put: u32,
+    pub sym_slot_names: u32,
+    pub sym_handler_names: u32,
+    pub sym_parent: u32,
+    pub sym_describe: u32,
+    pub sym_dnu: u32,  // doesNotUnderstand:
+    pub sym_length: u32,
+    pub sym_at: u32,
+    pub sym_at_put: u32,
+
+    // type prototypes: indexed by Value::type_tag()
+    // 0=nil, 1=bool, 2=int, 3=float, 4=symbol, 5=object
+    // plus: 6=cons, 7=string, 8=bytes, 9=array, 10=map, 11=block
+    pub type_protos: [Value; 12],
+
+    // native handlers: name_sym → Rust closure
+    pub natives: Vec<(u32, NativeFn)>,
+}
+
+pub type NativeFn = Box<dyn Fn(&mut Heap, Value, &[Value]) -> Result<Value, String>>;
+
+impl Heap {
+    pub fn new() -> Self {
+        let mut h = Heap {
+            objects: Vec::new(),
+            symbols: Vec::new(),
+            sym_reverse: std::collections::HashMap::new(),
+            sym_car: 0, sym_cdr: 0, sym_call: 0,
+            sym_slot_at: 0, sym_slot_at_put: 0,
+            sym_slot_names: 0, sym_handler_names: 0,
+            sym_parent: 0, sym_describe: 0, sym_dnu: 0,
+            sym_length: 0, sym_at: 0, sym_at_put: 0,
+            type_protos: [Value::NIL; 12],
+            natives: Vec::new(),
+        };
+
+        // intern well-known symbols
+        h.sym_car = h.intern("car");
+        h.sym_cdr = h.intern("cdr");
+        h.sym_call = h.intern("call:");
+        h.sym_slot_at = h.intern("slotAt:");
+        h.sym_slot_at_put = h.intern("slotAt:put:");
+        h.sym_slot_names = h.intern("slotNames");
+        h.sym_handler_names = h.intern("handlerNames");
+        h.sym_parent = h.intern("parent");
+        h.sym_describe = h.intern("describe");
+        h.sym_dnu = h.intern("doesNotUnderstand:");
+        h.sym_length = h.intern("length");
+        h.sym_at = h.intern("at:");
+        h.sym_at_put = h.intern("at:put:");
+
+        h
+    }
+
+    // -- symbol table --
+
+    pub fn intern(&mut self, name: &str) -> u32 {
+        if let Some(&id) = self.sym_reverse.get(name) {
+            return id;
+        }
+        let id = self.symbols.len() as u32;
+        self.symbols.push(name.to_string());
+        self.sym_reverse.insert(name.to_string(), id);
+        id
+    }
+
+    pub fn symbol_name(&self, id: u32) -> &str {
+        &self.symbols[id as usize]
+    }
+
+    // -- object allocation --
+
+    pub fn alloc(&mut self, obj: HeapObject) -> u32 {
+        let id = self.objects.len() as u32;
+        self.objects.push(obj);
+        id
+    }
+
+    pub fn alloc_val(&mut self, obj: HeapObject) -> Value {
+        Value::nursery(self.alloc(obj))
+    }
+
+    pub fn get(&self, id: u32) -> &HeapObject {
+        &self.objects[id as usize]
+    }
+
+    pub fn get_mut(&mut self, id: u32) -> &mut HeapObject {
+        &mut self.objects[id as usize]
+    }
+
+    // -- convenience allocators --
+
+    pub fn make_object(&mut self, parent: Value) -> Value {
+        self.alloc_val(HeapObject::new_empty(parent))
+    }
+
+    pub fn make_object_with_slots(&mut self, parent: Value, slot_names: Vec<u32>, slot_values: Vec<Value>) -> Value {
+        self.alloc_val(HeapObject::new_general(parent, slot_names, slot_values))
+    }
+
+    pub fn cons(&mut self, car: Value, cdr: Value) -> Value {
+        self.alloc_val(HeapObject::Pair(car, cdr))
+    }
+
+    pub fn alloc_string(&mut self, s: &str) -> Value {
+        self.alloc_val(HeapObject::Text(s.to_string()))
+    }
+
+    pub fn alloc_bytes(&mut self, data: Vec<u8>) -> Value {
+        self.alloc_val(HeapObject::Buffer(data))
+    }
+
+    pub fn alloc_array(&mut self, items: Vec<Value>) -> Value {
+        self.alloc_val(HeapObject::Array(items))
+    }
+
+    // -- object access helpers --
+
+    pub fn car(&self, id: u32) -> Value {
+        match self.get(id) {
+            HeapObject::Pair(car, _) => *car,
+            _ => Value::NIL,
+        }
+    }
+
+    pub fn cdr(&self, id: u32) -> Value {
+        match self.get(id) {
+            HeapObject::Pair(_, cdr) => *cdr,
+            _ => Value::NIL,
+        }
+    }
+
+    pub fn get_string(&self, id: u32) -> Option<&str> {
+        match self.get(id) {
+            HeapObject::Text(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn get_bytes(&self, id: u32) -> Option<&[u8]> {
+        match self.get(id) {
+            HeapObject::Buffer(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    /// Build a moof list from a slice of values: (a b c) as nested cons cells.
+    pub fn list(&mut self, items: &[Value]) -> Value {
+        let mut result = Value::NIL;
+        for item in items.iter().rev() {
+            result = self.cons(*item, result);
+        }
+        result
+    }
+
+    /// Collect a cons list into a Vec.
+    pub fn list_to_vec(&self, mut list: Value) -> Vec<Value> {
+        let mut result = Vec::new();
+        while let Some(id) = list.as_any_object() {
+            match self.get(id) {
+                HeapObject::Pair(car, cdr) => {
+                    result.push(*car);
+                    list = *cdr;
+                }
+                _ => break,
+            }
+        }
+        result
+    }
+
+    // -- native handler registration --
+
+    pub fn register_native(&mut self, name: &str, f: impl Fn(&mut Heap, Value, &[Value]) -> Result<Value, String> + 'static) -> Value {
+        let sym = self.intern(name);
+        self.natives.push((sym, Box::new(f)));
+        Value::symbol(sym) // the handler value IS the symbol — dispatch looks it up
+    }
+
+    pub fn find_native(&self, sym: u32) -> Option<usize> {
+        self.natives.iter().position(|(s, _)| *s == sym)
+    }
+
+    /// Total object count (for stats).
+    pub fn object_count(&self) -> usize {
+        self.objects.len()
+    }
+}
+
+// -- printing support --
+
+impl Heap {
+    /// Format a value for display, resolving symbols and walking cons lists.
+    pub fn format_value(&self, val: Value) -> String {
+        if val.is_nil() { return "nil".into(); }
+        if val.is_true() { return "true".into(); }
+        if val.is_false() { return "false".into(); }
+        if let Some(n) = val.as_integer() { return n.to_string(); }
+        if val.is_float() { return format!("{}", f64::from_bits(val.to_bits())); }
+        if let Some(id) = val.as_symbol() {
+            return format!("'{}", self.symbol_name(id));
+        }
+        if let Some(id) = val.as_any_object() {
+            return self.format_object(id);
+        }
+        format!("?{:#018x}", val.to_bits())
+    }
+
+    fn format_object(&self, id: u32) -> String {
+        match self.get(id) {
+            HeapObject::Pair(_, _) => self.format_list(id),
+            HeapObject::Text(s) => format!("\"{}\"", s.replace('"', "\\\"")),
+            HeapObject::Buffer(b) => format!("<bytes:{}>", b.len()),
+            HeapObject::Array(items) => {
+                let inner: Vec<_> = items.iter().map(|v| self.format_value(*v)).collect();
+                format!("[{}]", inner.join(", "))
+            }
+            HeapObject::Map(entries) => {
+                let inner: Vec<_> = entries.iter()
+                    .map(|(k, v)| format!("{} => {}", self.format_value(*k), self.format_value(*v)))
+                    .collect();
+                format!("{{| {} |}}", inner.join(", "))
+            }
+            HeapObject::General { parent, slot_names, slot_values, .. } => {
+                if slot_names.is_empty() {
+                    return format!("<object#{id}>");
+                }
+                let slots: Vec<_> = slot_names.iter().zip(slot_values.iter())
+                    .map(|(n, v)| format!("{}: {}", self.symbol_name(*n), self.format_value(*v)))
+                    .collect();
+                format!("{{ {} }}", slots.join(" "))
+            }
+        }
+    }
+
+    fn format_list(&self, mut id: u32) -> String {
+        let mut items = Vec::new();
+        let mut tail = Value::NIL;
+        loop {
+            match self.get(id) {
+                HeapObject::Pair(car, cdr) => {
+                    items.push(self.format_value(*car));
+                    if cdr.is_nil() {
+                        break;
+                    } else if let Some(next) = cdr.as_any_object() {
+                        if matches!(self.get(next), HeapObject::Pair(_, _)) {
+                            id = next;
+                            continue;
+                        }
+                    }
+                    // dotted pair
+                    tail = *cdr;
+                    break;
+                }
+                _ => break,
+            }
+        }
+        if tail.is_nil() {
+            format!("({})", items.join(" "))
+        } else {
+            format!("({} . {})", items.join(" "), self.format_value(tail))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn intern_and_lookup() {
+        let mut h = Heap::new();
+        let a = h.intern("hello");
+        let b = h.intern("world");
+        let c = h.intern("hello");
+        assert_eq!(a, c);
+        assert_ne!(a, b);
+        assert_eq!(h.symbol_name(a), "hello");
+    }
+
+    #[test]
+    fn alloc_and_get() {
+        let mut h = Heap::new();
+        let obj = h.make_object(Value::NIL);
+        assert!(obj.is_nursery());
+        let id = obj.as_nursery().unwrap();
+        assert!(matches!(h.get(id), HeapObject::General { .. }));
+    }
+
+    #[test]
+    fn cons_and_list() {
+        let mut h = Heap::new();
+        let list = h.list(&[Value::integer(1), Value::integer(2), Value::integer(3)]);
+        let vec = h.list_to_vec(list);
+        assert_eq!(vec.len(), 3);
+        assert_eq!(vec[0].as_integer(), Some(1));
+        assert_eq!(vec[2].as_integer(), Some(3));
+    }
+
+    #[test]
+    fn fixed_shape_slots() {
+        let mut h = Heap::new();
+        let x = h.intern("x");
+        let y = h.intern("y");
+        let obj = h.make_object_with_slots(Value::NIL, vec![x, y], vec![Value::integer(3), Value::integer(4)]);
+        let id = obj.as_any_object().unwrap();
+
+        // can read slots
+        assert_eq!(h.get(id).slot_get(x), Some(Value::integer(3)));
+        assert_eq!(h.get(id).slot_get(y), Some(Value::integer(4)));
+
+        // can write existing slots
+        assert!(h.get_mut(id).slot_set(x, Value::integer(99)));
+        assert_eq!(h.get(id).slot_get(x), Some(Value::integer(99)));
+
+        // cannot add new slots
+        let z = h.intern("z");
+        assert!(!h.get_mut(id).slot_set(z, Value::integer(0)));
+    }
+
+    #[test]
+    fn open_handlers() {
+        let mut h = Heap::new();
+        let obj = h.make_object(Value::NIL);
+        let id = obj.as_any_object().unwrap();
+        let sel = h.intern("foo");
+
+        assert!(h.get(id).handler_get(sel).is_none());
+
+        h.get_mut(id).handler_set(sel, Value::integer(42));
+        assert_eq!(h.get(id).handler_get(sel), Some(Value::integer(42)));
+
+        // overwrite
+        h.get_mut(id).handler_set(sel, Value::integer(99));
+        assert_eq!(h.get(id).handler_get(sel), Some(Value::integer(99)));
+    }
+
+    #[test]
+    fn format_values() {
+        let mut h = Heap::new();
+        assert_eq!(h.format_value(Value::NIL), "nil");
+        assert_eq!(h.format_value(Value::integer(42)), "42");
+
+        let s = h.alloc_string("hello");
+        assert_eq!(h.format_value(s), "\"hello\"");
+
+        let list = h.list(&[Value::integer(1), Value::integer(2)]);
+        assert_eq!(h.format_value(list), "(1 2)");
+    }
+}
