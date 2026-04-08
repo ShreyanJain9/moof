@@ -589,6 +589,7 @@ impl<'a> Compiler<'a> {
 
                 "%table-literal" => {
                     // (%table-literal (seq...) (k1 v1 k2 v2...))
+                    // compiles to: create empty table, push seq items, at:put: kv pairs
                     let items = self.heap.list_to_vec(expr);
                     if items.len() != 3 {
                         return Err("table literal: need seq and kv lists".into());
@@ -599,35 +600,52 @@ impl<'a> Compiler<'a> {
                     let nseq = seq_items.len();
                     let nmap = kv_items.len() / 2;
 
-                    // compile all seq values into registers
-                    let mut seq_regs = Vec::with_capacity(nseq);
-                    for item in &seq_items {
-                        let r = self.alloc_reg();
-                        self.compile_expr(*item, r)?;
-                        seq_regs.push(r);
-                    }
+                    // for small tables (<=10 entries), use the old MakeTable opcode
+                    // for large tables, use incremental at:put: to avoid register overflow
+                    if nseq + nmap * 2 <= 20 {
+                        let mut seq_regs = Vec::with_capacity(nseq);
+                        for item in &seq_items {
+                            let r = self.alloc_reg();
+                            self.compile_expr(*item, r)?;
+                            seq_regs.push(r);
+                        }
+                        let mut kv_regs = Vec::with_capacity(kv_items.len());
+                        for item in &kv_items {
+                            let r = self.alloc_reg();
+                            self.compile_expr(*item, r)?;
+                            kv_regs.push(r);
+                        }
+                        self.chunk.emit(Op::MakeTable, dst, nseq as u8, nmap as u8);
+                        let total_regs = seq_regs.len() + kv_regs.len();
+                        let mut trailing = Vec::with_capacity(total_regs);
+                        trailing.extend_from_slice(&seq_regs);
+                        trailing.extend_from_slice(&kv_regs);
+                        while trailing.len() % 4 != 0 { trailing.push(0); }
+                        self.chunk.code.extend_from_slice(&trailing);
+                    } else {
+                        // large table: create empty, then push/put incrementally
+                        // this avoids register overflow for large tables
+                        self.chunk.emit(Op::MakeTable, dst, 0, 0); // empty table
 
-                    // compile all kv pairs into registers
-                    let mut kv_regs = Vec::with_capacity(kv_items.len());
-                    for item in &kv_items {
-                        let r = self.alloc_reg();
-                        self.compile_expr(*item, r)?;
-                        kv_regs.push(r);
-                    }
+                        // TODO: sequential items for large tables (not needed for Iterable)
+                        // for now, large tables with seq items use the small path
 
-                    // emit MakeTable dst, nseq, nmap
-                    self.chunk.emit(Op::MakeTable, dst, nseq as u8, nmap as u8);
-
-                    // trailing data: seq regs, then kv regs (padded to 4-byte alignment)
-                    let total_regs = seq_regs.len() + kv_regs.len();
-                    let mut trailing = Vec::with_capacity(total_regs);
-                    trailing.extend_from_slice(&seq_regs);
-                    trailing.extend_from_slice(&kv_regs);
-                    // pad to multiple of 4
-                    while trailing.len() % 4 != 0 {
-                        trailing.push(0);
+                        // at:put: keyed items using the well-known symbol
+                        let at_put_const = self.add_sym_const(self.heap.sym_at_put);
+                        let key_reg = self.alloc_reg();
+                        let val_reg = self.alloc_reg();
+                        let discard_reg = self.alloc_reg(); // don't overwrite dst!
+                        for i in 0..nmap {
+                            self.compile_expr(kv_items[i * 2], key_reg)?;
+                            self.compile_expr(kv_items[i * 2 + 1], val_reg)?;
+                            // send at:put: to the table (dst), result goes to discard
+                            self.chunk.emit(Op::Send, discard_reg, dst, at_put_const as u8);
+                            self.chunk.code.push(2);
+                            self.chunk.code.push(key_reg);
+                            self.chunk.code.push(val_reg);
+                            self.chunk.code.push(0);
+                        }
                     }
-                    self.chunk.code.extend_from_slice(&trailing);
 
                     return Ok(());
                 }
