@@ -90,13 +90,19 @@ the things that make moof moof:
 
 ### haskell
 
+- **typeclasses → protocols.** haskell's `Eq`, `Ord`, `Functor`,
+  `Foldable`, `Traversable` — specify required methods, derive
+  the rest. moof's protocols are this but as objects. conform
+  to Comparable (implement `<`), get seven methods free. conform
+  to Iterable (implement `each:`), get thirty.
+
 - **effects are capabilities.** if your vat doesn't hold a ref
   to the Console object, you can't do IO. haskell's IO monad
   made concrete — not a type constraint but an object constraint.
 
 - **pattern matching.** `match` as a derived form from vau.
   destructure objects by shape, arrays by contents, hashmaps
-  by keys.
+  by keys. match on protocol conformance.
 
 - **laziness where you want it.** streams are objects with a
   `next` handler that computes on demand. infinite sequences
@@ -214,6 +220,248 @@ slots    = data.     public. fixed set. values mutable.
 handlers = behavior. public. open set.  delegated via parent.
 ```
 
+### protocols: the type system
+
+protocols are the contracts of the objectspace. a protocol says
+"if you can do X, i'll give you Y for free." protocols are
+objects (of course).
+
+```
+(def Comparable (protocol
+  requires: '(<)
+  provides:
+    (>       (fn (other) [other < self]))
+    (<=      (fn (other) (not [other < self])))
+    (>=      (fn (other) (not [self < other])))
+    (=       (fn (other) (and [self <= other] [self >= other])))
+    (min:    (fn (other) (if [self < other] self other)))
+    (max:    (fn (other) (if [self < other] other self)))
+    (clamp:to: (fn (lo hi) [[self max: lo] min: hi]))))
+```
+
+implement one handler (`<`), get seven for free. the provided
+handlers are mixed into the conforming object's handler table
+when you conform.
+
+```
+(conform Point Comparable
+  <: (fn (other) [self.x < other.x]))
+; Point now has <, >, <=, >=, =, min:, max:, clamp:to:
+
+[[{ Point x: 3 } min: { Point x: 7 }] x]  ; => 3
+```
+
+you can override any provided handler if the default isn't right:
+
+```
+(conform Point Comparable
+  <:  (fn (other) [self.x < other.x])
+  =:  (fn (other) (and [self.x = other.x] [self.y = other.y])))
+; custom = instead of the default derived from <
+```
+
+**conformance is nominal + structural.** you explicitly conform
+(`(conform Foo Protocol ...)`), which checks that required handlers
+are present and mixes in provided ones. but you can also check
+structural conformance: `[obj responds: Iterable]` returns true
+if the object has all the required handlers, whether or not it
+formally conformed.
+
+**protocols are used everywhere:**
+
+- **pattern matching.** match on protocol conformance:
+
+  ```
+  (match obj
+    (Printable [obj describe])
+    (Iterable  [obj toArray])
+    (_         "unknown"))
+  ```
+
+- **handler signatures.** document expected protocols:
+
+  ```
+  (def sort (fn (coll) ; coll : Iterable & Comparable
+    ...))
+  ```
+
+- **the agent.** the agent discovers capabilities through
+  protocols — `[obj protocols]` returns the list.
+
+- **the query model.** Queryable is a protocol. conform to it
+  and get `where:`, `select:`, `groupBy:`, etc.
+
+- **the canvas.** Renderable is a protocol. conform and your
+  objects appear on the canvas.
+
+#### the standard protocols
+
+these are the protocols that come with the image. each one has a
+small set of required handlers and a large set of provided ones.
+implementing the minimum gets you the maximum.
+
+**Printable** — how things present themselves.
+
+```
+requires: describe
+provides: toString, toDebugString, print:
+```
+
+every object conforms to Printable via Object's default
+`describe` handler. override it for custom display.
+
+**Comparable** — ordering.
+
+```
+requires: <
+provides: >, <=, >=, =, min:, max:, clamp:to:,
+          between:and:
+```
+
+**Numeric** — arithmetic.
+
+```
+requires: +, -, *, negate
+provides: abs, sign, zero?, positive?, negative?,
+          /, %  (default / and % via repeated subtraction — override for performance)
+```
+
+**Hashable** — identity for collections.
+
+```
+requires: hash
+provides: (enables use as HashMap key)
+```
+
+**Iterable** — the big one. this is ruby's Enumerable.
+
+```
+requires: each:
+provides: map:, filter:, reject:, fold:inject:, reduce:,
+          any:, every:, none:, count, count:,
+          find:, findIndex:,
+          first, last, isEmpty,
+          toArray, toList,
+          flat, flatMap:,
+          zip:, zip:with:,
+          take:, drop:, takeWhile:, dropWhile:,
+          min, max, minBy:, maxBy:, sort, sortBy:,
+          sum, product,
+          groupBy:, partition:,
+          each:withIndex:,
+          join:, join
+```
+
+implement `each:` and you get ~30 collection operations. this
+is how ruby made Enumerable the most-used module in the
+language. one handler, thirty for free.
+
+```
+(conform Point Iterable
+  each:: (fn (block) (do [block call: @x] [block call: @y])))
+
+[{ Point x: 3 y: 4 } sum]     ; => 7
+[{ Point x: 3 y: 4 } toArray] ; => [3, 4]
+```
+
+**Indexable** — positional access.
+
+```
+requires: at:, length
+provides: first, last, isEmpty, slice:to:,
+          indexOf:, contains:, reverse
+includes Iterable (each: derived from at: + length)
+```
+
+conform to Indexable and you also get Iterable for free —
+`each:` is derived from `at:` and `length`. protocol inclusion
+means conforming to Indexable automatically conforms to
+Iterable.
+
+**Callable** — anything invocable with `()` syntax.
+
+```
+requires: call:
+provides: compose:, andThen:, curry, partial:
+```
+
+blocks, lambdas, any object with `call:` — all conform.
+
+**Serializable** — persistence and wire transfer.
+
+```
+requires: serialize:
+provides: deserialize:, clone, deepClone
+```
+
+**Renderable** — canvas display.
+
+```
+requires: render:
+provides: bounds, position, moveTo:
+```
+
+**Queryable** — the query model.
+
+```
+requires: (nothing — default implementations from Iterable)
+provides: where:, select:, orderBy:, groupBy:,
+          join:on:equals:, aggregate:,
+          distinct, limit:, offset:
+includes Iterable
+```
+
+Queryable builds on Iterable. any Iterable is already
+Queryable. the provided handlers implement relational
+operations in terms of `each:`, `filter:`, `map:`, etc. the
+query model isn't magic — it's just protocols.
+
+**Observable** — reactive updates.
+
+```
+requires: (nothing — default state tracking)
+provides: onChange:, watch:, unwatch:, notify:
+```
+
+slot mutation triggers `onChange:` observers. the canvas uses
+this to re-render when objects change.
+
+#### protocol inclusion
+
+protocols can include other protocols:
+
+```
+(def Indexable (protocol
+  includes: (list Iterable)
+  requires: '(at: length)
+  provides:
+    (each: (fn (block)
+      (let ((i 0))
+        (while [i < [self length]]
+          [block call: [self at: i]]
+          (<- i [i + 1])))))
+    ...))
+```
+
+conforming to Indexable automatically conforms to Iterable
+(via the derived `each:`). conforming to Comparable + Iterable
+gives you sortable collections. protocols compose.
+
+#### asking about protocols
+
+```
+[obj protocols]              ; => (Printable Comparable Iterable ...)
+[obj conforms: Iterable]     ; => true
+[obj responds: Iterable]     ; structural check (has the handlers?)
+[Iterable conformers]        ; all objects that conform
+[Iterable required]          ; => (each:)
+[Iterable provided]          ; => (map: filter: fold:inject: ...)
+```
+
+protocols are objects. you can inspect them, query them, extend
+them. the agent uses `[obj protocols]` and `[Protocol required]`
+to understand what an object can do.
+
 ### mutable collections: Array and HashMap
 
 fixed-shape objects cover the 90% case. for the other 10% — when
@@ -243,33 +491,37 @@ default, the common case, the thing the whole system optimizes for.
 
 ### the type hierarchy
 
+prototypes and the protocols they conform to:
+
 ```
-Object
-  Nil
-  Boolean (True, False)
-  Number
-    Integer
+Object                    Printable
+  Nil                     Printable
+  Boolean (True, False)   Printable, Hashable
+  Number                  Printable, Comparable, Numeric, Hashable
+    Integer               + Iterable (times:)
     Float
-  Symbol
-  Cons
-  String
-  Bytes
-  Array
-  HashMap
-  Stream
-  Block        — closure, has call: handler
-  Environment  — scope bindings
-  Vat          — concurrency domain
-  Promise      — eventual result
-  Membrane     — send interceptor
-  Facet        — restricted view
-  Canvas       — the spatial browser surface
+  Symbol                  Printable, Hashable
+  Cons                    Printable, Iterable, Indexable
+  String                  Printable, Comparable, Hashable, Indexable, Iterable
+  Bytes                   Indexable
+  Array                   Printable, Iterable, Indexable, Queryable
+  HashMap                 Printable, Iterable
+  Stream                  Iterable
+  Block                   Callable
+  Environment
+  Vat                     Printable
+  Promise                 Printable
+  Membrane
+  Facet
+  Canvas                  Renderable
+  Protocol                Printable
 ```
 
 every one of these is an object. every one responds to messages.
 primitive values (nil, bool, int, float, symbol) are NaN-boxed
 immediates — 8 bytes, no heap allocation. but they delegate to
-their prototype for behavior.
+their prototype for behavior. their protocol conformances give
+them rich default behavior from minimal implementations.
 
 ### objects as data: the query model
 
@@ -303,12 +555,16 @@ out naturally as message sends on collections:
 ```
 
 this isn't an ORM. there's no SQL being generated. the objects ARE
-the data. the messages ARE the queries. the runtime knows about
-shapes and slots — it can optimize `where:` to a slot-offset
-comparison, not a hash lookup + method call.
+the data. the messages ARE the queries. every Iterable is
+automatically Queryable — `where:`, `groupBy:`, `orderBy:` are
+provided handlers from the Queryable protocol. implement `each:`
+and you get a query language.
 
-you get a query language for free from the object model. not bolted
-on. emergent.
+the runtime knows about shapes and slots — it can optimize
+`where:` to a slot-offset comparison, not a hash lookup + method
+call.
+
+not bolted on. emergent from protocols + fixed-shape objects.
 
 ---
 
@@ -554,10 +810,14 @@ system. clear module boundaries, no crate-level ceremony.
 - **one semantic type: Object.** cons, string, array, hashmap,
   vat, canvas — all objects. VM has optimized representations
   but semantics are uniform
+- **protocols** — the type system. require handlers, provide
+  defaults, mix in on conformance. Iterable gives 30 methods
+  from one. protocol-based typing used everywhere.
 - **fixed-shape slots** (public data) + open handlers (behavior)
 - **Array and HashMap** for runtime-mutable collections
 - **query operations** on collections (where, select, groupBy,
-  join, aggregate) — objects-as-rows, sends-as-queries
+  join, aggregate) — objects-as-rows, sends-as-queries, built
+  on the Queryable protocol
 - **block syntax**: `|x| expr` — distinct from object literals
 - **LMDB + nursery** persistence from day one
 - **vats as objects** (spawn, kill, supervise, capabilities)
@@ -599,24 +859,32 @@ tests.
 lexer, parser (with `|x| expr` block syntax), analyzer, compiler,
 VM. bootstrap: vau, fn, if, let, while, match. REPL works.
 
-### phase 3: vats
+### phase 3: protocols
+
+Protocol object. conform, provides, requires, includes. the
+standard suite: Printable, Comparable, Numeric, Hashable,
+Iterable (the big one — 30 methods from each:), Indexable,
+Callable, Queryable. protocol conformance for all built-in types.
+pattern matching on protocol conformance.
+
+### phase 4: vats
 
 vats as objects. scheduler. spawn. eventual sends. promises.
 fuel-based preemption. nursery GC at turn boundaries.
 
-### phase 4: data
+### phase 5: data
 
 Array, HashMap with full message interfaces. query operations
-on collections: where, select, groupBy, orderBy, join, aggregate.
-destructuring/pattern matching on all collection types.
+via Queryable protocol: where, select, groupBy, orderBy, join,
+aggregate. destructuring/pattern matching on all types.
 
-### phase 5: the canvas
+### phase 6: the canvas
 
 egui zoomable infinite canvas. object rendering via `render:`
 handlers. navigation, zoom, pan. eval bar. slot editing. handler
 browsing. transcript.
 
-### phase 6: the agent
+### phase 7: the agent
 
 LLM tool-use loop in a vat. membranes. facets. approval queue
 on the canvas. agent memory as objects.

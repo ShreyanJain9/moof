@@ -24,6 +24,8 @@ is `send`.
 
 - **one type:** Object. cons, string, array, hashmap, vat — all objects.
   the VM has fast internal representations, but semantics are uniform.
+- **protocols:** the type system. implement `each:`, get 30 Iterable methods free.
+  implement `<`, get 7 Comparable methods. protocol-based typing everywhere.
 - **fixed-shape slots:** `{ Point x: 3 y: 4 }` — exactly two slots, forever.
   values mutable, shape sealed. slot access is an array offset, not a hash lookup.
 - **open handlers:** add behavior to any object anytime. prototype delegation.
