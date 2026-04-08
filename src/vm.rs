@@ -245,11 +245,39 @@ impl VM {
                 }
 
                 Op::Eval => {
+                    // eval AST, optionally in a local environment
+                    // a = dst, b = AST, c = env (0 = no env register, else register index)
                     let ast = self.registers[base + b as usize];
+                    let env_val = if c != 0 { self.registers[base + c as usize] } else { Value::NIL };
+
+                    // if env is an object, temporarily inject its slots as globals
+                    let mut injected_keys: Vec<u32> = Vec::new();
+                    let mut saved_values: Vec<(u32, Option<Value>)> = Vec::new();
+                    if let Some(env_id) = env_val.as_any_object() {
+                        let slot_names = heap.get(env_id).slot_names();
+                        let slot_vals: Vec<Value> = slot_names.iter()
+                            .map(|&n| heap.get(env_id).slot_get(n).unwrap_or(Value::NIL))
+                            .collect();
+                        for (&name, &val) in slot_names.iter().zip(slot_vals.iter()) {
+                            saved_values.push((name, heap.globals.get(&name).copied()));
+                            heap.globals.insert(name, val);
+                            injected_keys.push(name);
+                        }
+                    }
+
                     let compile_result = crate::lang::compiler::Compiler::compile_toplevel(heap, ast)
                         .map_err(|e| format!("eval compile: {e}"))?;
-                    let result = self.eval_result(heap, compile_result)?;
-                    self.registers[base + a as usize] = result;
+                    let result = self.eval_result(heap, compile_result);
+
+                    // restore globals
+                    for (name, old_val) in saved_values {
+                        match old_val {
+                            Some(v) => { heap.globals.insert(name, v); }
+                            None => { heap.globals.remove(&name); }
+                        }
+                    }
+
+                    self.registers[base + a as usize] = result?;
                 }
 
                 Op::GetGlobal => {
@@ -467,10 +495,32 @@ impl VM {
                 }
                 Op::Eval => {
                     let ast = regs[base + b as usize];
+                    let env_val = if c != 0 { regs[base + c as usize] } else { Value::NIL };
+
+                    let mut saved_values: Vec<(u32, Option<Value>)> = Vec::new();
+                    if let Some(env_id) = env_val.as_any_object() {
+                        let slot_names = heap.get(env_id).slot_names();
+                        let slot_vals: Vec<Value> = slot_names.iter()
+                            .map(|&n| heap.get(env_id).slot_get(n).unwrap_or(Value::NIL))
+                            .collect();
+                        for (&name, &val) in slot_names.iter().zip(slot_vals.iter()) {
+                            saved_values.push((name, heap.globals.get(&name).copied()));
+                            heap.globals.insert(name, val);
+                        }
+                    }
+
                     let compile_result = crate::lang::compiler::Compiler::compile_toplevel(heap, ast)
                         .map_err(|e| format!("eval compile: {e}"))?;
-                    let result = self.eval_result(heap, compile_result)?;
-                    regs[base + a as usize] = result;
+                    let result = self.eval_result(heap, compile_result);
+
+                    for (name, old_val) in saved_values {
+                        match old_val {
+                            Some(v) => { heap.globals.insert(name, v); }
+                            None => { heap.globals.remove(&name); }
+                        }
+                    }
+
+                    regs[base + a as usize] = result?;
                 }
                 Op::DefGlobal => {
                     let idx = u16::from_be_bytes([a, b]) as usize;

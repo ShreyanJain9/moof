@@ -497,13 +497,20 @@ impl<'a> Compiler<'a> {
                 }
 
                 "eval" => {
-                    // (eval expr) — compile and execute expr at runtime
-                    // expr must be an AST (cons cells from quote or quasiquote)
+                    // (eval expr) or (eval expr env)
+                    // expr is an AST. env is an optional environment object.
                     let items = self.heap.list_to_vec(expr);
-                    if items.len() != 2 { return Err("eval: need one arg".into()); }
-                    self.compile_expr(items[1], dst)?;
-                    // emit EVAL opcode — the VM handles compilation + execution
-                    self.chunk.emit(Op::Eval, dst, dst, 0);
+                    if items.len() < 2 { return Err("eval: need at least one arg".into()); }
+                    let ast_reg = self.alloc_reg();
+                    self.compile_expr(items[1], ast_reg)?;
+                    let env_reg = if items.len() >= 3 {
+                        let r = self.alloc_reg();
+                        self.compile_expr(items[2], r)?;
+                        r
+                    } else {
+                        0 // 0 = no env
+                    };
+                    self.chunk.emit(Op::Eval, dst, ast_reg, env_reg);
                     return Ok(());
                 }
 
@@ -767,9 +774,32 @@ impl<'a> Compiler<'a> {
             self.chunk.emit(Op::Cons, args_reg, arg_reg, args_reg);
         }
 
-        // env placeholder (nil for now — real first-class envs later)
+        // capture the current local environment as a heap object
         let env_reg = self.alloc_reg();
-        self.chunk.emit(Op::LoadNil, env_reg, 0, 0);
+        let locals_snapshot: Vec<(u32, u8)> = self.locals.clone();
+        if locals_snapshot.is_empty() {
+            self.chunk.emit(Op::LoadNil, env_reg, 0, 0);
+        } else {
+            let parent_reg = self.alloc_reg();
+            let obj_sym = self.heap.find_symbol("Object").unwrap_or(0);
+            let obj_const = self.add_sym_const(obj_sym);
+            self.chunk.emit(Op::GetGlobal, parent_reg, (obj_const >> 8) as u8, obj_const as u8);
+            let nslots = locals_snapshot.len();
+            let mut val_regs = Vec::new();
+            for &(_, reg) in &locals_snapshot {
+                let r = self.alloc_reg();
+                self.chunk.emit(Op::Move, r, reg, 0);
+                val_regs.push(r);
+            }
+            self.chunk.emit(Op::MakeObj, env_reg, parent_reg, nslots as u8);
+            for (i, &(sym, _)) in locals_snapshot.iter().enumerate() {
+                let name_const = self.add_sym_const(sym);
+                self.chunk.code.push((name_const >> 8) as u8);
+                self.chunk.code.push(name_const as u8);
+                self.chunk.code.push(val_regs[i]);
+                self.chunk.code.push(0);
+            }
+        }
 
         // call the operative with (args-list, env)
         // operative's params are (user-params... $env)

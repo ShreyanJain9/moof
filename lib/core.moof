@@ -23,7 +23,7 @@
 (defmethod Integer max: (other) (if [self > other] self other))
 (defmethod Integer min: (other) (if [self < other] self other))
 (defmethod Integer clamp:to: (lo hi) [[self max: lo] min: hi])
-(defmethod Integer between:and: (lo hi) (if [self >= lo] [self <= hi] false))
+(defmethod Integer between:and: (lo hi) (and [self >= lo] [self <= hi]))
 (defmethod Integer times: (block)
   (let ((i 0))
     (while [i < self]
@@ -56,7 +56,7 @@
 (defmethod Float max: (other) (if [self > other] self other))
 (defmethod Float min: (other) (if [self < other] self other))
 (defmethod Float clamp:to: (lo hi) [[self max: lo] min: hi])
-(defmethod Float between:and: (lo hi) (if [self >= lo] [self <= hi] false))
+(defmethod Float between:and: (lo hi) (and [self >= lo] [self <= hi]))
 
 ; ── Boolean ────────────────────────────────────────────
 
@@ -152,7 +152,7 @@
 
 (defmethod Cons any: (f)
   (let ((current self) (found false))
-    (while (if (some? current) (not found) false)
+    (while (and (some? current) (not found))
       (if (f [current car]) (:= found true) nil)
       (:= current [current cdr]))
     found))
@@ -171,7 +171,7 @@
 
 (defmethod Cons find: (f)
   (let ((current self) (result nil))
-    (while (if (some? current) [result nil?] false)
+    (while (and (some? current) [result nil?])
       (if (f [current car]) (:= result [current car]) nil)
       (:= current [current cdr]))
     result))
@@ -202,15 +202,15 @@
   [self join: ""])
 
 (defmethod Cons take: (n)
-  (if (if (eq n 0) true [self nil?]) nil
+  (if (or (eq n 0) [self nil?]) nil
     (cons [self car] [[self cdr] take: [n - 1]])))
 
 (defmethod Cons drop: (n)
-  (if (if (eq n 0) true [self nil?]) self
+  (if (or (eq n 0) [self nil?]) self
     [[self cdr] drop: [n - 1]]))
 
 (defmethod Cons zip: (other)
-  (if (if [self nil?] true [other nil?]) nil
+  (if (or [self nil?] [other nil?]) nil
     (cons (cons [self car] [other car])
           [[self cdr] zip: [other cdr]])))
 
@@ -242,7 +242,7 @@
     (cons [yes reverse] [no reverse])))
 
 (defmethod Cons sortBy: (f)
-  (if (if [self nil?] true [[self cdr] nil?]) self
+  (if (or [self nil?] [[self cdr] nil?]) self
     (let ((pivot (f [self car]))
            (rest [self cdr])
            (lo [rest select: |x| [(f x) < pivot]])
