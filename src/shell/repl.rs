@@ -64,39 +64,14 @@ pub fn run() {
     };
 
     // try loading from LMDB
-    let (mut heap, mut vm) = if let Some(image) = store.load_all() {
-        let mut heap = Heap::restore(
-            image.objects,
-            image.symbols,
-            image.globals,
-            image.operatives,
-        );
-        // re-register native handlers (rust closures can't be serialized)
-        crate::runtime::register_type_protos(&mut heap);
-        // restore closure descs
+    let (mut heap, mut vm) = if let Some(_image) = store.load_all() {
+        // LMDB restore + bootstrap reload causes stale closure desc conflicts.
+        // For now, always do a fresh start. The image will be useful once we
+        // have proper persistence (content-addressed objects, not heap snapshots).
+        let mut heap = Heap::new();
         let mut vm = VM::new();
-        for desc in image.closure_descs {
-            vm.add_closure_desc(ClosureDesc {
-                chunk: Chunk {
-                    code: desc.code,
-                    constants: desc.constants,
-                    arity: desc.arity,
-                    num_regs: desc.num_regs,
-                    name: String::new(),
-                },
-                param_names: desc.param_names,
-                is_operative: desc.is_operative,
-                capture_names: desc.capture_names,
-                capture_parent_regs: desc.capture_parent_regs,
-                capture_local_regs: desc.capture_local_regs,
-                capture_values: Vec::new(),
-                desc_base: desc.desc_base,
-                rest_param_reg: desc.rest_param_reg,
-            });
-        }
-        // reload stdlib (adds methods that can't be serialized, like error.moof)
+        crate::runtime::register_type_protos(&mut heap);
         load_bootstrap(&mut vm, &mut heap);
-        eprintln!("  restored from image ({} objects)", heap.object_count());
         (heap, vm)
     } else {
         // fresh start
