@@ -822,7 +822,8 @@ impl<'a> Compiler<'a> {
                 self.emit_load_const(dst, form);
                 return Ok(());
             }
-            crate::object::HeapObject::General { .. } => {
+            crate::object::HeapObject::General { .. } |
+            crate::object::HeapObject::Closure { .. } => {
                 self.emit_load_const(dst, form);
                 return Ok(());
             }
@@ -2147,14 +2148,16 @@ pub fn register_type_protos(heap: &mut Heap) {
             else if receiver.is_float() { "Float" }
             else if receiver.is_symbol() { "Symbol" }
             else if let Some(id) = receiver.as_any_object() {
-                if heap.as_closure(receiver).is_some() { "Fn" }
-                else { match heap.get(id) {
+                match heap.get(id) {
+                    HeapObject::Closure { is_operative, .. } => {
+                        if *is_operative { "Operative" } else { "Fn" }
+                    }
                     HeapObject::General { .. } => "Object",
                     HeapObject::Pair(_, _) => "Cons",
                     HeapObject::Text(_) => "String",
                     HeapObject::Buffer(_) => "Bytes",
                     HeapObject::Table { .. } => "Table",
-                }}
+                }
             } else { "Unknown" };
         Ok(Value::symbol(heap.intern(name)))
     });

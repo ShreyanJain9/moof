@@ -39,9 +39,6 @@ pub struct Heap {
     pub sym_length: u32,
     pub sym_at: u32,
     pub sym_at_put: u32,
-    pub sym_code_idx: u32,    // __code_idx — closure code index
-    pub sym_arity: u32,       // __arity
-    pub sym_operative: u32,   // __operative
     pub sym_message: u32,     // message — Error slot
 
     // type prototypes: indexed by Value::type_tag()
@@ -68,7 +65,7 @@ impl Heap {
             sym_slot_names: 0, sym_handler_names: 0,
             sym_parent: 0, sym_describe: 0, sym_dnu: 0,
             sym_length: 0, sym_at: 0, sym_at_put: 0,
-            sym_code_idx: 0, sym_arity: 0, sym_operative: 0, sym_message: 0,
+            sym_message: 0,
             type_protos: [Value::NIL; 13],
             natives: Vec::new(),
         };
@@ -87,9 +84,6 @@ impl Heap {
         h.sym_length = h.intern("length");
         h.sym_at = h.intern("at:");
         h.sym_at_put = h.intern("at:put:");
-        h.sym_code_idx = h.intern("__code_idx");
-        h.sym_arity = h.intern("__arity");
-        h.sym_operative = h.intern("__operative");
         h.sym_message = h.intern("message");
 
         h
@@ -251,21 +245,18 @@ impl Heap {
 
     /// Create a closure object. Returns a nursery Value.
     pub fn make_closure(&mut self, code_idx: usize, arity: u8, is_operative: bool, captures: &[(u32, Value)]) -> Value {
-        let mut slot_names = vec![self.sym_code_idx, self.sym_arity, self.sym_operative];
-        let mut slot_values: Vec<Value> = vec![
-            Value::integer(code_idx as i64),
-            Value::integer(arity as i64),
-            Value::boolean(is_operative),
-        ];
-        // add captured values as named slots
-        for &(name, val) in captures {
-            slot_names.push(name);
-            slot_values.push(val);
-        }
-        let parent = self.type_protos[5]; // Object prototype
-        let id = self.alloc(HeapObject::new_general(parent, slot_names, slot_values));
+        // closures delegate to Block prototype (→ Object)
+        let parent = self.type_protos.get(11).copied().unwrap_or(self.type_protos[5]);
+        let id = self.alloc(HeapObject::Closure {
+            parent,
+            code_idx,
+            arity,
+            is_operative,
+            captures: captures.to_vec(),
+            handlers: Vec::new(),
+        });
         let val = Value::nursery(id);
-        // set call: handler to self — dispatch recognizes closures by __code_idx
+        // set call: handler to self — dispatch uses this to invoke the closure
         let call_sym = self.sym_call;
         self.get_mut(id).handler_set(call_sym, val);
         val
@@ -274,25 +265,17 @@ impl Heap {
     /// Check if a value is a closure object. Returns (code_idx, is_operative) if so.
     pub fn as_closure(&self, val: Value) -> Option<(usize, bool)> {
         let id = val.as_any_object()?;
-        let code_idx_val = self.get(id).slot_get(self.sym_code_idx)?;
-        let code_idx = code_idx_val.as_integer()?;
-        if code_idx < 0 { return None; }
-        let is_operative = self.get(id).slot_get(self.sym_operative)
-            .map(|v| v.is_true()).unwrap_or(false);
-        Some((code_idx as usize, is_operative))
+        match self.get(id) {
+            HeapObject::Closure { code_idx, is_operative, .. } => Some((*code_idx, *is_operative)),
+            _ => None,
+        }
     }
 
-    /// Get the captured values from a closure object (slots beyond __code_idx, __arity, __operative).
+    /// Get the captured values from a closure object.
     pub fn closure_captures(&self, val: Value) -> Vec<(u32, Value)> {
         let Some(id) = val.as_any_object() else { return Vec::new(); };
         match self.get(id) {
-            HeapObject::General { slot_names, slot_values, .. } => {
-                // skip the first 3 slots (__code_idx, __arity, __operative)
-                slot_names.iter().zip(slot_values.iter())
-                    .skip(3)
-                    .map(|(&n, &v)| (n, v))
-                    .collect()
-            }
+            HeapObject::Closure { captures, .. } => captures.clone(),
             _ => Vec::new(),
         }
     }
@@ -354,9 +337,7 @@ impl Heap {
         h.sym_length = *h.sym_reverse.get("length")?;
         h.sym_at = *h.sym_reverse.get("at:")?;
         h.sym_at_put = *h.sym_reverse.get("at:put:")?;
-        h.sym_code_idx = *h.sym_reverse.get("__code_idx")?;
-        h.sym_arity = *h.sym_reverse.get("__arity")?;
-        h.sym_operative = *h.sym_reverse.get("__operative")?;
+        // sym_code_idx/sym_arity/sym_operative removed — closures are now a HeapObject variant
         h.sym_message = h.sym_reverse.get("message").copied().unwrap_or_else(|| h.intern("message"));
         Some(h)
     }
@@ -367,6 +348,7 @@ impl Heap {
         if let Some(id) = val.as_any_object() {
             match self.get(id) {
                 HeapObject::General { parent, .. } => return *parent,
+                HeapObject::Closure { parent, .. } => return *parent,
                 HeapObject::Pair(_, _) => return self.type_protos.get(6).copied().unwrap_or(Value::NIL),
                 HeapObject::Text(_) => return self.type_protos.get(7).copied().unwrap_or(Value::NIL),
                 HeapObject::Buffer(_) => return self.type_protos.get(8).copied().unwrap_or(Value::NIL),
@@ -483,9 +465,7 @@ impl Heap {
         h.sym_length = h.sym_reverse.get("length").copied().unwrap_or(0);
         h.sym_at = h.sym_reverse.get("at:").copied().unwrap_or(0);
         h.sym_at_put = h.sym_reverse.get("at:put:").copied().unwrap_or(0);
-        h.sym_code_idx = h.sym_reverse.get("__code_idx").copied().unwrap_or(0);
-        h.sym_arity = h.sym_reverse.get("__arity").copied().unwrap_or(0);
-        h.sym_operative = h.sym_reverse.get("__operative").copied().unwrap_or(0);
+        // sym_code_idx/sym_arity/sym_operative removed — closures are now a HeapObject variant
         h.sym_message = h.sym_reverse.get("message").copied().unwrap_or_else(|| h.intern("message"));
         h
     }
@@ -500,8 +480,6 @@ impl Heap {
         if val.is_true() { return "true".into(); }
         if val.is_false() { return "false".into(); }
         if let Some(n) = val.as_integer() { return n.to_string(); }
-        // check if it's a closure object before generic object formatting
-        if self.as_closure(val).is_some() { return "<fn>".into(); }
         if val.is_float() { return format!("{}", f64::from_bits(val.to_bits())); }
         if let Some(id) = val.as_symbol() {
             return format!("'{}", self.symbol_name(id));
@@ -514,6 +492,10 @@ impl Heap {
 
     fn format_object(&self, id: u32) -> String {
         match self.get(id) {
+            HeapObject::Closure { is_operative, arity, .. } => {
+                if *is_operative { format!("<operative arity:{arity}>") }
+                else { format!("<fn arity:{arity}>") }
+            }
             HeapObject::Pair(_, _) => self.format_list(id),
             HeapObject::Text(s) => format!("\"{}\"", s.replace('"', "\\\"")),
             HeapObject::Buffer(b) => format!("<bytes:{}>", b.len()),
@@ -572,7 +554,6 @@ impl Heap {
         if val.is_true() { return "true".into(); }
         if val.is_false() { return "false".into(); }
         if let Some(n) = val.as_integer() { return format!("{n}  : Integer"); }
-        if self.as_closure(val).is_some() { return "<fn>".into(); }
         if val.is_float() {
             return format!("{}  : Float", f64::from_bits(val.to_bits()));
         }
@@ -587,6 +568,10 @@ impl Heap {
 
     fn display_object(&self, id: u32) -> String {
         match self.get(id) {
+            HeapObject::Closure { is_operative, arity, .. } => {
+                if *is_operative { format!("<operative arity:{arity}>") }
+                else { format!("<fn arity:{arity}>") }
+            }
             HeapObject::Pair(_, _) => {
                 let formatted = self.format_list(id);
                 let len = self.list_len(id);

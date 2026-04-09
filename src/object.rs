@@ -34,6 +34,17 @@ pub enum HeapObject {
         seq: Vec<Value>,              // sequential (integer-indexed, 0-based)
         map: Vec<(Value, Value)>,     // keyed (arbitrary key-value pairs)
     },
+
+    /// Closure: a compiled function or operative.
+    /// Parent chain leads to Block prototype → Object.
+    Closure {
+        parent: Value,                // Block/Closure prototype (→ Object)
+        code_idx: usize,             // index into VM's closure_descs
+        arity: u8,
+        is_operative: bool,
+        captures: Vec<(u32, Value)>, // (name_sym, captured_value)
+        handlers: Vec<(u32, Value)>, // per-instance handlers (e.g. call:)
+    },
 }
 
 impl HeapObject {
@@ -60,6 +71,7 @@ impl HeapObject {
     pub fn parent(&self) -> Value {
         match self {
             HeapObject::General { parent, .. } => *parent,
+            HeapObject::Closure { parent, .. } => *parent,
             // optimized types delegate to their type prototype (resolved by dispatch)
             _ => Value::NIL,
         }
@@ -72,8 +84,11 @@ impl HeapObject {
                 slot_names.iter().position(|n| *n == name)
                     .map(|i| slot_values[i])
             }
-            HeapObject::Pair(car, cdr) => {
-                // car=0 and cdr=1 are resolved by the caller using interned symbols
+            HeapObject::Closure { captures, .. } => {
+                // captured values are accessible as slots
+                captures.iter().find(|(n, _)| *n == name).map(|(_, v)| *v)
+            }
+            HeapObject::Pair(_car, _cdr) => {
                 None // handled by dispatch via Cons prototype
             }
             _ => None,
@@ -91,6 +106,14 @@ impl HeapObject {
                     false // shape is fixed — can't add slots
                 }
             }
+            HeapObject::Closure { captures, .. } => {
+                if let Some(cap) = captures.iter_mut().find(|(n, _)| *n == name) {
+                    cap.1 = val;
+                    true
+                } else {
+                    false
+                }
+            }
             _ => false,
         }
     }
@@ -99,6 +122,7 @@ impl HeapObject {
     pub fn slot_names(&self) -> Vec<u32> {
         match self {
             HeapObject::General { slot_names, .. } => slot_names.clone(),
+            HeapObject::Closure { captures, .. } => captures.iter().map(|(n, _)| *n).collect(),
             _ => Vec::new(),
         }
     }
@@ -106,7 +130,8 @@ impl HeapObject {
     /// Look up a handler by selector (symbol ID).
     pub fn handler_get(&self, selector: u32) -> Option<Value> {
         match self {
-            HeapObject::General { handlers, .. } => {
+            HeapObject::General { handlers, .. } |
+            HeapObject::Closure { handlers, .. } => {
                 handlers.iter().find(|(s, _)| *s == selector).map(|(_, v)| *v)
             }
             _ => None,
@@ -116,7 +141,8 @@ impl HeapObject {
     /// Set (or add) a handler. Handlers are open — always succeeds.
     pub fn handler_set(&mut self, selector: u32, handler: Value) {
         match self {
-            HeapObject::General { handlers, .. } => {
+            HeapObject::General { handlers, .. } |
+            HeapObject::Closure { handlers, .. } => {
                 if let Some(entry) = handlers.iter_mut().find(|(s, _)| *s == selector) {
                     entry.1 = handler;
                 } else {
@@ -133,7 +159,8 @@ impl HeapObject {
     /// Get all handler names (for introspection).
     pub fn handler_names(&self) -> Vec<u32> {
         match self {
-            HeapObject::General { handlers, .. } => {
+            HeapObject::General { handlers, .. } |
+            HeapObject::Closure { handlers, .. } => {
                 handlers.iter().map(|(s, _)| *s).collect()
             }
             _ => Vec::new(),

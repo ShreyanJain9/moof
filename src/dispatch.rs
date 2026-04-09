@@ -34,6 +34,7 @@ pub fn lookup_handler(heap: &Heap, receiver: Value, selector: u32) -> Result<(Va
             HeapObject::Text(_) => heap.type_protos.get(7),
             HeapObject::Buffer(_) => heap.type_protos.get(8),
             HeapObject::Table { .. } => heap.type_protos.get(9),
+            HeapObject::Closure { .. } => heap.type_protos.get(11),
             HeapObject::General { .. } => None,
         };
         // try variant proto first, then generic object proto
