@@ -1,0 +1,53 @@
+; range.moof — Range type with Iterable conformance
+;
+; [1 to: 10] creates a Range object with start/end/step slots.
+; implement each: here so Iterable protocol gives us 40+ methods for free.
+
+; Range: each: — iterate from start to end by step
+(defmethod Range each: (block)
+  (let ((i self.start)
+        (end self.end)
+        (step self.step))
+    (if [step > 0]
+      (while [i <= end]
+        (block i)
+        (:= i [i + step]))
+      (while [i >= end]
+        (block i)
+        (:= i [i + step])))))
+
+; Range: includes: — arithmetic check, not iteration
+(defmethod Range includes: (val)
+  (and [val >= self.start]
+       [val <= self.end]))
+
+; Range: size — number of elements
+(defmethod Range size ()
+  (let ((diff [self.end - self.start]))
+    [[[diff / self.step] + 1] max: 0]))
+
+; Range: min / max
+(defmethod Range min () self.start)
+(defmethod Range max () self.end)
+
+; Range: toList — materialize to cons list (via Iterable)
+; (already provided by Iterable conformance)
+
+; Range: show
+(defmethod Range show ()
+  (str [self describe] "  : Range"))
+
+; Range: fold:with: — direct implementation (avoids Iterable's toList roundtrip)
+[Range handle: 'fold:with: with: (fn (this init f)
+  (let ((acc init) (i this.start) (end this.end) (step this.step))
+    (if [step > 0]
+      (while [i <= end]
+        (:= acc (f acc i))
+        (:= i [i + step]))
+      (while [i >= end]
+        (:= acc (f acc i))
+        (:= i [i + step])))
+    acc))]
+
+; conform Range to Iterable — each: and fold:with: are already defined above
+(conform Range Iterable)

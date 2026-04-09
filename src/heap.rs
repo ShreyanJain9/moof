@@ -42,6 +42,7 @@ pub struct Heap {
     pub sym_code_idx: u32,    // __code_idx — closure code index
     pub sym_arity: u32,       // __arity
     pub sym_operative: u32,   // __operative
+    pub sym_message: u32,     // message — Error slot
 
     // type prototypes: indexed by Value::type_tag()
     // 0=nil, 1=bool, 2=int, 3=float, 4=symbol, 5=object
@@ -67,7 +68,7 @@ impl Heap {
             sym_slot_names: 0, sym_handler_names: 0,
             sym_parent: 0, sym_describe: 0, sym_dnu: 0,
             sym_length: 0, sym_at: 0, sym_at_put: 0,
-            sym_code_idx: 0, sym_arity: 0, sym_operative: 0,
+            sym_code_idx: 0, sym_arity: 0, sym_operative: 0, sym_message: 0,
             type_protos: [Value::NIL; 13],
             natives: Vec::new(),
         };
@@ -89,6 +90,7 @@ impl Heap {
         h.sym_code_idx = h.intern("__code_idx");
         h.sym_arity = h.intern("__arity");
         h.sym_operative = h.intern("__operative");
+        h.sym_message = h.intern("message");
 
         h
     }
@@ -142,6 +144,14 @@ impl Heap {
 
     pub fn make_object_with_slots(&mut self, parent: Value, slot_names: Vec<u32>, slot_values: Vec<Value>) -> Value {
         self.alloc_val(HeapObject::new_general(parent, slot_names, slot_values))
+    }
+
+    /// Create an Error object with a message string.
+    pub fn make_error(&mut self, msg: &str) -> Value {
+        let msg_val = self.alloc_string(msg);
+        let parent = self.type_protos[12]; // Error prototype
+        let parent = if parent.is_nil() { self.type_protos[5] } else { parent }; // fallback to Object
+        self.make_object_with_slots(parent, vec![self.sym_message], vec![msg_val])
     }
 
     pub fn cons(&mut self, car: Value, cdr: Value) -> Value {
@@ -252,7 +262,8 @@ impl Heap {
             slot_names.push(name);
             slot_values.push(val);
         }
-        let id = self.alloc(HeapObject::new_general(Value::NIL, slot_names, slot_values));
+        let parent = self.type_protos[5]; // Object prototype
+        let id = self.alloc(HeapObject::new_general(parent, slot_names, slot_values));
         let val = Value::nursery(id);
         // set call: handler to self — dispatch recognizes closures by __code_idx
         let call_sym = self.sym_call;
@@ -346,6 +357,7 @@ impl Heap {
         h.sym_code_idx = *h.sym_reverse.get("__code_idx")?;
         h.sym_arity = *h.sym_reverse.get("__arity")?;
         h.sym_operative = *h.sym_reverse.get("__operative")?;
+        h.sym_message = h.sym_reverse.get("message").copied().unwrap_or_else(|| h.intern("message"));
         Some(h)
     }
 
@@ -474,6 +486,7 @@ impl Heap {
         h.sym_code_idx = h.sym_reverse.get("__code_idx").copied().unwrap_or(0);
         h.sym_arity = h.sym_reverse.get("__arity").copied().unwrap_or(0);
         h.sym_operative = h.sym_reverse.get("__operative").copied().unwrap_or(0);
+        h.sym_message = h.sym_reverse.get("message").copied().unwrap_or_else(|| h.intern("message"));
         h
     }
 }

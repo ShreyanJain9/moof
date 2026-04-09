@@ -53,7 +53,7 @@ pub fn lookup_handler(heap: &Heap, receiver: Value, selector: u32) -> Result<(Va
         }
     }
 
-    // 3. not found — return error (caller sends doesNotUnderstand:)
+    // 3. not found — return error (caller handles doesNotUnderstand: dispatch)
     let sel_name = heap.symbol_name(selector);
     Err(format!("{} does not understand '{}'", heap.format_value(receiver), sel_name))
 }

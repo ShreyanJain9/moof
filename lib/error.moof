@@ -1,0 +1,9 @@
+; error.moof — error handling extensions
+;
+; the core try/catch and error forms are compiler builtins.
+; this file adds convenience methods.
+
+; rescue: — lightweight error suppression on blocks
+; [|| risky-expr rescue: default] => try risky-expr, return default on error
+(defmethod Object rescue: (default)
+  (try [self call: nil] catch: |_| default))

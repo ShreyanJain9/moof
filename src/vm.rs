@@ -300,6 +300,37 @@ impl VM {
                     }
                 }
 
+                Op::TryCatch => {
+                    // TryCatch dst, body_reg, handler_reg
+                    // call body (a zero-arg closure), on error call handler with Error object
+                    let body = self.registers[base + b as usize];
+                    let handler = self.registers[base + c as usize];
+                    let result = self.dispatch_send(heap, body, heap.sym_call, &[]);
+                    match result {
+                        Ok(val) => self.registers[base + a as usize] = val,
+                        Err(msg) => {
+                            let error_obj = heap.make_error(&msg);
+                            let arg_list = heap.list(&[error_obj]);
+                            let catch_result = self.dispatch_send(heap, handler, heap.sym_call, &[arg_list]);
+                            self.registers[base + a as usize] = catch_result?;
+                        }
+                    }
+                }
+
+                Op::Throw => {
+                    // Throw src — signal an error with value in src
+                    let val = self.registers[base + a as usize];
+                    let msg = if let Some(id) = val.as_any_object() {
+                        match heap.get(id) {
+                            crate::object::HeapObject::Text(s) => s.clone(),
+                            _ => heap.format_value(val),
+                        }
+                    } else {
+                        heap.format_value(val)
+                    };
+                    return Err(msg);
+                }
+
                 _ => {
                     return Err(format!("unimplemented opcode: {opcode:?}"));
                 }
@@ -576,6 +607,32 @@ impl VM {
                         break Err(format!("MakeClosure: idx {idx} out of bounds"));
                     }
                 }
+                Op::TryCatch => {
+                    let body = regs[base + b as usize];
+                    let handler = regs[base + c as usize];
+                    let result = self.dispatch_send(heap, body, heap.sym_call, &[]);
+                    match result {
+                        Ok(val) => regs[base + a as usize] = val,
+                        Err(msg) => {
+                            let error_obj = heap.make_error(&msg);
+                            let arg_list = heap.list(&[error_obj]);
+                            let catch_result = self.dispatch_send(heap, handler, heap.sym_call, &[arg_list]);
+                            regs[base + a as usize] = catch_result?;
+                        }
+                    }
+                }
+                Op::Throw => {
+                    let val = regs[base + a as usize];
+                    let msg = if let Some(id) = val.as_any_object() {
+                        match heap.get(id) {
+                            crate::object::HeapObject::Text(s) => s.clone(),
+                            _ => heap.format_value(val),
+                        }
+                    } else {
+                        heap.format_value(val)
+                    };
+                    break Err(msg);
+                }
                 _ => break Err(format!("unimplemented in closure: {opcode:?}")),
             }
         };
@@ -586,16 +643,30 @@ impl VM {
 
     /// Dispatch a message send, handling both native and bytecode handlers.
     fn dispatch_send(&mut self, heap: &mut Heap, receiver: Value, selector: u32, args: &[Value]) -> Result<Value, String> {
-        let (handler, _) = dispatch::lookup_handler(heap, receiver, selector)?;
+        match dispatch::lookup_handler(heap, receiver, selector) {
+            Ok((handler, _)) => self.call_handler(heap, handler, receiver, selector, args),
+            Err(err) => {
+                // try doesNotUnderstand: before propagating (avoid infinite recursion)
+                if selector != heap.sym_dnu {
+                    if let Ok((dnu_handler, _)) = dispatch::lookup_handler(heap, receiver, heap.sym_dnu) {
+                        let sel_sym = Value::symbol(selector);
+                        let args_list = heap.list(args);
+                        return self.call_handler(heap, dnu_handler, receiver, heap.sym_dnu, &[sel_sym, args_list]);
+                    }
+                }
+                Err(err)
+            }
+        }
+    }
 
+    /// Call a resolved handler (native or bytecode closure).
+    fn call_handler(&mut self, heap: &mut Heap, handler: Value, receiver: Value, selector: u32, args: &[Value]) -> Result<Value, String> {
         if dispatch::is_native(heap, handler) {
             dispatch::call_native(heap, handler, receiver, args)
         } else if let Some((code_idx, _)) = heap.as_closure(handler) {
             if selector == heap.sym_call {
-                // call: — args[0] is the args list, pass directly
                 self.call_closure_obj(heap, handler, code_idx, args)
             } else {
-                // method dispatch — prepend receiver as self, wrap in list
                 let mut full_args = vec![receiver];
                 full_args.extend_from_slice(args);
                 let arg_list = heap.list(&full_args);
@@ -608,6 +679,11 @@ impl VM {
 }
 
 impl VM {
+    /// Public interface: send a message to a value, used by REPL for show protocol etc.
+    pub fn send_message(&mut self, heap: &mut Heap, receiver: Value, selector: u32, args: &[Value]) -> Result<Value, String> {
+        self.dispatch_send(heap, receiver, selector, args)
+    }
+
     /// Evaluate a CompileResult, accumulating closure descs across calls.
     pub fn eval_result(&mut self, heap: &mut Heap, result: CompileResult) -> Result<Value, String> {
         // merge new closure descs — offset any MakeClosure indices in the chunk

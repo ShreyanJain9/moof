@@ -31,6 +31,9 @@ fn load_bootstrap(vm: &mut VM, heap: &mut Heap) {
         "lib/indexable.moof",
         "lib/callable.moof",
         "lib/types.moof",
+        "lib/error.moof",
+        "lib/showable.moof",
+        "lib/range.moof",
     ];
     for path in &files {
         if let Ok(source) = std::fs::read_to_string(path) {
@@ -91,6 +94,8 @@ pub fn run() {
                 rest_param_reg: desc.rest_param_reg,
             });
         }
+        // reload stdlib (adds methods that can't be serialized, like error.moof)
+        load_bootstrap(&mut vm, &mut heap);
         eprintln!("  restored from image ({} objects)", heap.object_count());
         (heap, vm)
     } else {
@@ -134,7 +139,25 @@ pub fn run() {
             match Compiler::compile_toplevel(&heap, *expr) {
                 Ok(result) => {
                     match vm.eval_result(&mut heap, result) {
-                        Ok(val) => println!("  {}", heap.display_value(val)),
+                        Ok(val) => {
+                            // try [val show] for display, fall back to display_value
+                            let show_sym = heap.intern("show");
+                            let displayed = match vm.send_message(&mut heap, val, show_sym, &[]) {
+                                Ok(show_val) => {
+                                    if let Some(id) = show_val.as_any_object() {
+                                        if let crate::object::HeapObject::Text(s) = heap.get(id) {
+                                            s.clone()
+                                        } else {
+                                            heap.display_value(val)
+                                        }
+                                    } else {
+                                        heap.display_value(val)
+                                    }
+                                }
+                                Err(_) => heap.display_value(val),
+                            };
+                            println!("  {displayed}");
+                        }
                         Err(e) => eprintln!("  ~ {e}"),
                     }
                 }
@@ -184,7 +207,18 @@ fn run_without_store() {
         for expr in &exprs {
             match Compiler::compile_toplevel(&heap, *expr) {
                 Ok(r) => match vm.eval_result(&mut heap, r) {
-                    Ok(val) => println!("  {}", heap.display_value(val)),
+                    Ok(val) => {
+                        let show_sym = heap.intern("show");
+                        let displayed = match vm.send_message(&mut heap, val, show_sym, &[]) {
+                            Ok(sv) => if let Some(id) = sv.as_any_object() {
+                                if let crate::object::HeapObject::Text(s) = heap.get(id) {
+                                    s.clone()
+                                } else { heap.display_value(val) }
+                            } else { heap.display_value(val) },
+                            Err(_) => heap.display_value(val),
+                        };
+                        println!("  {displayed}");
+                    }
                     Err(e) => eprintln!("  ~ {e}"),
                 },
                 Err(e) => eprintln!("  ~ {e}"),
