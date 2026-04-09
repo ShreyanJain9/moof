@@ -582,14 +582,25 @@ impl<'a> Compiler<'a> {
                         self.chunk.code[jump_over_else + 1] = bytes[0];
                         self.chunk.code[jump_over_else + 2] = bytes[1];
                     } else {
-                        // no else branch — patch jump-to-else, result is nil
-                        let end = self.chunk.offset();
-                        self.chunk.emit(Op::LoadNil, dst, 0, 0);
-                        let past = self.chunk.offset();
-                        let delta = (past - 4 as usize) as i16 - jump_to_else as i16 - 4;
+                        // no else branch: jump over nil load, then nil load for false case
+                        let jump_over_nil = self.chunk.offset();
+                        self.chunk.emit(Op::Jump, 0, 0, 0);
+
+                        // patch jump-to-else → land here (at the LoadNil)
+                        let nil_start = self.chunk.offset();
+                        let delta = (nil_start as i16) - (jump_to_else as i16) - 4;
                         let bytes = delta.to_be_bytes();
                         self.chunk.code[jump_to_else + 2] = bytes[0];
                         self.chunk.code[jump_to_else + 3] = bytes[1];
+
+                        self.chunk.emit(Op::LoadNil, dst, 0, 0);
+
+                        // patch jump-over-nil
+                        let end = self.chunk.offset();
+                        let delta2 = (end as i16) - (jump_over_nil as i16) - 4;
+                        let bytes2 = delta2.to_be_bytes();
+                        self.chunk.code[jump_over_nil + 1] = bytes2[0];
+                        self.chunk.code[jump_over_nil + 2] = bytes2[1];
                     }
 
                     return Ok(());
