@@ -454,6 +454,13 @@ pub fn register_type_protos(heap: &mut Heap) {
     let if_sym = heap.intern("ifTrue:ifFalse:");
     heap.get_mut(bool_id).handler_set(if_sym, h);
 
+    // Nil: ifTrue:ifFalse: — nil is falsy, always returns false branch
+    let h = heap.register_native("__nil_if_true_false", |_heap, _receiver, args| {
+        let false_val = args.get(1).copied().unwrap_or(Value::NIL);
+        Ok(false_val)
+    });
+    heap.get_mut(nil_id).handler_set(if_sym, h);
+
     // -- Float prototype (parent: Number) --
     let float_proto = heap.make_object(number_proto);
     heap.type_protos[3] = float_proto;
@@ -1203,4 +1210,12 @@ pub fn register_type_protos(heap: &mut Heap) {
     });
     let show_sym = heap.intern("show");
     heap.get_mut(obj_id).handler_set(show_sym, h);
+
+    // identical: — bit-level identity test (semantic foundation for eq)
+    let h = heap.register_native("obj_identical", |_heap, receiver, args| {
+        let other = args.first().copied().unwrap_or(Value::NIL);
+        Ok(Value::boolean(receiver == other))
+    });
+    let identical_sym = heap.intern("identical:");
+    heap.get_mut(obj_id).handler_set(identical_sym, h);
 }

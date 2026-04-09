@@ -1,9 +1,58 @@
-; bootstrap.moof — kernel syntax forms
+; bootstrap.moof — the semantic definitions of moof
 ;
-; compiler provides: quote def if fn let while do := cons eq eval send vau quasiquote
-; everything here extends those with vau-based syntactic forms.
+; the kernel: vau, send, def, quote — 4 compiler forms.
+; everything else is defined here as vau operatives or sends.
+;
+; the compiler has fast-paths for if/fn/let/while/cons/eq/do/:=/eval/try/error
+; that emit optimized bytecode. these definitions are the SEMANTIC SPEC —
+; they make every form an inspectable, passable, overridable object.
+;
+; [if type] => 'Operative. (def my-if if) works. that's the promise.
 
-; ── control flow (vau-based) ───────────────────────────
+; ═══════════════════════════════════════════════════════════
+; layer 0: things that are native sends (from runtime.rs)
+; ═══════════════════════════════════════════════════════════
+;
+; [cond ifTrue:ifFalse:] — on Boolean and Nil
+; [a identical: b]       — bit-level identity on Object
+; [obj equal: b]         — content equality on Object
+; (error "msg")          — compiler form (for now), signals error
+
+; ═══════════════════════════════════════════════════════════
+; layer 1: semantic definitions of compiler-optimized forms
+; ═══════════════════════════════════════════════════════════
+;
+; these defs store the operative/function in globals as a
+; first-class object. the compiler still uses its fast-path
+; when it sees these names — the def doesn't slow anything down.
+
+; if — the compiler emits JumpIfFalse, but semantically it's:
+; "eval the condition, send ifTrue:ifFalse: to the result"
+; note: the semantic def always takes 3 args. the compiler fast-path
+; handles the 2-arg (no else) case by defaulting to nil.
+(def if (vau (cond then else) $e
+  [(eval cond $e)
+    ifTrue: (eval then $e)
+    ifFalse: (eval else $e)]))
+
+; fn — the compiler does capture analysis + MakeClosure.
+; this def makes fn a first-class value (passable, inspectable).
+; the compiler fast-path handles actual closure creation.
+; the vau body just delegates back to the compiler via eval.
+(def fn (vau (params body) $e
+  (eval `(fn ,params ,body) $e)))
+
+; cons — the compiler emits the Cons opcode, but semantically
+; it's a function that builds a pair.
+(def cons (fn (car cdr) (cons car cdr)))
+
+; eq — the compiler emits the Eq opcode, but semantically
+; it's a send: [a identical: b]
+(def eq (fn (a b) [a identical: b]))
+
+; ═══════════════════════════════════════════════════════════
+; layer 2: control flow (uses if + eval)
+; ═══════════════════════════════════════════════════════════
 
 (def and (vau (a b) $e
   (if (eval a $e) (eval b $e) false)))
@@ -17,7 +66,11 @@
 (def unless (vau (test body) $e
   (if (eval test $e) nil (eval body $e))))
 
-; ── definition forms ───────────────────────────────────
+(def not (fn (x) (if x false true)))
+
+; ═══════════════════════════════════════════════════════════
+; layer 3: definition forms
+; ═══════════════════════════════════════════════════════════
 
 (def defn (vau (name params body) $e
   (eval `(def ,name (fn ,params ,body)) $e)))
@@ -32,7 +85,9 @@
         (handler [p handlerAt: existing-sel]))
     [p handle: new-sel with: handler])))
 
-; ── variadic list + string ─────────────────────────────
+; ═══════════════════════════════════════════════════════════
+; layer 4: variadic constructors + utilities
+; ═══════════════════════════════════════════════════════════
 
 (def list (fn args args))
 
@@ -43,9 +98,6 @@
       (:= remaining [remaining cdr]))
     result)))
 
-; ── standalone utilities ───────────────────────────────
-
-(def not (fn (x) (if x false true)))
 (def nil? (fn (x) (eq x nil)))
 (def some? (fn (x) (not (eq x nil))))
 (def member? (fn (x lst)
@@ -57,7 +109,9 @@
     result)))
 (def apply (fn (f args) (eval (cons f args))))
 
-; ── pattern matching ───────────────────────────────────
+; ═══════════════════════════════════════════════════════════
+; layer 5: pattern matching
+; ═══════════════════════════════════════════════════════════
 
 (def match-pattern? (fn (val pattern)
   (if (eq pattern (quote _)) true [val equal: pattern])))
