@@ -35,12 +35,12 @@
     ifTrue: (eval then $e)
     ifFalse: (eval else $e)]))
 
-; fn — the compiler does capture analysis + MakeClosure.
-; this def makes fn a first-class value (passable, inspectable).
-; the compiler fast-path handles actual closure creation.
-; the vau body just delegates back to the compiler via eval.
+; fn — create an applicative closure (args evaluated before body runs).
+; this is Kernel's "wrap": take a vau, return an applicative.
+; the compiler fast-path handles actual closure creation with capture
+; analysis. this definition is the semantic spec.
 (def fn (vau (params body) $e
-  (eval `(fn ,params ,body) $e)))
+  [(eval `(vau ,params $_ ,body) $e) wrap]))
 
 ; cons — the compiler emits the Cons opcode, but semantically
 ; it's a function that builds a pair.

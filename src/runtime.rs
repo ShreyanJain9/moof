@@ -1218,4 +1218,58 @@ pub fn register_type_protos(heap: &mut Heap) {
     });
     let identical_sym = heap.intern("identical:");
     heap.get_mut(obj_id).handler_set(identical_sym, h);
+
+    // -- Block/Closure prototype (type_protos[PROTO_CLOSURE]) --
+    let block_proto = heap.make_object(object_proto);
+    heap.type_protos[PROTO_CLOSURE] = block_proto;
+    let block_id = block_proto.as_any_object().unwrap();
+
+    // Block: wrap — convert operative to applicative (Kernel's wrap)
+    // [operative wrap] => applicative (same code, args evaluated by caller)
+    let h = heap.register_native("closure_wrap", |heap, receiver, _args| {
+        let id = receiver.as_any_object().ok_or("wrap: not a closure")?;
+        match heap.get(id) {
+            HeapObject::Closure { code_idx, arity, captures, parent, .. } => {
+                let code_idx = *code_idx;
+                let arity = *arity;
+                let parent = *parent;
+                let captures = captures.clone();
+                let new_id = heap.alloc(HeapObject::Closure {
+                    parent,
+                    code_idx,
+                    arity,
+                    is_operative: false,
+                    captures,
+                    handlers: Vec::new(),
+                });
+                let val = Value::nursery(new_id);
+                let call_sym = heap.sym_call;
+                heap.get_mut(new_id).handler_set(call_sym, val);
+                Ok(val)
+            }
+            _ => Err("wrap: not a closure".into()),
+        }
+    });
+    let wrap_sym = heap.intern("wrap");
+    heap.get_mut(block_id).handler_set(wrap_sym, h);
+
+    // Block: describe
+    let h = heap.register_native("closure_describe", |heap, receiver, _args| {
+        let s = heap.format_value(receiver);
+        Ok(heap.alloc_string(&s))
+    });
+    heap.get_mut(block_id).handler_set(describe_sym, h);
+
+    // register Block as global
+    let block_sym = heap.intern("Block");
+    heap.globals.insert(block_sym, block_proto);
+
+    // -- Root environment object --
+    // the root environment is an object. when we implement per-vat envs,
+    // each vat will have its own root. for now it's a single shared object.
+    // globals are still backed by heap.globals (HashMap) for performance,
+    // but the env object exists so $e at top level is a real object.
+    let env_proto = heap.make_object(object_proto);
+    let env_sym = heap.intern("Environment");
+    heap.globals.insert(env_sym, env_proto);
 }
