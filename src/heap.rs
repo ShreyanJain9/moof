@@ -18,6 +18,21 @@ pub struct HeapImage {
     pub operatives: Vec<String>,     // operative symbol names
 }
 
+// type prototype indices — named constants instead of magic numbers
+pub const PROTO_NIL: usize = 0;
+pub const PROTO_BOOL: usize = 1;
+pub const PROTO_INT: usize = 2;
+pub const PROTO_FLOAT: usize = 3;
+pub const PROTO_SYM: usize = 4;
+pub const PROTO_OBJ: usize = 5;
+pub const PROTO_CONS: usize = 6;
+pub const PROTO_STR: usize = 7;
+pub const PROTO_BYTES: usize = 8;
+pub const PROTO_TABLE: usize = 9;
+pub const PROTO_NUMBER: usize = 10;
+pub const PROTO_CLOSURE: usize = 11;
+pub const PROTO_ERROR: usize = 12;
+
 pub struct Heap {
     objects: Vec<HeapObject>,
     symbols: Vec<String>,
@@ -42,10 +57,8 @@ pub struct Heap {
     pub sym_at_put: u32,
     pub sym_message: u32,     // message — Error slot
 
-    // type prototypes: indexed by Value::type_tag()
-    // 0=nil, 1=bool, 2=int, 3=float, 4=symbol, 5=object
-    // plus: 6=cons, 7=string, 8=bytes, 9=table, 10=number, 11=block
-    pub type_protos: [Value; 13],
+    // type prototypes: indexed by PROTO_* constants
+    pub type_protos: Vec<Value>,
 
     // native handlers: name_sym → Rust closure
     pub natives: Vec<(u32, NativeFn)>,
@@ -68,7 +81,7 @@ impl Heap {
             sym_parent: 0, sym_describe: 0, sym_dnu: 0,
             sym_length: 0, sym_at: 0, sym_at_put: 0,
             sym_message: 0,
-            type_protos: [Value::NIL; 13],
+            type_protos: vec![Value::NIL; 13],
             natives: Vec::new(),
         };
 
@@ -145,8 +158,8 @@ impl Heap {
     /// Create an Error object with a message string.
     pub fn make_error(&mut self, msg: &str) -> Value {
         let msg_val = self.alloc_string(msg);
-        let parent = self.type_protos[12]; // Error prototype
-        let parent = if parent.is_nil() { self.type_protos[5] } else { parent }; // fallback to Object
+        let parent = self.type_protos[PROTO_ERROR];
+        let parent = if parent.is_nil() { self.type_protos[PROTO_OBJ] } else { parent };
         self.make_object_with_slots(parent, vec![self.sym_message], vec![msg_val])
     }
 
@@ -248,7 +261,8 @@ impl Heap {
     /// Create a closure object. Returns a nursery Value.
     pub fn make_closure(&mut self, code_idx: usize, arity: u8, is_operative: bool, captures: &[(u32, Value)]) -> Value {
         // closures delegate to Block prototype (→ Object)
-        let parent = self.type_protos.get(11).copied().unwrap_or(self.type_protos[5]);
+        let parent = self.type_protos.get(PROTO_CLOSURE).copied()
+            .unwrap_or_else(|| self.type_protos[PROTO_OBJ]);
         let id = self.alloc(HeapObject::Closure {
             parent,
             code_idx,
@@ -351,10 +365,10 @@ impl Heap {
             match self.get(id) {
                 HeapObject::General { parent, .. } => return *parent,
                 HeapObject::Closure { parent, .. } => return *parent,
-                HeapObject::Pair(_, _) => return self.type_protos.get(6).copied().unwrap_or(Value::NIL),
-                HeapObject::Text(_) => return self.type_protos.get(7).copied().unwrap_or(Value::NIL),
-                HeapObject::Buffer(_) => return self.type_protos.get(8).copied().unwrap_or(Value::NIL),
-                HeapObject::Table { .. } => return self.type_protos.get(9).copied().unwrap_or(Value::NIL),
+                HeapObject::Pair(_, _) => return self.type_protos.get(PROTO_CONS).copied().unwrap_or(Value::NIL),
+                HeapObject::Text(_) => return self.type_protos.get(PROTO_STR).copied().unwrap_or(Value::NIL),
+                HeapObject::Buffer(_) => return self.type_protos.get(PROTO_BYTES).copied().unwrap_or(Value::NIL),
+                HeapObject::Table { .. } => return self.type_protos.get(PROTO_TABLE).copied().unwrap_or(Value::NIL),
             }
         }
         // for primitives, use type_protos by tag

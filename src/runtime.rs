@@ -3,7 +3,7 @@
 // Extracted from compiler.rs. The compiler compiles AST to bytecode.
 // This module creates the objectspace: prototypes, handlers, globals.
 
-use crate::heap::Heap;
+use crate::heap::*;
 use crate::object::HeapObject;
 use crate::value::Value;
 
@@ -27,7 +27,7 @@ pub fn register_type_protos(heap: &mut Heap) {
     heap.intern("self");
     // create the Object prototype (root of all delegation)
     let object_proto = heap.make_object(Value::NIL);
-    heap.type_protos[5] = object_proto; // object type
+    heap.type_protos[PROTO_OBJ] = object_proto; // object type
     let obj_id = object_proto.as_any_object().unwrap();
 
     // Object: slotAt:
@@ -163,11 +163,11 @@ pub fn register_type_protos(heap: &mut Heap) {
 
     // Number prototype (shared parent for Integer and Float)
     let number_proto = heap.make_object(object_proto);
-    heap.type_protos[10] = number_proto;
+    heap.type_protos[PROTO_NUMBER] = number_proto;
 
     // Symbol prototype
     let sym_proto = heap.make_object(object_proto);
-    heap.type_protos[4] = sym_proto;
+    heap.type_protos[PROTO_SYM] = sym_proto;
     let sym_proto_id = sym_proto.as_any_object().unwrap();
 
     // Symbol: name — the string name of the symbol
@@ -203,7 +203,7 @@ pub fn register_type_protos(heap: &mut Heap) {
 
     // Integer prototype (parent: Number, not Object)
     let int_proto = heap.make_object(number_proto);
-    heap.type_protos[2] = int_proto;
+    heap.type_protos[PROTO_INT] = int_proto;
 
     // register native handlers for integer arithmetic
     let add_handler = heap.register_native("__int_add", |heap, receiver, args| {
@@ -419,9 +419,9 @@ pub fn register_type_protos(heap: &mut Heap) {
     });
     heap.get_mut(int_id).handler_set(to_by_sym, h);
 
-    // -- Nil prototype (type_protos[0]) --
+    // -- Nil prototype (type_protos[PROTO_NIL]) --
     let nil_proto = heap.make_object(object_proto);
-    heap.type_protos[0] = nil_proto;
+    heap.type_protos[PROTO_NIL] = nil_proto;
     let nil_id = nil_proto.as_any_object().unwrap();
 
     let h = heap.register_native("__nil_describe", |heap, _receiver, _args| {
@@ -429,9 +429,9 @@ pub fn register_type_protos(heap: &mut Heap) {
     });
     heap.get_mut(nil_id).handler_set(describe_sym, h);
 
-    // -- Boolean prototype (type_protos[1]) --
+    // -- Boolean prototype (type_protos[PROTO_BOOL]) --
     let bool_proto = heap.make_object(object_proto);
-    heap.type_protos[1] = bool_proto;
+    heap.type_protos[PROTO_BOOL] = bool_proto;
     let bool_id = bool_proto.as_any_object().unwrap();
 
     let h = heap.register_native("__bool_not", |_heap, receiver, _args| {
@@ -463,7 +463,7 @@ pub fn register_type_protos(heap: &mut Heap) {
 
     // -- Float prototype (parent: Number) --
     let float_proto = heap.make_object(number_proto);
-    heap.type_protos[3] = float_proto;
+    heap.type_protos[PROTO_FLOAT] = float_proto;
     let float_id = float_proto.as_any_object().unwrap();
 
     let h = heap.register_native("__float_add", |_heap, receiver, args| {
@@ -701,9 +701,9 @@ pub fn register_type_protos(heap: &mut Heap) {
     });
     heap.get_mut(float_id).handler_set(nan_sym, h);
 
-    // -- Cons prototype (type_protos[6]) --
+    // -- Cons prototype (type_protos[PROTO_CONS]) --
     let cons_proto = heap.make_object(object_proto);
-    heap.type_protos[6] = cons_proto;
+    heap.type_protos[PROTO_CONS] = cons_proto;
     let cons_id = cons_proto.as_any_object().unwrap();
 
     let h = heap.register_native("__cons_car", |heap, receiver, _args| {
@@ -740,9 +740,9 @@ pub fn register_type_protos(heap: &mut Heap) {
     });
     heap.get_mut(cons_id).handler_set(describe_sym, h);
 
-    // -- String prototype (type_protos[7]) --
+    // -- String prototype (type_protos[PROTO_STR]) --
     let str_proto = heap.make_object(object_proto);
-    heap.type_protos[7] = str_proto;
+    heap.type_protos[PROTO_STR] = str_proto;
     let str_id = str_proto.as_any_object().unwrap();
 
     let h = heap.register_native("__str_length", |heap, receiver, _args| {
@@ -935,9 +935,9 @@ pub fn register_type_protos(heap: &mut Heap) {
     });
     heap.get_mut(str_id).handler_set(str_to_float_sym, h);
 
-    // -- Table prototype (type_protos[9]) --
+    // -- Table prototype (type_protos[PROTO_TABLE]) --
     let table_proto = heap.make_object(object_proto);
-    heap.type_protos[9] = table_proto;
+    heap.type_protos[PROTO_TABLE] = table_proto;
     let table_id = table_proto.as_any_object().unwrap();
 
     // Table: at:
@@ -1094,9 +1094,9 @@ pub fn register_type_protos(heap: &mut Heap) {
     });
     heap.get_mut(table_id).handler_set(remove_sym, h);
 
-    // -- Error prototype (type_protos[12]) --
+    // -- Error prototype (type_protos[PROTO_ERROR]) --
     let error_proto = heap.make_object(object_proto);
-    heap.type_protos[12] = error_proto;
+    heap.type_protos[PROTO_ERROR] = error_proto;
     let error_id = error_proto.as_any_object().unwrap();
 
     // Error: message — read the message slot

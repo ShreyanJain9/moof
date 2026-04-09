@@ -7,7 +7,7 @@
 // 3. If found: execute (bytecode → VM, native → rust closure)
 // 4. If not found: send doesNotUnderstand: to receiver
 
-use crate::heap::Heap;
+use crate::heap::{Heap, PROTO_CONS, PROTO_STR, PROTO_BYTES, PROTO_TABLE, PROTO_CLOSURE};
 use crate::object::HeapObject;
 use crate::value::Value;
 
@@ -30,11 +30,11 @@ pub fn lookup_handler(heap: &Heap, receiver: Value, selector: u32) -> Result<(Va
     let proto = if let Some(id) = receiver.as_any_object() {
         // for heap objects, also check variant-specific protos
         let variant_proto = match heap.get(id) {
-            HeapObject::Pair(_, _) => heap.type_protos.get(6),
-            HeapObject::Text(_) => heap.type_protos.get(7),
-            HeapObject::Buffer(_) => heap.type_protos.get(8),
-            HeapObject::Table { .. } => heap.type_protos.get(9),
-            HeapObject::Closure { .. } => heap.type_protos.get(11),
+            HeapObject::Pair(_, _) => heap.type_protos.get(PROTO_CONS),
+            HeapObject::Text(_) => heap.type_protos.get(PROTO_STR),
+            HeapObject::Buffer(_) => heap.type_protos.get(PROTO_BYTES),
+            HeapObject::Table { .. } => heap.type_protos.get(PROTO_TABLE),
+            HeapObject::Closure { .. } => heap.type_protos.get(PROTO_CLOSURE),
             HeapObject::General { .. } => None,
         };
         // try variant proto first, then generic object proto
