@@ -5,6 +5,7 @@ mod dispatch;
 mod opcodes;
 mod vm;
 mod store;
+mod runtime;
 mod lang;
 mod shell;
 

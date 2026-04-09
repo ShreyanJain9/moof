@@ -72,7 +72,7 @@ pub fn run() {
             image.operatives,
         );
         // re-register native handlers (rust closures can't be serialized)
-        crate::lang::compiler::register_type_protos(&mut heap);
+        crate::runtime::register_type_protos(&mut heap);
         // restore closure descs
         let mut vm = VM::new();
         for desc in image.closure_descs {
@@ -102,7 +102,7 @@ pub fn run() {
         // fresh start
         let mut heap = Heap::new();
         let mut vm = VM::new();
-        crate::lang::compiler::register_type_protos(&mut heap);
+        crate::runtime::register_type_protos(&mut heap);
         load_bootstrap(&mut vm, &mut heap);
         (heap, vm)
     };
@@ -184,7 +184,7 @@ pub fn run() {
 fn run_without_store() {
     let mut heap = Heap::new();
     let mut vm = VM::new();
-    crate::lang::compiler::register_type_protos(&mut heap);
+    crate::runtime::register_type_protos(&mut heap);
     load_bootstrap(&mut vm, &mut heap);
     println!();
 
