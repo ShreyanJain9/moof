@@ -38,8 +38,8 @@
   (str [self describe] "  : Range"))
 
 ; Range: fold:with: — direct implementation (avoids Iterable's toList roundtrip)
-[Range handle: 'fold:with: with: (fn (this init f)
-  (let ((acc init) (i this.start) (end this.end) (step this.step))
+[Range handle: 'fold:with: with: (fn (self init f)
+  (let ((acc init) (i self.start) (end self.end) (step self.step))
     (if [step > 0]
       (while [i <= end]
         (:= acc (f acc i))
