@@ -145,7 +145,10 @@ impl<'a> Compiler<'a> {
 
         if let Some(sym_id) = car.as_symbol() {
             let name = self.heap.symbol_name(sym_id).to_string();
+            // is this symbol still bound to its bootstrap value?
+            let stable = !self.heap.rebound.contains(&sym_id);
             match name.as_str() {
+                // ── KERNEL FORMS (always compiled, never overridable) ──
                 "quote" => {
                     // (quote x) → load x as constant
                     let arg = self.first_arg(cdr_val)?;
@@ -219,7 +222,7 @@ impl<'a> Compiler<'a> {
                     return Ok(());
                 }
 
-                "do" => {
+                "do" if stable => {
                     // (do expr1 expr2 ... exprN) → compile all, return last
                     let items = self.heap.list_to_vec(expr);
                     if items.len() < 2 {
@@ -317,7 +320,7 @@ impl<'a> Compiler<'a> {
                     return Ok(());
                 }
 
-                "fn" | "lambda" => {
+                "fn" | "lambda" if stable => {
                     // (fn (params...) body...) → compile body as a sub-chunk, emit MakeClosure
                     let items = self.heap.list_to_vec(expr);
                     if items.len() < 3 {
@@ -401,7 +404,7 @@ impl<'a> Compiler<'a> {
                     return Ok(());
                 }
 
-                "let" => {
+                "let" if stable => {
                     // (let ((x 1) (y 2)) body...)
                     let items = self.heap.list_to_vec(expr);
                     if items.len() < 3 {
@@ -439,7 +442,7 @@ impl<'a> Compiler<'a> {
                     return Ok(());
                 }
 
-                "while" => {
+                "while" if stable => {
                     // (while cond body...) → loop: if !cond break; body; goto loop
                     let items = self.heap.list_to_vec(expr);
                     if items.len() < 3 {
@@ -479,7 +482,7 @@ impl<'a> Compiler<'a> {
                     return Ok(());
                 }
 
-                "cons" => {
+                "cons" if stable => {
                     let items = self.heap.list_to_vec(expr);
                     if items.len() != 3 { return Err("cons: need car and cdr".into()); }
                     let car_reg = self.alloc_reg();
@@ -490,7 +493,7 @@ impl<'a> Compiler<'a> {
                     return Ok(());
                 }
 
-                "eq" => {
+                "eq" if stable => {
                     let items = self.heap.list_to_vec(expr);
                     if items.len() != 3 { return Err("eq: need two args".into()); }
                     let a_reg = self.alloc_reg();
@@ -501,7 +504,7 @@ impl<'a> Compiler<'a> {
                     return Ok(());
                 }
 
-                "eval" => {
+                "eval" if stable => {
                     // (eval expr) or (eval expr env)
                     // expr is an AST. env is an optional environment object.
                     let items = self.heap.list_to_vec(expr);
@@ -519,7 +522,7 @@ impl<'a> Compiler<'a> {
                     return Ok(());
                 }
 
-                ":=" => {
+                ":=" if stable => {
                     // (:= name value) — mutate a local or global binding
                     let items = self.heap.list_to_vec(expr);
                     if items.len() != 3 {
@@ -539,7 +542,7 @@ impl<'a> Compiler<'a> {
                     return Ok(());
                 }
 
-                "if" => {
+                "if" if stable => {
                     // (if cond then else)
                     let items = self.heap.list_to_vec(expr);
                     if items.len() < 3 {
@@ -718,7 +721,7 @@ impl<'a> Compiler<'a> {
                     return Ok(());
                 }
 
-                "try" => {
+                "try" if stable => {
                     // (try body catch: |e| handler)
                     // compiles body and handler as closures, emits TryCatch
                     let items = self.heap.list_to_vec(expr);
@@ -777,7 +780,7 @@ impl<'a> Compiler<'a> {
                     return Ok(());
                 }
 
-                "error" => {
+                "error" if stable => {
                     // (error msg) — signal an error
                     let items = self.heap.list_to_vec(expr);
                     if items.len() < 2 {

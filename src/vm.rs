@@ -293,6 +293,10 @@ impl VM {
                     let name_sym = Value::from_bits(constants[idx]).as_symbol()
                         .ok_or("def_global: name constant is not a symbol")?;
                     let val = self.registers[base + c as usize];
+                    // track rebinding (if symbol already existed with a different value)
+                    if let Some(&old) = heap.globals.get(&name_sym) {
+                        if old != val { heap.rebound.insert(name_sym); }
+                    }
                     heap.globals.insert(name_sym, val);
                     // check if the value is an operative closure — mark it
                     if let Some((_, true)) = heap.as_closure(val) {
@@ -557,6 +561,9 @@ impl VM {
                     let name_sym = Value::from_bits(constants[idx]).as_symbol()
                         .ok_or("def_global: not a symbol")?;
                     let val = regs[base + c as usize];
+                    if let Some(&old) = heap.globals.get(&name_sym) {
+                        if old != val { heap.rebound.insert(name_sym); }
+                    }
                     heap.globals.insert(name_sym, val);
                     if let Some((_, true)) = heap.as_closure(val) {
                         heap.operatives.insert(name_sym);

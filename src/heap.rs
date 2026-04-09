@@ -24,6 +24,7 @@ pub struct Heap {
     sym_reverse: std::collections::HashMap<String, u32>,
     pub globals: std::collections::HashMap<u32, Value>, // top-level defs
     pub operatives: std::collections::HashSet<u32>,    // symbols bound to vau operatives
+    pub rebound: std::collections::HashSet<u32>,       // symbols that have been reassigned
 
     // well-known symbols (interned at startup)
     pub sym_car: u32,
@@ -60,6 +61,7 @@ impl Heap {
             sym_reverse: std::collections::HashMap::new(),
             globals: std::collections::HashMap::new(),
             operatives: std::collections::HashSet::new(),
+            rebound: std::collections::HashSet::new(),
             sym_car: 0, sym_cdr: 0, sym_call: 0,
             sym_slot_at: 0, sym_slot_at_put: 0,
             sym_slot_names: 0, sym_handler_names: 0,
