@@ -272,7 +272,9 @@ impl Heap {
     // -- native handler registration --
 
     pub fn register_native(&mut self, name: &str, f: impl Fn(&mut Heap, Value, &[Value]) -> Result<Value, String> + 'static) -> Value {
-        let sym = self.intern(name);
+        let idx = self.natives.len();
+        let unique = format!("{name}#{idx}");
+        let sym = self.intern(&unique);
         self.natives.push((sym, Box::new(f)));
         Value::symbol(sym) // the handler value IS the symbol — dispatch looks it up
     }
