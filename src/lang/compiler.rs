@@ -279,6 +279,7 @@ impl<'a> Compiler<'a> {
                         sub.compile_expr(*items.last().unwrap(), body_dst)?;
                     }
                     sub.chunk.emit(Op::Return, body_dst, 0, 0);
+                    sub.chunk.optimize_tail_calls();
                     let capture_names: Vec<u32> = sub.captures.iter().map(|(s, _, _)| *s).collect();
                     let capture_parent_regs: Vec<u8> = sub.captures.iter().map(|(_, r, _)| *r).collect();
                     let capture_local_regs: Vec<u8> = sub.captures.iter().map(|(_, _, lr)| *lr).collect();
@@ -299,8 +300,11 @@ impl<'a> Compiler<'a> {
                                 chunk.code[pc + 3] = new_idx as u8;
                             }
                             pc += 4;
-                            if pc >= 4 && crate::opcodes::Op::from_u8(chunk.code[pc - 4]) == Some(crate::opcodes::Op::Send) {
-                                pc += 4;
+                            if pc >= 4 {
+                                let prev = crate::opcodes::Op::from_u8(chunk.code[pc - 4]);
+                                if prev == Some(crate::opcodes::Op::Send) || prev == Some(crate::opcodes::Op::TailCall) {
+                                    pc += 4;
+                                }
                             }
                         }
                     }
@@ -356,6 +360,8 @@ impl<'a> Compiler<'a> {
                         sub.compile_expr(*items.last().unwrap(), body_dst)?;
                     }
                     sub.chunk.emit(Op::Return, body_dst, 0, 0);
+                    // peephole: replace Send+Return with TailCall
+                    sub.chunk.optimize_tail_calls();
                     let capture_names: Vec<u32> = sub.captures.iter().map(|(s, _, _)| *s).collect();
                     let capture_parent_regs: Vec<u8> = sub.captures.iter().map(|(_, r, _)| *r).collect();
                     let capture_local_regs: Vec<u8> = sub.captures.iter().map(|(_, _, lr)| *lr).collect();
@@ -380,9 +386,12 @@ impl<'a> Compiler<'a> {
                                 chunk.code[pc + 3] = new_idx as u8;
                             }
                             pc += 4;
-                            // skip SEND trailing data
-                            if pc >= 4 && crate::opcodes::Op::from_u8(chunk.code[pc - 4]) == Some(crate::opcodes::Op::Send) {
-                                pc += 4;
+                            // skip Send/TailCall trailing data
+                            if pc >= 4 {
+                                let prev = crate::opcodes::Op::from_u8(chunk.code[pc - 4]);
+                                if prev == Some(crate::opcodes::Op::Send) || prev == Some(crate::opcodes::Op::TailCall) {
+                                    pc += 4;
+                                }
                             }
                         }
                     }

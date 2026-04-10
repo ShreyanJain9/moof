@@ -128,6 +128,37 @@ impl Chunk {
         self.code.len()
     }
 
+    /// Peephole: replace Send + Return with TailCall where the Send destination
+    /// matches the Return register. Turns recursive calls into frame reuse.
+    pub fn optimize_tail_calls(&mut self) {
+        let code = &mut self.code;
+        let mut pc = 0;
+        while pc + 11 < code.len() {
+            // pattern: Send(dst, recv, sel) [nargs, a0, a1, a2] Return(ret_reg, _, _)
+            // where dst == ret_reg
+            if Op::from_u8(code[pc]) == Some(Op::Send) {
+                let dst = code[pc + 1];
+                let args_pc = pc + 4; // trailing arg data
+                let ret_pc = pc + 8;  // potential Return
+                if ret_pc + 3 < code.len()
+                    && Op::from_u8(code[ret_pc]) == Some(Op::Return)
+                    && code[ret_pc + 1] == dst
+                {
+                    // replace Send with TailCall
+                    code[pc] = Op::TailCall as u8;
+                }
+            }
+            pc += 4;
+            // skip Send/TailCall trailing data
+            if pc >= 4 {
+                let prev = Op::from_u8(code[pc - 4]);
+                if prev == Some(Op::Send) || prev == Some(Op::TailCall) {
+                    pc += 4;
+                }
+            }
+        }
+    }
+
     // emit a jump with a placeholder offset, returns the position to patch
     pub fn emit_jump(&mut self, op: Op, test: u8) -> usize {
         match op {

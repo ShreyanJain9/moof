@@ -253,6 +253,104 @@ impl VM {
                     }
                 }
 
+                Op::TailCall => {
+                    // TailCall: same as Send but reuses the current frame for closures.
+                    // This turns recursive calls into O(1) frame usage.
+                    let dst = a;
+                    let recv = f.regs[b as usize];
+                    let sel_idx = c as usize;
+                    let sel_sym = if sel_idx < f.constants.len() {
+                        Value::from_bits(f.constants[sel_idx]).as_symbol()
+                            .ok_or("tail_call: selector not a symbol")?
+                    } else {
+                        return Err("tail_call: selector out of bounds".into());
+                    };
+
+                    if f.pc + 3 >= f.code.len() {
+                        return Err("tail_call: truncated".into());
+                    }
+                    let nargs = f.code[f.pc] as usize;
+                    let arg_start = f.pc + 1;
+                    let mut send_args = Vec::with_capacity(nargs);
+                    for i in 0..nargs.min(3) {
+                        send_args.push(f.regs[f.code[arg_start + i] as usize]);
+                    }
+                    f.pc += 4;
+
+                    let lookup = dispatch::lookup_handler(heap, recv, sel_sym);
+                    let (handler, _) = match lookup {
+                        Ok(h) => h,
+                        Err(err) => {
+                            if sel_sym != heap.sym_dnu {
+                                if let Ok((dnu_handler, _)) = dispatch::lookup_handler(heap, recv, heap.sym_dnu) {
+                                    let s = Value::symbol(sel_sym);
+                                    let al = heap.list(&send_args);
+                                    let result = self.call_handler_recursive(heap, dnu_handler, recv, heap.sym_dnu, &[s, al])?;
+                                    self.frames.last_mut().unwrap().regs[dst as usize] = result;
+                                    continue;
+                                }
+                            }
+                            return Err(err);
+                        }
+                    };
+
+                    if dispatch::is_native(heap, handler) {
+                        // native: call directly, store result, then the Return after will pop
+                        let result = dispatch::call_native(heap, handler, recv, &send_args)?;
+                        self.frames.last_mut().unwrap().regs[dst as usize] = result;
+                    } else if let Some((code_idx, _)) = heap.as_closure(handler) {
+                        // closure: REPLACE current frame instead of pushing
+                        let arg_list = if sel_sym == heap.sym_call {
+                            send_args.first().copied().unwrap_or(Value::NIL)
+                        } else {
+                            let mut full = vec![recv];
+                            full.extend_from_slice(&send_args);
+                            heap.list(&full)
+                        };
+                        // build new frame contents
+                        if code_idx >= self.closure_descs.len() {
+                            return Err(format!("tail_call: code_idx {} out of bounds", code_idx));
+                        }
+                        let chunk = self.closure_descs[code_idx].chunk.clone();
+                        let closure_desc_base = self.closure_descs[code_idx].desc_base;
+                        let capture_local_regs = self.closure_descs[code_idx].capture_local_regs.clone();
+                        let rest_reg = self.closure_descs[code_idx].rest_param_reg;
+                        let arity = chunk.arity as usize;
+                        let captures_from_obj = heap.closure_captures(handler);
+
+                        let f = self.frames.last_mut().unwrap();
+                        // reuse the frame: reset everything
+                        f.regs.clear();
+                        f.regs.resize(chunk.num_regs as usize + 16, Value::NIL);
+                        f.pc = 0;
+                        f.code = chunk.code.clone();
+                        f.constants = chunk.constants.clone();
+                        f.desc_base = closure_desc_base;
+                        // result_reg stays the same (we're replacing, not pushing)
+
+                        // unpack args
+                        let unpacked = heap.list_to_vec(arg_list);
+                        for i in 0..arity.min(unpacked.len()) {
+                            f.regs[i] = unpacked[i];
+                        }
+                        if let Some(rest_r) = rest_reg {
+                            let rest_args: Vec<Value> = unpacked.iter().skip(arity).copied().collect();
+                            f.regs[rest_r as usize] = heap.list(&rest_args);
+                        }
+                        for (i, (_, val)) in captures_from_obj.iter().enumerate() {
+                            if i < capture_local_regs.len() {
+                                let reg = capture_local_regs[i] as usize;
+                                if reg < f.regs.len() {
+                                    f.regs[reg] = *val;
+                                }
+                            }
+                        }
+                        // continue loop — will execute the new frame's code
+                    } else {
+                        return Err(format!("handler is not callable"));
+                    }
+                }
+
                 Op::Call => {
                     let dst = a;
                     let func = f.regs[b as usize];
