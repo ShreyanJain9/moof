@@ -1,13 +1,23 @@
 // The bytecode interpreter: register-based VM with frame stack.
 //
 // ONE opcode loop. Closure calls push frames, returns pop them.
-// No duplicated opcode handling. Foundation for fuel counting and TCO.
+// No duplicated opcode handling. Fuel counting and TCO built in.
 
 use crate::dispatch;
 use crate::heap::Heap;
 use crate::lang::compiler::{ClosureDesc, CompileResult};
 use crate::opcodes::{Chunk, Op};
 use crate::value::Value;
+
+/// Result of running the VM. Distinguishes normal completion, yield, and error.
+pub enum RunResult {
+    /// Normal completion with a value.
+    Done(Value),
+    /// Fuel exhausted. Frame stack is preserved — refuel and call run() again.
+    Yielded,
+    /// Unrecoverable error.
+    Error(String),
+}
 
 struct Frame {
     regs: Vec<Value>,
@@ -126,11 +136,11 @@ impl VM {
     fn run(&mut self, heap: &mut Heap) -> Result<Value, String> {
         let base_depth = self.frames.len() - 1; // the frame we just pushed
         loop {
-            // fuel counting
+            // fuel counting — yield preserves frame stack
             if self.fuel > 0 {
                 self.fuel -= 1;
                 if self.fuel == 0 {
-                    return Err("out of fuel".into());
+                    return Err("__yield__".into());
                 }
             }
 
@@ -615,6 +625,22 @@ impl VM {
     /// Public interface: send a message to a value.
     pub fn send_message(&mut self, heap: &mut Heap, receiver: Value, selector: u32, args: &[Value]) -> Result<Value, String> {
         self.dispatch_send(heap, receiver, selector, args)
+    }
+
+    /// Check if the VM yielded (fuel exhausted, frame stack preserved).
+    pub fn is_yielded(&self) -> bool {
+        !self.frames.is_empty()
+    }
+
+    /// Resume execution after yield. Refuel and continue from where we stopped.
+    pub fn resume(&mut self, heap: &mut Heap, fuel: u64) -> Result<Value, String> {
+        self.fuel = fuel;
+        self.run(heap)
+    }
+
+    /// Check if a result indicates a yield (vs a real error).
+    pub fn is_yield_error(err: &str) -> bool {
+        err == "__yield__"
     }
 
     /// Evaluate a CompileResult, accumulating closure descs.
