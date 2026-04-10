@@ -6,6 +6,7 @@
 // Fixed-shape slots: an object's slot NAMES are sealed at creation.
 // Only values can change. Handlers are open — add them anytime.
 
+use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 use crate::value::Value;
 
@@ -45,6 +46,15 @@ pub enum HeapObject {
         captures: Vec<(u32, Value)>, // (name_sym, captured_value)
         handlers: Vec<(u32, Value)>, // per-instance handlers (e.g. call:)
     },
+
+    /// Environment: dynamic-shape binding object.
+    /// Unlike General (fixed shape), new bindings can be added at any time.
+    /// Used as the root namespace — `def` writes here, `GetGlobal` reads here.
+    Environment {
+        parent: Value,                        // scope chain (NIL for root)
+        bindings: HashMap<u32, Value>,        // sym → value, O(1), dynamic
+        handlers: Vec<(u32, Value)>,          // like all objects
+    },
 }
 
 impl HeapObject {
@@ -70,8 +80,9 @@ impl HeapObject {
     /// Get the parent value (for delegation).
     pub fn parent(&self) -> Value {
         match self {
-            HeapObject::General { parent, .. } => *parent,
-            HeapObject::Closure { parent, .. } => *parent,
+            HeapObject::General { parent, .. } |
+            HeapObject::Closure { parent, .. } |
+            HeapObject::Environment { parent, .. } => *parent,
             // optimized types delegate to their type prototype (resolved by dispatch)
             _ => Value::NIL,
         }
@@ -87,6 +98,9 @@ impl HeapObject {
             HeapObject::Closure { captures, .. } => {
                 // captured values are accessible as slots
                 captures.iter().find(|(n, _)| *n == name).map(|(_, v)| *v)
+            }
+            HeapObject::Environment { bindings, .. } => {
+                bindings.get(&name).copied()
             }
             HeapObject::Pair(_car, _cdr) => {
                 None // handled by dispatch via Cons prototype
@@ -114,6 +128,10 @@ impl HeapObject {
                     false
                 }
             }
+            HeapObject::Environment { bindings, .. } => {
+                bindings.insert(name, val);
+                true // dynamic shape — always succeeds
+            }
             _ => false,
         }
     }
@@ -123,6 +141,7 @@ impl HeapObject {
         match self {
             HeapObject::General { slot_names, .. } => slot_names.clone(),
             HeapObject::Closure { captures, .. } => captures.iter().map(|(n, _)| *n).collect(),
+            HeapObject::Environment { bindings, .. } => bindings.keys().copied().collect(),
             _ => Vec::new(),
         }
     }
@@ -131,7 +150,8 @@ impl HeapObject {
     pub fn handler_get(&self, selector: u32) -> Option<Value> {
         match self {
             HeapObject::General { handlers, .. } |
-            HeapObject::Closure { handlers, .. } => {
+            HeapObject::Closure { handlers, .. } |
+            HeapObject::Environment { handlers, .. } => {
                 handlers.iter().find(|(s, _)| *s == selector).map(|(_, v)| *v)
             }
             _ => None,
@@ -142,7 +162,8 @@ impl HeapObject {
     pub fn handler_set(&mut self, selector: u32, handler: Value) {
         match self {
             HeapObject::General { handlers, .. } |
-            HeapObject::Closure { handlers, .. } => {
+            HeapObject::Closure { handlers, .. } |
+            HeapObject::Environment { handlers, .. } => {
                 if let Some(entry) = handlers.iter_mut().find(|(s, _)| *s == selector) {
                     entry.1 = handler;
                 } else {
@@ -160,7 +181,8 @@ impl HeapObject {
     pub fn handler_names(&self) -> Vec<u32> {
         match self {
             HeapObject::General { handlers, .. } |
-            HeapObject::Closure { handlers, .. } => {
+            HeapObject::Closure { handlers, .. } |
+            HeapObject::Environment { handlers, .. } => {
                 handlers.iter().map(|(s, _)| *s).collect()
             }
             _ => Vec::new(),

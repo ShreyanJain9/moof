@@ -3,7 +3,7 @@
 // Objects stored as bincode-serialized HeapObject entries.
 // Key: u32 object ID (big-endian). Value: serialized bytes.
 // Symbol table in a separate LMDB database.
-// Globals + operatives in a third database.
+// Environment is a heap object — its ID is stored as metadata.
 //
 // The nursery (heap.rs) is the fast in-memory arena.
 // Promotion: when an object needs to persist, it moves here.
@@ -14,12 +14,11 @@ use std::path::Path;
 use heed::types::*;
 use heed::{Database, Env, EnvOpenOptions};
 use crate::object::HeapObject;
-use crate::value::Value;
 
 pub struct Store {
     env: Env,
     objects: Database<U32<heed::byteorder::BE>, Bytes>,
-    meta: Database<Str, Bytes>, // "symbols", "globals", "operatives", "closure_descs"
+    meta: Database<Str, Bytes>, // "symbols", "env_id", "closure_descs"
 }
 
 impl Store {
@@ -46,8 +45,7 @@ impl Store {
         &self,
         objects: &[HeapObject],
         symbols: &[String],
-        globals: &std::collections::HashMap<u32, Value>,
-        operatives: &std::collections::HashSet<u32>,
+        env_id: u32,
         closure_chunks: &[crate::lang::compiler::ClosureDesc],
     ) -> Result<(), String> {
         let mut wtxn = self.env.write_txn().map_err(|e| format!("txn: {e}"))?;
@@ -68,19 +66,10 @@ impl Store {
         self.meta.put(&mut wtxn, "symbols", &sym_bytes)
             .map_err(|e| format!("put syms: {e}"))?;
 
-        // write globals as Vec<(u32, u64)>
-        let globals_vec: Vec<(u32, u64)> = globals.iter()
-            .map(|(&k, &v)| (k, v.to_bits()))
-            .collect();
-        let glob_bytes = bincode::serialize(&globals_vec).map_err(|e| format!("serialize globals: {e}"))?;
-        self.meta.put(&mut wtxn, "globals", &glob_bytes)
-            .map_err(|e| format!("put globals: {e}"))?;
-
-        // write operatives as Vec<u32>
-        let ops_vec: Vec<u32> = operatives.iter().copied().collect();
-        let ops_bytes = bincode::serialize(&ops_vec).map_err(|e| format!("serialize ops: {e}"))?;
-        self.meta.put(&mut wtxn, "operatives", &ops_bytes)
-            .map_err(|e| format!("put ops: {e}"))?;
+        // write env_id
+        let env_bytes = bincode::serialize(&env_id).map_err(|e| format!("serialize env: {e}"))?;
+        self.meta.put(&mut wtxn, "env_id", &env_bytes)
+            .map_err(|e| format!("put env: {e}"))?;
 
         // write closure descs (bytecode chunks + metadata)
         let desc_data: Vec<SerializableClosureDesc> = closure_chunks.iter().map(|d| {
@@ -124,17 +113,9 @@ impl Store {
         }
         if objects.is_empty() { return None; }
 
-        // read globals
-        let glob_bytes = self.meta.get(&rtxn, "globals").ok()??;
-        let globals_vec: Vec<(u32, u64)> = bincode::deserialize(glob_bytes).ok()?;
-        let globals: std::collections::HashMap<u32, Value> = globals_vec.into_iter()
-            .map(|(k, v)| (k, Value::from_bits(v)))
-            .collect();
-
-        // read operatives
-        let ops_bytes = self.meta.get(&rtxn, "operatives").ok()??;
-        let operatives_vec: Vec<u32> = bincode::deserialize(ops_bytes).ok()?;
-        let operatives: std::collections::HashSet<u32> = operatives_vec.into_iter().collect();
+        // read env_id
+        let env_bytes = self.meta.get(&rtxn, "env_id").ok()??;
+        let env_id: u32 = bincode::deserialize(env_bytes).ok()?;
 
         // read closure descs
         let desc_bytes = self.meta.get(&rtxn, "closure_descs").ok()??;
@@ -142,15 +123,14 @@ impl Store {
 
         rtxn.commit().ok()?;
 
-        Some(LoadedImage { objects, symbols, globals, operatives, closure_descs: descs })
+        Some(LoadedImage { objects, symbols, env_id, closure_descs: descs })
     }
 }
 
 pub struct LoadedImage {
     pub objects: Vec<HeapObject>,
     pub symbols: Vec<String>,
-    pub globals: std::collections::HashMap<u32, Value>,
-    pub operatives: std::collections::HashSet<u32>,
+    pub env_id: u32,
     pub closure_descs: Vec<SerializableClosureDesc>,
 }
 

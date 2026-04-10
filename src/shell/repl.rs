@@ -184,8 +184,7 @@ pub fn run() {
     match store.save_all(
         heap.objects_ref(),
         heap.symbols_ref(),
-        &heap.globals,
-        &heap.operatives,
+        heap.env,
         vm.closure_descs_ref(),
     ) {
         Ok(()) => eprintln!("  image saved to LMDB ({} objects)", heap.object_count()),

@@ -14,8 +14,7 @@ use crate::value::Value;
 pub struct HeapImage {
     pub objects: Vec<HeapObject>,
     pub symbols: Vec<String>,
-    pub globals: Vec<(String, u64)>, // name → value bits
-    pub operatives: Vec<String>,     // operative symbol names
+    pub env_id: u32,                 // root environment object ID
 }
 
 // type prototype indices — named constants instead of magic numbers
@@ -49,8 +48,7 @@ pub struct Heap {
     objects: Vec<HeapObject>,
     symbols: Vec<String>,
     sym_reverse: std::collections::HashMap<String, u32>,
-    pub globals: std::collections::HashMap<u32, Value>, // top-level defs
-    pub operatives: std::collections::HashSet<u32>,    // symbols bound to vau operatives
+    pub env: u32,                                      // root environment object ID
     pub rebound: std::collections::HashSet<u32>,       // symbols that have been reassigned
     pub vat_id: u32,                                   // which vat this heap belongs to
     pub outbox: Vec<OutgoingMessage>,                  // pending messages to other vats
@@ -86,8 +84,7 @@ impl Heap {
             objects: Vec::new(),
             symbols: Vec::new(),
             sym_reverse: std::collections::HashMap::new(),
-            globals: std::collections::HashMap::new(),
-            operatives: std::collections::HashSet::new(),
+            env: 0,
             rebound: std::collections::HashSet::new(),
             vat_id: 0,
             outbox: Vec::new(),
@@ -100,6 +97,13 @@ impl Heap {
             type_protos: vec![Value::NIL; 15],
             natives: Vec::new(),
         };
+
+        // allocate root environment object (gets ID 0)
+        h.env = h.alloc(HeapObject::Environment {
+            parent: Value::NIL, // fixed up in register_type_protos
+            bindings: std::collections::HashMap::new(),
+            handlers: Vec::new(),
+        });
 
         // intern well-known symbols
         h.sym_car = h.intern("car");
@@ -139,6 +143,22 @@ impl Heap {
     /// Look up a symbol ID by name without interning. Returns None if not found.
     pub fn find_symbol(&self, name: &str) -> Option<u32> {
         self.sym_reverse.get(name).copied()
+    }
+
+    // -- environment access --
+
+    pub fn env_get(&self, sym: u32) -> Option<Value> {
+        self.get(self.env).slot_get(sym)
+    }
+
+    pub fn env_def(&mut self, sym: u32, val: Value) {
+        self.get_mut(self.env).slot_set(sym, val);
+    }
+
+    pub fn env_remove(&mut self, sym: u32) {
+        if let HeapObject::Environment { bindings, .. } = self.get_mut(self.env) {
+            bindings.remove(&sym);
+        }
     }
 
     // -- object allocation --
@@ -314,17 +334,10 @@ impl Heap {
 
     /// Save the heap to a file.
     pub fn save_image(&self, path: &str) -> Result<(), String> {
-        let globals: Vec<(String, u64)> = self.globals.iter()
-            .map(|(&sym, &val)| (self.symbol_name(sym).to_string(), val.to_bits()))
-            .collect();
-        let operatives: Vec<String> = self.operatives.iter()
-            .map(|&sym| self.symbol_name(sym).to_string())
-            .collect();
         let image = HeapImage {
             objects: self.objects.clone(),
             symbols: self.symbols.clone(),
-            globals,
-            operatives,
+            env_id: self.env,
         };
         let bytes = bincode::serialize(&image).map_err(|e| format!("serialize: {e}"))?;
         std::fs::write(path, bytes).map_err(|e| format!("write: {e}"))?;
@@ -339,21 +352,11 @@ impl Heap {
         let mut h = Heap::new();
         h.objects = image.objects;
         h.symbols = image.symbols;
+        h.env = image.env_id;
         // rebuild sym_reverse
         h.sym_reverse.clear();
         for (i, name) in h.symbols.iter().enumerate() {
             h.sym_reverse.insert(name.clone(), i as u32);
-        }
-        // restore globals
-        for (name, bits) in &image.globals {
-            let sym = *h.sym_reverse.get(name.as_str())?;
-            h.globals.insert(sym, Value::from_bits(*bits));
-        }
-        // restore operatives
-        for name in &image.operatives {
-            if let Some(&sym) = h.sym_reverse.get(name.as_str()) {
-                h.operatives.insert(sym);
-            }
         }
         // re-intern well-known symbols (they should already exist)
         h.sym_car = *h.sym_reverse.get("car")?;
@@ -369,7 +372,6 @@ impl Heap {
         h.sym_length = *h.sym_reverse.get("length")?;
         h.sym_at = *h.sym_reverse.get("at:")?;
         h.sym_at_put = *h.sym_reverse.get("at:put:")?;
-        // sym_code_idx/sym_arity/sym_operative removed — closures are now a HeapObject variant
         h.sym_message = h.sym_reverse.get("message").copied().unwrap_or_else(|| h.intern("message"));
         Some(h)
     }
@@ -379,8 +381,9 @@ impl Heap {
         // for heap objects, check the variant first
         if let Some(id) = val.as_any_object() {
             match self.get(id) {
-                HeapObject::General { parent, .. } => return *parent,
-                HeapObject::Closure { parent, .. } => return *parent,
+                HeapObject::General { parent, .. } |
+                HeapObject::Closure { parent, .. } |
+                HeapObject::Environment { parent, .. } => return *parent,
                 HeapObject::Pair(_, _) => return self.type_protos.get(PROTO_CONS).copied().unwrap_or(Value::NIL),
                 HeapObject::Text(_) => return self.type_protos.get(PROTO_STR).copied().unwrap_or(Value::NIL),
                 HeapObject::Buffer(_) => return self.type_protos.get(PROTO_BYTES).copied().unwrap_or(Value::NIL),
@@ -471,18 +474,16 @@ impl Heap {
     pub fn restore(
         objects: Vec<HeapObject>,
         symbols: Vec<String>,
-        globals: std::collections::HashMap<u32, Value>,
-        operatives: std::collections::HashSet<u32>,
+        env_id: u32,
     ) -> Self {
         let mut h = Heap::new();
         h.objects = objects;
         h.symbols = symbols;
+        h.env = env_id;
         h.sym_reverse.clear();
         for (i, name) in h.symbols.iter().enumerate() {
             h.sym_reverse.insert(name.clone(), i as u32);
         }
-        h.globals = globals;
-        h.operatives = operatives;
         // re-resolve well-known symbols
         h.sym_car = h.sym_reverse.get("car").copied().unwrap_or(0);
         h.sym_cdr = h.sym_reverse.get("cdr").copied().unwrap_or(0);
@@ -497,7 +498,6 @@ impl Heap {
         h.sym_length = h.sym_reverse.get("length").copied().unwrap_or(0);
         h.sym_at = h.sym_reverse.get("at:").copied().unwrap_or(0);
         h.sym_at_put = h.sym_reverse.get("at:put:").copied().unwrap_or(0);
-        // sym_code_idx/sym_arity/sym_operative removed — closures are now a HeapObject variant
         h.sym_message = h.sym_reverse.get("message").copied().unwrap_or_else(|| h.intern("message"));
         h
     }
@@ -539,7 +539,7 @@ impl Heap {
                 }
                 format!("#[{}]", parts.join(" "))
             }
-            HeapObject::General { parent, slot_names, slot_values, .. } => {
+            HeapObject::General { slot_names, slot_values, .. } => {
                 if slot_names.is_empty() {
                     return format!("<object#{id}>");
                 }
@@ -547,6 +547,9 @@ impl Heap {
                     .map(|(n, v)| format!("{}: {}", self.symbol_name(*n), self.format_value(*v)))
                     .collect();
                 format!("{{ {} }}", slots.join(" "))
+            }
+            HeapObject::Environment { bindings, .. } => {
+                format!("<environment: {} bindings>", bindings.len())
             }
         }
     }
@@ -659,6 +662,9 @@ impl Heap {
                 };
 
                 format!("  {{ {nslots} slots, {nhandlers} handlers{handler_info}\n{}\n  }}", lines.join("\n"))
+            }
+            HeapObject::Environment { bindings, .. } => {
+                format!("<environment: {} bindings>", bindings.len())
             }
         }
     }

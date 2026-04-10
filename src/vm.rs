@@ -533,7 +533,7 @@ impl VM {
                     let idx = u16::from_be_bytes([b, c]) as usize;
                     let name_sym = Value::from_bits(f.constants[idx]).as_symbol()
                         .ok_or("get_global: name constant is not a symbol")?;
-                    let val = heap.globals.get(&name_sym).copied()
+                    let val = heap.env_get(name_sym)
                         .ok_or_else(|| format!("unbound: '{}'", heap.symbol_name(name_sym)))?;
                     f.regs[a as usize] = val;
                 }
@@ -544,13 +544,10 @@ impl VM {
                     let name_sym = Value::from_bits(f.constants[idx]).as_symbol()
                         .ok_or("def_global: name constant is not a symbol")?;
                     let val = f.regs[c as usize];
-                    if let Some(&old) = heap.globals.get(&name_sym) {
+                    if let Some(old) = heap.env_get(name_sym) {
                         if old != val { heap.rebound.insert(name_sym); }
                     }
-                    heap.globals.insert(name_sym, val);
-                    if let Some((_, true)) = heap.as_closure(val) {
-                        heap.operatives.insert(name_sym);
-                    }
+                    heap.env_def(name_sym, val);
                 }
 
                 Op::Eval => {
@@ -558,7 +555,7 @@ impl VM {
                     let ast = f.regs[b as usize];
                     let env_val = if c != 0 { f.regs[c as usize] } else { Value::NIL };
 
-                    // temporarily inject env slots as globals
+                    // temporarily inject env slots as bindings
                     let mut saved_values: Vec<(u32, Option<Value>)> = Vec::new();
                     if let Some(env_id) = env_val.as_any_object() {
                         let slot_names = heap.get(env_id).slot_names();
@@ -566,8 +563,8 @@ impl VM {
                             .map(|&n| heap.get(env_id).slot_get(n).unwrap_or(Value::NIL))
                             .collect();
                         for (&name, &val) in slot_names.iter().zip(slot_vals.iter()) {
-                            saved_values.push((name, heap.globals.get(&name).copied()));
-                            heap.globals.insert(name, val);
+                            saved_values.push((name, heap.env_get(name)));
+                            heap.env_def(name, val);
                         }
                     }
 
@@ -575,11 +572,11 @@ impl VM {
                         .map_err(|e| format!("eval compile: {e}"))?;
                     let result = self.eval_result(heap, compile_result);
 
-                    // restore globals
+                    // restore bindings
                     for (name, old_val) in saved_values {
                         match old_val {
-                            Some(v) => { heap.globals.insert(name, v); }
-                            None => { heap.globals.remove(&name); }
+                            Some(v) => { heap.env_def(name, v); }
+                            None => { heap.env_remove(name); }
                         }
                     }
 

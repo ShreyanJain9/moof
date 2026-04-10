@@ -35,7 +35,7 @@ pub fn lookup_handler(heap: &Heap, receiver: Value, selector: u32) -> Result<(Va
             HeapObject::Buffer(_) => heap.type_protos.get(PROTO_BYTES),
             HeapObject::Table { .. } => heap.type_protos.get(PROTO_TABLE),
             HeapObject::Closure { .. } => heap.type_protos.get(PROTO_CLOSURE),
-            HeapObject::General { .. } => None,
+            HeapObject::General { .. } | HeapObject::Environment { .. } => None,
         };
         // try variant proto first, then generic object proto
         if let Some(Some(vp)) = variant_proto.map(|p| p.as_any_object()) {

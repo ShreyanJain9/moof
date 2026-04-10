@@ -862,9 +862,11 @@ impl<'a> Compiler<'a> {
                 }
 
                 _ => {
-                    // check if this is a known operative
-                    if self.heap.operatives.contains(&sym_id) {
-                        return self.compile_operative_call(expr, sym_id, dst);
+                    // check if this is a known operative (derived from value)
+                    if let Some(val) = self.heap.env_get(sym_id) {
+                        if let Some((_, true)) = self.heap.as_closure(val) {
+                            return self.compile_operative_call(expr, sym_id, dst);
+                        }
                     }
                     // generic applicative call: (f a b c) → send call: to f
                     return self.compile_call(expr, dst);
@@ -892,7 +894,8 @@ impl<'a> Compiler<'a> {
                 return Ok(());
             }
             crate::object::HeapObject::General { .. } |
-            crate::object::HeapObject::Closure { .. } => {
+            crate::object::HeapObject::Closure { .. } |
+            crate::object::HeapObject::Environment { .. } => {
                 self.emit_load_const(dst, form);
                 return Ok(());
             }
