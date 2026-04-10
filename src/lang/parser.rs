@@ -263,13 +263,13 @@ impl<'a> Parser<'a> {
         let mut parent = self.intern("Object");
         let mut slot_names: Vec<Value> = Vec::new();
         let mut slot_values: Vec<Value> = Vec::new();
-        let mut methods: Vec<Value> = Vec::new(); // (selector params body) triples flattened
-        let mut protocols: Vec<Value> = Vec::new();
+        let mut methods: Vec<Value> = Vec::new(); // (selector fn) pairs flattened
+        let mut init_exprs: Vec<Value> = Vec::new(); // do block expressions
 
-        // check if first item is a parent (not keyword, not [, not }, not "is")
+        // check if first item is a parent (not keyword, not [, not }, not "do")
         match self.peek() {
             Token::RBrace | Token::Keyword(_) | Token::LBracket => {}
-            Token::Symbol(s) if s == "is" => {}
+            Token::Symbol(s) if s == "do" => {}
             _ => { parent = self.parse_expr()?; }
         }
 
@@ -343,34 +343,34 @@ impl<'a> Parser<'a> {
                     methods.push(fn_expr);
                 }
 
-                // protocol: is Protocol
-                Token::Symbol(ref s) if s == "is" => {
-                    self.advance(); // is
-                    match self.peek().clone() {
-                        Token::Symbol(ref proto) => {
-                            let proto_sym = self.intern(proto);
-                            protocols.push(proto_sym);
-                            self.advance();
+                // do expr... — init block, runs after creation with self bound
+                Token::Symbol(ref s) if s == "do" => {
+                    self.advance(); // do
+                    // parse all remaining exprs until }
+                    loop {
+                        match self.peek() {
+                            Token::RBrace => break,
+                            Token::Eof => return Err("unterminated object literal".into()),
+                            _ => init_exprs.push(self.parse_expr()?),
                         }
-                        _ => return Err("expected protocol name after 'is'".into()),
                     }
                 }
 
                 Token::Eof => return Err("unterminated object literal".into()),
-                ref tok => return Err(format!("expected slot, method, or }} in object literal, got {tok:?}")),
+                ref tok => return Err(format!("expected slot, method, do, or }} in object literal, got {tok:?}")),
             }
         }
 
         // emit: (%object-literal parent (slot-names...) slot-val1 slot-val2...
         //         (method-sel1 method-fn1 method-sel2 method-fn2...)
-        //         (proto1 proto2...))
+        //         (init-expr1 init-expr2...))
         let names_list = self.heap.list(&slot_names);
         let methods_list = self.heap.list(&methods);
-        let protocols_list = self.heap.list(&protocols);
+        let init_list = self.heap.list(&init_exprs);
         let mut all = vec![obj_sym, parent, names_list];
         all.extend(slot_values);
         all.push(methods_list);
-        all.push(protocols_list);
+        all.push(init_list);
         Ok(self.heap.list(&all))
     }
 

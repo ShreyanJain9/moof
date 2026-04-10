@@ -739,37 +739,25 @@ impl<'a> Compiler<'a> {
                         }
                     }
 
-                    // protocols: items[3+nslots+1] is the protocols list
-                    let protos_idx = 3 + nslots + 1;
-                    if protos_idx < items.len() {
-                        let protos_list = self.heap.list_to_vec(items[protos_idx]);
-                        for proto_sym_val in protos_list {
-                            if let Some(proto_sym) = proto_sym_val.as_symbol() {
-                                // emit: (conform dst Protocol)
-                                // compile as a call to the global 'conform' function
-                                let conform_sym = self.heap.find_symbol("conform").unwrap_or(0);
-                                let conform_const = self.add_sym_const(conform_sym);
-                                let conform_reg = self.alloc_reg();
-                                self.chunk.emit(Op::GetGlobal, conform_reg, (conform_const >> 8) as u8, conform_const as u8);
+                    // init block: items[3+nslots+1] is the init expressions list
+                    // these run with `self` bound to the newly created object
+                    let init_idx = 3 + nslots + 1;
+                    if init_idx < items.len() {
+                        let init_list = self.heap.list_to_vec(items[init_idx]);
+                        if !init_list.is_empty() {
+                            // temporarily bind `self` to dst for the init block
+                            let self_sym = self.heap.find_symbol("self").unwrap_or(0);
+                            let saved_locals = self.locals.len();
+                            self.locals.push((self_sym, dst));
 
-                                let proto_const = self.add_sym_const(proto_sym);
-                                let proto_reg = self.alloc_reg();
-                                self.chunk.emit(Op::GetGlobal, proto_reg, (proto_const >> 8) as u8, proto_const as u8);
-
-                                // call: (conform obj protocol)
-                                let args_reg = self.alloc_reg();
-                                self.chunk.emit(Op::LoadNil, args_reg, 0, 0);
-                                self.chunk.emit(Op::Cons, args_reg, proto_reg, args_reg);
-                                self.chunk.emit(Op::Cons, args_reg, dst, args_reg);
-
-                                let call_const = self.add_sym_const(self.heap.sym_call);
-                                let discard_reg = self.alloc_reg();
-                                self.chunk.emit(Op::Send, discard_reg, conform_reg, call_const as u8);
-                                self.chunk.code.push(1);
-                                self.chunk.code.push(args_reg);
-                                self.chunk.code.push(0);
-                                self.chunk.code.push(0);
+                            // compile each init expression
+                            for init_expr in &init_list {
+                                let tmp = self.alloc_reg();
+                                self.compile_expr(*init_expr, tmp)?;
                             }
+
+                            // restore locals
+                            self.locals.truncate(saved_locals);
                         }
                     }
 
