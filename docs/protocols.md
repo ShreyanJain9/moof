@@ -156,8 +156,8 @@ conforming to Indexable gives you Iterable for free.
 (def Greetable (make-protocol "Greetable"
   (list 'greet)
   #[
-    'hello => (fn (this) (str "hello, " [this greet]))
-    'goodbye => (fn (this) (str "goodbye, " [this greet]))
+    'hello => (fn (self) (str "hello, " [self greet]))
+    'goodbye => (fn (self) (str "goodbye, " [self greet]))
   ]
   nil))
 

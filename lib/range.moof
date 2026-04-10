@@ -1,20 +1,49 @@
 ; range.moof — Range type, pure moof object literal.
 
 (def Range {
-  start: 0  end: 0  step: 1
-  [each: block] (let ((i @start) (end @end) (step @step)) (if [step > 0] (while [i <= end] (block i) (:= i [i + step])) (while [i >= end] (block i) (:= i [i + step]))))
-  [includes: val] (and [val >= @start] [val <= @end])
-  [size] [[[[@end - @start] / @step] + 1] max: 0]
+  start: 0
+  end: 0
+  step: 1
+
+  [each: block]
+    (let ((i @start) (end @end) (step @step))
+      (if [step > 0]
+        (while [i <= end] (block i) (:= i [i + step]))
+        (while [i >= end] (block i) (:= i [i + step]))))
+
+  [includes: val]
+    (and [val >= @start] [val <= @end])
+
+  [size]
+    [[[[@end - @start] / @step] + 1] max: 0]
+
   [min] @start
   [max] @end
-  [describe] (if [@step = 1] (str "(" @start " to: " @end ")") (str "(" @start " to: " @end " by: " @step ")"))
-  [show] (str [self describe] "  : Range")
+
+  [describe]
+    (if [@step = 1]
+      (str "(" @start " to: " @end ")")
+      (str "(" @start " to: " @end " by: " @step ")"))
+
+  [show]
+    (str [self describe] "  : Range")
+
   do (conform self Iterable)
 })
 
 ; fold:with: — direct, avoids Iterable's toList roundtrip
-[Range handle: 'fold:with: with: (fn (self init f) (let ((acc init) (i self.start) (end self.end) (step self.step)) (if [step > 0] (while [i <= end] (:= acc (f acc i)) (:= i [i + step])) (while [i >= end] (:= acc (f acc i)) (:= i [i + step]))) acc))]
+[Range handle: 'fold:with: with:
+  (fn (self init f)
+    (let ((acc init) (i self.start) (end self.end) (step self.step))
+      (if [step > 0]
+        (while [i <= end] (:= acc (f acc i)) (:= i [i + step]))
+        (while [i >= end] (:= acc (f acc i)) (:= i [i + step])))
+      acc))]
 
 ; Integer: to: and to:by:
-(defmethod Integer to: (end) { Range start: self end: end step: 1 })
-[Integer handle: 'to:by: with: (fn (self end step) { Range start: self end: end step: step })]
+(defmethod Integer to: (end)
+  { Range start: self end: end step: 1 })
+
+[Integer handle: 'to:by: with:
+  (fn (self end step)
+    { Range start: self end: end step: step })]

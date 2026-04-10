@@ -8,6 +8,30 @@ use crate::vm::VM;
 use crate::value::Value;
 use std::path::Path;
 
+/// Count unbalanced brackets/parens/braces across the entire input.
+/// Positive = more openers than closers (need more input).
+fn bracket_depth(s: &str) -> i32 {
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut in_comment = false;
+    for c in s.chars() {
+        if c == '\n' { in_comment = false; continue; }
+        if in_comment { continue; }
+        if escape { escape = false; continue; }
+        if c == '\\' && in_string { escape = true; continue; }
+        if c == '"' { in_string = !in_string; continue; }
+        if in_string { continue; }
+        if c == ';' { in_comment = true; continue; }
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    depth
+}
+
 fn eval_source(vm: &mut VM, heap: &mut Heap, source: &str) -> Result<(), String> {
     let tokens = lexer::tokenize(source).map_err(|e| format!("lex: {e}"))?;
     let mut parser = Parser::new(&tokens, heap);
@@ -99,7 +123,22 @@ pub fn run() {
         let trimmed = line.trim();
         if trimmed.is_empty() { continue; }
 
-        let tokens = match lexer::tokenize(trimmed) {
+        // accumulate multi-line input when brackets are unbalanced
+        let mut input = trimmed.to_string();
+        loop {
+            let depth = bracket_depth(&input);
+            if depth <= 0 { break; }
+            // unbalanced — read continuation line
+            let cont = match rl.readline("  ... ") {
+                Ok(l) => l,
+                Err(_) => break,
+            };
+            let _ = rl.add_history_entry(&cont);
+            input.push('\n');
+            input.push_str(&cont);
+        }
+
+        let tokens = match lexer::tokenize(&input) {
             Ok(t) => t,
             Err(e) => { eprintln!("  ~ lex: {e}"); continue; }
         };
