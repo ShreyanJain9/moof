@@ -1265,11 +1265,100 @@ pub fn register_type_protos(heap: &mut Heap) {
     heap.globals.insert(block_sym, block_proto);
 
     // -- Root environment object --
-    // the root environment is an object. when we implement per-vat envs,
-    // each vat will have its own root. for now it's a single shared object.
-    // globals are still backed by heap.globals (HashMap) for performance,
-    // but the env object exists so $e at top level is a real object.
     let env_proto = heap.make_object(object_proto);
     let env_sym = heap.intern("Environment");
     heap.globals.insert(env_sym, env_proto);
+
+    // -- FarRef prototype (PROTO_FARREF) --
+    // a far reference is a proxy for an object in another vat.
+    // all sends are intercepted via doesNotUnderstand: and queued.
+    let farref_proto = heap.make_object(object_proto);
+    heap.type_protos[PROTO_FARREF] = farref_proto;
+    let farref_id = farref_proto.as_any_object().unwrap();
+
+    // FarRef: doesNotUnderstand: — intercept ALL sends, queue to outbox
+    let target_vat_sym = heap.intern("__target_vat");
+    let target_obj_sym = heap.intern("__target_obj");
+    let h = heap.register_native("farref_dnu", move |heap, receiver, args| {
+        let id = receiver.as_any_object().ok_or("farref DNU: not an object")?;
+        let target_vat = heap.get(id).slot_get(target_vat_sym)
+            .and_then(|v| v.as_integer()).ok_or("farref: missing __target_vat")? as u32;
+        let target_obj = heap.get(id).slot_get(target_obj_sym)
+            .and_then(|v| v.as_integer()).ok_or("farref: missing __target_obj")? as u32;
+
+        let selector = args.first().and_then(|v| v.as_symbol()).unwrap_or(0);
+        let msg_args = if args.len() > 1 {
+            heap.list_to_vec(args[1])
+        } else {
+            Vec::new()
+        };
+
+        // create a promise for the result
+        let promise_proto = heap.type_protos[PROTO_PROMISE];
+        let state_sym = heap.intern("__state");
+        let pending_sym = heap.intern("pending");
+        let buffer_sym = heap.intern("__buffer");
+        let promise = heap.make_object_with_slots(
+            promise_proto,
+            vec![state_sym, buffer_sym],
+            vec![Value::symbol(pending_sym), Value::NIL],
+        );
+        let promise_obj_id = promise.as_any_object().unwrap();
+
+        // push to outbox
+        heap.outbox.push(crate::heap::OutgoingMessage {
+            target_vat_id: target_vat,
+            target_obj_id: target_obj,
+            selector,
+            args: msg_args,
+            promise_id: promise_obj_id,
+        });
+
+        Ok(promise)
+    });
+    let dnu_sym = heap.sym_dnu;
+    heap.get_mut(farref_id).handler_set(dnu_sym, h);
+
+    // FarRef: describe
+    let h = heap.register_native("farref_describe", move |heap, receiver, _args| {
+        let id = receiver.as_any_object().ok_or("describe: not a farref")?;
+        let vat = heap.get(id).slot_get(target_vat_sym)
+            .and_then(|v| v.as_integer()).unwrap_or(-1);
+        let obj = heap.get(id).slot_get(target_obj_sym)
+            .and_then(|v| v.as_integer()).unwrap_or(-1);
+        let s = format!("<far-ref vat:{vat} obj:{obj}>");
+        Ok(heap.alloc_string(&s))
+    });
+    heap.get_mut(farref_id).handler_set(describe_sym, h);
+
+    let farref_sym = heap.intern("FarRef");
+    heap.globals.insert(farref_sym, farref_proto);
+
+    // -- Promise prototype (PROTO_PROMISE) --
+    // a promise represents a future value. sends to unresolved promises
+    // are buffered via doesNotUnderstand: and forwarded when resolved.
+    let promise_proto = heap.make_object(object_proto);
+    heap.type_protos[PROTO_PROMISE] = promise_proto;
+    let promise_id = promise_proto.as_any_object().unwrap();
+
+    // Promise: describe
+    let state_sym = heap.intern("__state");
+    let h = heap.register_native("promise_describe", move |heap, receiver, _args| {
+        let id = receiver.as_any_object().ok_or("describe: not a promise")?;
+        let state = heap.get(id).slot_get(state_sym)
+            .map(|v| heap.format_value(v)).unwrap_or("?".into());
+        let s = format!("<promise {state}>");
+        Ok(heap.alloc_string(&s))
+    });
+    heap.get_mut(promise_id).handler_set(describe_sym, h);
+
+    let promise_sym = heap.intern("Promise");
+    heap.globals.insert(promise_sym, promise_proto);
+
+    // -- Vat prototype --
+    // [Vat spawn: block] creates a new vat. The block runs in the new vat
+    // and its return value becomes accessible via a far reference.
+    let vat_proto = heap.make_object(object_proto);
+    let vat_sym = heap.intern("Vat");
+    heap.globals.insert(vat_sym, vat_proto);
 }

@@ -32,6 +32,18 @@ pub const PROTO_TABLE: usize = 9;
 pub const PROTO_NUMBER: usize = 10;
 pub const PROTO_CLOSURE: usize = 11;
 pub const PROTO_ERROR: usize = 12;
+pub const PROTO_FARREF: usize = 13;
+pub const PROTO_PROMISE: usize = 14;
+
+/// An outgoing message from a vat (queued by FarRef's doesNotUnderstand:).
+#[derive(Debug)]
+pub struct OutgoingMessage {
+    pub target_vat_id: u32,
+    pub target_obj_id: u32,
+    pub selector: u32,
+    pub args: Vec<Value>,
+    pub promise_id: u32,  // local promise to resolve with the result
+}
 
 pub struct Heap {
     objects: Vec<HeapObject>,
@@ -40,6 +52,8 @@ pub struct Heap {
     pub globals: std::collections::HashMap<u32, Value>, // top-level defs
     pub operatives: std::collections::HashSet<u32>,    // symbols bound to vau operatives
     pub rebound: std::collections::HashSet<u32>,       // symbols that have been reassigned
+    pub vat_id: u32,                                   // which vat this heap belongs to
+    pub outbox: Vec<OutgoingMessage>,                  // pending messages to other vats
 
     // well-known symbols (interned at startup)
     pub sym_car: u32,
@@ -75,13 +89,15 @@ impl Heap {
             globals: std::collections::HashMap::new(),
             operatives: std::collections::HashSet::new(),
             rebound: std::collections::HashSet::new(),
+            vat_id: 0,
+            outbox: Vec::new(),
             sym_car: 0, sym_cdr: 0, sym_call: 0,
             sym_slot_at: 0, sym_slot_at_put: 0,
             sym_slot_names: 0, sym_handler_names: 0,
             sym_parent: 0, sym_describe: 0, sym_dnu: 0,
             sym_length: 0, sym_at: 0, sym_at_put: 0,
             sym_message: 0,
-            type_protos: vec![Value::NIL; 13],
+            type_protos: vec![Value::NIL; 15],
             natives: Vec::new(),
         };
 
