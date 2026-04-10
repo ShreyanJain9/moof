@@ -358,66 +358,8 @@ pub fn register_type_protos(heap: &mut Heap) {
     });
     heap.get_mut(int_id).handler_set(to_float_sym, h);
 
-    // -- Range prototype (a General object with start/end/step slots) --
-    let range_proto = heap.make_object(object_proto);
-    let range_id = range_proto.as_any_object().unwrap();
-    // store range_proto as a global so moof code can access it
-    let range_sym = heap.intern("Range");
-    heap.globals.insert(range_sym, range_proto);
-
-    // Range: each: is implemented in moof (lib/range.moof) using while loop.
-    // Iterable conformance gives 40+ methods from that one each: implementation.
-
-    // Range: describe
-    let r_start_sym = heap.intern("start");
-    let r_end_sym = heap.intern("end");
-    let r_step_sym = heap.intern("step");
-    let h = heap.register_native("__range_describe", move |heap, receiver, _args| {
-        let id = receiver.as_any_object().ok_or("describe: not a range")?;
-        let start = heap.get(id).slot_get(r_start_sym)
-            .map(|v| heap.format_value(v)).unwrap_or("?".into());
-        let end = heap.get(id).slot_get(r_end_sym)
-            .map(|v| heap.format_value(v)).unwrap_or("?".into());
-        let step = heap.get(id).slot_get(r_step_sym)
-            .and_then(|v| v.as_integer()).unwrap_or(1);
-        let s = if step == 1 {
-            format!("({start} to: {end})")
-        } else {
-            format!("({start} to: {end} by: {step})")
-        };
-        Ok(heap.alloc_string(&s))
-    });
-    heap.get_mut(range_id).handler_set(describe_sym, h);
-
-    // Integer: to: — creates a Range
-    let to_sym = heap.intern("to:");
-    let h = heap.register_native("__int_to", move |heap, receiver, args| {
-        let start = receiver.as_integer().ok_or("to: receiver not an integer")?;
-        let end = args.first().and_then(|v| v.as_integer()).ok_or("to: arg not an integer")?;
-        let rp = heap.globals.get(&range_sym).copied().unwrap_or(Value::NIL);
-        Ok(heap.make_object_with_slots(
-            rp,
-            vec![r_start_sym, r_end_sym, r_step_sym],
-            vec![Value::integer(start), Value::integer(end), Value::integer(1)],
-        ))
-    });
-    heap.get_mut(int_id).handler_set(to_sym, h);
-
-    // Integer: to:by: — creates a Range with step
-    let to_by_sym = heap.intern("to:by:");
-    let h = heap.register_native("__int_to_by", move |heap, receiver, args| {
-        let start = receiver.as_integer().ok_or("to:by: receiver not an integer")?;
-        let end = args.get(0).and_then(|v| v.as_integer()).ok_or("to:by: first arg not an integer")?;
-        let step = args.get(1).and_then(|v| v.as_integer()).ok_or("to:by: second arg not an integer")?;
-        if step == 0 { return Err("to:by: step cannot be zero".into()); }
-        let rp = heap.globals.get(&range_sym).copied().unwrap_or(Value::NIL);
-        Ok(heap.make_object_with_slots(
-            rp,
-            vec![r_start_sym, r_end_sym, r_step_sym],
-            vec![Value::integer(start), Value::integer(end), Value::integer(step)],
-        ))
-    });
-    heap.get_mut(int_id).handler_set(to_by_sym, h);
+    // Range: fully defined in lib/range.moof as a pure moof object literal.
+    // Integer#to: and Integer#to:by: are also defined there.
 
     // -- Nil prototype (type_protos[PROTO_NIL]) --
     let nil_proto = heap.make_object(object_proto);
