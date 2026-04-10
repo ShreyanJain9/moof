@@ -6,6 +6,7 @@ mod opcodes;
 mod vm;
 mod store;
 mod runtime;
+mod scheduler;
 mod lang;
 mod shell;
 
