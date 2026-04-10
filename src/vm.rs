@@ -411,7 +411,10 @@ impl VM {
                 Op::MakeObj => {
                     let f = self.frames.last_mut().unwrap();
                     let parent = f.regs[b as usize];
-                    let nslots = c as usize;
+                    let clone_parent = (c & 0x80) != 0;
+                    let nslots = (c & 0x7F) as usize;
+
+                    // read explicitly provided slots from bytecode
                     let mut slot_names = Vec::with_capacity(nslots);
                     let mut slot_values = Vec::with_capacity(nslots);
                     for _ in 0..nslots {
@@ -424,7 +427,41 @@ impl VM {
                         slot_names.push(ns);
                         slot_values.push(f.regs[vr]);
                     }
-                    f.regs[a as usize] = heap.make_object_with_slots(parent, slot_names, slot_values);
+
+                    if clone_parent {
+                        // clone: copy parent's slots as defaults, overlay with provided slots
+                        if let Some(pid) = parent.as_any_object() {
+                            let parent_slot_names = heap.get(pid).slot_names();
+                            let mut merged_names = Vec::new();
+                            let mut merged_values = Vec::new();
+
+                            // copy parent's slots (defaults)
+                            for &pn in &parent_slot_names {
+                                let pv = heap.get(pid).slot_get(pn).unwrap_or(Value::NIL);
+                                merged_names.push(pn);
+                                merged_values.push(pv);
+                            }
+
+                            // overlay with explicitly provided slots
+                            for (i, &sn) in slot_names.iter().enumerate() {
+                                if let Some(pos) = merged_names.iter().position(|&n| n == sn) {
+                                    // override existing
+                                    merged_values[pos] = slot_values[i];
+                                } else {
+                                    // new slot
+                                    merged_names.push(sn);
+                                    merged_values.push(slot_values[i]);
+                                }
+                            }
+                            f.regs[a as usize] = heap.make_object_with_slots(parent, merged_names, merged_values);
+                        } else {
+                            // parent is not an object (e.g. nil) — just use provided slots
+                            f.regs[a as usize] = heap.make_object_with_slots(parent, slot_names, slot_values);
+                        }
+                    } else {
+                        // no clone — just delegate (old behavior)
+                        f.regs[a as usize] = heap.make_object_with_slots(parent, slot_names, slot_values);
+                    }
                 }
 
                 Op::SetSlot => {

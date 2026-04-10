@@ -248,24 +248,36 @@ impl<'a> Parser<'a> {
     fn parse_object_literal(&mut self) -> Result<Value, String> {
         self.advance(); // {
 
-        // { Parent? key: val key: val ... }
-        // first non-keyword expr is the parent (optional)
-        // then keyword-value pairs are slots
+        // superpowered object literals:
+        //   { Parent?
+        //     name: value              ; slot
+        //     [sel] body               ; unary method
+        //     [sel: param] body        ; keyword method
+        //     [sel: p1 sel2: p2] body  ; multi-keyword method
+        //     is Protocol              ; protocol conformance
+        //   }
+        //
+        // parent is CLONED (defaults copied), not just delegated.
 
         let obj_sym = self.intern("%object-literal");
-        let mut parent = self.intern("Object"); // default parent
+        let mut parent = self.intern("Object");
         let mut slot_names: Vec<Value> = Vec::new();
         let mut slot_values: Vec<Value> = Vec::new();
+        let mut methods: Vec<Value> = Vec::new(); // (selector params body) triples flattened
+        let mut protocols: Vec<Value> = Vec::new();
 
-        // check if first item is a parent (non-keyword expression)
-        if !matches!(self.peek(), Token::RBrace | Token::Keyword(_)) {
-            parent = self.parse_expr()?;
+        // check if first item is a parent (not keyword, not [, not }, not "is")
+        match self.peek() {
+            Token::RBrace | Token::Keyword(_) | Token::LBracket => {}
+            Token::Symbol(s) if s == "is" => {}
+            _ => { parent = self.parse_expr()?; }
         }
 
-        // parse keyword: value pairs
         loop {
             match self.peek().clone() {
                 Token::RBrace => { self.advance(); break; }
+
+                // slot: name: value
                 Token::Keyword(ref k) => {
                     let name = k.trim_end_matches(':').to_string();
                     self.advance();
@@ -273,15 +285,92 @@ impl<'a> Parser<'a> {
                     slot_names.push(self.quoted(name_sym));
                     slot_values.push(self.parse_expr()?);
                 }
+
+                // method: [selector params...] body
+                Token::LBracket => {
+                    self.advance(); // [
+                    let mut selector = String::new();
+                    let mut params: Vec<Value> = Vec::new();
+
+                    // parse method signature: [sel] or [sel: param ...] or [sel: p1 sel2: p2 ...]
+                    loop {
+                        match self.peek().clone() {
+                            Token::RBracket => { self.advance(); break; }
+                            Token::Symbol(ref s) => {
+                                if selector.is_empty() && params.is_empty() {
+                                    // first symbol: unary selector
+                                    selector = s.clone();
+                                    self.advance();
+                                } else {
+                                    // param name
+                                    let p = self.intern(s);
+                                    params.push(p);
+                                    self.advance();
+                                }
+                            }
+                            Token::Keyword(ref k) => {
+                                // keyword part of selector
+                                selector.push_str(k);
+                                self.advance();
+                                // next token should be a param name
+                                if let Token::Symbol(ref p) = self.peek().clone() {
+                                    let psym = self.intern(p);
+                                    params.push(psym);
+                                    self.advance();
+                                } else {
+                                    return Err("expected param name after keyword in method signature".into());
+                                }
+                            }
+                            Token::Eof => return Err("unterminated method signature".into()),
+                            ref t => return Err(format!("unexpected {t:?} in method signature")),
+                        }
+                    }
+
+                    // parse body expression
+                    let body = self.parse_expr()?;
+
+                    // build: (fn (self ...params) body)
+                    let fn_sym = self.intern("fn");
+                    let self_sym = self.intern("self");
+                    let mut fn_params = vec![self_sym];
+                    fn_params.extend(params);
+                    let param_list = self.heap.list(&fn_params);
+                    let fn_expr = self.heap.list(&[fn_sym, param_list, body]);
+
+                    // store: selector symbol + fn expression
+                    let sel_sym = self.intern(&selector);
+                    methods.push(self.quoted(sel_sym));
+                    methods.push(fn_expr);
+                }
+
+                // protocol: is Protocol
+                Token::Symbol(ref s) if s == "is" => {
+                    self.advance(); // is
+                    match self.peek().clone() {
+                        Token::Symbol(ref proto) => {
+                            let proto_sym = self.intern(proto);
+                            protocols.push(proto_sym);
+                            self.advance();
+                        }
+                        _ => return Err("expected protocol name after 'is'".into()),
+                    }
+                }
+
                 Token::Eof => return Err("unterminated object literal".into()),
-                ref tok => return Err(format!("expected keyword: or }} in object literal, got {tok:?}")),
+                ref tok => return Err(format!("expected slot, method, or }} in object literal, got {tok:?}")),
             }
         }
 
-        // emit: (%object-literal parent (name1 name2...) val1 val2...)
+        // emit: (%object-literal parent (slot-names...) slot-val1 slot-val2...
+        //         (method-sel1 method-fn1 method-sel2 method-fn2...)
+        //         (proto1 proto2...))
         let names_list = self.heap.list(&slot_names);
+        let methods_list = self.heap.list(&methods);
+        let protocols_list = self.heap.list(&protocols);
         let mut all = vec![obj_sym, parent, names_list];
         all.extend(slot_values);
+        all.push(methods_list);
+        all.push(protocols_list);
         Ok(self.heap.list(&all))
     }
 
