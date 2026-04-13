@@ -1,0 +1,146 @@
+; act.moof — monadic foundations
+;
+; the identity monad on Object, Flatmappable protocol,
+; Result types (Ok/Err), monadic do-notation as a vau,
+; and the Act placeholder for future effect system.
+
+; ═══════════════════════════════════════════════════════════
+; layer 0: identity monad defaults on Object
+; ═══════════════════════════════════════════════════════════
+;
+; every value is trivially monadic. Acts, Results, Options
+; override with real behavior. pure values pass through.
+
+(defmethod Object then: (block) (block))
+(defmethod Object flatMap: (f) (f self))
+(defmethod Object map: (f) (f self))
+
+; ═══════════════════════════════════════════════════════════
+; layer 1: Result types — Ok and Err prototypes
+; ═══════════════════════════════════════════════════════════
+
+(def Ok {
+  value: nil
+  [describe] (str "Ok(" [@value describe] ")")
+  [show] (str [self describe] "  : Ok")
+})
+
+(def Err {
+  message: nil
+  [describe] (str "Err(" [@message describe] ")")
+  [show] (str [self describe] "  : Err")
+})
+
+; Ok: flatMap applies f to the value, map wraps result
+(defmethod Ok flatMap: (f) (f @value))
+(defmethod Ok map: (f) { Ok value: (f @value) })
+(defmethod Ok then: (block) (block))
+(defmethod Ok recover: (f) self)
+(defmethod Ok ok? () true)
+
+; Err: short-circuit everything, propagate the error
+(defmethod Err flatMap: (f) self)
+(defmethod Err map: (f) self)
+(defmethod Err then: (block) self)
+(defmethod Err recover: (f) (f @message))
+(defmethod Err ok? () false)
+
+; ═══════════════════════════════════════════════════════════
+; layer 2: Flatmappable protocol
+; ═══════════════════════════════════════════════════════════
+
+(def Flatmappable (make-protocol "Flatmappable"
+  '(flatMap: map:)
+  #[
+    'then: => (fn (self block) [self flatMap: |_| (block)])
+    'recover: => (fn (self f) self)
+    'ok? => (fn (self) true)
+  ]
+  nil))
+
+(conform Ok Flatmappable)
+(conform Err Flatmappable)
+
+; ═══════════════════════════════════════════════════════════
+; layer 3: Cons as Flatmappable (list comprehensions)
+; ═══════════════════════════════════════════════════════════
+
+(defmethod Cons flatMap: (f)
+  [[self map: f] fold: nil with: |acc lst| [acc append: lst]])
+
+(conform Cons Flatmappable)
+
+; ═══════════════════════════════════════════════════════════
+; layer 4: monadic do-notation (vau operative)
+; ═══════════════════════════════════════════════════════════
+;
+; (do expr1 expr2 expr3)         → sequencing via then:
+; (do (x <- expr) rest...)       → binding via flatMap:
+; (do (let ((y val))) rest...)   → pure binding, scoped to rest
+;
+; desugars entirely to flatMap: and then: sends.
+; works for ANY Flatmappable: Acts, Results, Lists, pure values.
+
+(defn cons? (x) [[x type] identical: (quote Cons)])
+
+(defn arrow-bind? (form)
+  (if (not (cons? form)) false
+    (if (nil? [form cdr]) false
+      [[[form cdr] car] identical: (quote <-)])))
+
+(defn let-form? (form)
+  (if (not (cons? form)) false
+    [[form car] identical: (quote let)]))
+
+(defn do-expand (forms env)
+  (if (nil? forms) nil
+    (if (nil? [forms cdr])
+      ; last expression — eval directly
+      (eval [forms car] env)
+      ; multiple expressions — check head
+      (let ((head [forms car])
+            (rest [forms cdr]))
+        (if (arrow-bind? head)
+          ; (name <- expr) → flatMap: binding
+          (let ((name [head car])
+                (expr [[[head cdr] cdr] car]))
+            [(eval expr env) flatMap:
+              (eval `(fn (,name) (do ,@rest)) env)])
+          (if (let-form? head)
+            ; (let binds) → wrap rest in let scope
+            (eval `(let ,[[head cdr] car] (do ,@rest)) env)
+            ; plain expression → then: sequencing
+            [(eval head env) then:
+              (eval `(fn () (do ,@rest)) env)]))))))
+
+; Force `do` into the rebound set so the compiler falls back to the vau
+; instead of using its built-in fast-path for sequencing.
+(def do nil)
+(def do (vau body $e
+  (do-expand body $e)))
+
+; ═══════════════════════════════════════════════════════════
+; layer 5: Act placeholder (effect type)
+; ═══════════════════════════════════════════════════════════
+;
+; Act describes an effect. full execution comes with vat wiring.
+; for now it's inspectable data that conforms to Flatmappable.
+
+(def Act {
+  target: nil
+  selector: nil
+  args: nil
+
+  [describe]
+    (str "<Act: " [@selector describe] " on " [@target describe] ">")
+
+  [show]
+    (str [self describe] "  : Act")
+
+  ; placeholder: run the effect immediately (no real scheduling yet)
+  [flatMap: f] (f nil)
+  [map: f] (f nil)
+  [then: block] (block)
+})
+
+(conform Act Flatmappable)

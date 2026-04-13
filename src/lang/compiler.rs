@@ -238,17 +238,15 @@ impl<'a> Compiler<'a> {
                 }
 
                 "vau" => {
-                    // (vau (params) $env body...)
+                    // (vau (params) $env body...) or (vau rest-param $env body...)
                     // creates an operative — receives unevaluated args + caller env
                     // params bind to the raw AST args, $env binds to caller env
                     let items = self.heap.list_to_vec(expr);
                     if items.len() < 4 {
                         return Err("vau: need (params) $env body".into());
                     }
-                    let params = self.heap.list_to_vec(items[1]);
-                    let mut param_syms: Vec<u32> = params.iter()
-                        .map(|p| p.as_symbol().ok_or("vau: param must be a symbol"))
-                        .collect::<Result<_, _>>()?;
+                    let (positional, rest_param) = self.heap.extract_params(items[1]);
+                    let mut param_syms: Vec<u32> = positional;
 
                     // $env param (items[2]) — must start with $
                     let env_sym = items[2].as_symbol()
@@ -268,6 +266,12 @@ impl<'a> Compiler<'a> {
                         let reg = sub.alloc_reg();
                         sub.locals.push((sym, reg));
                     }
+                    // rest param gets extra args as a list (before env)
+                    let rest_reg = if let Some(rest_sym) = rest_param {
+                        let reg = sub.alloc_reg();
+                        sub.locals.push((rest_sym, reg));
+                        Some(reg)
+                    } else { None };
                     let body_dst = sub.alloc_reg();
                     if items.len() == 4 {
                         sub.compile_expr(items[3], body_dst)?;
@@ -316,7 +320,7 @@ impl<'a> Compiler<'a> {
                         capture_names,
                         capture_parent_regs,
                         capture_local_regs,
-                        capture_values: Vec::new(), desc_base: 0, rest_param_reg: None,
+                        capture_values: Vec::new(), desc_base: 0, rest_param_reg: rest_reg,
                     };
                     let idx = self.closure_descs.len();
                     self.closure_descs.push(desc);
@@ -909,6 +913,42 @@ impl<'a> Compiler<'a> {
                         let arg = self.heap.car(arg_id);
                         self.compile_expr(arg, dst)?;
                         return Ok(());
+                    }
+                    if self.heap.symbol_name(sym) == "unquote-splicing" {
+                        // top-level ,@expr — just evaluate
+                        let arg_id = cdr.as_any_object().ok_or("unquote-splicing: missing arg")?;
+                        let arg = self.heap.car(arg_id);
+                        self.compile_expr(arg, dst)?;
+                        return Ok(());
+                    }
+                }
+                // check if car is (unquote-splicing expr) — splice into list
+                if let Some(car_id) = car.as_any_object() {
+                    if let crate::object::HeapObject::Pair(splice_head, splice_rest) = self.heap.get(car_id) {
+                        let splice_head = *splice_head;
+                        let splice_rest = *splice_rest;
+                        if let Some(sym) = splice_head.as_symbol() {
+                            if self.heap.symbol_name(sym) == "unquote-splicing" {
+                                let arg_id = splice_rest.as_any_object()
+                                    .ok_or("unquote-splicing: missing arg")?;
+                                let arg = self.heap.car(arg_id);
+                                // compile the splice expression (evaluates to a list)
+                                let list_reg = self.alloc_reg();
+                                self.compile_expr(arg, list_reg)?;
+                                // compile the rest of the quasiquoted list
+                                let rest_reg = self.alloc_reg();
+                                self.compile_quasiquote(cdr, rest_reg)?;
+                                // emit [list append: rest] to concatenate
+                                let sel_const = self.add_sym_const(
+                                    self.heap.find_symbol("append:").unwrap_or(0));
+                                self.chunk.emit(Op::Send, dst, list_reg, sel_const as u8);
+                                self.chunk.code.push(1); // nargs
+                                self.chunk.code.push(rest_reg);
+                                self.chunk.code.push(0);
+                                self.chunk.code.push(0);
+                                return Ok(());
+                            }
+                        }
                     }
                 }
                 // recursively quasiquote car and cdr, then cons

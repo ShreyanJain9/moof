@@ -116,7 +116,7 @@
               (if (f x)
                 (cons (cons x [p car]) [p cdr])
                 (cons [p car] (cons x [p cdr])))]))
-        (cons [[pair car] reverse] [[pair cdr] reverse])))
+        (cons [[pair car] reverse] (list [[pair cdr] reverse]))))
 
     'tally => (fn (self)
       [self fold: #[] with: |counts x|

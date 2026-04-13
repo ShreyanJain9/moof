@@ -92,6 +92,7 @@ impl VM {
         let closure_desc_base = self.closure_descs[code_idx].desc_base;
         let capture_local_regs = self.closure_descs[code_idx].capture_local_regs.clone();
         let rest_reg = self.closure_descs[code_idx].rest_param_reg;
+        let is_operative = self.closure_descs[code_idx].is_operative;
         let arity = chunk.arity as usize;
 
         // read captures from the heap closure object
@@ -102,13 +103,38 @@ impl VM {
         // unpack args: args[0] is the cons list of actual arguments
         let arg_list = args.first().copied().unwrap_or(Value::NIL);
         let unpacked = heap.list_to_vec(arg_list);
-        for i in 0..arity.min(unpacked.len()) {
-            regs[i] = unpacked[i];
-        }
-        // rest param
-        if let Some(rest_r) = rest_reg {
-            let rest_args: Vec<Value> = unpacked.iter().skip(arity).copied().collect();
-            regs[rest_r as usize] = heap.list(&rest_args);
+
+        if is_operative && rest_reg.is_some() && arity > 0 {
+            // operative with rest param: $env is last positional, gets last arg (env).
+            // rest param captures everything between positional params and env.
+            let n_before_env = arity - 1;
+            for i in 0..n_before_env.min(unpacked.len()) {
+                regs[i] = unpacked[i];
+            }
+            // last positional ($e) gets last element of args (the env)
+            if !unpacked.is_empty() {
+                regs[arity - 1] = *unpacked.last().unwrap();
+            }
+            // rest param captures the middle (operands after positionals, before env)
+            if let Some(rest_r) = rest_reg {
+                let start = n_before_env;
+                let end = if unpacked.len() > 0 { unpacked.len() - 1 } else { 0 };
+                let rest_args: Vec<Value> = if start < end {
+                    unpacked[start..end].to_vec()
+                } else {
+                    Vec::new()
+                };
+                regs[rest_r as usize] = heap.list(&rest_args);
+            }
+        } else {
+            // normal case: fill positional params from start, rest gets remainder
+            for i in 0..arity.min(unpacked.len()) {
+                regs[i] = unpacked[i];
+            }
+            if let Some(rest_r) = rest_reg {
+                let rest_args: Vec<Value> = unpacked.iter().skip(arity).copied().collect();
+                regs[rest_r as usize] = heap.list(&rest_args);
+            }
         }
         // load captured values into their compiler-assigned registers
         for (i, (_, val)) in captures_from_obj.iter().enumerate() {
@@ -325,6 +351,7 @@ impl VM {
                         let closure_desc_base = self.closure_descs[code_idx].desc_base;
                         let capture_local_regs = self.closure_descs[code_idx].capture_local_regs.clone();
                         let rest_reg = self.closure_descs[code_idx].rest_param_reg;
+                        let is_operative = self.closure_descs[code_idx].is_operative;
                         let arity = chunk.arity as usize;
                         let captures_from_obj = heap.closure_captures(handler);
 
@@ -340,12 +367,32 @@ impl VM {
 
                         // unpack args
                         let unpacked = heap.list_to_vec(arg_list);
-                        for i in 0..arity.min(unpacked.len()) {
-                            f.regs[i] = unpacked[i];
-                        }
-                        if let Some(rest_r) = rest_reg {
-                            let rest_args: Vec<Value> = unpacked.iter().skip(arity).copied().collect();
-                            f.regs[rest_r as usize] = heap.list(&rest_args);
+                        if is_operative && rest_reg.is_some() && arity > 0 {
+                            let n_before_env = arity - 1;
+                            for i in 0..n_before_env.min(unpacked.len()) {
+                                f.regs[i] = unpacked[i];
+                            }
+                            if !unpacked.is_empty() {
+                                f.regs[arity - 1] = *unpacked.last().unwrap();
+                            }
+                            if let Some(rest_r) = rest_reg {
+                                let start = n_before_env;
+                                let end = if unpacked.len() > 0 { unpacked.len() - 1 } else { 0 };
+                                let rest_args: Vec<Value> = if start < end {
+                                    unpacked[start..end].to_vec()
+                                } else {
+                                    Vec::new()
+                                };
+                                f.regs[rest_r as usize] = heap.list(&rest_args);
+                            }
+                        } else {
+                            for i in 0..arity.min(unpacked.len()) {
+                                f.regs[i] = unpacked[i];
+                            }
+                            if let Some(rest_r) = rest_reg {
+                                let rest_args: Vec<Value> = unpacked.iter().skip(arity).copied().collect();
+                                f.regs[rest_r as usize] = heap.list(&rest_args);
+                            }
                         }
                         for (i, (_, val)) in captures_from_obj.iter().enumerate() {
                             if i < capture_local_regs.len() {

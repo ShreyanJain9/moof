@@ -58,6 +58,7 @@ fn load_bootstrap(vm: &mut VM, heap: &mut Heap) {
         "lib/error.moof",
         "lib/showable.moof",
         "lib/range.moof",
+        "lib/act.moof",
     ];
     for path in &files {
         if let Ok(source) = std::fs::read_to_string(path) {
