@@ -7,19 +7,28 @@
 
 ; conform: install provided handlers from a protocol onto a type
 (defn conform (proto prot)
-  (let ((provs [prot slotAt: (quote provides)]))
-    (if (nil? provs) nil
-      (let ((ks [provs keys])
-            (current ks))
-        (while (some? current)
-          (let ((sel [current car])
-                (handler [provs at: sel])
-                (already [proto responds: sel]))
-            (if (not already)
-              [proto handle: sel with: handler]
-              nil))
-          (:= current [current cdr])))))
-  proto)
+  (do
+    ; install provided handlers (skip only if proto has it DIRECTLY, not inherited)
+    (let ((provs [prot slotAt: (quote provides)]))
+      (if (nil? provs) nil
+        (let ((ks [provs keys])
+              (current ks))
+          (while (some? current)
+            (let ((sel [current car])
+                  (handler [provs at: sel]))
+              (if (not [proto hasOwnHandler: sel])
+                [proto handle: sel with: handler]
+                nil))
+            (:= current [current cdr])))))
+    ; recursively conform included protocols
+    (let ((includes [prot slotAt: (quote includes)]))
+      (if (some? includes)
+        (let ((current includes))
+          (while (some? current)
+            (conform proto [current car])
+            (:= current [current cdr])))
+        nil))
+    proto))
 
 (defn conforms? (obj prot)
   (let ((reqs [prot slotAt: (quote requires)]))

@@ -16,16 +16,21 @@
 (defmethod Object map: (f) (f self))
 
 ; ═══════════════════════════════════════════════════════════
-; layer 1: Result types — Ok and Err prototypes
+; layer 1: Result types — Result > Ok, Err
 ; ═══════════════════════════════════════════════════════════
 
-(def Ok {
+(def Result {
+  [describe] "<Result>"
+  [show] (str [self describe] "  : Result")
+})
+
+(def Ok { Result
   value: nil
   [describe] (str "Ok(" [@value describe] ")")
   [show] (str [self describe] "  : Ok")
 })
 
-(def Err {
+(def Err { Result
   message: nil
   [describe] (str "Err(" [@message describe] ")")
   [show] (str [self describe] "  : Err")

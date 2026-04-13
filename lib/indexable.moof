@@ -15,6 +15,16 @@
           (when [[self at: i] equal: x] (:= result i))
           (:= i [i + 1]))
         result))
+    ; efficient fold:with: using each: (cell pattern for mutable accumulator)
+    'fold:with: => (fn (self init f)
+      (let ((cell #["v" => init]))
+        [self each: |x| [cell at: "v" put: (f [cell at: "v"] x)]]
+        [cell at: "v"]))
+    ; toList using each: directly (cell pattern)
+    'toList => (fn (self)
+      (let ((cell #["r" => nil]))
+        [self each: |x| [cell at: "r" put: (cons x [cell at: "r"])]]
+        [[cell at: "r"] reverse]))
   ]
   (list Iterable)))
 

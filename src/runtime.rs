@@ -122,11 +122,21 @@ pub fn register_type_protos(heap: &mut Heap) {
         Ok(Value::NIL)
     });
 
-    // Object: responds: — check if a handler exists
+    // Object: responds: — check if a handler exists (walks prototype chain)
     native(heap, obj_id, "responds:", |heap, receiver, args| {
         let sel = args.first().and_then(|v| v.as_symbol()).ok_or("responds: arg must be a symbol")?;
         let names = heap.all_handler_names(receiver);
         Ok(Value::boolean(names.contains(&sel)))
+    });
+
+    // Object: hasOwnHandler: — check if THIS object has the handler directly (no chain walk)
+    native(heap, obj_id, "hasOwnHandler:", |heap, receiver, args| {
+        let sel = args.first().and_then(|v| v.as_symbol()).ok_or("hasOwnHandler: arg must be a symbol")?;
+        if let Some(id) = receiver.as_any_object() {
+            Ok(Value::boolean(heap.get(id).handler_get(sel).is_some()))
+        } else {
+            Ok(Value::FALSE)
+        }
     });
 
     // Object: clone — shallow copy
