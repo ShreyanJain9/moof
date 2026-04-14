@@ -1,15 +1,18 @@
 ; numeric.moof — implement +/-/*/negate, get 5 methods free
 
-(def Numeric (make-protocol "Numeric"
-  (list '+ '- '* 'negate)
-  #[
-    'abs => (fn (self) (if [self negative?] [self negate] self))
-    'sign => (fn (self) (if [self positive?] 1 (if [self negative?] -1 0)))
-    'zero? => (fn (self) [self = 0])
-    'positive? => (fn (self) [self > 0])
-    'negative? => (fn (self) [self < 0])
-  ]
-  nil))
+(defprotocol Numeric
+  "Arithmetic. Implement +, -, *, negate, get 5 methods free."
+
+  (require (+ other) "Add other to self")
+  (require (- other) "Subtract other from self")
+  (require (* other) "Multiply self by other")
+  (require (negate) "Return the negation of self")
+
+  (provide (abs) (if [self negative?] [self negate] self))
+  (provide (sign) (if [self positive?] 1 (if [self negative?] -1 0)))
+  (provide (zero?) [self = 0])
+  (provide (positive?) [self > 0])
+  (provide (negative?) [self < 0]))
 
 (conform Number Numeric)
 

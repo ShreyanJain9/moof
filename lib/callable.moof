@@ -1,14 +1,14 @@
 ; callable.moof — implement call:, get composition
 
-(def Callable (make-protocol "Callable"
-  (list 'call:)
-  #[
-    'compose: => (fn (self other) (fn (x) (self (other x))))
-    '>> => (fn (self other) (fn (x) (other (self x))))
-    'partial: => (fn (self arg) (fn (x) (self arg x)))
-    'flip => (fn (self) (fn (a b) (self b a)))
-  ]
-  nil))
+(defprotocol Callable
+  "Functions. Implement call:, get composition."
+
+  (require (call: args) "Call with arguments")
+
+  (provide (compose: other) (fn (x) (self (other x))))
+  (provide (>> other) (fn (x) (other (self x))))
+  (provide (partial: arg) (fn (x) (self arg x)))
+  (provide (flip) (fn (a b) (self b a))))
 
 (defn id (x) x)
 (defn constantly (x) (fn args x))

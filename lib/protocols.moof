@@ -1,9 +1,9 @@
 ; protocols.moof — protocol infrastructure
 
-(def Protocol { name: "Protocol" requires: nil provides: nil includes: nil })
+(def Protocol { name: "Protocol" doc: nil requires: nil provides: nil includes: nil docs: nil })
 
 (defn make-protocol (name requires provides includes)
-  { Protocol name: name requires: requires provides: provides includes: includes })
+  { Protocol name: name doc: nil requires: requires provides: provides includes: includes docs: nil })
 
 ; conform: install provided handlers from a protocol onto a type
 (defn conform (proto prot)
@@ -39,3 +39,73 @@
             (:= ok false) nil)
           (:= current [current cdr]))
         ok))))
+
+; ═══════════════════════════════════════════════════════════
+; defprotocol — clean protocol definition with documentation
+; ═══════════════════════════════════════════════════════════
+;
+; (defprotocol Name
+;   "docstring"
+;   (require (selector params...) "description")
+;   (provide (selector params...) body...)
+;   (include OtherProtocol))
+
+(def defprotocol (vau args $e
+  (let ((name [args car])
+        (clauses [args cdr])
+        (doc-str nil)
+        (requires nil)
+        (provides #[])
+        (includes nil)
+        (docs #[]))
+    (do
+      ; check for optional docstring (first clause is a string)
+      (if (some? clauses)
+        (if [[[clauses car] type] identical: (quote String)]
+          (do (:= doc-str [clauses car])
+              (:= clauses [clauses cdr]))
+          nil)
+        nil)
+      ; process clauses
+      (let ((current clauses))
+        (while (some? current)
+          (let ((clause [current car]))
+            ; dispatch on clause type — it's a list whose car is require/provide/include
+            (if (some? clause)
+              (do (if [[clause car] identical: (quote require)]
+                  ; (require (sel params...) "doc")
+                  (let ((sig [[clause cdr] car])
+                        (sel [sig car])
+                        (params [sig cdr])
+                        (method-doc (if (some? [[clause cdr] cdr])
+                                     [[[clause cdr] cdr] car] nil)))
+                    (do (:= requires (cons sel requires))
+                        [docs at: sel put:
+                          { params: params doc: method-doc kind: (quote require) }]))
+                  (if [[clause car] identical: (quote provide)]
+                    ; (provide (sel params...) body...)
+                    (let ((sig [[clause cdr] car])
+                          (sel [sig car])
+                          (params [sig cdr])
+                          (body [[clause cdr] cdr])
+                          (handler (eval (cons (quote fn)
+                                    (cons (cons (quote self) params) body)) $e)))
+                      (do [provides at: sel put: handler]
+                          [docs at: sel put:
+                            { params: params doc: nil kind: (quote provide) }]))
+                    (if [[clause car] identical: (quote include)]
+                      ; (include Protocol)
+                      (:= includes (cons (eval [[clause cdr] car] $e) includes))
+                      nil))))
+              nil))
+          (:= current [current cdr])))
+      ; create and bind the protocol
+      (let ((prot { Protocol
+                    name: [name describe]
+                    doc: doc-str
+                    requires: requires
+                    provides: provides
+                    includes: includes
+                    docs: docs }))
+        (eval (cons (quote def) (cons name (cons prot nil))) $e)
+        prot)))))

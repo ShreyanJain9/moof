@@ -54,14 +54,15 @@
 ; layer 2: Flatmappable protocol
 ; ═══════════════════════════════════════════════════════════
 
-(def Flatmappable (make-protocol "Flatmappable"
-  '(flatMap: map:)
-  #[
-    'then: => (fn (self block) [self flatMap: |_| (block)])
-    'recover: => (fn (self f) self)
-    'ok? => (fn (self) true)
-  ]
-  nil))
+(defprotocol Flatmappable
+  "Monadic composition. Implement flatMap: + map:, get do-notation."
+
+  (require (flatMap: f) "Chain: apply f to the wrapped value, f returns a new wrapper")
+  (require (map: f) "Transform: apply f to the wrapped value, rewrap the result")
+
+  (provide (then: block) [self flatMap: |_| (block)])
+  (provide (recover: f) self)
+  (provide (ok?) true))
 
 (conform Ok Flatmappable)
 (conform Err Flatmappable)

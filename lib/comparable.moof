@@ -1,17 +1,17 @@
 ; comparable.moof — implement <, get 7 methods free
 
-(def Comparable (make-protocol "Comparable"
-  '(<)
-  #[
-    '> => |self other| (not [self < other])
-    '<= => (fn (self other) (not [other < self]))
-    '>= => (fn (self other) (not [self < other]))
-    'between:and: => (fn (self lo hi) (and [self >= lo] [self <= hi]))
-    'clamp:to: => (fn (self lo hi) [[self max: lo] min: hi])
-    'min: => (fn (self other) (if [self < other] self other))
-    'max: => (fn (self other) (if [self > other] self other))
-  ]
-  nil))
+(defprotocol Comparable
+  "Ordering. Implement <, get 7 methods free."
+
+  (require (< other) "Return true if self is less than other")
+
+  (provide (> other) (not [self < other]))
+  (provide (<= other) (not [other < self]))
+  (provide (>= other) (not [self < other]))
+  (provide (between:and: lo hi) (and [self >= lo] [self <= hi]))
+  (provide (clamp:to: lo hi) [[self max: lo] min: hi])
+  (provide (min: other) (if [self < other] self other))
+  (provide (max: other) (if [self > other] self other)))
 
 (conform Number Comparable)
 (conform String Comparable)
