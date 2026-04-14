@@ -1,22 +1,53 @@
-; numeric.moof — implement +/-/*/negate, get 5 methods free
+; numeric.moof — arithmetic
+;
+; numbers in moof are objects that respond to arithmetic messages.
+; [3 + 4] is a send: the integer 3 receives the message + with
+; argument 4. this protocol captures what it means to be numeric:
+; you can add, subtract, multiply, and negate. from those four
+; operations, sign, absolute value, and zero-checking follow.
+;
+; conforming types: Number (parent of Integer and Float).
 
 (defprotocol Numeric
-  "Arithmetic. Implement +, -, *, negate, get 5 methods free."
+  "Arithmetic. Implement +, -, *, negate to get abs, sign, and predicates.
+   Numeric values form a ring: + and * are associative and commutative,
+   * distributes over +, and negate provides additive inverses."
 
-  (require (+ other) "Add other to self")
-  (require (- other) "Subtract other from self")
-  (require (* other) "Multiply self by other")
-  (require (negate) "Return the negation of self")
+  (require (+ other)
+    "Add other to self. Must be associative and commutative:
+     [a + b] = [b + a], [[a + b] + c] = [a + [b + c]].")
 
-  (provide (abs) (if [self negative?] [self negate] self))
-  (provide (sign) (if [self positive?] 1 (if [self negative?] -1 0)))
-  (provide (zero?) [self = 0])
-  (provide (positive?) [self > 0])
-  (provide (negative?) [self < 0]))
+  (require (- other)
+    "Subtract other from self. [a - b] = [a + [b negate]].")
+
+  (require (* other)
+    "Multiply self by other. Must be associative and commutative.
+     [a * [b + c]] = [[a * b] + [a * c]].")
+
+  (require (negate)
+    "Return the additive inverse. [self + [self negate]] = 0.")
+
+  (provide (abs)
+    (if [self negative?] [self negate] self))
+
+  (provide (sign)
+    (if [self positive?] 1 (if [self negative?] -1 0)))
+
+  (provide (zero?)
+    [self = 0])
+
+  (provide (positive?)
+    [self > 0])
+
+  (provide (negative?)
+    [self < 0]))
 
 (conform Number Numeric)
 
 ; ── Integer-specific ───────────────────────────────────
+; these are methods on Integer that don't belong to a protocol.
+; they're here because integers have specific structure (discrete,
+; ordered, countable) that floats don't share.
 
 (defmethod Integer even? () (eq [self % 2] 0))
 (defmethod Integer odd? () (not [self even?]))

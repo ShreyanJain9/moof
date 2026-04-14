@@ -1,36 +1,63 @@
 ; showable.moof — self-describing display
 ;
-; Object has a native `show` handler that returns format_value.
-; these overrides make display type-aware for the REPL.
+; every moof object can describe itself. the describe handler
+; returns a string representation of the value (like ruby's
+; inspect or haskell's show). the show handler returns how the
+; REPL displays the value — typically describe plus type info.
+;
+; Object has native describe and show handlers (from runtime.rs)
+; that provide sensible defaults for all types. this protocol
+; formalizes the contract and provides type-specific overrides
+; so the REPL output is informative and consistent.
+;
+; conforming types: all types conform via Object's defaults.
+; specific types override for better display.
 
-; Integer: "42  : Integer"
+(defprotocol Showable
+  "Self-describing display. Implement describe to control how
+   your object renders as text. describe returns the value as a
+   string; show returns how the REPL displays it (usually
+   describe + type annotation). Every object has defaults from
+   Object — override for custom display."
+
+  (require (describe)
+    "Return a string representation of self.
+     Should be unambiguous: [\"hello\" describe] => \"hello\",
+     [42 describe] => \"42\", ['foo describe] => \"foo\".")
+
+  (provide (show)
+    (str [self describe] "  : " [[self type] describe]))
+
+  (provide (toString)
+    [self describe])
+
+  (provide (print)
+    (do [[self describe] println] self))
+
+  (provide (println)
+    (do [[self describe] println] nil)))
+
+; ── type-specific show overrides ───────────────────────
+; the REPL calls [value show] to display results.
+; each type gets a distinctive format.
+
 (defmethod Integer show ()
   (str [self describe] "  : Integer"))
 
-; Float: "3.14  : Float"
 (defmethod Float show ()
   (str [self describe] "  : Float"))
 
-; Boolean: "true" / "false"  (no type suffix, it's obvious)
+; Boolean, Nil, Symbol: no type suffix — they're self-evident.
+; true, false, nil, 'foo — you know what they are.
 
-; Nil: "nil"  (no type suffix)
-
-; Symbol: "'foo"  (no type suffix, the quote makes it clear)
-
-; String: show with quotes and type
 (defmethod String show ()
   (str "\"" self "\"  : String"))
 
-; Cons: "(1 2 3)  : Cons (N elements)"
 (defmethod Cons show ()
   (str [self describe] "  : Cons (" [self length] " elements)"))
 
-; Table: use describe + type info
 (defmethod Table show ()
   (str [self describe] "  : Table"))
 
-; Fn: "<fn>  : Fn"
-
-; Error: "Error: message"
 (defmethod Error show ()
   (str "Error: " [self message]))

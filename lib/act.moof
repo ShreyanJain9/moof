@@ -27,13 +27,11 @@
 (def Ok { Result
   value: nil
   [describe] (str "Ok(" [@value describe] ")")
-  [show] (str [self describe] "  : Ok")
 })
 
 (def Err { Result
   message: nil
   [describe] (str "Err(" [@message describe] ")")
-  [show] (str [self describe] "  : Err")
 })
 
 ; Ok: flatMap applies f to the value, map wraps result
@@ -55,14 +53,35 @@
 ; ═══════════════════════════════════════════════════════════
 
 (defprotocol Flatmappable
-  "Monadic composition. Implement flatMap: + map:, get do-notation."
+  "Monadic composition. Implement flatMap: + map: to get do-notation,
+   sequencing, and error recovery. This is moof's answer to haskell's
+   Monad typeclass: one protocol that unifies promise chains, nil-safe
+   access, list comprehensions, and result error handling under a
+   single composition mechanism.
 
-  (require (flatMap: f) "Chain: apply f to the wrapped value, f returns a new wrapper")
-  (require (map: f) "Transform: apply f to the wrapped value, rewrap the result")
+   (do (x <- [some-act]) [process x]) works for ANY Flatmappable.
+   Acts chain effects. Results short-circuit errors. Lists enumerate.
+   Pure values pass through (Object has identity-monad defaults)."
 
-  (provide (then: block) [self flatMap: |_| (block)])
-  (provide (recover: f) self)
-  (provide (ok?) true))
+  (require (flatMap: f)
+    "Chain: unwrap self, apply f, return f's wrapped result.
+     f must return a value of the same Flatmappable type.
+     This is haskell's >>= (bind). The do-notation (x <- expr)
+     desugars to [expr flatMap: |x| ...].")
+
+  (require (map: f)
+    "Transform: unwrap self, apply f, rewrap the result.
+     Unlike flatMap:, f returns a plain value (not wrapped).
+     This is haskell's fmap.")
+
+  (provide (then: block)
+    [self flatMap: |_| (block)])
+
+  (provide (recover: f)
+    self)
+
+  (provide (ok?)
+    true))
 
 (conform Ok Flatmappable)
 (conform Err Flatmappable)

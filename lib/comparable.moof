@@ -1,17 +1,42 @@
-; comparable.moof — implement <, get 7 methods free
+; comparable.moof — ordering
+;
+; in moof, ordering emerges from a single operation: <.
+; everything else — >, <=, >=, min, max, clamping, range
+; checking — is derived. this is the protocol pattern:
+; implement one thing, get a family of behavior for free.
+;
+; conforming types: Number, String.
 
 (defprotocol Comparable
-  "Ordering. Implement <, get 7 methods free."
+  "Total ordering. Implement < to get comparison, bounds, and clamping.
+   The < handler defines a total order: for any two values a and b,
+   exactly one of [a < b], [a > b], or [a = b] holds."
 
-  (require (< other) "Return true if self is less than other")
+  (require (< other)
+    "Return true if self comes before other in the ordering.
+     Must be transitive: if [a < b] and [b < c] then [a < c].
+     Must be irreflexive: [a < a] is always false.")
 
-  (provide (> other) (not [self < other]))
-  (provide (<= other) (not [other < self]))
-  (provide (>= other) (not [self < other]))
-  (provide (between:and: lo hi) (and [self >= lo] [self <= hi]))
-  (provide (clamp:to: lo hi) [[self max: lo] min: hi])
-  (provide (min: other) (if [self < other] self other))
-  (provide (max: other) (if [self > other] self other)))
+  (provide (> other)
+    (not [self < other]))
+
+  (provide (<= other)
+    (not [other < self]))
+
+  (provide (>= other)
+    (not [self < other]))
+
+  (provide (between:and: lo hi)
+    (and [self >= lo] [self <= hi]))
+
+  (provide (clamp:to: lo hi)
+    [[self max: lo] min: hi])
+
+  (provide (min: other)
+    (if [self < other] self other))
+
+  (provide (max: other)
+    (if [self > other] self other)))
 
 (conform Number Comparable)
 (conform String Comparable)

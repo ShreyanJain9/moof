@@ -1,17 +1,48 @@
-; iterable.moof — implement each:, get ~40 methods free
+; iterable.moof — the big one
 ;
-; all provided methods work via toList + recursion.
-; no mutable accumulators except via cell pattern.
+; in moof, a collection is anything that can visit its elements
+; one at a time. that's it. implement each: — a handler that
+; calls a block once per element — and you get ~40 collection
+; operations for free: map, filter, fold, sort, group, zip,
+; take, drop, flatten, and more.
+;
+; this is ruby's Enumerable applied to moof's object model.
+; the protocol pattern at its most powerful: one handler buys
+; you an entire collection algebra.
+;
+; conforming types: Cons (linked lists), and anything that
+; conforms to Indexable (String, Table) gets Iterable through
+; protocol inclusion.
+;
+; implementation note: provided methods use toList + recursion.
+; the recursive pattern (let ((go nil)) (:= go (fn ...)) (go ...))
+; relies on mutable local variables. for types where closures
+; capture by value (not reference), Indexable provides efficient
+; override implementations using the cell pattern instead.
 
 (defprotocol Iterable
-  "Collections. Implement each:, get ~40 methods free."
+  "Collections. Implement each: to get map, filter, fold, sort,
+   group, zip, take, drop, flatten, and ~30 more operations.
+   The each: handler is the universal iterator: it visits every
+   element exactly once, in order, calling a block for each one."
 
-  (require (each: block) "Call block with each element")
+  (require (each: block)
+    "Call block once for each element, in order.
+     [self each: |x| [x print]] prints every element.
+     The return value of each: is unspecified — use fold:with:
+     if you need to accumulate a result.")
+
+  ; ── conversion ───────────────────────────────────────
 
   (provide (toList)
     (let ((cell #["r" => nil]))
       [self each: |x| [cell at: "r" put: (cons x [cell at: "r"])]]
       [[cell at: "r"] reverse]))
+
+  (provide (toTable)
+    (let ((t #[])) [self each: |x| [t push: x]] t))
+
+  ; ── folding ──────────────────────────────────────────
 
   (provide (fold:with: init f)
     (let ((lst [self toList]))
@@ -26,10 +57,21 @@
       (if (nil? lst) nil
         [[lst cdr] fold: [lst car] with: f])))
 
-  (provide (sum) [self fold: 0 with: |a x| [a + x]])
+  ; ── aggregation ──────────────────────────────────────
+
+  (provide (sum)     [self fold: 0 with: |a x| [a + x]])
   (provide (product) [self fold: 1 with: |a x| [a * x]])
-  (provide (count) [self fold: 0 with: |a _| [a + 1]])
-  (provide (count: f) [self fold: 0 with: |a x| (if (f x) [a + 1] a)])
+  (provide (count)   [self fold: 0 with: |a _| [a + 1]])
+
+  (provide (count: f)
+    [self fold: 0 with: |a x| (if (f x) [a + 1] a)])
+
+  (provide (min)   [self reduce: |a x| (if [x < a] x a)])
+  (provide (max)   [self reduce: |a x| (if [x > a] x a)])
+  (provide (minBy: f) [self reduce: |a x| (if [(f x) < (f a)] x a)])
+  (provide (maxBy: f) [self reduce: |a x| (if [(f x) > (f a)] x a)])
+
+  ; ── transformation ───────────────────────────────────
 
   (provide (map: f)
     [[self fold: nil with: |acc x| (cons (f x) acc)] reverse])
@@ -37,7 +79,16 @@
   (provide (select: f)
     [[self fold: nil with: |acc x| (if (f x) (cons x acc) acc)] reverse])
 
-  (provide (reject: f) [self select: |x| (not (f x))])
+  (provide (reject: f)
+    [self select: |x| (not (f x))])
+
+  (provide (flatMap: f)
+    [[self map: f] fold: nil with: |acc lst| [acc append: lst]])
+
+  (provide (reverse)
+    [self fold: nil with: |acc x| (cons x acc)])
+
+  ; ── searching ────────────────────────────────────────
 
   (provide (find: f)
     (let ((lst [self toList]) (go nil))
@@ -47,14 +98,30 @@
             (go [remaining cdr])))))
       (go lst)))
 
-  (provide (any: f) [self fold: false with: |found x| (if found true (f x))])
-  (provide (all: f) [self fold: true with: |ok x| (if ok (f x) false)])
-  (provide (none: f) (not [self any: f]))
-  (provide (includes: x) [self any: |el| [el equal: x]])
-  (provide (empty?) [self fold: true with: |_ _| false])
+  (provide (any: f)
+    [self fold: false with: |found x| (if found true (f x))])
 
-  (provide (first) (let ((lst [self toList])) (if (nil? lst) nil [lst car])))
-  (provide (last) (let ((lst [self toList])) (if (nil? lst) nil [lst last])))
+  (provide (all: f)
+    [self fold: true with: |ok x| (if ok (f x) false)])
+
+  (provide (none: f)
+    (not [self any: f]))
+
+  (provide (includes: x)
+    [self any: |el| [el equal: x]])
+
+  (provide (empty?)
+    [self fold: true with: |_ _| false])
+
+  ; ── accessing ────────────────────────────────────────
+
+  (provide (first)
+    (let ((lst [self toList])) (if (nil? lst) nil [lst car])))
+
+  (provide (last)
+    (let ((lst [self toList])) (if (nil? lst) nil [lst last])))
+
+  ; ── slicing ──────────────────────────────────────────
 
   (provide (take: n)
     (let ((lst [self toList]) (go nil))
@@ -88,13 +155,11 @@
             remaining))))
       (go lst)))
 
-  (provide (min) [self reduce: |a x| (if [x < a] x a)])
-  (provide (max) [self reduce: |a x| (if [x > a] x a)])
-  (provide (minBy: f) [self reduce: |a x| (if [(f x) < (f a)] x a)])
-  (provide (maxBy: f) [self reduce: |a x| (if [(f x) > (f a)] x a)])
-  (provide (reverse) [self fold: nil with: |acc x| (cons x acc)])
+  ; ── sorting ──────────────────────────────────────────
 
-  (provide (sort) [[self toList] sortBy: |x| x])
+  (provide (sort)
+    [[self toList] sortBy: |x| x])
+
   (provide (sortBy: f)
     (let ((lst [self toList]))
       (if (or [lst nil?] [[lst cdr] nil?]) lst
@@ -103,6 +168,8 @@
               (lo [rest select: |x| [(f x) < pivot]])
               (hi [rest reject: |x| [(f x) < pivot]]))
           [[lo sortBy: f] append: (cons [lst car] [hi sortBy: f])]))))
+
+  ; ── grouping ─────────────────────────────────────────
 
   (provide (groupBy: f)
     [self fold: #[] with: |groups x|
@@ -123,6 +190,8 @@
         [counts at: x put: (if (nil? n) 1 [n + 1])]
         counts)])
 
+  ; ── combining ────────────────────────────────────────
+
   (provide (zip: other)
     (let ((lst [self toList]) (olst [other toList]) (go nil))
       (:= go (fn (a b)
@@ -139,15 +208,18 @@
             (cons sep (cons [remaining car] (go [remaining cdr] false)))))))
       (go lst true)))
 
-  (provide (join) [self fold: "" with: |acc x| [acc ++ [x describe]]])
+  ; ── strings ──────────────────────────────────────────
+
+  (provide (join)
+    [self fold: "" with: |acc x| [acc ++ [x describe]]])
+
   (provide (join: sep)
     (let ((lst [self toList]))
       (if (nil? lst) ""
         [[lst cdr] fold: [[lst car] describe] with:
           |acc x| [[acc ++ sep] ++ [x describe]]])))
 
-  (provide (toTable)
-    (let ((t #[])) [self each: |x| [t push: x]] t))
+  ; ── iteration with index ─────────────────────────────
 
   (provide (each:withIndex: f)
     (let ((lst [self toList]) (go nil))
@@ -156,22 +228,24 @@
           (do (f [remaining car] i) (go [remaining cdr] [i + 1])))))
       (go lst 0)))
 
+  ; ── uniqueness ───────────────────────────────────────
+
   (provide (distinct)
     [[self fold: (cons nil nil) with: |state x|
       (if (not (member? x [state cdr]))
         (cons (cons x [state car]) (cons x [state cdr]))
-        state)] car reverse])
+        state)] car reverse]))
 
-  (provide (flatMap: f)
-    [[self map: f] fold: nil with: |acc lst| [acc append: lst]]))
-
-; ── Cons: implement each: + fold:with: directly ───────
+; ── Cons: direct implementations for efficiency ───────
+; Cons (linked lists) gets efficient each: and fold:with:
+; that use while loops instead of the recursive pattern.
+; these direct handlers are installed BEFORE conforming,
+; so the protocol's provided versions are skipped.
 
 (defmethod Cons each: (block)
   (let ((current self))
     (while (some? current) (block [current car]) (:= current [current cdr]))))
 
-; fold:with: on Cons uses efficient iteration, not toList
 [Cons handle: 'fold:with: with: (fn (self init f)
   (let ((acc init) (current self))
     (while (some? current)
@@ -187,7 +261,6 @@
 
 (conform Cons Iterable)
 
-; aliases
 (alias Cons filter: select:)
 (alias Cons collect: map:)
 (alias Cons detect: find:)

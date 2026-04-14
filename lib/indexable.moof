@@ -1,18 +1,41 @@
-; indexable.moof — implement at: + length, get Iterable for free
+; indexable.moof — positional access
+;
+; some collections have a natural integer index: strings have
+; character positions, tables have sequential slots. Indexable
+; captures this: implement at: + length, and you get iteration,
+; search, and all of Iterable for free via protocol inclusion.
+;
+; this is the bridge: positional access → iteration → the full
+; collection algebra. conform to Indexable and you automatically
+; conform to Iterable.
+;
+; conforming types: String, Table.
 
 (defprotocol Indexable
-  "Positional access. Implement at: + length, get Iterable for free."
+  "Positional access. Implement at: + length to get iteration,
+   search, and the full Iterable collection algebra. Indexable
+   includes Iterable: conforming gives you ~40 methods from
+   just two implementations."
 
-  (require (at: index) "Return element at index")
-  (require (length) "Return the number of elements")
+  (require (at: index)
+    "Return the element at the given integer index (0-based).
+     Out-of-bounds access should return nil.")
+
+  (require (length)
+    "Return the number of elements as an integer.")
 
   (provide (each: block)
     (let ((i 0) (len [self length]))
       (while [i < len] (block [self at: i]) (:= i [i + 1]))))
 
-  (provide (first) (if [[self length] > 0] [self at: 0] nil))
-  (provide (last) (if [[self length] > 0] [self at: [[self length] - 1]] nil))
-  (provide (empty?) (eq [self length] 0))
+  (provide (first)
+    (if [[self length] > 0] [self at: 0] nil))
+
+  (provide (last)
+    (if [[self length] > 0] [self at: [[self length] - 1]] nil))
+
+  (provide (empty?)
+    (eq [self length] 0))
 
   (provide (indexOf: x)
     (let ((i 0) (len [self length]) (result nil))
@@ -21,13 +44,16 @@
         (:= i [i + 1]))
       result))
 
-  ; efficient fold:with: using each: (cell pattern avoids capture-by-value)
+  ; efficient fold:with: using each:
+  ; uses the cell pattern (mutable heap table) because closures
+  ; capture variables by value, not reference. the cell is a
+  ; shared heap object that both the closure and caller can see.
   (provide (fold:with: init f)
     (let ((cell #["v" => init]))
       [self each: |x| [cell at: "v" put: (f [cell at: "v"] x)]]
       [cell at: "v"]))
 
-  ; toList using each: (cell pattern)
+  ; toList using each: (same cell pattern)
   (provide (toList)
     (let ((cell #["r" => nil]))
       [self each: |x| [cell at: "r" put: (cons x [cell at: "r"])]]
