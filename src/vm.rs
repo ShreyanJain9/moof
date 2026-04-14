@@ -708,6 +708,14 @@ impl VM {
         self.dispatch_send(heap, receiver, selector, args)
     }
 
+    /// Call a closure/callable value with args.
+    /// Wraps args in a cons list (as expected by call: dispatch).
+    pub fn call_value(&mut self, heap: &mut Heap, callable: Value, args: &[Value]) -> Result<Value, String> {
+        let sel = heap.sym_call;
+        let arg_list = heap.list(args);
+        self.dispatch_send(heap, callable, sel, &[arg_list])
+    }
+
     /// Check if the VM yielded (fuel exhausted, frame stack preserved).
     pub fn is_yielded(&self) -> bool {
         !self.frames.is_empty()

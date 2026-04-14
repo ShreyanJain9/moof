@@ -1,11 +1,5 @@
-use crate::heap::Heap;
-use crate::lang::lexer;
-use crate::lang::parser::Parser;
-use crate::lang::compiler::{Compiler, ClosureDesc};
-use crate::store::{Store, SerializableClosureDesc};
-use crate::opcodes::Chunk;
-use crate::vm::VM;
-use crate::value::Value;
+use crate::scheduler::Scheduler;
+use crate::store::Store;
 use std::path::Path;
 
 /// Count unbalanced brackets/parens/braces across the entire input.
@@ -32,44 +26,6 @@ fn bracket_depth(s: &str) -> i32 {
     depth
 }
 
-fn eval_source(vm: &mut VM, heap: &mut Heap, source: &str) -> Result<(), String> {
-    let tokens = lexer::tokenize(source).map_err(|e| format!("lex: {e}"))?;
-    let mut parser = Parser::new(&tokens, heap);
-    let exprs = parser.parse_all().map_err(|e| format!("parse: {e}"))?;
-    for expr in &exprs {
-        let result = Compiler::compile_toplevel(heap, *expr)
-            .map_err(|e| format!("compile: {e}"))?;
-        vm.eval_result(heap, result)
-            .map_err(|e| format!("eval: {e}"))?;
-    }
-    Ok(())
-}
-
-fn load_bootstrap(vm: &mut VM, heap: &mut Heap) {
-    let files = [
-        "lib/bootstrap.moof",
-        "lib/protocols.moof",
-        "lib/comparable.moof",
-        "lib/numeric.moof",
-        "lib/iterable.moof",
-        "lib/indexable.moof",
-        "lib/callable.moof",
-        "lib/types.moof",
-        "lib/error.moof",
-        "lib/showable.moof",
-        "lib/range.moof",
-        "lib/act.moof",
-    ];
-    for path in &files {
-        if let Ok(source) = std::fs::read_to_string(path) {
-            match eval_source(vm, heap, &source) {
-                Ok(()) => eprintln!("  loaded {path}"),
-                Err(e) => { eprintln!("  ~ error in {path}: {e}"); return; }
-            }
-        }
-    }
-}
-
 const STORE_PATH: &str = ".moof/store";
 
 pub fn run() {
@@ -78,34 +34,23 @@ pub fn run() {
     println!("       ~ a living objectspace ~");
     println!("    clarus the dogcow lives again");
 
-    let store = match Store::open(Path::new(STORE_PATH)) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("  ~ could not open store: {e}");
-            eprintln!("  running without persistence");
-            run_without_store();
-            return;
-        }
-    };
+    // create the scheduler
+    let mut sched = Scheduler::new(100_000);
 
-    // try loading from LMDB
-    let (mut heap, mut vm) = if let Some(_image) = store.load_all() {
-        // LMDB restore + bootstrap reload causes stale closure desc conflicts.
-        // For now, always do a fresh start. The image will be useful once we
-        // have proper persistence (content-addressed objects, not heap snapshots).
-        let mut heap = Heap::new();
-        let mut vm = VM::new();
-        crate::runtime::register_type_protos(&mut heap);
-        load_bootstrap(&mut vm, &mut heap);
-        (heap, vm)
-    } else {
-        // fresh start
-        let mut heap = Heap::new();
-        let mut vm = VM::new();
-        crate::runtime::register_type_protos(&mut heap);
-        load_bootstrap(&mut vm, &mut heap);
-        (heap, vm)
-    };
+    // vat 0: init vat (the rust runtime — bare, no bootstrap)
+    let _init_vat_id = sched.spawn_bare_vat();
+
+    // vat 1: Console capability vat
+    let (console_vat_id, console_obj_id) = sched.spawn_console_vat();
+
+    // vat 2: the REPL vat (just a regular vat with bootstrap)
+    let repl_vat_id = sched.spawn_vat();
+
+    // give the REPL a far reference to Console
+    let console_ref = sched.create_farref(repl_vat_id, console_vat_id, console_obj_id);
+    let console_sym = sched.vat_mut(repl_vat_id).heap.intern("console");
+    sched.vat_mut(repl_vat_id).heap.env_def(console_sym, console_ref);
+
     println!();
 
     let mut rl = match rustyline::DefaultEditor::new() {
@@ -129,7 +74,6 @@ pub fn run() {
         loop {
             let depth = bracket_depth(&input);
             if depth <= 0 { break; }
-            // unbalanced — read continuation line
             let cont = match rl.readline("  ... ") {
                 Ok(l) => l,
                 Err(_) => break,
@@ -139,37 +83,44 @@ pub fn run() {
             input.push_str(&cont);
         }
 
-        let tokens = match lexer::tokenize(&input) {
+        // eval in the REPL vat, then drain all pending cross-vat work
+        let tokens = match crate::lang::lexer::tokenize(&input) {
             Ok(t) => t,
             Err(e) => { eprintln!("  ~ lex: {e}"); continue; }
         };
 
-        let mut parser = Parser::new(&tokens, &mut heap);
+        let vat = sched.vat_mut(repl_vat_id);
+        let mut parser = crate::lang::parser::Parser::new(&tokens, &mut vat.heap);
         let exprs = match parser.parse_all() {
             Ok(e) => e,
             Err(e) => { eprintln!("  ~ parse: {e}"); continue; }
         };
 
         for expr in &exprs {
-            match Compiler::compile_toplevel(&heap, *expr) {
+            let vat = sched.vat_mut(repl_vat_id);
+            match crate::lang::compiler::Compiler::compile_toplevel(&vat.heap, *expr) {
                 Ok(result) => {
-                    match vm.eval_result(&mut heap, result) {
+                    match vat.vm.eval_result(&mut vat.heap, result) {
                         Ok(val) => {
-                            // try [val show] for display, fall back to display_value
-                            let show_sym = heap.intern("show");
-                            let displayed = match vm.send_message(&mut heap, val, show_sym, &[]) {
+                            // drain cross-vat work after each expression
+                            sched.drain();
+
+                            let vat = sched.vat_mut(repl_vat_id);
+                            // display: try [val show], fall back to display_value
+                            let show_sym = vat.heap.intern("show");
+                            let displayed = match vat.vm.send_message(&mut vat.heap, val, show_sym, &[]) {
                                 Ok(show_val) => {
                                     if let Some(id) = show_val.as_any_object() {
-                                        if let crate::object::HeapObject::Text(s) = heap.get(id) {
+                                        if let crate::object::HeapObject::Text(s) = vat.heap.get(id) {
                                             s.clone()
                                         } else {
-                                            heap.display_value(val)
+                                            vat.heap.display_value(val)
                                         }
                                     } else {
-                                        heap.display_value(val)
+                                        vat.heap.display_value(val)
                                     }
                                 }
-                                Err(_) => heap.display_value(val),
+                                Err(_) => vat.heap.display_value(val),
                             };
                             println!("  {displayed}");
                         }
@@ -182,62 +133,18 @@ pub fn run() {
     }
 
     // save to LMDB
-    match store.save_all(
-        heap.objects_ref(),
-        heap.symbols_ref(),
-        heap.env,
-        vm.closure_descs_ref(),
-    ) {
-        Ok(()) => eprintln!("  image saved to LMDB ({} objects)", heap.object_count()),
-        Err(e) => eprintln!("  ~ save failed: {e}"),
-    }
-
-    println!("\n  the circle closes. moof.\n");
-}
-
-fn run_without_store() {
-    let mut heap = Heap::new();
-    let mut vm = VM::new();
-    crate::runtime::register_type_protos(&mut heap);
-    load_bootstrap(&mut vm, &mut heap);
-    println!();
-
-    let mut rl = rustyline::DefaultEditor::new().unwrap();
-    loop {
-        let line = match rl.readline("\u{2728} ") {
-            Ok(line) => { let _ = rl.add_history_entry(&line); line }
-            Err(rustyline::error::ReadlineError::Eof) => break,
-            Err(_) => continue,
-        };
-        let trimmed = line.trim();
-        if trimmed.is_empty() { continue; }
-        let tokens = match lexer::tokenize(trimmed) {
-            Ok(t) => t, Err(e) => { eprintln!("  ~ {e}"); continue; }
-        };
-        let mut parser = Parser::new(&tokens, &mut heap);
-        let exprs = match parser.parse_all() {
-            Ok(e) => e, Err(e) => { eprintln!("  ~ {e}"); continue; }
-        };
-        for expr in &exprs {
-            match Compiler::compile_toplevel(&heap, *expr) {
-                Ok(r) => match vm.eval_result(&mut heap, r) {
-                    Ok(val) => {
-                        let show_sym = heap.intern("show");
-                        let displayed = match vm.send_message(&mut heap, val, show_sym, &[]) {
-                            Ok(sv) => if let Some(id) = sv.as_any_object() {
-                                if let crate::object::HeapObject::Text(s) = heap.get(id) {
-                                    s.clone()
-                                } else { heap.display_value(val) }
-                            } else { heap.display_value(val) },
-                            Err(_) => heap.display_value(val),
-                        };
-                        println!("  {displayed}");
-                    }
-                    Err(e) => eprintln!("  ~ {e}"),
-                },
-                Err(e) => eprintln!("  ~ {e}"),
-            }
+    if let Ok(store) = Store::open(Path::new(STORE_PATH)) {
+        let vat = sched.vat(repl_vat_id);
+        match store.save_all(
+            vat.heap.objects_ref(),
+            vat.heap.symbols_ref(),
+            vat.heap.env,
+            vat.vm.closure_descs_ref(),
+        ) {
+            Ok(()) => eprintln!("  image saved to LMDB ({} objects)", vat.heap.object_count()),
+            Err(e) => eprintln!("  ~ save failed: {e}"),
         }
     }
+
     println!("\n  the circle closes. moof.\n");
 }

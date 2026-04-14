@@ -117,6 +117,14 @@
   (if (not (cons? form)) false
     [[form car] identical: (quote let)]))
 
+; do-bind-and-continue: bind a name in the env, then keep expanding.
+; used by do-expand to create closures that survive deferred execution.
+; the (def name (quote val)) puts the binding in the heap environment,
+; so subsequent eval calls find it even when called from the scheduler.
+(defn do-bind-and-continue (name val rest env)
+  (let ((__ (eval `(def ,name (quote ,val)) env)))
+    (do-expand rest env)))
+
 (defn do-expand (forms env)
   (if (nil? forms) nil
     (if (nil? [forms cdr])
@@ -127,10 +135,13 @@
             (rest [forms cdr]))
         (if (arrow-bind? head)
           ; (name <- expr) → flatMap: binding
+          ; the pipe block captures name, rest, env from this scope.
+          ; when called later (possibly deferred by the scheduler),
+          ; it defs the value into the heap env and continues.
           (let ((name [head car])
                 (expr [[[head cdr] cdr] car]))
             [(eval expr env) flatMap:
-              (eval `(fn (,name) (do ,@rest)) env)])
+              |__do_v__| (do-bind-and-continue name __do_v__ rest env)])
           (if (let-form? head)
             ; (let binds) → wrap rest in let scope
             (eval `(let ,[[head cdr] car] (do ,@rest)) env)
@@ -145,27 +156,12 @@
   (do-expand body $e)))
 
 ; ═══════════════════════════════════════════════════════════
-; layer 5: Act placeholder (effect type)
+; layer 5: Act (effect type)
 ; ═══════════════════════════════════════════════════════════
 ;
-; Act describes an effect. full execution comes with vat wiring.
-; for now it's inspectable data that conforms to Flatmappable.
-
-(def Act {
-  target: nil
-  selector: nil
-  args: nil
-
-  [describe]
-    (str "<Act: " [@selector describe] " on " [@target describe] ">")
-
-  [show]
-    (str [self describe] "  : Act")
-
-  ; placeholder: run the effect immediately (no real scheduling yet)
-  [flatMap: f] (f nil)
-  [map: f] (f nil)
-  [then: block] (block)
-})
+; Act is the one effectful type. it describes a cross-vat send
+; and carries its continuation chain. the Act prototype and its
+; handlers (flatMap:, map:, then:, describe, etc.) are defined
+; in rust (runtime.rs). here we just conform it to Flatmappable.
 
 (conform Act Flatmappable)

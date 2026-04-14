@@ -32,7 +32,22 @@ pub const PROTO_NUMBER: usize = 10;
 pub const PROTO_CLOSURE: usize = 11;
 pub const PROTO_ERROR: usize = 12;
 pub const PROTO_FARREF: usize = 13;
-pub const PROTO_PROMISE: usize = 14;
+pub const PROTO_ACT: usize = 14;
+
+/// What to run in a spawned vat.
+#[derive(Debug)]
+pub enum SpawnPayload {
+    Source(String),              // source code to eval
+    Closure(Value),              // closure to copy + call (no args)
+    ClosureWithArgs(Value, Vec<Value>),  // closure + args to pass
+}
+
+/// A spawn request: queued by [Vat spawn: block/source], processed by scheduler.
+#[derive(Debug)]
+pub struct SpawnRequest {
+    pub payload: SpawnPayload,
+    pub act_id: u32,             // Act in this vat to resolve with the result
+}
 
 /// An outgoing message from a vat (queued by FarRef's doesNotUnderstand:).
 #[derive(Debug)]
@@ -41,7 +56,7 @@ pub struct OutgoingMessage {
     pub target_obj_id: u32,
     pub selector: u32,
     pub args: Vec<Value>,
-    pub promise_id: u32,  // local promise to resolve with the result
+    pub act_id: u32,  // local Act to resolve with the result
 }
 
 pub struct Heap {
@@ -52,6 +67,8 @@ pub struct Heap {
     pub rebound: std::collections::HashSet<u32>,       // symbols that have been reassigned
     pub vat_id: u32,                                   // which vat this heap belongs to
     pub outbox: Vec<OutgoingMessage>,                  // pending messages to other vats
+    pub spawn_queue: Vec<SpawnRequest>,                // pending vat spawn requests
+    pub ready_acts: Vec<u32>,                          // Acts with ready continuations
 
     // well-known symbols (interned at startup)
     pub sym_car: u32,
@@ -88,6 +105,8 @@ impl Heap {
             rebound: std::collections::HashSet::new(),
             vat_id: 0,
             outbox: Vec::new(),
+            spawn_queue: Vec::new(),
+            ready_acts: Vec::new(),
             sym_car: 0, sym_cdr: 0, sym_call: 0,
             sym_slot_at: 0, sym_slot_at_put: 0,
             sym_slot_names: 0, sym_handler_names: 0,
@@ -213,6 +232,41 @@ impl Heap {
 
     pub fn alloc_table_seq(&mut self, items: Vec<Value>) -> Value {
         self.alloc_val(HeapObject::Table { seq: items, map: Vec::new() })
+    }
+
+    /// Create an Act for a cross-vat send (pending, with target info).
+    pub fn make_act(&mut self, target_vat: u32, target_obj: u32, selector: u32) -> Value {
+        let act_proto = self.type_protos[PROTO_ACT];
+        let state_sym = self.intern("__state");
+        let pending_sym = self.intern("pending");
+        let chain_sym = self.intern("__chain");
+        let tgt_vat_sym = self.intern("__target_vat");
+        let tgt_obj_sym = self.intern("__target_obj");
+        let sel_sym = self.intern("__selector");
+        let result_sym = self.intern("__result");
+        self.make_object_with_slots(
+            act_proto,
+            vec![state_sym, chain_sym, tgt_vat_sym, tgt_obj_sym, sel_sym, result_sym],
+            vec![Value::symbol(pending_sym), Value::NIL,
+                 Value::integer(target_vat as i64), Value::integer(target_obj as i64),
+                 Value::symbol(selector), Value::NIL],
+        )
+    }
+
+    /// Create a pending Act with no target (for continuation-derived Acts).
+    pub fn make_pending_act(&mut self) -> Value {
+        let act_proto = self.type_protos[PROTO_ACT];
+        let state_sym = self.intern("__state");
+        let pending_sym = self.intern("pending");
+        let chain_sym = self.intern("__chain");
+        let result_sym = self.intern("__result");
+        let cont_fn_sym = self.intern("__cont_fn");
+        let cont_val_sym = self.intern("__cont_val");
+        self.make_object_with_slots(
+            act_proto,
+            vec![state_sym, chain_sym, result_sym, cont_fn_sym, cont_val_sym],
+            vec![Value::symbol(pending_sym), Value::NIL, Value::NIL, Value::NIL, Value::NIL],
+        )
     }
 
     // -- object access helpers --

@@ -21,6 +21,31 @@ fn native(
     heap.get_mut(proto_id).handler_set(sym, h);
 }
 
+/// Format an Act for display.
+fn format_act(heap: &Heap, receiver: Value) -> Result<String, String> {
+    let id = receiver.as_any_object().ok_or("not an act")?;
+    let state_sym = heap.find_symbol("__state").unwrap_or(0);
+    let result_sym = heap.find_symbol("__result").unwrap_or(0);
+    let resolved_sym = heap.find_symbol("resolved").unwrap_or(u32::MAX);
+    let failed_sym = heap.find_symbol("failed").unwrap_or(u32::MAX);
+
+    let state = heap.get(id).slot_get(state_sym);
+    let is_resolved = state.map(|v| v == Value::symbol(resolved_sym)).unwrap_or(false);
+    let is_failed = state.map(|v| v == Value::symbol(failed_sym)).unwrap_or(false);
+
+    if is_resolved {
+        let result = heap.get(id).slot_get(result_sym).unwrap_or(Value::NIL);
+        let result_str = heap.format_value(result);
+        Ok(format!("<Act resolved: {result_str}>"))
+    } else if is_failed {
+        let result = heap.get(id).slot_get(result_sym).unwrap_or(Value::NIL);
+        let result_str = heap.format_value(result);
+        Ok(format!("<Act failed: {result_str}>"))
+    } else {
+        Ok("<Act pending>".into())
+    }
+}
+
 /// Register type prototypes and native handlers on the heap.
 pub fn register_type_protos(heap: &mut Heap) {
     // pre-intern symbols used by the compiler's defmethod
@@ -949,17 +974,8 @@ pub fn register_type_protos(heap: &mut Heap) {
                 Vec::new()
             };
 
-            // create a promise for the result
-            let promise_proto = heap.type_protos[PROTO_PROMISE];
-            let state_sym = heap.intern("__state");
-            let pending_sym = heap.intern("pending");
-            let buffer_sym = heap.intern("__buffer");
-            let promise = heap.make_object_with_slots(
-                promise_proto,
-                vec![state_sym, buffer_sym],
-                vec![Value::symbol(pending_sym), Value::NIL],
-            );
-            let promise_obj_id = promise.as_any_object().unwrap();
+            // create an Act for the result
+            let act = heap.make_act(target_vat, target_obj, selector);
 
             // push to outbox
             heap.outbox.push(crate::heap::OutgoingMessage {
@@ -967,10 +983,10 @@ pub fn register_type_protos(heap: &mut Heap) {
                 target_obj_id: target_obj,
                 selector,
                 args: msg_args,
-                promise_id: promise_obj_id,
+                act_id: act.as_any_object().unwrap(),
             });
 
-            Ok(promise)
+            Ok(act)
         });
     }
 
@@ -992,30 +1008,228 @@ pub fn register_type_protos(heap: &mut Heap) {
     let farref_sym = heap.intern("FarRef");
     heap.env_def(farref_sym, farref_proto);
 
-    // -- Promise prototype (PROTO_PROMISE) --
-    // a promise represents a future value. sends to unresolved promises
-    // are buffered via doesNotUnderstand: and forwarded when resolved.
-    let promise_proto = heap.make_object(object_proto);
-    heap.type_protos[PROTO_PROMISE] = promise_proto;
-    let promise_id = promise_proto.as_any_object().unwrap();
+    // -- Act prototype (PROTO_ACT) --
+    // Act is the one effectful type. it describes a cross-vat send
+    // and carries its continuation chain (flatMap: closures).
+    let act_proto = heap.make_object(object_proto);
+    heap.type_protos[PROTO_ACT] = act_proto;
+    let act_id = act_proto.as_any_object().unwrap();
 
-    // Promise: describe
-    let state_sym = heap.intern("__state");
-    native(heap, promise_id, "describe", move |heap, receiver, _args| {
-        let id = receiver.as_any_object().ok_or("describe: not a promise")?;
-        let state = heap.get(id).slot_get(state_sym)
-            .map(|v| heap.format_value(v)).unwrap_or("?".into());
-        let s = format!("<promise {state}>");
-        Ok(heap.alloc_string(&s))
-    });
+    // Act: describe / show
+    {
+        native(heap, act_id, "describe", |heap, receiver, _args| {
+            let s = format_act(heap, receiver)?;
+            Ok(heap.alloc_string(&s))
+        });
 
-    let promise_sym = heap.intern("Promise");
-    heap.env_def(promise_sym, promise_proto);
+        native(heap, act_id, "show", |heap, receiver, _args| {
+            let s = format_act(heap, receiver)?;
+            Ok(heap.alloc_string(&format!("{s}  : Act")))
+        });
+    }
+
+    // Act: flatMap: — append continuation to the chain, or queue if resolved
+    {
+        let chain_sym = heap.intern("__chain");
+        native(heap, act_id, "flatMap:", move |heap, receiver, args| {
+            let f = args.first().copied().ok_or("flatMap: needs a function")?;
+            let id = receiver.as_any_object().ok_or("flatMap: not an act")?;
+
+            let state_sym_local = heap.intern("__state");
+            let resolved_sym = heap.intern("resolved");
+            let result_sym = heap.intern("__result");
+            let is_resolved = heap.get(id).slot_get(state_sym_local)
+                .map(|v| v == Value::symbol(resolved_sym)).unwrap_or(false);
+
+            if is_resolved {
+                // already resolved — create a ready Act for the scheduler to run
+                let result = heap.get(id).slot_get(result_sym).unwrap_or(Value::NIL);
+                let new_act = heap.make_pending_act();
+                let new_act_id = new_act.as_any_object().unwrap();
+                let cont_fn_sym = heap.intern("__cont_fn");
+                let cont_val_sym = heap.intern("__cont_val");
+                heap.get_mut(new_act_id).slot_set(cont_fn_sym, f);
+                heap.get_mut(new_act_id).slot_set(cont_val_sym, result);
+                heap.ready_acts.push(new_act_id);
+                Ok(new_act)
+            } else {
+                // pending — append to continuation chain
+                let current_chain = heap.get(id).slot_get(chain_sym).unwrap_or(Value::NIL);
+                let new_link = heap.cons(f, current_chain);
+                heap.get_mut(id).slot_set(chain_sym, new_link);
+                Ok(receiver)
+            }
+        });
+    }
+
+    // Act: map: — same as flatMap: (identity monad wraps automatically)
+    {
+        native(heap, act_id, "map:", |heap, receiver, args| {
+            let f = args.first().copied().ok_or("map: needs a function")?;
+            let id = receiver.as_any_object().ok_or("map: not an act")?;
+
+            let state_sym_local = heap.intern("__state");
+            let resolved_sym = heap.intern("resolved");
+            let result_sym = heap.intern("__result");
+            let is_resolved = heap.get(id).slot_get(state_sym_local)
+                .map(|v| v == Value::symbol(resolved_sym)).unwrap_or(false);
+
+            if is_resolved {
+                let result = heap.get(id).slot_get(result_sym).unwrap_or(Value::NIL);
+                let new_act = heap.make_pending_act();
+                let new_act_id = new_act.as_any_object().unwrap();
+                let cont_fn_sym = heap.intern("__cont_fn");
+                let cont_val_sym = heap.intern("__cont_val");
+                heap.get_mut(new_act_id).slot_set(cont_fn_sym, f);
+                heap.get_mut(new_act_id).slot_set(cont_val_sym, result);
+                heap.ready_acts.push(new_act_id);
+                Ok(new_act)
+            } else {
+                let chain_sym = heap.intern("__chain");
+                let current_chain = heap.get(id).slot_get(chain_sym).unwrap_or(Value::NIL);
+                let new_link = heap.cons(f, current_chain);
+                heap.get_mut(id).slot_set(chain_sym, new_link);
+                Ok(receiver)
+            }
+        });
+    }
+
+    // Act: then: — sequence, ignore previous value
+    {
+        native(heap, act_id, "then:", |heap, receiver, args| {
+            let block = args.first().copied().ok_or("then: needs a block")?;
+            // then: is flatMap: that ignores the value
+            // wrap block in a closure that ignores its arg
+            // for now, just append block to the chain — scheduler calls it with result, block ignores it
+            let id = receiver.as_any_object().ok_or("then: not an act")?;
+            let chain_sym = heap.intern("__chain");
+            let current_chain = heap.get(id).slot_get(chain_sym).unwrap_or(Value::NIL);
+            let new_link = heap.cons(block, current_chain);
+            heap.get_mut(id).slot_set(chain_sym, new_link);
+            Ok(receiver)
+        });
+    }
+
+    // Act: recover: — no-op on success, handler on failure
+    {
+        native(heap, act_id, "recover:", |_heap, receiver, _args| {
+            // for now, pass through — error propagation comes later
+            Ok(receiver)
+        });
+    }
+
+    // Act: ok? — true if resolved successfully
+    {
+        native(heap, act_id, "ok?", |heap, receiver, _args| {
+            let id = receiver.as_any_object().ok_or("ok?: not an act")?;
+            let state_sym_local = heap.intern("__state");
+            let resolved_sym = heap.intern("resolved");
+            let is_resolved = heap.get(id).slot_get(state_sym_local)
+                .map(|v| v == Value::symbol(resolved_sym)).unwrap_or(false);
+            Ok(if is_resolved { Value::TRUE } else { Value::FALSE })
+        });
+    }
+
+    // Act: result — get the resolved value (or nil if pending)
+    {
+        native(heap, act_id, "result", |heap, receiver, _args| {
+            let id = receiver.as_any_object().ok_or("result: not an act")?;
+            let result_sym = heap.intern("__result");
+            Ok(heap.get(id).slot_get(result_sym).unwrap_or(Value::NIL))
+        });
+    }
+
+    // Act: inspect — return the Act's description as data
+    {
+        native(heap, act_id, "inspect", |heap, receiver, _args| {
+            let id = receiver.as_any_object().ok_or("inspect: not an act")?;
+            let tgt_sym = heap.intern("__target_vat");
+            let obj_sym = heap.intern("__target_obj");
+            let sel_sym = heap.intern("__selector");
+            let state_sym_local = heap.intern("__state");
+
+            let target = heap.get(id).slot_get(tgt_sym).unwrap_or(Value::NIL);
+            let obj = heap.get(id).slot_get(obj_sym).unwrap_or(Value::NIL);
+            let sel = heap.get(id).slot_get(sel_sym).unwrap_or(Value::NIL);
+            let state = heap.get(id).slot_get(state_sym_local).unwrap_or(Value::NIL);
+
+            let t_sym = heap.intern("target");
+            let o_sym = heap.intern("object");
+            let s_sym = heap.intern("selector");
+            let st_sym = heap.intern("state");
+            Ok(heap.make_object_with_slots(
+                Value::NIL,
+                vec![t_sym, o_sym, s_sym, st_sym],
+                vec![target, obj, sel, state],
+            ))
+        });
+    }
+
+    let act_sym = heap.intern("Act");
+    heap.env_def(act_sym, act_proto);
 
     // -- Vat prototype --
-    // [Vat spawn: block] creates a new vat. The block runs in the new vat
-    // and its return value becomes accessible via a far reference.
     let vat_proto = heap.make_object(object_proto);
+    let vat_id_obj = vat_proto.as_any_object().unwrap();
+
+    // [Vat spawn: block-or-source] — queue a spawn request, return an Act
+    // accepts a closure (|| expr) or a source string ("[3 + 4]")
+    native(heap, vat_id_obj, "spawn:", |heap, _receiver, args| {
+        let arg = args.first().copied().ok_or("spawn: needs a block or source string")?;
+
+        let payload = if let Some(obj_id) = arg.as_any_object() {
+            match heap.get(obj_id) {
+                crate::object::HeapObject::Text(s) => {
+                    crate::heap::SpawnPayload::Source(s.clone())
+                }
+                crate::object::HeapObject::Closure { .. } => {
+                    crate::heap::SpawnPayload::Closure(arg)
+                }
+                _ => return Err("spawn: argument must be a block or source string".into()),
+            }
+        } else {
+            return Err("spawn: argument must be a block or source string".into());
+        };
+
+        // create a pending Act for the result
+        let act = heap.make_pending_act();
+        let act_obj_id = act.as_any_object().unwrap();
+
+        // queue the spawn request
+        heap.spawn_queue.push(crate::heap::SpawnRequest {
+            payload,
+            act_id: act_obj_id,
+        });
+
+        Ok(act)
+    });
+
+    // [Vat spawn:with: block args] — pass args to the closure in the new vat
+    native(heap, vat_id_obj, "spawn:with:", |heap, _receiver, args| {
+        let block = args.first().copied().ok_or("spawn:with: needs a block")?;
+        let args_val = args.get(1).copied().ok_or("spawn:with: needs args")?;
+
+        if heap.as_closure(block).is_none() {
+            return Err("spawn:with: first arg must be a closure".into());
+        }
+        let spawn_args = heap.list_to_vec(args_val);
+
+        let act = heap.make_pending_act();
+        let act_obj_id = act.as_any_object().unwrap();
+
+        heap.spawn_queue.push(crate::heap::SpawnRequest {
+            payload: crate::heap::SpawnPayload::ClosureWithArgs(block, spawn_args),
+            act_id: act_obj_id,
+        });
+
+        Ok(act)
+    });
+
+    // [Vat describe]
+    native(heap, vat_id_obj, "describe", |heap, _receiver, _args| {
+        Ok(heap.alloc_string("<Vat>"))
+    });
+
     let vat_sym = heap.intern("Vat");
     heap.env_def(vat_sym, vat_proto);
 }
