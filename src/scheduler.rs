@@ -489,8 +489,31 @@ impl Scheduler {
                     let s = s.clone();
                     return self.vat_mut(to_vat).heap.alloc_string(&s);
                 }
+                crate::object::HeapObject::General { parent: _, slot_names, slot_values, .. } => {
+                    // copy General objects (including FarRefs) by cloning slots
+                    let names: Vec<String> = slot_names.iter()
+                        .map(|s| from_heap.symbol_name(*s).to_string())
+                        .collect();
+                    let vals: Vec<Value> = slot_values.clone();
+                    // check if this is a FarRef (has __target_vat slot)
+                    let is_farref = names.iter().any(|n| n == "__target_vat");
+                    // re-intern names and copy values in target heap
+                    let new_names: Vec<u32> = names.iter()
+                        .map(|n| self.vat_mut(to_vat).heap.intern(n))
+                        .collect();
+                    let new_vals: Vec<Value> = vals.iter()
+                        .map(|v| self.copy_value_across(*v, _from_vat, to_vat))
+                        .collect();
+                    let parent = if is_farref {
+                        self.vat(to_vat).heap.type_protos[crate::heap::PROTO_FARREF]
+                    } else {
+                        self.vat(to_vat).heap.type_protos[crate::heap::PROTO_OBJ]
+                    };
+                    return self.vat_mut(to_vat).heap.make_object_with_slots(
+                        parent, new_names, new_vals,
+                    );
+                }
                 _ => {
-                    // can't copy complex objects yet — return nil with a warning
                     eprintln!("  ~ warning: cannot copy heap object across vats (yet)");
                     return Value::NIL;
                 }
