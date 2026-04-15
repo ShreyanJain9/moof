@@ -24,17 +24,17 @@ its capabilities are explicit. it's the actor model, naturally.
 
   count: 0
 
-  [increment] (do
-    (:= @count [@count + 1])
-    @count)
+  [increment]
+    (update { count: [@count + 1] }
+            [@count + 1])
 
-  [decrement] (do
-    (:= @count [@count - 1])
-    @count)
+  [decrement]
+    (update { count: [@count - 1] }
+            [@count - 1])
 
   [get] @count
 
-  [reset] (:= @count 0)
+  [reset] (update { count: 0 })
 
   [log]
     [console println: (str "count: " [@count describe])])
@@ -44,16 +44,75 @@ the parts:
 
 - `Counter` — the server name. becomes a constructor.
 - `(console)` — required capabilities. must be provided at
-  construction time.
+  construction time via config object.
 - `"A counter..."` — docstring. queryable at runtime.
-- `count: 0` — a slot with a default value. mutable via `:=`.
-  private to the server's vat.
+- `count: 0` — a slot with initial value. immutable within
+  a handler — state changes only via `update`.
 - `[increment]`, `[get]`, etc. — handlers. same syntax as
   object literal handlers. these are the server's public API.
 
 the body IS an object literal. the only additions are the name,
 the capability list, and the docstring. if you know how to write
 moof objects, you know how to write servers.
+
+## handler return types
+
+handlers are pure functions. they return one of four things:
+
+**plain value** — query, no state change.
+
+```moof
+[get] @count
+; vat sends @count as reply. state unchanged.
+```
+
+**Update** — state transition with optional reply.
+
+```moof
+[increment]
+  (update { count: [@count + 1] }   ; delta (which slots change)
+          [@count + 1])              ; reply to caller
+
+[reset] (update { count: 0 })
+; delta applied. reply is nil.
+```
+
+`update` creates an Update value — inspectable data, like Act.
+the vat examines the return and applies the delta between
+messages. the handler itself never mutates anything.
+
+**Act** — effect, no state change.
+
+```moof
+[log]
+  [console println: @count]
+; cross-vat send → Act. vat executes effect, sends result.
+```
+
+**Act resolving to Update** — effectful state transition.
+
+```moof
+[save] (do
+  [store save: 'count value: @count]
+  (update { saved: true }))
+; effect first, then state change after effect completes.
+```
+
+### snapshot semantics
+
+inside a handler, `@slot` reads from an immutable snapshot
+of the server's current state. the snapshot is taken when the
+handler starts. the handler never sees its own state changes.
+
+```moof
+[increment]
+  (update { count: [@count + 1] }
+          [@count + 1])
+; @count is always the PRE-increment value within this handler.
+```
+
+handlers are pure: (current-state, message-args) → return value.
+no hidden mutation. referentially transparent.
 
 ## construction
 
@@ -75,8 +134,7 @@ pointing at the server object in its vat.
 ### why a config object?
 
 capabilities are named, not positional. order doesn't matter.
-self-documenting at the call site. scales to many capabilities
-without combinatorial keyword messages:
+self-documenting at the call site. scales to many capabilities:
 
 ```moof
 (do (g <- (GameEngine {
@@ -97,14 +155,15 @@ construction, inside the server's vat:
   count: 0
 
   [init] (do
-    [console println: "counter started"]
-    (:= @count 0))
+    [console println: "counter started"])
 
   [increment] ...)
 ```
 
-`[init]` can do IO (it has capability refs). its return value
-is ignored — construction always resolves to the FarRef.
+`[init]` can do IO. its return value is ignored —
+construction always resolves to the FarRef. if `[init]`
+returns an Update, the delta is applied before the first
+external message.
 
 ## the actor model
 
@@ -116,7 +175,7 @@ actor model           moof server
 actor                 server object in its own vat
 mailbox               vat message queue
 receive               handler dispatch
-state                 slots (private to the vat)
+state                 slots (immutable snapshots, Update deltas)
 send                  cross-vat message → Act
 sequential processing one handler at a time (vat is single-threaded)
 location transparency FarRef (same interface local or remote)
@@ -126,7 +185,8 @@ become                change prototype delegation
 ### sequential processing
 
 the vat processes one message at a time. no concurrency within
-a server. this means:
+a server. state transitions are atomic — the delta from one
+handler is applied before the next message is processed.
 
 ```moof
 ; these are sequenced — second increment sees first's result
@@ -150,7 +210,7 @@ this is prototype delegation:
   [unlock] [self become: Unlocked]})
 
 (def Unlocked {
-  [increment] (do (:= @count [@count + 1]) @count)
+  [increment] (update { count: [@count + 1] } [@count + 1])
   [lock] [self become: Locked]})
 
 (defserver Counter ()
@@ -169,9 +229,8 @@ that marks the vat Dead. override it for cleanup:
 (defserver Logger (console store)
   entries: nil
 
-  [log: msg] (do
-    (:= @entries (cons msg @entries))
-    nil)
+  [log: msg]
+    (update { entries: (cons msg @entries) })
 
   [stop] (do
     [store save: 'log value: @entries]
@@ -182,185 +241,85 @@ after `[stop]` runs, the vat is marked Dead. pending messages
 are dropped. pending Acts on this vat resolve as failed with
 a "vat stopped" error.
 
-`[server stop]` returns an Act that resolves when the stop
-handler completes.
+### crash behavior
 
-### crash
-
-if a handler raises an error and there's no `recover:`:
+if a handler raises an error:
 
 1. the error propagates to the caller's Act (resolves as failed)
 2. the vat stays alive — one bad message shouldn't kill the server
-3. the server continues processing the next message
+3. no state change (the handler didn't return an Update)
+4. the server continues processing the next message
 
-this is a deliberate choice: handlers are isolated from each
-other. a crash in `[increment]` doesn't affect the next
-`[get]`. state may be inconsistent, but the server is still
-responsive.
-
-for "let it crash" erlang-style, you'd override this:
-
-```moof
-(defserver StrictCounter ()
-  count: 0
-  [increment] (do (:= @count [@count + 1]) @count)
-
-  ; any handler error → stop the server
-  [handleError: e] [self stop])
-```
+handlers are isolated from each other. a crash in `[increment]`
+doesn't affect the next `[get]`.
 
 ### supervision (future)
 
-a supervisor is a server that monitors other servers and
-restarts them on crash:
-
-```moof
-(defserver CounterSupervisor (console)
-  counter: nil
-
-  [init] (do
-    (:= @counter (Counter { console: console }))
-    nil)
-
-  [restart] (do
-    [console println: "restarting counter"]
-    (:= @counter (Counter { console: console }))
-    nil))
-```
-
-proper supervision trees (one-for-one, one-for-all, rest-for-one)
-are future work. the architecture supports it — supervisors are
-just servers that hold FarRefs to children.
+a supervisor is a server that monitors children and restarts
+them on crash. architecture supports it — supervisors hold
+FarRefs. proper supervision trees are future work.
 
 ## compute vats vs server vats
 
-two kinds of vat spawning:
-
-**compute vats** — `[Vat spawn: || expr]`. run a computation,
-return the result, vat goes Dead. one-shot. used for parallelism.
+**compute vats** — `[Vat spawn: || expr]`. one-shot. run a
+computation, copy result to parent, vat goes Dead.
 
 ```moof
 (do (x <- [Vat spawn: || [expensive-computation data]])
     [process x])
 ```
 
-**server vats** — `(defserver ...)`. create an object, vat stays
-alive, FarRef returned. persistent. used for stateful services.
+**server vats** — `(defserver ...)`. persistent. object stays
+in the vat. FarRef returned. vat stays alive between messages
+until `[stop]`.
 
 ```moof
 (do (c <- (Counter { console: console }))
-    [c increment]  ; vat stays alive between sends
+    [c increment]
     [c increment])
 ```
 
-the scheduler marks compute vats Dead after their result is
-copied. server vats stay alive until `[stop]` or crash.
-
 ## capabilities
 
-capabilities are FarRefs passed at construction time. the server
-declares what it needs:
+capabilities are FarRefs passed at construction via config
+object:
 
 ```moof
 (defserver MyServer (console clock store)
   ...)
+
+(MyServer { console: console clock: clock store: store })
 ```
 
 this means:
-- the constructor requires a config with `console`, `clock`,
-  and `store` keys
-- inside handlers, these names are bound to FarRefs
+- constructor validates all required caps are present
+- inside handlers, cap names are bound to FarRefs
 - the server can only do IO through these refs
-- withhold a capability = the server can't use it
-
-### principle of least authority
-
-the spawner decides what the child gets:
-
-```moof
-; full access
-(MyServer { console: console clock: clock store: store })
-
-; read-only store (wrap in a membrane)
-(MyServer { console: console
-            clock: clock
-            store: (read-only store) })
-
-; no store at all — constructor error
-(MyServer { console: console clock: clock })
-; → error: missing required capability 'store'
-```
-
-membranes (wrappers that intercept sends) are future work but
-the architecture supports them naturally — a membrane is just
-a FarRef that logs/filters/transforms messages.
+- withhold a capability → server can't use it
+- pass a membrane → server gets filtered access
 
 ### testing
 
-servers are trivially testable because capabilities are injected:
+servers are trivially testable — inject mock capabilities:
 
 ```moof
 ; in production
 (Counter { console: real-console })
 
-; in tests — mock console records sends
+; in tests — mock console records sends instead of printing
 (def mock { messages: nil
-  [println: msg] (:= @messages (cons msg @messages)) })
+  [println: msg]
+    (update { messages: (cons msg @messages) }) })
 (Counter { console: mock })
 ```
 
-no test frameworks, no dependency injection libraries. pass a
-different object. that's it.
-
-## config objects and destructuring
-
-server construction uses config objects — moof's native named
-parameter pattern:
-
-```moof
-{ console: console  clock: clock  store: store }
-```
-
-this is an object literal. keys are symbols. values are
-anything. order doesn't matter. it's the general solution to
-"pass a bundle of named things."
-
-inside defserver, the vau destructures the config: extracts
-each required capability by name and binds it as a local.
-conceptually:
-
-```moof
-; what defserver generates (roughly):
-(fn (config)
-  (let ((console [config slotAt: 'console])
-        (clock   [config slotAt: 'clock]))
-    ... spawn vat, create object ...))
-```
-
-### a general destructuring form (future)
-
-config objects motivate a general destructuring bind:
-
-```moof
-(let-slots { x y z } config
-  [x + y + z])
-```
-
-or pattern matching on object shape:
-
-```moof
-(match config
-  { host: h port: p } [connect h p]
-  { url: u }          [parse-url u])
-```
-
-these are language features that benefit everything, not just
-servers. design work for the surface syntax phase.
+no test frameworks. no dependency injection libraries.
+pass a different object. that's it.
 
 ## introspection
 
-servers are objects. they respond to the same queries as any
-moof object:
+servers are objects. they respond to standard queries via
+the FarRef:
 
 ```moof
 [counter doc]           ; → "A counter with logging."
@@ -368,13 +327,12 @@ moof object:
 [counter slotNames]     ; → (count)
 ```
 
-the FarRef transparently proxies these — they're just messages.
-the agent (LLM in a vat) can discover what a server does by
-querying its handlers and docs.
+the agent (LLM in a vat) discovers server APIs by querying
+handlers and docs. same mechanism as any moof object.
 
 ## the defserver vau
 
-`defserver` is a vau operative. it:
+`defserver` is a vau operative, not compiler magic. it:
 
 1. parses the capability list and body
 2. defines a constructor function in the current environment
@@ -382,39 +340,38 @@ querying its handlers and docs.
    a. validates the config object against required capabilities
    b. spawns a new vat
    c. creates the server object inside the vat (with capability
-      refs bound as locals)
-   d. registers the object as the vat's root (for message dispatch)
+      refs bound in scope)
+   d. registers the object as the vat's root
    e. runs `[init]` if defined
    f. returns an Act that resolves to a FarRef
 
-this is implemented as a moof vau, not compiler magic. you can
-inspect it, override it, wrap it. `(def defserver ...)` is just
-a binding. the server pattern is a library, not a language feature.
+inspectable, overridable, composable. the server pattern is a
+library, not a language feature.
 
-## example: a key-value store server
+## example: key-value store
 
 ```moof
 (defserver KVStore (console)
-  "A persistent key-value store with logging."
+  "A key-value store with logging."
 
-  data: {}
+  data: #[]
 
   [get: key]
-    [[@data slotAt: key] or: nil]
+    [@data at: key]
 
   [put: key value: val] (do
-    (:= @data [[@data clone] slotAt: key put: val])
     [console println: (str "stored " [key describe])]
-    val)
+    (update { data: [@data at: key put: val] }
+            val))
 
   [keys]
-    [@data slotNames]
+    [@data keys]
 
   [size]
-    [[@data slotNames] length]
+    [[@data keys] length]
 
-  [stop]
-    [console println: (str "kvstore stopped (" [self size] " keys)")])
+  [stop] (do
+    [console println: (str "kvstore stopped (" [[self size] describe] " keys)")]))
 ```
 
 usage:
@@ -432,10 +389,10 @@ usage:
 
 1. **a server is an object in its own vat.** that's the whole idea.
 2. **defserver body = object literal.** slots, handlers, delegation.
-3. **capabilities are explicit.** config object, named, validated.
-4. **construction returns Act<FarRef>.** async by nature.
-5. **one message at a time.** vat is the synchronization primitive.
-6. **[stop] ends the vat.** override for cleanup. default provided.
-7. **crashes are isolated.** one bad handler doesn't kill the server.
-8. **servers are testable.** inject mock capabilities. done.
+3. **handlers are pure.** return plain values, Updates, or Acts.
+4. **Update is a value.** state deltas are data, not side effects.
+5. **capabilities via config object.** named, validated, mockable.
+6. **one message at a time.** vat is the synchronization primitive.
+7. **[stop] ends the vat.** override for cleanup. default provided.
+8. **crashes are isolated.** bad handler → failed Act, server lives on.
 9. **defserver is a vau.** library, not language. inspectable, overridable.
