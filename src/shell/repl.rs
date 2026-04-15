@@ -1,9 +1,9 @@
+use moof::manifest::Manifest;
 use moof::scheduler::Scheduler;
 use moof::store::Store;
 use std::path::Path;
 
-/// Count unbalanced brackets/parens/braces across the entire input.
-/// Positive = more openers than closers (need more input).
+/// Count unbalanced brackets/parens/braces.
 fn bracket_depth(s: &str) -> i32 {
     let mut depth = 0i32;
     let mut in_string = false;
@@ -26,7 +26,7 @@ fn bracket_depth(s: &str) -> i32 {
     depth
 }
 
-const STORE_PATH: &str = ".moof/store";
+const MANIFEST_PATH: &str = "moof.toml";
 
 pub fn run() {
     println!();
@@ -34,38 +34,66 @@ pub fn run() {
     println!("       ~ a living objectspace ~");
     println!("    clarus the dogcow lives again");
 
-    // create the scheduler
+    // load manifest (or use defaults)
+    let manifest = match Path::new(MANIFEST_PATH).exists() {
+        true => match Manifest::load(Path::new(MANIFEST_PATH)) {
+            Ok(m) => { eprintln!("  manifest: {MANIFEST_PATH}"); m }
+            Err(e) => { eprintln!("  ~ manifest error: {e}, using defaults"); Manifest::default() }
+        },
+        false => { eprintln!("  no manifest, using defaults"); Manifest::default() }
+    };
+
     let mut sched = Scheduler::new(100_000);
 
-    // vat 0: init vat (the rust runtime — bare, no bootstrap)
+    // vat 0: init vat (bare)
     let _init_vat_id = sched.spawn_bare_vat();
 
-    // spawn capability vats and collect their FarRef info
-    let capabilities = moof::plugins::default_capabilities();
+    // spawn capability vats from manifest
     let mut cap_refs: Vec<(String, u32, u32)> = Vec::new();
-    for cap in &capabilities {
-        let (vat_id, obj_id) = sched.spawn_capability(cap.as_ref());
-        cap_refs.push((cap.name().to_string(), vat_id, obj_id));
-    }
-
-    // the REPL vat (just a regular vat with bootstrap)
-    let repl_vat_id = sched.spawn_vat();
-
-    // give the REPL far references to all capabilities
-    for (name, vat_id, obj_id) in &cap_refs {
-        let farref = sched.create_farref(repl_vat_id, *vat_id, *obj_id);
-        let sym = sched.vat_mut(repl_vat_id).heap.intern(name);
-        sched.vat_mut(repl_vat_id).heap.env_def(sym, farref);
-    }
-
-    // reload plugins from previous session
-    let plugins_file = Path::new(STORE_PATH).join("plugins.json");
-    if plugins_file.exists() {
-        if let Ok(json) = std::fs::read_to_string(&plugins_file) {
-            if let Ok(paths) = serde_json::from_str::<Vec<String>>(&json) {
-                let paths: Vec<std::path::PathBuf> = paths.iter().map(std::path::PathBuf::from).collect();
-                sched.reload_plugins(&paths, repl_vat_id);
+    for (name, spec) in &manifest.capabilities {
+        if let Some(builtin_name) = Manifest::is_builtin(spec) {
+            if let Some(cap) = moof::plugins::builtin_capability(builtin_name) {
+                let (vat_id, obj_id) = sched.spawn_capability(cap.as_ref());
+                cap_refs.push((name.clone(), vat_id, obj_id));
+            } else {
+                eprintln!("  ~ unknown builtin capability: {builtin_name}");
             }
+        } else {
+            // external plugin dylib
+            match sched.load_plugin(Path::new(spec)) {
+                Ok((loaded_name, vat_id, obj_id)) => {
+                    cap_refs.push((name.clone(), vat_id, obj_id));
+                    eprintln!("  loaded plugin '{loaded_name}'");
+                }
+                Err(e) => eprintln!("  ~ plugin error for '{name}': {e}"),
+            }
+        }
+    }
+
+    // spawn REPL vat — type plugins registered from manifest
+    let repl_vat_id = sched.spawn_vat_with_manifest(&manifest);
+
+    // load source files from manifest
+    for source_path in &manifest.sources.files {
+        if let Ok(source) = std::fs::read_to_string(source_path) {
+            let vat = sched.vat_mut(repl_vat_id);
+            match vat.eval_source(&source) {
+                Ok(_) => eprintln!("  loaded {source_path}"),
+                Err(e) => { eprintln!("  ~ error in {source_path}: {e}"); return; }
+            }
+        } else {
+            eprintln!("  ~ source not found: {source_path}");
+        }
+    }
+
+    // grant capabilities to REPL based on manifest [grants]
+    let repl_grants = manifest.grants.get("repl")
+        .cloned().unwrap_or_default();
+    for (name, vat_id, obj_id) in &cap_refs {
+        if repl_grants.contains(name) {
+            let farref = sched.create_farref(repl_vat_id, *vat_id, *obj_id);
+            let sym = sched.vat_mut(repl_vat_id).heap.intern(name);
+            sched.vat_mut(repl_vat_id).heap.env_def(sym, farref);
         }
     }
 
@@ -88,32 +116,32 @@ pub fn run() {
         if trimmed.is_empty() { continue; }
 
         // REPL commands
-        if trimmed.starts_with("(load-plugin ") && trimmed.ends_with(')') {
-            let path_str = trimmed.strip_prefix("(load-plugin ").unwrap()
-                .strip_suffix(')').unwrap().trim().trim_matches('"');
-            match sched.load_plugin(std::path::Path::new(path_str)) {
-                Ok((name, vat_id, obj_id)) => {
-                    let farref = sched.create_farref(repl_vat_id, vat_id, obj_id);
-                    let sym = sched.vat_mut(repl_vat_id).heap.intern(&name);
-                    sched.vat_mut(repl_vat_id).heap.env_def(sym, farref);
-                    eprintln!("  loaded plugin '{name}' (vat {vat_id})");
+        if trimmed == "(plugins)" {
+            if sched.loaded_plugins.is_empty() && cap_refs.is_empty() {
+                println!("  no capabilities loaded");
+            } else {
+                for (name, vat_id, _) in &cap_refs {
+                    println!("  {name} (vat {vat_id})");
                 }
-                Err(e) => eprintln!("  ~ plugin error: {e}"),
             }
             continue;
         }
-        if trimmed == "(plugins)" {
-            if sched.loaded_plugins.is_empty() {
-                println!("  no dynamic plugins loaded");
-            } else {
-                for p in &sched.loaded_plugins {
-                    println!("  {} (vat {}, {:?})", p.name, p.vat_id, p.path);
+        if trimmed.starts_with("(reload ") && trimmed.ends_with(')') {
+            let path_str = trimmed.strip_prefix("(reload ").unwrap()
+                .strip_suffix(')').unwrap().trim().trim_matches('"');
+            if let Ok(source) = std::fs::read_to_string(path_str) {
+                let vat = sched.vat_mut(repl_vat_id);
+                match vat.eval_source(&source) {
+                    Ok(_) => eprintln!("  reloaded {path_str}"),
+                    Err(e) => eprintln!("  ~ error in {path_str}: {e}"),
                 }
+            } else {
+                eprintln!("  ~ file not found: {path_str}");
             }
             continue;
         }
 
-        // accumulate multi-line input when brackets are unbalanced
+        // accumulate multi-line input
         let mut input = trimmed.to_string();
         loop {
             let depth = bracket_depth(&input);
@@ -127,7 +155,7 @@ pub fn run() {
             input.push_str(&cont);
         }
 
-        // eval in the REPL vat, then drain all pending cross-vat work
+        // eval
         let tokens = match moof::lang::lexer::tokenize(&input) {
             Ok(t) => t,
             Err(e) => { eprintln!("  ~ lex: {e}"); continue; }
@@ -146,23 +174,16 @@ pub fn run() {
                 Ok(result) => {
                     match vat.vm.eval_result(&mut vat.heap, result) {
                         Ok(val) => {
-                            // drain cross-vat work after each expression
                             sched.drain();
-
                             let vat = sched.vat_mut(repl_vat_id);
-                            // display: try [val show], fall back to display_value
                             let show_sym = vat.heap.intern("show");
                             let displayed = match vat.vm.send_message(&mut vat.heap, val, show_sym, &[]) {
                                 Ok(show_val) => {
                                     if let Some(id) = show_val.as_any_object() {
                                         if let moof::object::HeapObject::Text(s) = vat.heap.get(id) {
                                             s.clone()
-                                        } else {
-                                            vat.heap.display_value(val)
-                                        }
-                                    } else {
-                                        vat.heap.display_value(val)
-                                    }
+                                        } else { vat.heap.display_value(val) }
+                                    } else { vat.heap.display_value(val) }
                                 }
                                 Err(_) => vat.heap.display_value(val),
                             };
@@ -176,8 +197,9 @@ pub fn run() {
         }
     }
 
-    // save to LMDB
-    if let Ok(store) = Store::open(Path::new(STORE_PATH)) {
+    // save image
+    let store_path = &manifest.image.path;
+    if let Ok(store) = Store::open(Path::new(store_path)) {
         let vat = sched.vat(repl_vat_id);
         match store.save_all(
             vat.heap.objects_ref(),
@@ -185,20 +207,8 @@ pub fn run() {
             vat.heap.env,
             vat.vm.closure_descs_ref(),
         ) {
-            Ok(()) => eprintln!("  image saved to LMDB ({} objects)", vat.heap.object_count()),
+            Ok(()) => eprintln!("  image saved ({} objects)", vat.heap.object_count()),
             Err(e) => eprintln!("  ~ save failed: {e}"),
-        }
-    }
-
-    // save plugin paths for next session
-    let plugin_paths: Vec<String> = sched.loaded_plugins.iter()
-        .map(|p| p.path.to_string_lossy().to_string())
-        .collect();
-    if !plugin_paths.is_empty() {
-        let plugins_file = Path::new(STORE_PATH).join("plugins.json");
-        if let Ok(json) = serde_json::to_string_pretty(&plugin_paths) {
-            let _ = std::fs::write(&plugins_file, json);
-            eprintln!("  {} plugin(s) saved", plugin_paths.len());
         }
     }
 

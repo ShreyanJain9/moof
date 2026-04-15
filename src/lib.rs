@@ -25,6 +25,7 @@ pub mod store;
 pub mod plugins;
 pub mod runtime;
 pub mod scheduler;
+pub mod manifest;
 pub mod lang;
 
 // re-export the most-used types at crate root

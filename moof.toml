@@ -1,0 +1,45 @@
+# moof.toml — image manifest
+#
+# everything moof loads is declared here. no manifest = blank VM.
+# edit this file to add/remove types, capabilities, source files.
+
+[image]
+name = "moof"
+path = ".moof/store"
+
+[types]
+# structural plugins — registered on every vat's heap.
+# "builtin:X" = compiled into the moof binary.
+# "path/to/lib.dylib" = load external plugin.
+core = "builtin:core"
+numeric = "builtin:numeric"
+collections = "builtin:collections"
+effects = "builtin:effects"
+block = "builtin:block"
+
+[capabilities]
+# each capability gets its own vat. accessed via FarRef → Act.
+console = "builtin:console"
+clock = "builtin:clock"
+
+[sources]
+# moof files eval'd into the image, in order.
+files = [
+  "lib/bootstrap.moof",
+  "lib/protocols.moof",
+  "lib/comparable.moof",
+  "lib/numeric.moof",
+  "lib/iterable.moof",
+  "lib/indexable.moof",
+  "lib/callable.moof",
+  "lib/types.moof",
+  "lib/error.moof",
+  "lib/showable.moof",
+  "lib/range.moof",
+  "lib/act.moof",
+]
+
+[grants]
+# which capabilities each context can access.
+# the REPL gets these as FarRef bindings.
+repl = ["console", "clock"]

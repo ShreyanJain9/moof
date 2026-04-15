@@ -90,28 +90,53 @@ pub fn float_unary(heap: &mut Heap, proto_id: u32, sel: &str, f: fn(f64) -> Valu
     });
 }
 
-/// The default type plugins: registered on every vat's heap.
-pub fn default_plugins() -> Vec<Box<dyn Plugin>> {
-    vec![
-        Box::new(core::CorePlugin),
-        Box::new(numeric::NumericPlugin),
-        Box::new(collections::CollectionsPlugin),
-        Box::new(block::BlockPlugin),
-        Box::new(effects::EffectsPlugin),
-    ]
+/// Look up a built-in type plugin by name.
+pub fn builtin_type_plugin(name: &str) -> Option<Box<dyn Plugin>> {
+    match name {
+        "core" => Some(Box::new(core::CorePlugin)),
+        "numeric" => Some(Box::new(numeric::NumericPlugin)),
+        "collections" => Some(Box::new(collections::CollectionsPlugin)),
+        "block" => Some(Box::new(block::BlockPlugin)),
+        "effects" => Some(Box::new(effects::EffectsPlugin)),
+        _ => None,
+    }
 }
 
-/// The default capability plugins: each becomes its own vat.
-pub fn default_capabilities() -> Vec<Box<dyn CapabilityPlugin>> {
-    vec![
-        Box::new(capabilities::ConsoleCapability),
-        Box::new(capabilities::ClockCapability),
-    ]
+/// Look up a built-in capability plugin by name.
+pub fn builtin_capability(name: &str) -> Option<Box<dyn CapabilityPlugin>> {
+    match name {
+        "console" => Some(Box::new(capabilities::ConsoleCapability)),
+        "clock" => Some(Box::new(capabilities::ClockCapability)),
+        _ => None,
+    }
 }
 
-/// Register all type plugins on a heap.
+/// Register type plugins on a heap based on manifest [types].
+pub fn register_from_manifest(heap: &mut Heap, types: &std::collections::HashMap<String, String>) {
+    // ensure "core" loads first, then alphabetical
+    let mut names: Vec<&String> = types.keys().collect();
+    names.sort_by(|a, b| {
+        if a.as_str() == "core" { std::cmp::Ordering::Less }
+        else if b.as_str() == "core" { std::cmp::Ordering::Greater }
+        else { a.cmp(b) }
+    });
+    for name in names {
+        let spec = &types[name];
+        if let Some(builtin_name) = crate::manifest::Manifest::is_builtin(spec) {
+            if let Some(plugin) = builtin_type_plugin(builtin_name) {
+                plugin.register(heap);
+            } else {
+                eprintln!("  ~ unknown builtin type: {builtin_name}");
+            }
+        } else {
+            eprintln!("  ~ external type plugins not yet supported: {spec}");
+        }
+    }
+}
+
+/// Register all default type plugins (fallback when no manifest).
 pub fn register_all(heap: &mut Heap) {
-    for plugin in default_plugins() {
-        plugin.register(heap);
+    for name in ["core", "numeric", "collections", "block", "effects"] {
+        if let Some(p) = builtin_type_plugin(name) { p.register(heap); }
     }
 }

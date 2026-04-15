@@ -63,12 +63,26 @@ const BOOTSTRAP_FILES: &[&str] = &[
 ];
 
 impl Vat {
-    /// Create a new vat with a fresh Heap and VM.
+    /// Create a new vat with default type plugins.
     pub fn new(id: u32) -> Self {
         let mut heap = Heap::new();
         heap.vat_id = id;
         let vm = VM::new();
         crate::runtime::register_type_protos(&mut heap);
+        Vat {
+            id,
+            heap,
+            vm,
+            mailbox: VecDeque::new(),
+            status: VatStatus::Idle,
+        }
+    }
+
+    /// Create a bare vat (no type plugins). Plugins registered separately.
+    pub fn new_bare(id: u32) -> Self {
+        let mut heap = Heap::new();
+        heap.vat_id = id;
+        let vm = VM::new();
         Vat {
             id,
             heap,
@@ -151,6 +165,16 @@ impl Scheduler {
         self.next_vat_id += 1;
         let mut vat = Vat::new(id);
         vat.load_bootstrap();
+        self.vats.push(vat);
+        id
+    }
+
+    /// Spawn a vat with type plugins from a manifest. No source files loaded.
+    pub fn spawn_vat_with_manifest(&mut self, manifest: &crate::manifest::Manifest) -> u32 {
+        let id = self.next_vat_id;
+        self.next_vat_id += 1;
+        let mut vat = Vat::new_bare(id);
+        crate::plugins::register_from_manifest(&mut vat.heap, &manifest.types);
         self.vats.push(vat);
         id
     }
