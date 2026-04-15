@@ -115,12 +115,23 @@ impl Vat {
     }
 }
 
+/// Info about a loaded dynamic plugin.
+pub struct LoadedPlugin {
+    pub name: String,
+    pub path: std::path::PathBuf,
+    pub vat_id: u32,
+    pub obj_id: u32,
+}
+
 /// The scheduler: manages vats and runs them.
 pub struct Scheduler {
     pub vats: Vec<Vat>,
     pub fuel_per_turn: u64,
     next_vat_id: u32,
-    loaded_plugins: Vec<Box<dyn crate::plugins::CapabilityPlugin>>,
+    // keep dylib handles alive
+    _plugin_handles: Vec<Box<dyn CapabilityPlugin>>,
+    /// Dynamically loaded plugins (for persistence/reload).
+    pub loaded_plugins: Vec<LoadedPlugin>,
 }
 
 impl Scheduler {
@@ -129,6 +140,7 @@ impl Scheduler {
             vats: Vec::new(),
             fuel_per_turn,
             next_vat_id: 0,
+            _plugin_handles: Vec::new(),
             loaded_plugins: Vec::new(),
         }
     }
@@ -166,13 +178,45 @@ impl Scheduler {
     /// Load a dynamic plugin from a shared library and spawn it as a capability vat.
     /// Returns (capability_name, vat_id, root_object_id).
     pub fn load_plugin(&mut self, path: &std::path::Path) -> Result<(String, u32, u32), String> {
+        // check if already loaded
+        if let Some(existing) = self.loaded_plugins.iter().find(|p| p.path == path) {
+            return Err(format!("plugin '{}' already loaded from {:?}", existing.name, existing.path));
+        }
+
         let plugin = crate::plugins::dynload::DynCapabilityPlugin::load(path)?;
         let name = plugin.name().to_string();
+        let plugin_path = plugin.path().to_path_buf();
         let (vat_id, obj_id) = self.spawn_capability(&plugin);
-        // keep the plugin alive (it owns the dylib handle)
-        // store it in the scheduler
-        self.loaded_plugins.push(Box::new(plugin));
+
+        self.loaded_plugins.push(LoadedPlugin {
+            name: name.clone(),
+            path: plugin_path,
+            vat_id,
+            obj_id,
+        });
+        // keep the dylib handle alive
+        self._plugin_handles.push(Box::new(plugin));
         Ok((name, vat_id, obj_id))
+    }
+
+    /// Get paths of all loaded dynamic plugins (for image persistence).
+    pub fn plugin_paths(&self) -> Vec<&std::path::Path> {
+        self.loaded_plugins.iter().map(|p| p.path.as_path()).collect()
+    }
+
+    /// Reload all plugins from saved paths. Used on image restore.
+    pub fn reload_plugins(&mut self, paths: &[std::path::PathBuf], repl_vat_id: u32) {
+        for path in paths {
+            match self.load_plugin(path) {
+                Ok((name, vat_id, obj_id)) => {
+                    let farref = self.create_farref(repl_vat_id, vat_id, obj_id);
+                    let sym = self.vat_mut(repl_vat_id).heap.intern(&name);
+                    self.vat_mut(repl_vat_id).heap.env_def(sym, farref);
+                    eprintln!("  reloaded plugin '{name}'");
+                }
+                Err(e) => eprintln!("  ~ failed to reload plugin from {path:?}: {e}"),
+            }
+        }
     }
 
     /// Create a FarRef in a vat pointing to an object in another vat.

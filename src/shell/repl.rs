@@ -58,6 +58,17 @@ pub fn run() {
         sched.vat_mut(repl_vat_id).heap.env_def(sym, farref);
     }
 
+    // reload plugins from previous session
+    let plugins_file = Path::new(STORE_PATH).join("plugins.json");
+    if plugins_file.exists() {
+        if let Ok(json) = std::fs::read_to_string(&plugins_file) {
+            if let Ok(paths) = serde_json::from_str::<Vec<String>>(&json) {
+                let paths: Vec<std::path::PathBuf> = paths.iter().map(std::path::PathBuf::from).collect();
+                sched.reload_plugins(&paths, repl_vat_id);
+            }
+        }
+    }
+
     println!();
 
     let mut rl = match rustyline::DefaultEditor::new() {
@@ -88,6 +99,16 @@ pub fn run() {
                     eprintln!("  loaded plugin '{name}' (vat {vat_id})");
                 }
                 Err(e) => eprintln!("  ~ plugin error: {e}"),
+            }
+            continue;
+        }
+        if trimmed == "(plugins)" {
+            if sched.loaded_plugins.is_empty() {
+                println!("  no dynamic plugins loaded");
+            } else {
+                for p in &sched.loaded_plugins {
+                    println!("  {} (vat {}, {:?})", p.name, p.vat_id, p.path);
+                }
             }
             continue;
         }
@@ -166,6 +187,18 @@ pub fn run() {
         ) {
             Ok(()) => eprintln!("  image saved to LMDB ({} objects)", vat.heap.object_count()),
             Err(e) => eprintln!("  ~ save failed: {e}"),
+        }
+    }
+
+    // save plugin paths for next session
+    let plugin_paths: Vec<String> = sched.loaded_plugins.iter()
+        .map(|p| p.path.to_string_lossy().to_string())
+        .collect();
+    if !plugin_paths.is_empty() {
+        let plugins_file = Path::new(STORE_PATH).join("plugins.json");
+        if let Ok(json) = serde_json::to_string_pretty(&plugin_paths) {
+            let _ = std::fs::write(&plugins_file, json);
+            eprintln!("  {} plugin(s) saved", plugin_paths.len());
         }
     }
 
