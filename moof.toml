@@ -37,6 +37,7 @@ files = [
   "lib/showable.moof",
   "lib/range.moof",
   "lib/act.moof",
+  "lib/server.moof",
 ]
 
 [grants]

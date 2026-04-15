@@ -338,8 +338,21 @@ impl Scheduler {
                 // resolve the Act in the parent vat
                 match result {
                     Ok(val) => {
-                        let copied_val = self.copy_value_across(val, child_id, parent_vat_id);
-                        self.resolve_act(parent_vat_id, req.act_id, copied_val, false);
+                        if req.serve {
+                            // serve mode: return a FarRef to the object in the child vat
+                            if let Some(obj_id) = val.as_any_object() {
+                                let farref = self.create_farref(parent_vat_id, child_id, obj_id);
+                                self.resolve_act(parent_vat_id, req.act_id, farref, false);
+                            } else {
+                                let err = self.vat_mut(parent_vat_id).heap
+                                    .make_error("serve: closure must return an object");
+                                self.resolve_act(parent_vat_id, req.act_id, err, true);
+                            }
+                        } else {
+                            // compute mode: copy the result value
+                            let copied_val = self.copy_value_across(val, child_id, parent_vat_id);
+                            self.resolve_act(parent_vat_id, req.act_id, copied_val, false);
+                        }
                     }
                     Err(e) => {
                         let err_val = self.vat_mut(parent_vat_id).heap.make_error(&e);
@@ -382,10 +395,14 @@ impl Scheduler {
                 let result = self.vat_mut(target_vat_id).dispatch_message(&msg);
                 match result {
                     Ok(val) => {
+                        // check if the handler returned an Update value
+                        let reply = self.process_handler_result(target_vat_id, msg.receiver_id, val);
+                        // copy the reply to the source vat
+                        let copied = self.copy_value_across(reply, target_vat_id, source_vat_id);
                         resolutions.push(ActResolution {
                             vat_id: source_vat_id,
                             act_id: out_msg.act_id,
-                            result: val,
+                            result: copied,
                             is_error: false,
                         });
                     }
@@ -550,6 +567,30 @@ impl Scheduler {
                         parent, new_names, new_vals,
                     );
                 }
+                crate::object::HeapObject::Pair(car, cdr) => {
+                    let car = *car;
+                    let cdr = *cdr;
+                    let new_car = self.copy_value_across(car, _from_vat, to_vat);
+                    let new_cdr = self.copy_value_across(cdr, _from_vat, to_vat);
+                    return self.vat_mut(to_vat).heap.cons(new_car, new_cdr);
+                }
+                crate::object::HeapObject::Table { seq, map } => {
+                    let seq = seq.clone();
+                    let map = map.clone();
+                    let new_seq: Vec<Value> = seq.iter()
+                        .map(|v| self.copy_value_across(*v, _from_vat, to_vat))
+                        .collect();
+                    let new_map: Vec<(Value, Value)> = map.iter()
+                        .map(|(k, v)| {
+                            let nk = self.copy_value_across(*k, _from_vat, to_vat);
+                            let nv = self.copy_value_across(*v, _from_vat, to_vat);
+                            (nk, nv)
+                        })
+                        .collect();
+                    return self.vat_mut(to_vat).heap.alloc_val(
+                        crate::object::HeapObject::Table { seq: new_seq, map: new_map }
+                    );
+                }
                 _ => {
                     eprintln!("  ~ warning: cannot copy heap object across vats (yet)");
                     return Value::NIL;
@@ -557,6 +598,38 @@ impl Scheduler {
             }
         }
         val
+    }
+
+    /// Process a handler's return value. If it's an Update, apply the delta
+    /// to the receiver and return the reply. Otherwise return the value as-is.
+    fn process_handler_result(&mut self, vat_id: u32, receiver_id: u32, val: Value) -> Value {
+        let vat = self.vat_mut(vat_id);
+        let update_proto = vat.heap.type_protos[crate::heap::PROTO_UPDATE];
+        if update_proto.is_nil() { return val; }
+
+        // check if val is an Update
+        let proto = vat.heap.prototype_of(val);
+        if proto != update_proto { return val; }
+
+        // it's an Update — extract delta and reply
+        let delta_sym = vat.heap.intern("__delta");
+        let reply_sym = vat.heap.intern("__reply");
+        let val_id = val.as_any_object().unwrap();
+        let delta = vat.heap.get(val_id).slot_get(delta_sym).unwrap_or(Value::NIL);
+        let reply = vat.heap.get(val_id).slot_get(reply_sym).unwrap_or(Value::NIL);
+
+        // apply delta: for each slot in the delta object, update the receiver
+        if let Some(delta_id) = delta.as_any_object() {
+            let delta_names = vat.heap.get(delta_id).slot_names();
+            let delta_vals: Vec<Value> = delta_names.iter()
+                .map(|n| vat.heap.get(delta_id).slot_get(*n).unwrap_or(Value::NIL))
+                .collect();
+            for (name, val) in delta_names.iter().zip(delta_vals.iter()) {
+                vat.heap.get_mut(receiver_id).slot_set(*name, *val);
+            }
+        }
+
+        reply
     }
 
     /// Check if a value is an Act (has PROTO_ACT as prototype).

@@ -269,6 +269,7 @@ impl Plugin for EffectsPlugin {
             heap.spawn_queue.push(SpawnRequest {
                 payload,
                 act_id: act_obj_id,
+                serve: false,
             });
 
             Ok(act)
@@ -290,6 +291,54 @@ impl Plugin for EffectsPlugin {
             heap.spawn_queue.push(SpawnRequest {
                 payload: SpawnPayload::ClosureWithArgs(block, spawn_args),
                 act_id: act_obj_id,
+                serve: false,
+            });
+
+            Ok(act)
+        });
+
+        // [Vat serve: block] — spawn a server vat, return FarRef (object stays in vat)
+        native(heap, vat_id_obj, "serve:", |heap, _receiver, args| {
+            let arg = args.first().copied().ok_or("serve: needs a block or source string")?;
+            let payload = if let Some(obj_id) = arg.as_any_object() {
+                match heap.get(obj_id) {
+                    HeapObject::Text(s) => SpawnPayload::Source(s.clone()),
+                    HeapObject::Closure { .. } => SpawnPayload::Closure(arg),
+                    _ => return Err("serve: argument must be a block or source string".into()),
+                }
+            } else {
+                return Err("serve: argument must be a block or source string".into());
+            };
+
+            let act = heap.make_pending_act();
+            let act_obj_id = act.as_any_object().unwrap();
+
+            heap.spawn_queue.push(SpawnRequest {
+                payload,
+                act_id: act_obj_id,
+                serve: true,  // return FarRef, keep vat alive
+            });
+
+            Ok(act)
+        });
+
+        // [Vat serve:with: block args] — serve with args
+        native(heap, vat_id_obj, "serve:with:", |heap, _receiver, args| {
+            let block = args.first().copied().ok_or("serve:with: needs a block")?;
+            let args_val = args.get(1).copied().ok_or("serve:with: needs args")?;
+
+            if heap.as_closure(block).is_none() {
+                return Err("serve:with: first arg must be a closure".into());
+            }
+            let spawn_args = heap.list_to_vec(args_val);
+
+            let act = heap.make_pending_act();
+            let act_obj_id = act.as_any_object().unwrap();
+
+            heap.spawn_queue.push(SpawnRequest {
+                payload: SpawnPayload::ClosureWithArgs(block, spawn_args),
+                act_id: act_obj_id,
+                serve: true,
             });
 
             Ok(act)

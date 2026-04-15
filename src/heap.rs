@@ -48,6 +48,7 @@ pub enum SpawnPayload {
 pub struct SpawnRequest {
     pub payload: SpawnPayload,
     pub act_id: u32,             // Act in this vat to resolve with the result
+    pub serve: bool,             // true = return FarRef (server vat), false = copy result (compute vat)
 }
 
 /// An outgoing message from a vat (queued by FarRef's doesNotUnderstand:).
