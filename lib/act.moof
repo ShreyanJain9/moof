@@ -163,3 +163,13 @@
 ; here we just conform Act to Chainable.
 
 (conform Act Chainable)
+
+; ═══════════════════════════════════════════════════════════
+; layer 6: Update (state transition type)
+; ═══════════════════════════════════════════════════════════
+;
+; Update carries a delta (slots to change) and a reply (value
+; to send back). then: is defined natively — applies f to the
+; reply, merges deltas if f returns another Update.
+
+(conform Update Chainable)

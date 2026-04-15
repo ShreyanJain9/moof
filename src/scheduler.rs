@@ -14,6 +14,39 @@ use crate::value::Value;
 use crate::lang::compiler::Compiler;
 use crate::plugins::CapabilityPlugin;
 
+/// Merge two delta objects: base slots + override slots → new object.
+fn merge_deltas(heap: &mut Heap, base: Value, overrides: Value) -> Value {
+    let base_id = match base.as_any_object() {
+        Some(id) => id,
+        None => return overrides,
+    };
+    let over_id = match overrides.as_any_object() {
+        Some(id) => id,
+        None => return base,
+    };
+
+    // collect all slots from base
+    let base_names = heap.get(base_id).slot_names();
+    let mut names: Vec<u32> = base_names.clone();
+    let mut vals: Vec<Value> = base_names.iter()
+        .map(|n| heap.get(base_id).slot_get(*n).unwrap_or(Value::NIL))
+        .collect();
+
+    // apply overrides
+    let over_names = heap.get(over_id).slot_names();
+    for name in &over_names {
+        let val = heap.get(over_id).slot_get(*name).unwrap_or(Value::NIL);
+        if let Some(i) = names.iter().position(|n| *n == *name) {
+            vals[i] = val;
+        } else {
+            names.push(*name);
+            vals.push(val);
+        }
+    }
+
+    heap.make_object_with_slots(Value::NIL, names, vals)
+}
+
 /// A message queued for delivery to a vat.
 pub struct Message {
     pub receiver_id: u32,        // object ID in the target vat
@@ -295,9 +328,50 @@ impl Scheduler {
                 let cont_fn = vat.heap.get(act_id).slot_get(cont_fn_sym);
                 let cont_val = vat.heap.get(act_id).slot_get(cont_val_sym);
                 if let (Some(f), Some(val)) = (cont_fn, cont_val) {
+                    // check if this ready-act has a merge_delta (from Update then:)
+                    let merge_delta_sym = vat.heap.intern("__merge_delta");
+                    let merge_delta = vat.heap.get(act_id).handler_get(merge_delta_sym);
+
                     match vat.vm.call_value(&mut vat.heap, f, &[val]) {
                         Ok(result) => {
-                            self.resolve_act(vat_id, act_id, result, false);
+                            if let Some(our_delta) = merge_delta {
+                                // wrap result: if result is an Update, merge deltas.
+                                // if result is a plain value, create Update with our delta.
+                                let vat = self.vat_mut(vat_id);
+                                let update_proto = vat.heap.type_protos[crate::heap::PROTO_UPDATE];
+                                let is_update = !update_proto.is_nil()
+                                    && vat.heap.prototype_of(result) == update_proto;
+
+                                let final_val = if is_update {
+                                    // merge: our delta + result's delta
+                                    let result_id = result.as_any_object().unwrap();
+                                    let delta_sym = vat.heap.intern("__delta");
+                                    let reply_sym = vat.heap.intern("__reply");
+                                    let result_delta = vat.heap.get(result_id)
+                                        .slot_get(delta_sym).unwrap_or(Value::NIL);
+                                    let result_reply = vat.heap.get(result_id)
+                                        .slot_get(reply_sym).unwrap_or(Value::NIL);
+                                    // merge: start with our_delta slots, override with result_delta slots
+                                    let merged = merge_deltas(&mut vat.heap, our_delta, result_delta);
+                                    vat.heap.make_object_with_slots(
+                                        update_proto,
+                                        vec![delta_sym, reply_sym],
+                                        vec![merged, result_reply],
+                                    )
+                                } else {
+                                    // plain value — wrap with our delta
+                                    let delta_sym = vat.heap.intern("__delta");
+                                    let reply_sym = vat.heap.intern("__reply");
+                                    vat.heap.make_object_with_slots(
+                                        update_proto,
+                                        vec![delta_sym, reply_sym],
+                                        vec![our_delta, result],
+                                    )
+                                };
+                                self.resolve_act(vat_id, act_id, final_val, false);
+                            } else {
+                                self.resolve_act(vat_id, act_id, result, false);
+                            }
                         }
                         Err(e) => {
                             let err_val = self.vat_mut(vat_id).heap.make_error(&e);
@@ -641,7 +715,7 @@ impl Scheduler {
         let delta = vat.heap.get(val_id).slot_get(delta_sym).unwrap_or(Value::NIL);
         let reply = vat.heap.get(val_id).slot_get(reply_sym).unwrap_or(Value::NIL);
 
-        // apply delta: for each slot in the delta object, update the receiver
+        // apply delta: use with: to create merged state, then replace slots
         if let Some(delta_id) = delta.as_any_object() {
             let delta_names = vat.heap.get(delta_id).slot_names();
             let delta_vals: Vec<Value> = delta_names.iter()
@@ -651,6 +725,9 @@ impl Scheduler {
                 vat.heap.get_mut(receiver_id).slot_set(*name, *val);
             }
         }
+        // note: slot_set is used here as an internal scheduler mechanism,
+        // not as a user-facing mutation. the server object is only modified
+        // between message deliveries, atomically.
 
         reply
     }

@@ -397,6 +397,42 @@ impl Plugin for EffectsPlugin {
             Ok(heap.get(id).slot_get(reply_sym).unwrap_or(Value::NIL))
         });
 
+        // Update: then: — apply f to reply. if f returns Update, merge deltas.
+        native(heap, update_id, "then:", |heap, receiver, args| {
+            let f = args.first().copied().ok_or("then: needs a function")?;
+            let id = receiver.as_any_object().ok_or("then: not an update")?;
+            let reply_sym = heap.intern("__reply");
+            let delta_sym = heap.intern("__delta");
+            let reply = heap.get(id).slot_get(reply_sym).unwrap_or(Value::NIL);
+            let our_delta = heap.get(id).slot_get(delta_sym).unwrap_or(Value::NIL);
+
+            // apply f to the reply — we can't call closures from native handlers,
+            // so return a pending-style value that the scheduler resolves.
+            // actually: for Update, then: is most useful at the moof level.
+            // let's just store f and the update, the scheduler chains them.
+            // OR: use the ready_acts mechanism.
+
+            // simplest: create a new pending Act that runs f(reply) and wraps
+            // the result with our delta.
+            let new_act = heap.make_pending_act();
+            let new_act_id = new_act.as_any_object().unwrap();
+            let cont_fn_sym = heap.intern("__cont_fn");
+            let cont_val_sym = heap.intern("__cont_val");
+            let merge_delta_sym = heap.intern("__merge_delta");
+            heap.get_mut(new_act_id).slot_set(cont_fn_sym, f);
+            heap.get_mut(new_act_id).slot_set(cont_val_sym, reply);
+            // store our delta to merge after f runs
+            heap.get_mut(new_act_id).handler_set(merge_delta_sym, our_delta);
+            heap.ready_acts.push(new_act_id);
+            Ok(new_act)
+        });
+
+        // Update: map: — alias for then: (same as Act)
+        let then_sym = heap.intern("then:");
+        let map_sym = heap.intern("map:");
+        let then_handler = heap.get(update_id).handler_get(then_sym).unwrap();
+        heap.get_mut(update_id).handler_set(map_sym, then_handler);
+
         let update_sym = heap.intern("Update");
         heap.env_def(update_sym, update_proto);
 
