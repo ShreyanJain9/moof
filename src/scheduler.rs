@@ -395,8 +395,31 @@ impl Scheduler {
                 let result = self.vat_mut(target_vat_id).dispatch_message(&msg);
                 match result {
                     Ok(val) => {
-                        // check if the handler returned an Update value
-                        let reply = self.process_handler_result(target_vat_id, msg.receiver_id, val);
+                        // check what the handler returned
+                        let vat = self.vat_mut(target_vat_id);
+                        let is_act = Self::is_act(&vat.heap, val);
+                        let reply = if is_act {
+                            // handler returned an Act (IO + maybe Update).
+                            // we need to wait for the Act to resolve, then
+                            // check for Update and apply the delta.
+                            // store the receiver_id and caller info on the Act
+                            // so the drain loop can finalize it later.
+                            let act_id = val.as_any_object().unwrap();
+                            let srv_recv_sym = vat.heap.intern("__server_recv");
+                            let srv_caller_vat_sym = vat.heap.intern("__server_caller_vat");
+                            let srv_caller_act_sym = vat.heap.intern("__server_caller_act");
+                            vat.heap.get_mut(act_id).handler_set(srv_recv_sym,
+                                Value::integer(msg.receiver_id as i64));
+                            vat.heap.get_mut(act_id).handler_set(srv_caller_vat_sym,
+                                Value::integer(source_vat_id as i64));
+                            vat.heap.get_mut(act_id).handler_set(srv_caller_act_sym,
+                                Value::integer(out_msg.act_id as i64));
+                            // don't resolve the caller's Act yet — the drain loop
+                            // will handle it when this Act resolves
+                            continue;
+                        } else {
+                            self.process_handler_result(target_vat_id, msg.receiver_id, val)
+                        };
                         // copy the reply to the source vat
                         let copied = self.copy_value_across(reply, target_vat_id, source_vat_id);
                         resolutions.push(ActResolution {
@@ -714,7 +737,32 @@ impl Scheduler {
         vat.heap.get_mut(act_id).slot_set(state_sym, Value::symbol(resolved_sym));
         vat.heap.get_mut(act_id).slot_set(result_sym, current_val);
 
+        // check if this Act is from a server handler (has __server_recv metadata).
+        // if so, process the resolved value as a handler result (check for Update,
+        // apply delta), then resolve the caller's Act with the reply.
+        let srv_recv_sym = vat.heap.intern("__server_recv");
+        let srv_info = vat.heap.get(act_id).handler_get(srv_recv_sym)
+            .and_then(|v| v.as_integer())
+            .map(|recv_id| {
+                let caller_vat_sym = vat.heap.intern("__server_caller_vat");
+                let caller_act_sym = vat.heap.intern("__server_caller_act");
+                let caller_vat = vat.heap.get(act_id).handler_get(caller_vat_sym)
+                    .and_then(|v| v.as_integer()).unwrap_or(0) as u32;
+                let caller_act = vat.heap.get(act_id).handler_get(caller_act_sym)
+                    .and_then(|v| v.as_integer()).unwrap_or(0) as u32;
+                (recv_id as u32, caller_vat, caller_act)
+            });
+        if let Some((recv_id, caller_vat, caller_act)) = srv_info {
+            // process the resolved value — check for Update
+            let reply = self.process_handler_result(vat_id, recv_id, current_val);
+            // copy reply to the caller's vat and resolve their Act
+            let copied = self.copy_value_across(reply, vat_id, caller_vat);
+            self.resolve_act(caller_vat, caller_act, copied, is_err);
+            return;
+        }
+
         // check if this Act has a forward link (inner Act → outer Act)
+        let vat = self.vat_mut(vat_id);
         let fwd_sym = vat.heap.intern("__forward_to");
         let fwd_info = vat.heap.get(act_id).handler_get(fwd_sym)
             .and_then(|v| v.as_integer())
