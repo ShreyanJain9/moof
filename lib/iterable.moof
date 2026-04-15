@@ -15,10 +15,9 @@
 ; protocol inclusion.
 ;
 ; implementation note: provided methods use toList + recursion.
-; the recursive pattern (let ((go nil)) (:= go (fn ...)) (go ...))
-; relies on mutable local variables. for types where closures
-; capture by value (not reference), Indexable provides efficient
-; override implementations using the cell pattern instead.
+; all implementations are pure — no mutation. recursive helpers use
+; the self-passing pattern (fn (self-go ...) (self-go self-go ...))
+; in place of letrec.
 
 (defprotocol Iterable
   "Collections. Implement each: to get map, filter, fold, sort,

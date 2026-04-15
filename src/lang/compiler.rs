@@ -455,45 +455,7 @@ impl<'a> Compiler<'a> {
                     return Ok(());
                 }
 
-                "while" if stable => {
-                    // (while cond body...) → loop: if !cond break; body; goto loop
-                    let items = self.heap.list_to_vec(expr);
-                    if items.len() < 3 {
-                        return Err("while: need condition and body".into());
-                    }
-
-                    let loop_start = self.chunk.offset();
-
-                    // compile condition
-                    let cond_reg = self.alloc_reg();
-                    self.compile_expr(items[1], cond_reg)?;
-
-                    // jump out if false
-                    let exit_jump = self.chunk.offset();
-                    self.chunk.emit(Op::JumpIfFalse, cond_reg, 0, 0);
-
-                    // compile body
-                    for i in 2..items.len() {
-                        let tmp = self.alloc_reg();
-                        self.compile_expr(items[i], tmp)?;
-                    }
-
-                    // jump back to loop start
-                    let back_offset = (loop_start as i16) - (self.chunk.offset() as i16) - 4;
-                    let back_bytes = back_offset.to_be_bytes();
-                    self.chunk.emit(Op::Jump, back_bytes[0], back_bytes[1], 0);
-
-                    // patch exit jump
-                    let exit_target = self.chunk.offset();
-                    let exit_offset = (exit_target as i16) - (exit_jump as i16) - 4;
-                    let exit_bytes = exit_offset.to_be_bytes();
-                    self.chunk.code[exit_jump + 2] = exit_bytes[0];
-                    self.chunk.code[exit_jump + 3] = exit_bytes[1];
-
-                    // while returns nil
-                    self.chunk.emit(Op::LoadNil, dst, 0, 0);
-                    return Ok(());
-                }
+                // "while" removed — use recursion instead
 
                 "cons" if stable => {
                     let items = self.heap.list_to_vec(expr);
@@ -535,25 +497,8 @@ impl<'a> Compiler<'a> {
                     return Ok(());
                 }
 
-                ":=" if stable => {
-                    // (:= name value) — mutate a local or global binding
-                    let items = self.heap.list_to_vec(expr);
-                    if items.len() != 3 {
-                        return Err("<-: need name and value".into());
-                    }
-                    let name_sym = items[1].as_symbol()
-                        .ok_or("<-: target must be a symbol")?;
-                    self.compile_expr(items[2], dst)?;
-                    if let Some(reg) = self.find_local(name_sym) {
-                        // mutate local
-                        self.chunk.emit(Op::Move, reg, dst, 0);
-                    } else {
-                        // mutate global
-                        let idx = self.add_sym_const(name_sym);
-                        self.chunk.emit(Op::DefGlobal, (idx >> 8) as u8, idx as u8, dst);
-                    }
-                    return Ok(());
-                }
+                // ":=" removed — all values are immutable.
+                // use let bindings, fold, recursion, or servers for state.
 
                 "if" if stable => {
                     // (if cond then else)

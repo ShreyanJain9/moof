@@ -3,7 +3,7 @@
 ; the kernel: vau, send, def, quote — 4 compiler forms.
 ; everything else is defined here as vau operatives or sends.
 ;
-; the compiler has fast-paths for if/fn/let/while/cons/eq/do/:=/eval/try/error
+; the compiler has fast-paths for if/fn/let/cons/eq/do/eval/try/error
 ; that emit optimized bytecode. these definitions are the SEMANTIC SPEC —
 ; they make every form an inspectable, passable, overridable object.
 ;
