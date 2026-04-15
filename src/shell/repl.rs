@@ -76,6 +76,22 @@ pub fn run() {
         let trimmed = line.trim();
         if trimmed.is_empty() { continue; }
 
+        // REPL commands
+        if trimmed.starts_with("(load-plugin ") && trimmed.ends_with(')') {
+            let path_str = trimmed.strip_prefix("(load-plugin ").unwrap()
+                .strip_suffix(')').unwrap().trim().trim_matches('"');
+            match sched.load_plugin(std::path::Path::new(path_str)) {
+                Ok((name, vat_id, obj_id)) => {
+                    let farref = sched.create_farref(repl_vat_id, vat_id, obj_id);
+                    let sym = sched.vat_mut(repl_vat_id).heap.intern(&name);
+                    sched.vat_mut(repl_vat_id).heap.env_def(sym, farref);
+                    eprintln!("  loaded plugin '{name}' (vat {vat_id})");
+                }
+                Err(e) => eprintln!("  ~ plugin error: {e}"),
+            }
+            continue;
+        }
+
         // accumulate multi-line input when brackets are unbalanced
         let mut input = trimmed.to_string();
         loop {

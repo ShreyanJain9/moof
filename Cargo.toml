@@ -5,8 +5,12 @@ edition = "2024"
 license = "MIT"
 description = "a persistent, concurrent objectspace"
 
+[lib]
+crate-type = ["lib", "cdylib"]
+
 [dependencies]
 rustyline = "15"
 serde = { version = "1", features = ["derive"] }
 bincode = "1"
 heed = "0.22"
+libloading = "0.8"

@@ -12,6 +12,7 @@ use crate::heap::{Heap, OutgoingMessage, SpawnRequest};
 use crate::vm::VM;
 use crate::value::Value;
 use crate::lang::compiler::Compiler;
+use crate::plugins::CapabilityPlugin;
 
 /// A message queued for delivery to a vat.
 pub struct Message {
@@ -119,6 +120,7 @@ pub struct Scheduler {
     pub vats: Vec<Vat>,
     pub fuel_per_turn: u64,
     next_vat_id: u32,
+    loaded_plugins: Vec<Box<dyn crate::plugins::CapabilityPlugin>>,
 }
 
 impl Scheduler {
@@ -127,6 +129,7 @@ impl Scheduler {
             vats: Vec::new(),
             fuel_per_turn,
             next_vat_id: 0,
+            loaded_plugins: Vec::new(),
         }
     }
 
@@ -158,6 +161,18 @@ impl Scheduler {
         let obj_id = cap.setup(&mut vat);
         self.vats.push(vat);
         (id, obj_id)
+    }
+
+    /// Load a dynamic plugin from a shared library and spawn it as a capability vat.
+    /// Returns (capability_name, vat_id, root_object_id).
+    pub fn load_plugin(&mut self, path: &std::path::Path) -> Result<(String, u32, u32), String> {
+        let plugin = crate::plugins::dynload::DynCapabilityPlugin::load(path)?;
+        let name = plugin.name().to_string();
+        let (vat_id, obj_id) = self.spawn_capability(&plugin);
+        // keep the plugin alive (it owns the dylib handle)
+        // store it in the scheduler
+        self.loaded_plugins.push(Box::new(plugin));
+        Ok((name, vat_id, obj_id))
     }
 
     /// Create a FarRef in a vat pointing to an object in another vat.
