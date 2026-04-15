@@ -26,17 +26,17 @@ impl Plugin for NumericPlugin {
         int_binop(heap, int_id, "<=", |a, b| Value::boolean(a <= b));
         int_binop(heap, int_id, ">=", |a, b| Value::boolean(a >= b));
 
-        // division and modulo (check for zero)
-        native(heap, int_id, "/", |_heap, receiver, args| {
+        // division and modulo (return Err on zero)
+        native(heap, int_id, "/", |heap, receiver, args| {
             let a = receiver.as_integer().ok_or("/: not int")?;
             let b = args.first().and_then(|v| v.as_integer()).ok_or("/: arg not int")?;
-            if b == 0 { return Err("division by zero".into()); }
+            if b == 0 { return Ok(heap.make_error("division by zero")); }
             Ok(Value::integer(a / b))
         });
-        native(heap, int_id, "%", |_heap, receiver, args| {
+        native(heap, int_id, "%", |heap, receiver, args| {
             let a = receiver.as_integer().ok_or("%: not int")?;
             let b = args.first().and_then(|v| v.as_integer()).ok_or("%: arg not int")?;
-            if b == 0 { return Err("modulo by zero".into()); }
+            if b == 0 { return Ok(heap.make_error("modulo by zero")); }
             Ok(Value::integer(a % b))
         });
 
@@ -89,10 +89,10 @@ impl Plugin for NumericPlugin {
         float_binop(heap, float_id, "atan2:", |a, b| Value::float(a.atan2(b)));
 
         // division (manual — zero check)
-        native(heap, float_id, "/", |_heap, receiver, args| {
-            let a = receiver.as_float().ok_or("/ : receiver not a float")?;
-            let b = args.first().and_then(|v| v.as_float()).ok_or("/ : arg not a float")?;
-            if b == 0.0 { return Err("division by zero".into()); }
+        native(heap, float_id, "/", |heap, receiver, args| {
+            let a = receiver.as_float().ok_or("/ : not float")?;
+            let b = args.first().and_then(|v| v.as_float()).ok_or("/ : arg not float")?;
+            if b == 0.0 { return Ok(heap.make_error("division by zero")); }
             Ok(Value::float(a / b))
         });
 

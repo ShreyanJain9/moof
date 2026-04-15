@@ -1,9 +1,11 @@
-; error.moof — error handling extensions
+; error.moof — Result-based error handling
 ;
-; the core try/catch and error forms are compiler builtins.
-; this file adds convenience methods.
+; no try/catch. errors are values: { Err message: "..." }
+; use Result (Ok/Err) for operations that can fail.
+; use recover: on Results and Acts for error handling.
+;
+; (err "message") creates an Err value.
+; [result ok?] checks if it succeeded.
+; [result recover: |e| fallback] handles errors.
 
-; rescue: — lightweight error suppression on blocks
-; [|| risky-expr rescue: default] => try risky-expr, return default on error
-(defmethod Object rescue: (default)
-  (try [self call: nil] catch: |_| default))
+(defn err (msg) { Err message: msg })

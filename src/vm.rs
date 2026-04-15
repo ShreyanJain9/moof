@@ -630,35 +630,9 @@ impl VM {
                     self.frames.last_mut().unwrap().regs[a as usize] = result?;
                 }
 
-                Op::TryCatch => {
-                    // TryCatch still uses recursive dispatch (it's a natural error boundary)
-                    let f = self.frames.last_mut().unwrap();
-                    let body = f.regs[b as usize];
-                    let handler = f.regs[c as usize];
-                    let result = self.dispatch_send(heap, body, heap.sym_call, &[]);
-                    match result {
-                        Ok(val) => self.frames.last_mut().unwrap().regs[a as usize] = val,
-                        Err(msg) => {
-                            let error_obj = heap.make_error(&msg);
-                            let arg_list = heap.list(&[error_obj]);
-                            let catch_result = self.dispatch_send(heap, handler, heap.sym_call, &[arg_list]);
-                            self.frames.last_mut().unwrap().regs[a as usize] = catch_result?;
-                        }
-                    }
-                }
-
-                Op::Throw => {
-                    let f = self.frames.last_mut().unwrap();
-                    let val = f.regs[a as usize];
-                    let msg = if let Some(id) = val.as_any_object() {
-                        match heap.get(id) {
-                            crate::object::HeapObject::Text(s) => s.clone(),
-                            _ => heap.format_value(val),
-                        }
-                    } else {
-                        heap.format_value(val)
-                    };
-                    return Err(msg);
+                // TryCatch and Throw removed — errors are Result values.
+                Op::TryCatch | Op::Throw => {
+                    return Err("try/catch/error removed — use Result values".into());
                 }
 
                 _ => return Err(format!("unimplemented opcode: {opcode:?}")),

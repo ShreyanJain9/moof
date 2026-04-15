@@ -736,79 +736,9 @@ impl<'a> Compiler<'a> {
                     return Ok(());
                 }
 
-                "try" if stable => {
-                    // (try body catch: |e| handler)
-                    // compiles body and handler as closures, emits TryCatch
-                    let items = self.heap.list_to_vec(expr);
-                    // expect: (try body catch: handler) — 4 items
-                    if items.len() != 4 {
-                        return Err("try: expected (try body catch: handler)".into());
-                    }
-                    // items[2] should be the symbol catch: — we just skip it
-                    // compile body as (fn () body)
-                    let body_reg = self.alloc_reg();
-                    {
-                        let mut sub = Compiler::new(self.heap, "<try-body>");
-                        sub.parent_locals = self.locals.clone();
-                        sub.chunk.arity = 0;
-                        let body_dst = sub.alloc_reg();
-                        sub.compile_expr(items[1], body_dst)?;
-                        sub.chunk.emit(Op::Return, body_dst, 0, 0);
-                        let capture_names: Vec<u32> = sub.captures.iter().map(|(s, _, _)| *s).collect();
-                        let capture_parent_regs: Vec<u8> = sub.captures.iter().map(|(_, r, _)| *r).collect();
-                        let capture_local_regs: Vec<u8> = sub.captures.iter().map(|(_, _, lr)| *lr).collect();
-                        let sub_result = sub.finish();
-                        let sub_descs_offset = self.closure_descs.len();
-                        let n_sub_descs = sub_result.closure_descs.len();
-                        self.closure_descs.extend(sub_result.closure_descs);
-                        let mut chunk = sub_result.chunk;
-                        if n_sub_descs > 0 {
-                            let mut pc = 0;
-                            while pc + 3 < chunk.code.len() {
-                                if Op::from_u8(chunk.code[pc]) == Some(Op::MakeClosure) {
-                                    let old = u16::from_be_bytes([chunk.code[pc + 2], chunk.code[pc + 3]]);
-                                    let new_idx = old + sub_descs_offset as u16;
-                                    chunk.code[pc + 2] = (new_idx >> 8) as u8;
-                                    chunk.code[pc + 3] = new_idx as u8;
-                                }
-                                pc += 4;
-                                if pc >= 4 && Op::from_u8(chunk.code[pc - 4]) == Some(Op::Send) { pc += 4; }
-                            }
-                        }
-                        let desc = ClosureDesc {
-                            chunk, param_names: vec![], is_operative: false,
-                            capture_names, capture_parent_regs, capture_local_regs,
-                            capture_values: Vec::new(), desc_base: 0, rest_param_reg: None,
-                        };
-                        let idx = self.closure_descs.len();
-                        self.closure_descs.push(desc);
-                        self.chunk.emit(Op::MakeClosure, body_reg, (idx >> 8) as u8, idx as u8);
-                    }
-
-                    // compile handler (should be a block/fn)
-                    let handler_reg = self.alloc_reg();
-                    self.compile_expr(items[3], handler_reg)?;
-
-                    // emit TryCatch dst, body_reg, handler_reg
-                    self.chunk.emit(Op::TryCatch, dst, body_reg, handler_reg);
-
-                    return Ok(());
-                }
-
-                "error" if stable => {
-                    // (error msg) — signal an error
-                    let items = self.heap.list_to_vec(expr);
-                    if items.len() < 2 {
-                        return Err("error: need a message".into());
-                    }
-                    let msg_reg = self.alloc_reg();
-                    self.compile_expr(items[1], msg_reg)?;
-                    self.chunk.emit(Op::Throw, msg_reg, 0, 0);
-                    // TryCatch will catch this; if uncaught, VM returns Err
-                    // load nil into dst as fallback (code after throw is unreachable)
-                    self.chunk.emit(Op::LoadNil, dst, 0, 0);
-                    return Ok(());
-                }
+                // try/catch and error removed — errors are Result values.
+                // use { Err message: "..." } for application errors.
+                // use recover: on Acts/Results for error handling.
 
                 _ => {
                     // check if this is a known operative (derived from value)
