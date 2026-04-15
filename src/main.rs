@@ -1,14 +1,6 @@
-mod value;
-mod object;
-mod heap;
-mod dispatch;
-mod opcodes;
-mod vm;
-mod store;
-mod plugins;
-mod runtime;
-mod scheduler;
-mod lang;
+// moof binary — just runs the REPL.
+// the runtime, plugins, and core are in lib.rs.
+
 mod shell;
 
 fn main() {

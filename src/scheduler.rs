@@ -149,61 +149,15 @@ impl Scheduler {
         id
     }
 
-    /// Create a Console capability vat. Returns (vat_id, console_obj_id).
-    pub fn spawn_console_vat(&mut self) -> (u32, u32) {
+    /// Spawn a capability vat from a CapabilityPlugin.
+    /// Returns (vat_id, root_object_id).
+    pub fn spawn_capability(&mut self, cap: &dyn crate::plugins::CapabilityPlugin) -> (u32, u32) {
         let id = self.next_vat_id;
         self.next_vat_id += 1;
         let mut vat = Vat::new(id);
-
-        // create the console object with native handlers
-        let console_obj = vat.heap.make_object(Value::NIL);
-        let console_id = console_obj.as_any_object().unwrap();
-
-        // println: — print a value followed by newline
-        let println_sym = vat.heap.intern("println:");
-        let h = vat.heap.register_native("println:", |heap, _receiver, args| {
-            let val = args.first().copied().unwrap_or(Value::NIL);
-            if let Some(obj_id) = val.as_any_object() {
-                if let crate::object::HeapObject::Text(s) = heap.get(obj_id) {
-                    println!("{s}");
-                } else {
-                    println!("{}", heap.format_value(val));
-                }
-            } else {
-                println!("{}", heap.format_value(val));
-            }
-            Ok(Value::NIL)
-        });
-        vat.heap.get_mut(console_id).handler_set(println_sym, h);
-
-        // print: — print without newline
-        let print_sym = vat.heap.intern("print:");
-        let h = vat.heap.register_native("print:", |heap, _receiver, args| {
-            let val = args.first().copied().unwrap_or(Value::NIL);
-            if let Some(obj_id) = val.as_any_object() {
-                if let crate::object::HeapObject::Text(s) = heap.get(obj_id) {
-                    print!("{s}");
-                } else {
-                    print!("{}", heap.format_value(val));
-                }
-            } else {
-                print!("{}", heap.format_value(val));
-            }
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
-            Ok(Value::NIL)
-        });
-        vat.heap.get_mut(console_id).handler_set(print_sym, h);
-
-        // describe
-        let desc_sym = vat.heap.intern("describe");
-        let h = vat.heap.register_native("describe", |heap, _receiver, _args| {
-            Ok(heap.alloc_string("<Console>"))
-        });
-        vat.heap.get_mut(console_id).handler_set(desc_sym, h);
-
+        let obj_id = cap.setup(&mut vat);
         self.vats.push(vat);
-        (id, console_id)
+        (id, obj_id)
     }
 
     /// Create a FarRef in a vat pointing to an object in another vat.

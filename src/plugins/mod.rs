@@ -1,23 +1,49 @@
 // Plugin system: native modules that extend the objectspace.
 //
-// A Plugin registers type prototypes and native handlers on a Heap.
-// The runtime loads plugins in order — later plugins can reference
-// prototypes created by earlier ones.
+// Two kinds of plugins:
+//
+// 1. Plugin — registers type prototypes and native handlers on a Heap.
+//    Used for core language types (Integer, String, etc.). Every vat
+//    gets these automatically.
+//
+// 2. CapabilityPlugin — creates a capability vat with native handlers.
+//    Used for IO (Console, Clock, Store, etc.). Each capability is its
+//    own vat. Sends to it go through FarRef → Act. The capability's
+//    native code is the only thing that touches the outside world.
+//
+// External code adds plugins by creating a Runtime with custom plugin
+// lists — no modification to moof source needed.
 
 pub mod core;
 pub mod numeric;
 pub mod collections;
 pub mod effects;
 pub mod block;
+pub mod capabilities;
 
 use crate::heap::Heap;
 use crate::object::HeapObject;
 use crate::value::Value;
+use crate::scheduler::Vat;
 
-/// A native module that extends the objectspace.
+/// A native module that extends every vat's objectspace.
+/// Registers type prototypes and handlers on a Heap.
 pub trait Plugin {
     fn name(&self) -> &str;
     fn register(&self, heap: &mut Heap);
+}
+
+/// A native capability that lives in its own vat.
+/// Creates a root object with native handlers. Sends to the
+/// capability go through FarRef → outbox → scheduler → native
+/// handler → Act resolution. All effects are mediated.
+pub trait CapabilityPlugin {
+    /// The name used to bind the FarRef in the REPL (e.g. "console").
+    fn name(&self) -> &str;
+
+    /// Set up native handlers on a root object in the given vat.
+    /// Returns the root object ID (for FarRef creation).
+    fn setup(&self, vat: &mut Vat) -> u32;
 }
 
 /// Register a native handler on a prototype.
@@ -63,7 +89,7 @@ pub fn float_unary(heap: &mut Heap, proto_id: u32, sel: &str, f: fn(f64) -> Valu
     });
 }
 
-/// The default plugin set: everything needed for a working moof runtime.
+/// The default type plugins: registered on every vat's heap.
 pub fn default_plugins() -> Vec<Box<dyn Plugin>> {
     vec![
         Box::new(core::CorePlugin),
@@ -74,7 +100,15 @@ pub fn default_plugins() -> Vec<Box<dyn Plugin>> {
     ]
 }
 
-/// Register all plugins on a heap.
+/// The default capability plugins: each becomes its own vat.
+pub fn default_capabilities() -> Vec<Box<dyn CapabilityPlugin>> {
+    vec![
+        Box::new(capabilities::ConsoleCapability),
+        Box::new(capabilities::ClockCapability),
+    ]
+}
+
+/// Register all type plugins on a heap.
 pub fn register_all(heap: &mut Heap) {
     for plugin in default_plugins() {
         plugin.register(heap);

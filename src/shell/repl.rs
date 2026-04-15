@@ -1,5 +1,5 @@
-use crate::scheduler::Scheduler;
-use crate::store::Store;
+use moof::scheduler::Scheduler;
+use moof::store::Store;
 use std::path::Path;
 
 /// Count unbalanced brackets/parens/braces across the entire input.
@@ -40,16 +40,23 @@ pub fn run() {
     // vat 0: init vat (the rust runtime — bare, no bootstrap)
     let _init_vat_id = sched.spawn_bare_vat();
 
-    // vat 1: Console capability vat
-    let (console_vat_id, console_obj_id) = sched.spawn_console_vat();
+    // spawn capability vats and collect their FarRef info
+    let capabilities = moof::plugins::default_capabilities();
+    let mut cap_refs: Vec<(String, u32, u32)> = Vec::new();
+    for cap in &capabilities {
+        let (vat_id, obj_id) = sched.spawn_capability(cap.as_ref());
+        cap_refs.push((cap.name().to_string(), vat_id, obj_id));
+    }
 
-    // vat 2: the REPL vat (just a regular vat with bootstrap)
+    // the REPL vat (just a regular vat with bootstrap)
     let repl_vat_id = sched.spawn_vat();
 
-    // give the REPL a far reference to Console
-    let console_ref = sched.create_farref(repl_vat_id, console_vat_id, console_obj_id);
-    let console_sym = sched.vat_mut(repl_vat_id).heap.intern("console");
-    sched.vat_mut(repl_vat_id).heap.env_def(console_sym, console_ref);
+    // give the REPL far references to all capabilities
+    for (name, vat_id, obj_id) in &cap_refs {
+        let farref = sched.create_farref(repl_vat_id, *vat_id, *obj_id);
+        let sym = sched.vat_mut(repl_vat_id).heap.intern(name);
+        sched.vat_mut(repl_vat_id).heap.env_def(sym, farref);
+    }
 
     println!();
 
@@ -84,13 +91,13 @@ pub fn run() {
         }
 
         // eval in the REPL vat, then drain all pending cross-vat work
-        let tokens = match crate::lang::lexer::tokenize(&input) {
+        let tokens = match moof::lang::lexer::tokenize(&input) {
             Ok(t) => t,
             Err(e) => { eprintln!("  ~ lex: {e}"); continue; }
         };
 
         let vat = sched.vat_mut(repl_vat_id);
-        let mut parser = crate::lang::parser::Parser::new(&tokens, &mut vat.heap);
+        let mut parser = moof::lang::parser::Parser::new(&tokens, &mut vat.heap);
         let exprs = match parser.parse_all() {
             Ok(e) => e,
             Err(e) => { eprintln!("  ~ parse: {e}"); continue; }
@@ -98,7 +105,7 @@ pub fn run() {
 
         for expr in &exprs {
             let vat = sched.vat_mut(repl_vat_id);
-            match crate::lang::compiler::Compiler::compile_toplevel(&vat.heap, *expr) {
+            match moof::lang::compiler::Compiler::compile_toplevel(&vat.heap, *expr) {
                 Ok(result) => {
                     match vat.vm.eval_result(&mut vat.heap, result) {
                         Ok(val) => {
@@ -111,7 +118,7 @@ pub fn run() {
                             let displayed = match vat.vm.send_message(&mut vat.heap, val, show_sym, &[]) {
                                 Ok(show_val) => {
                                     if let Some(id) = show_val.as_any_object() {
-                                        if let crate::object::HeapObject::Text(s) = vat.heap.get(id) {
+                                        if let moof::object::HeapObject::Text(s) = vat.heap.get(id) {
                                             s.clone()
                                         } else {
                                             vat.heap.display_value(val)
