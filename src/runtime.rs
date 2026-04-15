@@ -89,6 +89,48 @@ pub fn register_type_protos(heap: &mut Heap) {
         Ok(val)
     });
 
+    // Object: with: — non-destructive slot update. returns a new object.
+    native(heap, obj_id, "with:", |heap, receiver, args| {
+        let overrides = args.first().copied().ok_or("with: needs an object")?;
+        let override_id = overrides.as_any_object().ok_or("with: arg must be an object")?;
+
+        // get the original object's slots + handlers
+        let recv_id = receiver.as_any_object().ok_or("with: receiver must be an object")?;
+        let (orig_names, orig_vals, parent, orig_handlers) = match heap.get(recv_id) {
+            HeapObject::General { slot_names, slot_values, parent, handlers } => {
+                (slot_names.clone(), slot_values.clone(), *parent, handlers.clone())
+            }
+            _ => return Err("with: receiver must be a general object".into()),
+        };
+
+        // get the override slots
+        let override_names_syms = heap.get(override_id).slot_names();
+        let override_vals: Vec<Value> = override_names_syms.iter()
+            .map(|n| heap.get(override_id).slot_get(*n).unwrap_or(Value::NIL))
+            .collect();
+
+        // build new slot arrays: original with overrides applied
+        let mut new_names = orig_names.clone();
+        let mut new_vals = orig_vals.clone();
+        for (name, val) in override_names_syms.iter().zip(override_vals.iter()) {
+            if let Some(i) = new_names.iter().position(|n| *n == *name) {
+                new_vals[i] = *val;
+            } else {
+                new_names.push(*name);
+                new_vals.push(*val);
+            }
+        }
+
+        // create new object with same parent and handlers
+        let new_obj = heap.alloc_val(HeapObject::General {
+            parent,
+            slot_names: new_names,
+            slot_values: new_vals,
+            handlers: orig_handlers,
+        });
+        Ok(new_obj)
+    });
+
     // Object: parent — works for ALL types (primitives, optimized variants, general objects)
     native(heap, obj_id, "parent", |heap, receiver, _args| {
         Ok(heap.prototype_of(receiver))
@@ -698,42 +740,42 @@ pub fn register_type_protos(heap: &mut Heap) {
             _ => Err("at: not a Table".into()),
         }
     });
+    // at:put: — returns a NEW table (non-destructive)
     native(heap, table_id, "at:put:", |heap, receiver, args| {
         let id = receiver.as_any_object().ok_or("at:put: not a table")?;
         let key = args.first().copied().unwrap_or(Value::NIL);
         let val = args.get(1).copied().unwrap_or(Value::NIL);
-        // find existing key index using content equality (before mutable borrow)
-        let existing_idx = match heap.get(id) {
-            HeapObject::Table { map, .. } => {
-                map.iter().position(|(k, _)| heap.values_equal(*k, key))
-            }
-            _ => return Err("at:put: not a Table".into()),
-        };
-        match heap.get_mut(id) {
+        match heap.get(id) {
             HeapObject::Table { seq, map } => {
+                let mut new_seq = seq.clone();
+                let mut new_map = map.clone();
                 if let Some(idx) = key.as_integer() {
-                    if idx >= 0 && (idx as usize) < seq.len() {
-                        seq[idx as usize] = val;
-                        return Ok(val);
+                    if idx >= 0 && (idx as usize) < new_seq.len() {
+                        new_seq[idx as usize] = val;
+                        return Ok(heap.alloc_val(HeapObject::Table { seq: new_seq, map: new_map }));
                     }
                 }
-                if let Some(pos) = existing_idx {
-                    map[pos].1 = val;
+                // map entry: update existing or append
+                let existing = new_map.iter().position(|(k, _)| heap.values_equal(*k, key));
+                if let Some(pos) = existing {
+                    new_map[pos].1 = val;
                 } else {
-                    map.push((key, val));
+                    new_map.push((key, val));
                 }
-                Ok(val)
+                Ok(heap.alloc_val(HeapObject::Table { seq: new_seq, map: new_map }))
             }
             _ => Err("at:put: not a Table".into()),
         }
     });
+    // push: — returns a NEW table with element appended (non-destructive)
     native(heap, table_id, "push:", |heap, receiver, args| {
         let id = receiver.as_any_object().ok_or("push: not a table")?;
         let val = args.first().copied().unwrap_or(Value::NIL);
-        match heap.get_mut(id) {
-            HeapObject::Table { seq, .. } => {
-                seq.push(val);
-                Ok(val)
+        match heap.get(id) {
+            HeapObject::Table { seq, map } => {
+                let mut new_seq = seq.clone();
+                new_seq.push(val);
+                Ok(heap.alloc_val(HeapObject::Table { seq: new_seq, map: map.clone() }))
             }
             _ => Err("push: not a Table".into()),
         }
@@ -781,21 +823,17 @@ pub fn register_type_protos(heap: &mut Heap) {
             _ => Err("contains: not a Table".into()),
         }
     });
+    // remove: — returns a NEW table with key removed (non-destructive)
     native(heap, table_id, "remove:", |heap, receiver, args| {
         let id = receiver.as_any_object().ok_or("remove: not a table")?;
         let key = args.first().copied().unwrap_or(Value::NIL);
-        let pos = match heap.get(id) {
-            HeapObject::Table { map, .. } => map.iter().position(|(k, _)| heap.values_equal(*k, key)),
-            _ => return Err("remove: not a Table".into()),
-        };
-        match heap.get_mut(id) {
-            HeapObject::Table { map, .. } => {
-                if let Some(pos) = pos {
-                    let (_, val) = map.remove(pos);
-                    Ok(val)
-                } else {
-                    Ok(Value::NIL)
-                }
+        match heap.get(id) {
+            HeapObject::Table { seq, map } => {
+                let new_map: Vec<(Value, Value)> = map.iter()
+                    .filter(|(k, _)| !heap.values_equal(*k, key))
+                    .cloned()
+                    .collect();
+                Ok(heap.alloc_val(HeapObject::Table { seq: seq.clone(), map: new_map }))
             }
             _ => Err("remove: not a Table".into()),
         }
@@ -1232,4 +1270,82 @@ pub fn register_type_protos(heap: &mut Heap) {
 
     let vat_sym = heap.intern("Vat");
     heap.env_def(vat_sym, vat_proto);
+
+    // -- Update type (PROTO_UPDATE) --
+    // Update is the state transition value for servers.
+    // (update delta) or (update delta reply) creates one.
+    // The vat applies the delta between message deliveries.
+    let update_proto = heap.make_object(object_proto);
+    heap.type_protos[PROTO_UPDATE] = update_proto;
+    let update_id = update_proto.as_any_object().unwrap();
+
+    // Update: describe
+    native(heap, update_id, "describe", |heap, receiver, _args| {
+        let id = receiver.as_any_object().ok_or("describe: not an update")?;
+        let delta_sym = heap.intern("__delta");
+        let reply_sym = heap.intern("__reply");
+        let delta = heap.get(id).slot_get(delta_sym)
+            .map(|v| heap.format_value(v)).unwrap_or("nil".into());
+        let reply = heap.get(id).slot_get(reply_sym)
+            .map(|v| heap.format_value(v)).unwrap_or("nil".into());
+        let s = format!("<Update delta:{delta} reply:{reply}>");
+        Ok(heap.alloc_string(&s))
+    });
+
+    // Update: show
+    native(heap, update_id, "show", |heap, receiver, _args| {
+        let id = receiver.as_any_object().ok_or("show: not an update")?;
+        let delta_sym = heap.intern("__delta");
+        let reply_sym = heap.intern("__reply");
+        let delta = heap.get(id).slot_get(delta_sym)
+            .map(|v| heap.format_value(v)).unwrap_or("nil".into());
+        let reply = heap.get(id).slot_get(reply_sym)
+            .map(|v| heap.format_value(v)).unwrap_or("nil".into());
+        let s = format!("<Update delta:{delta} reply:{reply}>  : Update");
+        Ok(heap.alloc_string(&s))
+    });
+
+    // Update: delta — get the delta object
+    native(heap, update_id, "delta", |heap, receiver, _args| {
+        let id = receiver.as_any_object().ok_or("delta: not an update")?;
+        let delta_sym = heap.intern("__delta");
+        Ok(heap.get(id).slot_get(delta_sym).unwrap_or(Value::NIL))
+    });
+
+    // Update: reply — get the reply value
+    native(heap, update_id, "reply", |heap, receiver, _args| {
+        let id = receiver.as_any_object().ok_or("reply: not an update")?;
+        let reply_sym = heap.intern("__reply");
+        Ok(heap.get(id).slot_get(reply_sym).unwrap_or(Value::NIL))
+    });
+
+    let update_sym = heap.intern("Update");
+    heap.env_def(update_sym, update_proto);
+
+    // -- `update` function --
+    // (update delta) — state transition, reply is nil
+    // (update delta reply) — state transition with reply
+    let update_fn_sym = heap.intern("update");
+    let update_fn = heap.register_native("update", |heap, _receiver, args| {
+        // args comes in as call: dispatch — args[0] is a cons list of actual args
+        let arg_list = args.first().copied().unwrap_or(Value::NIL);
+        let unpacked = heap.list_to_vec(arg_list);
+        let delta = unpacked.first().copied().ok_or("update: needs a delta object")?;
+        let reply = unpacked.get(1).copied().unwrap_or(Value::NIL);
+        let update_proto = heap.type_protos[PROTO_UPDATE];
+        let delta_sym = heap.intern("__delta");
+        let reply_sym = heap.intern("__reply");
+        Ok(heap.make_object_with_slots(
+            update_proto,
+            vec![delta_sym, reply_sym],
+            vec![delta, reply],
+        ))
+    });
+    // register as a global function — wrap the native in a closure-like dispatch
+    // For now, make `update` a global object with call: handler
+    let update_obj = heap.make_object(object_proto);
+    let update_obj_id = update_obj.as_any_object().unwrap();
+    let call_sym = heap.sym_call;
+    heap.get_mut(update_obj_id).handler_set(call_sym, update_fn);
+    heap.env_def(update_fn_sym, update_obj);
 }

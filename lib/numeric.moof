@@ -57,36 +57,39 @@
 (alias Integer pred dec)
 
 (defmethod Integer times: (block)
-  (let ((i 0)) (while [i < self] (block i) (:= i [i + 1]))))
+  (if [self <= 0] nil
+    (let ((go (fn (self-go i n blk)
+                (if [i >= n] nil
+                  (do (blk i) (self-go self-go [i + 1] n blk))))))
+      (go go 0 self block))))
 
 (defmethod Integer upto:do: (limit block)
-  (let ((i self)) (while [i <= limit] (block i) (:= i [i + 1]))))
+  (if [self > limit] nil
+    (do (block self) [[self + 1] upto: limit do: block])))
 
 (defmethod Integer downto:do: (limit block)
-  (let ((i self)) (while [i >= limit] (block i) (:= i [i - 1]))))
+  (if [self < limit] nil
+    (do (block self) [[self - 1] downto: limit do: block])))
 
 (defmethod Integer pow: (exp)
-  (let ((result 1) (i 0))
-    (while [i < exp] (:= result [result * self]) (:= i [i + 1]))
-    result))
+  (if [exp <= 0] 1
+    [self * [self pow: [exp - 1]]]))
 
 (defmethod Integer gcd: (other)
   (let ((a [self abs]) (b [other abs]))
-    (while (not [b zero?])
-      (let ((t b)) (:= b [a % b]) (:= a t)))
-    a))
+    (if [b zero?] a
+      [b gcd: [a % b]])))
 
 (defmethod Integer lcm: (other)
   (if (or [self zero?] [other zero?]) 0
     [[[self * other] abs] / [self gcd: other]]))
 
 (defmethod Integer digits ()
-  (let ((n [self abs]) (result nil))
-    (if [n zero?] (list 0)
-      (do (while (not [n zero?])
-            (:= result (cons [n % 10] result))
-            (:= n [n / 10]))
-          result))))
+  (if [self zero?] (list 0)
+    (let ((go (fn (self-go n acc)
+                (if [n zero?] acc
+                  (self-go self-go [n / 10] (cons [n % 10] acc))))))
+      (go go [self abs] nil))))
 
 (defmethod Integer factorial ()
   (if [self <= 1] 1 [self * [[self dec] factorial]]))

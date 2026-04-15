@@ -6,10 +6,11 @@
   step: 1
 
   [each: block]
-    (let ((i @start) (end @end) (step @step))
-      (if [step > 0]
-        (while [i <= end] (block i) (:= i [i + step]))
-        (while [i >= end] (block i) (:= i [i + step]))))
+    (let ((go (fn (self-go i end step blk)
+                (if (if [step > 0] [i <= end] [i >= end])
+                  (do (blk i) (self-go self-go [i + step] end step blk))
+                  nil))))
+      (go go @start @end @step block))
 
   [includes: val]
     (and [val >= @start] [val <= @end])
@@ -34,11 +35,11 @@
 ; fold:with: — direct, avoids Iterable's toList roundtrip
 [Range handle: 'fold:with: with:
   (fn (self init f)
-    (let ((acc init) (i self.start) (end self.end) (step self.step))
-      (if [step > 0]
-        (while [i <= end] (:= acc (f acc i)) (:= i [i + step]))
-        (while [i >= end] (:= acc (f acc i)) (:= i [i + step])))
-      acc))]
+    (let ((go (fn (self-go acc i end step)
+                (if (if [step > 0] [i <= end] [i >= end])
+                  (self-go self-go (f acc i) [i + step] end step)
+                  acc))))
+      (go go init self.start self.end self.step)))]
 
 ; Integer: to: and to:by:
 (defmethod Integer to: (end)

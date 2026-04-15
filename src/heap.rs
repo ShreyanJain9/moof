@@ -33,6 +33,7 @@ pub const PROTO_CLOSURE: usize = 11;
 pub const PROTO_ERROR: usize = 12;
 pub const PROTO_FARREF: usize = 13;
 pub const PROTO_ACT: usize = 14;
+pub const PROTO_UPDATE: usize = 15;
 
 /// What to run in a spawned vat.
 #[derive(Debug)]
@@ -113,7 +114,7 @@ impl Heap {
             sym_parent: 0, sym_describe: 0, sym_dnu: 0,
             sym_length: 0, sym_at: 0, sym_at_put: 0,
             sym_message: 0,
-            type_protos: vec![Value::NIL; 15],
+            type_protos: vec![Value::NIL; 16],
             natives: Vec::new(),
         };
 

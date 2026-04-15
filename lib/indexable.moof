@@ -24,9 +24,9 @@
   (require (length)
     "Return the number of elements as an integer.")
 
+  ; each: using toList → Cons each: (recursive, no mutation)
   (provide (each: block)
-    (let ((i 0) (len [self length]))
-      (while [i < len] (block [self at: i]) (:= i [i + 1]))))
+    [[self toList] each: block])
 
   (provide (first)
     (if [[self length] > 0] [self at: 0] nil))
@@ -38,26 +38,28 @@
     (eq [self length] 0))
 
   (provide (indexOf: x)
-    (let ((i 0) (len [self length]) (result nil))
-      (while (and [i < len] [result nil?])
-        (when [[self at: i] equal: x] (:= result i))
-        (:= i [i + 1]))
-      result))
+    (let ((len [self length])
+          (go (fn (self-go coll i)
+                (if [i >= len] nil
+                  (if [[coll at: i] equal: x] i
+                    (self-go self-go coll [i + 1]))))))
+      (go go self 0)))
 
-  ; efficient fold:with: using each:
-  ; uses the cell pattern (mutable heap table) because closures
-  ; capture variables by value, not reference. the cell is a
-  ; shared heap object that both the closure and caller can see.
+  ; fold: recursive over indices (pure, no mutation)
   (provide (fold:with: init f)
-    (let ((cell #["v" => init]))
-      [self each: |x| [cell at: "v" put: (f [cell at: "v"] x)]]
-      [cell at: "v"]))
+    (let ((len [self length])
+          (go (fn (self-go coll acc i)
+                (if [i >= len] acc
+                  (self-go self-go coll (f acc [coll at: i]) [i + 1])))))
+      (go go self init 0)))
 
-  ; toList using each: (same cell pattern)
+  ; toList: recursive build from end (pure, no mutation)
   (provide (toList)
-    (let ((cell #["r" => nil]))
-      [self each: |x| [cell at: "r" put: (cons x [cell at: "r"])]]
-      [[cell at: "r"] reverse]))
+    (let ((len [self length])
+          (go (fn (self-go coll acc i)
+                (if [i < 0] acc
+                  (self-go self-go coll (cons [coll at: i] acc) [i - 1])))))
+      (go go self nil [len - 1])))
 
   (include Iterable))
 

@@ -6,39 +6,39 @@
   { Protocol name: name doc: nil requires: requires provides: provides includes: includes docs: nil })
 
 ; conform: install provided handlers from a protocol onto a type
+(defn conform-install-provides (proto provs ks)
+  (if (nil? ks) proto
+    (let ((sel [ks car])
+          (handler [provs at: sel]))
+      (if (not [proto hasOwnHandler: sel])
+        [proto handle: sel with: handler]
+        nil)
+      (conform-install-provides proto provs [ks cdr]))))
+
+(defn conform-includes (proto includes)
+  (if (nil? includes) proto
+    (do (conform proto [includes car])
+        (conform-includes proto [includes cdr]))))
+
 (defn conform (proto prot)
-  (do
-    ; install provided handlers (skip only if proto has it DIRECTLY, not inherited)
-    (let ((provs [prot slotAt: (quote provides)]))
-      (if (nil? provs) nil
-        (let ((ks [provs keys])
-              (current ks))
-          (while (some? current)
-            (let ((sel [current car])
-                  (handler [provs at: sel]))
-              (if (not [proto hasOwnHandler: sel])
-                [proto handle: sel with: handler]
-                nil))
-            (:= current [current cdr])))))
-    ; recursively conform included protocols
-    (let ((includes [prot slotAt: (quote includes)]))
-      (if (some? includes)
-        (let ((current includes))
-          (while (some? current)
-            (conform proto [current car])
-            (:= current [current cdr])))
-        nil))
-    proto))
+  (let ((provs [prot slotAt: (quote provides)]))
+    (if (some? provs)
+      (conform-install-provides proto provs [provs keys])
+      nil))
+  (let ((includes [prot slotAt: (quote includes)]))
+    (if (some? includes)
+      (conform-includes proto includes)
+      nil))
+  proto)
 
 (defn conforms? (obj prot)
   (let ((reqs [prot slotAt: (quote requires)]))
     (if (nil? reqs) true
-      (let ((current reqs) (ok true))
-        (while (if (some? current) ok false)
-          (if (not [obj responds: [current car]])
-            (:= ok false) nil)
-          (:= current [current cdr]))
-        ok))))
+      (let ((check (fn (self-check remaining)
+              (if (nil? remaining) true
+                (if (not [obj responds: [remaining car]]) false
+                  (self-check self-check [remaining cdr]))))))
+        (check check reqs)))))
 
 ; ═══════════════════════════════════════════════════════════
 ; defprotocol — clean protocol definition with documentation
@@ -50,62 +50,66 @@
 ;   (provide (selector params...) body...)
 ;   (include OtherProtocol))
 
+; process-clause: given one clause and the current accumulator,
+; return a new accumulator { requires provides includes docs }
+(defn process-clause (clause acc env)
+  (if (nil? clause) acc
+    (if [[clause car] identical: (quote require)]
+      ; (require (sel params...) "doc")
+      (let ((sig [[clause cdr] car])
+            (sel [sig car])
+            (params [sig cdr])
+            (method-doc (if (some? [[clause cdr] cdr])
+                         [[[clause cdr] cdr] car] nil)))
+        [acc with: {
+          requires: (cons sel [acc slotAt: (quote requires)])
+          docs: [[acc slotAt: (quote docs)] at: sel put:
+            { params: params doc: method-doc kind: (quote require) }] }])
+      (if [[clause car] identical: (quote provide)]
+        ; (provide (sel params...) body...)
+        (let ((sig [[clause cdr] car])
+              (sel [sig car])
+              (params [sig cdr])
+              (body [[clause cdr] cdr])
+              (handler (eval (cons (quote fn)
+                        (cons (cons (quote self) params) body)) env)))
+          [acc with: {
+            provides: [[acc slotAt: (quote provides)] at: sel put: handler]
+            docs: [[acc slotAt: (quote docs)] at: sel put:
+              { params: params doc: nil kind: (quote provide) }] }])
+        (if [[clause car] identical: (quote include)]
+          ; (include Protocol)
+          [acc with: {
+            includes: (cons (eval [[clause cdr] car] env)
+                           [acc slotAt: (quote includes)]) }]
+          acc)))))
+
+; process-clauses: fold over clause list
+(defn process-clauses (clauses acc env)
+  (if (nil? clauses) acc
+    (process-clauses [clauses cdr]
+      (process-clause [clauses car] acc env) env)))
+
 (def defprotocol (vau args $e
   (let ((name [args car])
-        (clauses [args cdr])
-        (doc-str nil)
-        (requires nil)
-        (provides #[])
-        (includes nil)
-        (docs #[]))
-    (do
-      ; check for optional docstring (first clause is a string)
-      (if (some? clauses)
-        (if [[[clauses car] type] identical: (quote String)]
-          (do (:= doc-str [clauses car])
-              (:= clauses [clauses cdr]))
-          nil)
-        nil)
-      ; process clauses
-      (let ((current clauses))
-        (while (some? current)
-          (let ((clause [current car]))
-            ; dispatch on clause type — it's a list whose car is require/provide/include
-            (if (some? clause)
-              (do (if [[clause car] identical: (quote require)]
-                  ; (require (sel params...) "doc")
-                  (let ((sig [[clause cdr] car])
-                        (sel [sig car])
-                        (params [sig cdr])
-                        (method-doc (if (some? [[clause cdr] cdr])
-                                     [[[clause cdr] cdr] car] nil)))
-                    (do (:= requires (cons sel requires))
-                        [docs at: sel put:
-                          { params: params doc: method-doc kind: (quote require) }]))
-                  (if [[clause car] identical: (quote provide)]
-                    ; (provide (sel params...) body...)
-                    (let ((sig [[clause cdr] car])
-                          (sel [sig car])
-                          (params [sig cdr])
-                          (body [[clause cdr] cdr])
-                          (handler (eval (cons (quote fn)
-                                    (cons (cons (quote self) params) body)) $e)))
-                      (do [provides at: sel put: handler]
-                          [docs at: sel put:
-                            { params: params doc: nil kind: (quote provide) }]))
-                    (if [[clause car] identical: (quote include)]
-                      ; (include Protocol)
-                      (:= includes (cons (eval [[clause cdr] car] $e) includes))
-                      nil))))
-              nil))
-          (:= current [current cdr])))
-      ; create and bind the protocol
-      (let ((prot { Protocol
-                    name: [name describe]
-                    doc: doc-str
-                    requires: requires
-                    provides: provides
-                    includes: includes
-                    docs: docs }))
-        (eval (cons (quote def) (cons name (cons prot nil))) $e)
-        prot)))))
+        (raw-clauses [args cdr])
+        ; check for optional docstring
+        (has-docstring (if (some? raw-clauses)
+                        [[[raw-clauses car] type] identical: (quote String)]
+                        false))
+        (doc-str (if has-docstring [raw-clauses car] nil))
+        (clauses (if has-docstring [raw-clauses cdr] raw-clauses))
+        ; initial accumulator
+        (init { requires: nil provides: #[] includes: nil docs: #[] })
+        ; process all clauses
+        (result (process-clauses clauses init $e))
+        ; build the protocol object
+        (prot { Protocol
+                name: [name describe]
+                doc: doc-str
+                requires: [result slotAt: (quote requires)]
+                provides: [result slotAt: (quote provides)]
+                includes: [result slotAt: (quote includes)]
+                docs: [result slotAt: (quote docs)] }))
+    (eval (cons (quote def) (cons name (cons prot nil))) $e)
+    prot)))
