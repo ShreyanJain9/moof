@@ -1,18 +1,19 @@
 ; act.moof — monadic foundations
 ;
-; the identity monad on Object, Flatmappable protocol,
-; Result types (Ok/Err), monadic do-notation as a vau,
-; and the Act placeholder for future effect system.
+; the unified chaining model: then: is the one operation.
+; every value responds to then:. Acts auto-flatten. Results
+; auto-wrap. pure values pass through. do-notation desugars
+; to then: chains.
 
 ; ═══════════════════════════════════════════════════════════
-; layer 0: identity monad defaults on Object
+; layer 0: identity defaults on Object
 ; ═══════════════════════════════════════════════════════════
 ;
-; every value is trivially monadic. Acts, Results, Options
-; override with real behavior. pure values pass through.
+; every value is trivially chainable. [5 then: |x| [x + 1]]
+; just applies f to self. Acts, Results, Cons override with
+; real behavior.
 
-(defmethod Object then: (block) (block))
-(defmethod Object flatMap: (f) (f self))
+(defmethod Object then: (f) (f self))
 (defmethod Object map: (f) (f self))
 
 ; ═══════════════════════════════════════════════════════════
@@ -34,48 +35,51 @@
   [describe] (str "Err(" [@message describe] ")")
 })
 
-; Ok: flatMap applies f to the value, map wraps result
-(defmethod Ok flatMap: (f) (f @value))
+; Ok: then: applies f. if result is Err, propagate. otherwise wrap in Ok.
+(defmethod Ok then: (f)
+  (let ((result (f @value)))
+    ; auto-wrap: if f returned a Result, pass through. otherwise wrap in Ok.
+    (if [[result type] identical: (quote Result)] result
+      (if (some? [[result type] identical: (quote Ok)]) result
+        { Ok value: result }))))
+
+; actually, simpler: just apply f. no auto-wrapping. the user returns
+; Ok/Err explicitly if they want Result semantics. the identity monad
+; on Object handles the plain case.
+(defmethod Ok then: (f) (f @value))
 (defmethod Ok map: (f) { Ok value: (f @value) })
-(defmethod Ok then: (block) (block))
 (defmethod Ok recover: (f) self)
 (defmethod Ok ok? () true)
 
-; Err: short-circuit everything, propagate the error
-(defmethod Err flatMap: (f) self)
+; Err: short-circuit everything
+(defmethod Err then: (f) self)
 (defmethod Err map: (f) self)
-(defmethod Err then: (block) self)
 (defmethod Err recover: (f) (f @message))
 (defmethod Err ok? () false)
 
 ; ═══════════════════════════════════════════════════════════
-; layer 2: Flatmappable protocol
+; layer 2: Chainable protocol (was Flatmappable)
 ; ═══════════════════════════════════════════════════════════
 
-(defprotocol Flatmappable
-  "Monadic composition. Implement flatMap: + map: to get do-notation,
-   sequencing, and error recovery. This is moof's answer to haskell's
-   Monad typeclass: one protocol that unifies promise chains, nil-safe
-   access, list comprehensions, and result error handling under a
-   single composition mechanism.
+(defprotocol Chainable
+  "Monadic chaining. Implement then: to get do-notation and
+   composition. then: is the universal bind: unwrap self,
+   apply f, return the result. auto-flattening is handled by
+   the runtime (for Acts) or by convention (for Results).
 
-   (do (x <- [some-act]) [process x]) works for ANY Flatmappable.
-   Acts chain effects. Results short-circuit errors. Lists enumerate.
-   Pure values pass through (Object has identity-monad defaults)."
+   (do (x <- expr) [process x]) desugars to
+   [expr then: |x| [process x]].
 
-  (require (flatMap: f)
-    "Chain: unwrap self, apply f, return f's wrapped result.
-     f must return a value of the same Flatmappable type.
-     This is haskell's >>= (bind). The do-notation (x <- expr)
-     desugars to [expr flatMap: |x| ...].")
+   Works for Acts (effect chains), Results (error chains),
+   Lists (comprehensions), and plain values (identity)."
 
-  (require (map: f)
-    "Transform: unwrap self, apply f, rewrap the result.
-     Unlike flatMap:, f returns a plain value (not wrapped).
-     This is haskell's fmap.")
+  (require (then: f)
+    "Chain: unwrap self, apply f, return result.
+     If f returns the same monadic type, it's flattened.
+     This is haskell's >>= (bind) and JavaScript's .then().")
 
-  (provide (then: block)
-    [self flatMap: |_| (block)])
+  (provide (map: f)
+    [self then: |x| (f x)])
 
   (provide (recover: f)
     self)
@@ -83,28 +87,29 @@
   (provide (ok?)
     true))
 
-(conform Ok Flatmappable)
-(conform Err Flatmappable)
+(conform Ok Chainable)
+(conform Err Chainable)
 
 ; ═══════════════════════════════════════════════════════════
-; layer 3: Cons as Flatmappable (list comprehensions)
+; layer 3: Cons as Chainable (list comprehensions)
 ; ═══════════════════════════════════════════════════════════
 
-(defmethod Cons flatMap: (f)
+; then: on Cons is concatMap (flatMap). f must return a list.
+(defmethod Cons then: (f)
   [[self map: f] fold: nil with: |acc lst| [acc append: lst]])
 
-(conform Cons Flatmappable)
+(conform Cons Chainable)
 
 ; ═══════════════════════════════════════════════════════════
 ; layer 4: monadic do-notation (vau operative)
 ; ═══════════════════════════════════════════════════════════
 ;
 ; (do expr1 expr2 expr3)         → sequencing via then:
-; (do (x <- expr) rest...)       → binding via flatMap:
+; (do (x <- expr) rest...)       → binding via then:
 ; (do (let ((y val))) rest...)   → pure binding, scoped to rest
 ;
-; desugars entirely to flatMap: and then: sends.
-; works for ANY Flatmappable: Acts, Results, Lists, pure values.
+; desugars entirely to then: sends.
+; works for ANY Chainable: Acts, Results, Lists, pure values.
 
 (defn cons? (x) [[x type] identical: (quote Cons)])
 
@@ -118,9 +123,6 @@
     [[form car] identical: (quote let)]))
 
 ; do-bind-and-continue: bind a name in the env, then keep expanding.
-; used by do-expand to create closures that survive deferred execution.
-; the (def name (quote val)) puts the binding in the heap environment,
-; so subsequent eval calls find it even when called from the scheduler.
 (defn do-bind-and-continue (name val rest env)
   (let ((__ (eval `(def ,name (quote ,val)) env)))
     (do-expand rest env)))
@@ -134,20 +136,17 @@
       (let ((head [forms car])
             (rest [forms cdr]))
         (if (arrow-bind? head)
-          ; (name <- expr) → flatMap: binding
-          ; the pipe block captures name, rest, env from this scope.
-          ; when called later (possibly deferred by the scheduler),
-          ; it defs the value into the heap env and continues.
+          ; (name <- expr) → bind via then:
           (let ((name [head car])
                 (expr [[[head cdr] cdr] car]))
-            [(eval expr env) flatMap:
+            [(eval expr env) then:
               |__do_v__| (do-bind-and-continue name __do_v__ rest env)])
           (if (let-form? head)
             ; (let binds) → wrap rest in let scope
             (eval `(let ,[[head cdr] car] (do ,@rest)) env)
-            ; plain expression → then: sequencing
+            ; plain expression → sequence via then: (ignore value)
             [(eval head env) then:
-              (eval `(fn () (do ,@rest)) env)]))))))
+              |_| (do-expand rest env)]))))))
 
 ; Force `do` into the rebound set so the compiler falls back to the vau
 ; instead of using its built-in fast-path for sequencing.
@@ -159,9 +158,8 @@
 ; layer 5: Act (effect type)
 ; ═══════════════════════════════════════════════════════════
 ;
-; Act is the one effectful type. it describes a cross-vat send
-; and carries its continuation chain. the Act prototype and its
-; handlers (flatMap:, map:, then:, describe, etc.) are defined
-; in rust (runtime.rs). here we just conform it to Flatmappable.
+; Act is the one effectful type. then: is defined natively in
+; rust (runtime.rs). flatMap: and map: are aliases for then:.
+; here we just conform Act to Chainable.
 
-(conform Act Flatmappable)
+(conform Act Chainable)

@@ -46,6 +46,37 @@ fn format_act(heap: &Heap, receiver: Value) -> Result<String, String> {
     }
 }
 
+/// Register an integer binary op: [int op arg] → int or bool.
+fn int_binop(heap: &mut Heap, proto_id: u32, sel: &str, f: fn(i64, i64) -> Value) {
+    let name = sel.to_string();
+    native(heap, proto_id, sel, move |_heap, receiver, args| {
+        let a = receiver.as_integer().ok_or_else(|| format!("{}: receiver not an integer", name))?;
+        let b = args.first().and_then(|v| v.as_integer())
+            .ok_or_else(|| format!("{}: arg not an integer", name))?;
+        Ok(f(a, b))
+    });
+}
+
+/// Register a float binary op: [float op arg] → float or bool.
+fn float_binop(heap: &mut Heap, proto_id: u32, sel: &str, f: fn(f64, f64) -> Value) {
+    let name = sel.to_string();
+    native(heap, proto_id, sel, move |_heap, receiver, args| {
+        let a = receiver.as_float().ok_or_else(|| format!("{}: receiver not a float", name))?;
+        let b = args.first().and_then(|v| v.as_float())
+            .ok_or_else(|| format!("{}: arg not a float", name))?;
+        Ok(f(a, b))
+    });
+}
+
+/// Register a float unary op: [float op] → float or bool.
+fn float_unary(heap: &mut Heap, proto_id: u32, sel: &str, f: fn(f64) -> Value) {
+    let name = sel.to_string();
+    native(heap, proto_id, sel, move |_heap, receiver, _args| {
+        let a = receiver.as_float().ok_or_else(|| format!("{}: not a float", name))?;
+        Ok(f(a))
+    });
+}
+
 /// Register type prototypes and native handlers on the heap.
 pub fn register_type_protos(heap: &mut Heap) {
     // pre-intern symbols used by the compiler's defmethod
@@ -258,90 +289,47 @@ pub fn register_type_protos(heap: &mut Heap) {
         Ok(heap.alloc_string(&format!("'{name}")))
     });
 
-    // Integer prototype (parent: Number, not Object)
+    // -- Integer prototype (parent: Number) --
     let int_proto = heap.make_object(number_proto);
     heap.type_protos[PROTO_INT] = int_proto;
-
-    // register native handlers for integer arithmetic
     let int_id = int_proto.as_any_object().unwrap();
-    native(heap, int_id, "+", |_heap, receiver, args| {
-        let a = receiver.as_integer().ok_or("+ : receiver not an integer")?;
-        let b = args.first().and_then(|v| v.as_integer()).ok_or("+ : arg not an integer")?;
-        Ok(Value::integer(a + b))
-    });
-    native(heap, int_id, "-", |_heap, receiver, args| {
-        let a = receiver.as_integer().ok_or("- : receiver not an integer")?;
-        let b = args.first().and_then(|v| v.as_integer()).ok_or("- : arg not an integer")?;
-        Ok(Value::integer(a - b))
-    });
-    native(heap, int_id, "*", |_heap, receiver, args| {
-        let a = receiver.as_integer().ok_or("* : receiver not an integer")?;
-        let b = args.first().and_then(|v| v.as_integer()).ok_or("* : arg not an integer")?;
-        Ok(Value::integer(a * b))
-    });
+
+    // arithmetic
+    int_binop(heap, int_id, "+",  |a, b| Value::integer(a + b));
+    int_binop(heap, int_id, "-",  |a, b| Value::integer(a - b));
+    int_binop(heap, int_id, "*",  |a, b| Value::integer(a * b));
+    int_binop(heap, int_id, "=",  |a, b| Value::boolean(a == b));
+    int_binop(heap, int_id, "<",  |a, b| Value::boolean(a < b));
+    int_binop(heap, int_id, ">",  |a, b| Value::boolean(a > b));
+    int_binop(heap, int_id, "<=", |a, b| Value::boolean(a <= b));
+    int_binop(heap, int_id, ">=", |a, b| Value::boolean(a >= b));
+
+    // division and modulo (check for zero)
     native(heap, int_id, "/", |_heap, receiver, args| {
-        let a = receiver.as_integer().ok_or("/ : receiver not an integer")?;
-        let b = args.first().and_then(|v| v.as_integer()).ok_or("/ : arg not an integer")?;
+        let a = receiver.as_integer().ok_or("/: not int")?;
+        let b = args.first().and_then(|v| v.as_integer()).ok_or("/: arg not int")?;
         if b == 0 { return Err("division by zero".into()); }
         Ok(Value::integer(a / b))
     });
-    native(heap, int_id, "<", |_heap, receiver, args| {
-        let a = receiver.as_integer().ok_or("< : receiver not an integer")?;
-        let b = args.first().and_then(|v| v.as_integer()).ok_or("< : arg not an integer")?;
-        Ok(Value::boolean(a < b))
-    });
-    native(heap, int_id, ">", |_heap, receiver, args| {
-        let a = receiver.as_integer().ok_or("> : receiver not an integer")?;
-        let b = args.first().and_then(|v| v.as_integer()).ok_or("> : arg not an integer")?;
-        Ok(Value::boolean(a > b))
-    });
-    native(heap, int_id, "=", |_heap, receiver, args| {
-        let a = receiver.as_integer().ok_or("= : receiver not an integer")?;
-        let b = args.first().and_then(|v| v.as_integer()).ok_or("= : arg not an integer")?;
-        Ok(Value::boolean(a == b))
-    });
-    native(heap, int_id, ">=", |_heap, receiver, args| {
-        let a = receiver.as_integer().ok_or(">= : not int")?;
-        let b = args.first().and_then(|v| v.as_integer()).ok_or(">= : arg not int")?;
-        Ok(Value::boolean(a >= b))
-    });
-    native(heap, int_id, "<=", |_heap, receiver, args| {
-        let a = receiver.as_integer().ok_or("<= : not int")?;
-        let b = args.first().and_then(|v| v.as_integer()).ok_or("<= : arg not int")?;
-        Ok(Value::boolean(a <= b))
-    });
     native(heap, int_id, "%", |_heap, receiver, args| {
-        let a = receiver.as_integer().ok_or("% : not int")?;
-        let b = args.first().and_then(|v| v.as_integer()).ok_or("% : arg not int")?;
+        let a = receiver.as_integer().ok_or("%: not int")?;
+        let b = args.first().and_then(|v| v.as_integer()).ok_or("%: arg not int")?;
         if b == 0 { return Err("modulo by zero".into()); }
         Ok(Value::integer(a % b))
     });
-    native(heap, int_id, "negate", |_heap, receiver, _args| {
-        let a = receiver.as_integer().ok_or("negate: not int")?;
-        Ok(Value::integer(-a))
-    });
-    native(heap, int_id, "describe", |_heap, receiver, _args| {
-        Ok(receiver)
-    });
 
-    // Integer: bit operations
-    native(heap, int_id, "bitAnd:", |_heap, receiver, args| {
-        let a = receiver.as_integer().ok_or("bitAnd: not an integer")?;
-        let b = args.first().and_then(|v| v.as_integer()).ok_or("bitAnd: arg not an integer")?;
-        Ok(Value::integer(a & b))
+    // unary
+    native(heap, int_id, "negate", |_heap, receiver, _args| {
+        Ok(Value::integer(-receiver.as_integer().ok_or("negate: not int")?))
     });
-    native(heap, int_id, "bitOr:", |_heap, receiver, args| {
-        let a = receiver.as_integer().ok_or("bitOr: not an integer")?;
-        let b = args.first().and_then(|v| v.as_integer()).ok_or("bitOr: arg not an integer")?;
-        Ok(Value::integer(a | b))
-    });
-    native(heap, int_id, "bitXor:", |_heap, receiver, args| {
-        let a = receiver.as_integer().ok_or("bitXor: not an integer")?;
-        let b = args.first().and_then(|v| v.as_integer()).ok_or("bitXor: arg not an integer")?;
-        Ok(Value::integer(a ^ b))
-    });
+    native(heap, int_id, "describe", |_heap, receiver, _args| Ok(receiver));
+
+    // bitwise
+    int_binop(heap, int_id, "bitAnd:",    |a, b| Value::integer(a & b));
+    int_binop(heap, int_id, "bitOr:",     |a, b| Value::integer(a | b));
+    int_binop(heap, int_id, "bitXor:",    |a, b| Value::integer(a ^ b));
     native(heap, int_id, "bitNot", |_heap, receiver, _args| {
-        let a = receiver.as_integer().ok_or("bitNot: not an integer")?;
+        let a = receiver.as_integer().ok_or("bitNot: not int")?;
         Ok(Value::integer(!a))
     });
     native(heap, int_id, "shiftLeft:", |_heap, receiver, args| {
@@ -402,145 +390,61 @@ pub fn register_type_protos(heap: &mut Heap) {
     heap.type_protos[PROTO_FLOAT] = float_proto;
     let float_id = float_proto.as_any_object().unwrap();
 
-    native(heap, float_id, "+", |_heap, receiver, args| {
-        let a = receiver.as_float().ok_or("+ : receiver not a float")?;
-        let b = args.first().and_then(|v| v.as_float()).ok_or("+ : arg not numeric")?;
-        Ok(Value::float(a + b))
-    });
-    native(heap, float_id, "-", |_heap, receiver, args| {
-        let a = receiver.as_float().ok_or("- : receiver not a float")?;
-        let b = args.first().and_then(|v| v.as_float()).ok_or("- : arg not numeric")?;
-        Ok(Value::float(a - b))
-    });
-    native(heap, float_id, "*", |_heap, receiver, args| {
-        let a = receiver.as_float().ok_or("* : receiver not a float")?;
-        let b = args.first().and_then(|v| v.as_float()).ok_or("* : arg not numeric")?;
-        Ok(Value::float(a * b))
-    });
+    // arithmetic binops
+    float_binop(heap, float_id, "+",  |a, b| Value::float(a + b));
+    float_binop(heap, float_id, "-",  |a, b| Value::float(a - b));
+    float_binop(heap, float_id, "*",  |a, b| Value::float(a * b));
+    float_binop(heap, float_id, "=",  |a, b| Value::boolean(a == b));
+    float_binop(heap, float_id, "<",  |a, b| Value::boolean(a < b));
+    float_binop(heap, float_id, ">",  |a, b| Value::boolean(a > b));
+    float_binop(heap, float_id, "<=", |a, b| Value::boolean(a <= b));
+    float_binop(heap, float_id, ">=", |a, b| Value::boolean(a >= b));
+    float_binop(heap, float_id, "pow:",  |a, b| Value::float(a.powf(b)));
+    float_binop(heap, float_id, "atan2:", |a, b| Value::float(a.atan2(b)));
+
+    // division (manual — zero check)
     native(heap, float_id, "/", |_heap, receiver, args| {
         let a = receiver.as_float().ok_or("/ : receiver not a float")?;
-        let b = args.first().and_then(|v| v.as_float()).ok_or("/ : arg not numeric")?;
+        let b = args.first().and_then(|v| v.as_float()).ok_or("/ : arg not a float")?;
         if b == 0.0 { return Err("division by zero".into()); }
         Ok(Value::float(a / b))
     });
-    native(heap, float_id, "<", |_heap, receiver, args| {
-        let a = receiver.as_float().ok_or("< : receiver not a float")?;
-        let b = args.first().and_then(|v| v.as_float()).ok_or("< : arg not numeric")?;
-        Ok(Value::boolean(a < b))
-    });
-    native(heap, float_id, ">", |_heap, receiver, args| {
-        let a = receiver.as_float().ok_or("> : receiver not a float")?;
-        let b = args.first().and_then(|v| v.as_float()).ok_or("> : arg not numeric")?;
-        Ok(Value::boolean(a > b))
-    });
-    native(heap, float_id, "=", |_heap, receiver, args| {
-        let a = receiver.as_float().ok_or("= : receiver not a float")?;
-        let b = args.first().and_then(|v| v.as_float()).ok_or("= : arg not numeric")?;
-        Ok(Value::boolean(a == b))
-    });
-    native(heap, float_id, ">=", |_heap, receiver, args| {
-        let a = receiver.as_float().ok_or(">= : not numeric")?;
-        let b = args.first().and_then(|v| v.as_float()).ok_or(">= : arg not numeric")?;
-        Ok(Value::boolean(a >= b))
-    });
-    native(heap, float_id, "<=", |_heap, receiver, args| {
-        let a = receiver.as_float().ok_or("<= : not numeric")?;
-        let b = args.first().and_then(|v| v.as_float()).ok_or("<= : arg not numeric")?;
-        Ok(Value::boolean(a <= b))
-    });
-    native(heap, float_id, "sqrt", |_heap, receiver, _args| {
-        Ok(Value::float(receiver.as_float().ok_or("sqrt: not numeric")?.sqrt()))
-    });
-    native(heap, float_id, "floor", |_heap, receiver, _args| {
-        Ok(Value::float(receiver.as_float().ok_or("floor: not numeric")?.floor()))
-    });
-    native(heap, float_id, "ceil", |_heap, receiver, _args| {
-        Ok(Value::float(receiver.as_float().ok_or("ceil: not numeric")?.ceil()))
-    });
-    native(heap, float_id, "round", |_heap, receiver, _args| {
-        Ok(Value::float(receiver.as_float().ok_or("round: not numeric")?.round()))
-    });
+
+    // unary math
+    float_unary(heap, float_id, "negate", |a| Value::float(-a));
+    float_unary(heap, float_id, "sqrt",   |a| Value::float(a.sqrt()));
+    float_unary(heap, float_id, "floor",  |a| Value::float(a.floor()));
+    float_unary(heap, float_id, "ceil",   |a| Value::float(a.ceil()));
+    float_unary(heap, float_id, "round",  |a| Value::float(a.round()));
+    float_unary(heap, float_id, "sin",    |a| Value::float(a.sin()));
+    float_unary(heap, float_id, "cos",    |a| Value::float(a.cos()));
+    float_unary(heap, float_id, "tan",    |a| Value::float(a.tan()));
+    float_unary(heap, float_id, "asin",   |a| Value::float(a.asin()));
+    float_unary(heap, float_id, "acos",   |a| Value::float(a.acos()));
+    float_unary(heap, float_id, "atan",   |a| Value::float(a.atan()));
+    float_unary(heap, float_id, "log",    |a| Value::float(a.ln()));
+    float_unary(heap, float_id, "log10",  |a| Value::float(a.log10()));
+    float_unary(heap, float_id, "log2",   |a| Value::float(a.log2()));
+    float_unary(heap, float_id, "exp",    |a| Value::float(a.exp()));
+
+    // predicates
+    float_unary(heap, float_id, "nan?",      |a| Value::boolean(a.is_nan()));
+    float_unary(heap, float_id, "infinite?",  |a| Value::boolean(a.is_infinite()));
+    float_unary(heap, float_id, "finite?",    |a| Value::boolean(a.is_finite()));
+
+    // toInteger, describe (manual — need type conversion / heap access)
     native(heap, float_id, "toInteger", |_heap, receiver, _args| {
-        let a = receiver.as_float().ok_or("toInteger: not numeric")?;
-        Ok(Value::integer(a as i64))
+        Ok(Value::integer(receiver.as_float().ok_or("toInteger: not a float")? as i64))
     });
     native(heap, float_id, "describe", |heap, receiver, _args| {
-        let a = receiver.as_float().ok_or("describe: not numeric")?;
-        Ok(heap.alloc_string(&format!("{}", a)))
-    });
-    native(heap, float_id, "negate", |_heap, receiver, _args| {
-        let a = receiver.as_float().ok_or("negate: not numeric")?;
-        Ok(Value::float(-a))
+        Ok(heap.alloc_string(&format!("{}", receiver.as_float().ok_or("describe: not a float")?)))
     });
 
-    // Float: trig
-    native(heap, float_id, "sin", |_heap, receiver, _args| {
-        Ok(Value::float(receiver.as_float().ok_or("sin: not numeric")?.sin()))
-    });
-    native(heap, float_id, "cos", |_heap, receiver, _args| {
-        Ok(Value::float(receiver.as_float().ok_or("cos: not numeric")?.cos()))
-    });
-    native(heap, float_id, "tan", |_heap, receiver, _args| {
-        Ok(Value::float(receiver.as_float().ok_or("tan: not numeric")?.tan()))
-    });
-    native(heap, float_id, "asin", |_heap, receiver, _args| {
-        Ok(Value::float(receiver.as_float().ok_or("asin: not numeric")?.asin()))
-    });
-    native(heap, float_id, "acos", |_heap, receiver, _args| {
-        Ok(Value::float(receiver.as_float().ok_or("acos: not numeric")?.acos()))
-    });
-    native(heap, float_id, "atan", |_heap, receiver, _args| {
-        Ok(Value::float(receiver.as_float().ok_or("atan: not numeric")?.atan()))
-    });
-    native(heap, float_id, "atan2:", |_heap, receiver, args| {
-        let a = receiver.as_float().ok_or("atan2: not numeric")?;
-        let b = args.first().and_then(|v| v.as_float()).ok_or("atan2: arg not numeric")?;
-        Ok(Value::float(a.atan2(b)))
-    });
-
-    // Float: log/exp
-    native(heap, float_id, "log", |_heap, receiver, _args| {
-        Ok(Value::float(receiver.as_float().ok_or("log: not numeric")?.ln()))
-    });
-    native(heap, float_id, "log10", |_heap, receiver, _args| {
-        Ok(Value::float(receiver.as_float().ok_or("log10: not numeric")?.log10()))
-    });
-    native(heap, float_id, "log2", |_heap, receiver, _args| {
-        Ok(Value::float(receiver.as_float().ok_or("log2: not numeric")?.log2()))
-    });
-    native(heap, float_id, "exp", |_heap, receiver, _args| {
-        Ok(Value::float(receiver.as_float().ok_or("exp: not numeric")?.exp()))
-    });
-    native(heap, float_id, "pow:", |_heap, receiver, args| {
-        let a = receiver.as_float().ok_or("pow: not numeric")?;
-        let b = args.first().and_then(|v| v.as_float()).ok_or("pow: arg not numeric")?;
-        Ok(Value::float(a.powf(b)))
-    });
-
-    // Float: predicates
-    native(heap, float_id, "nan?", |_heap, receiver, _args| {
-        Ok(Value::boolean(receiver.as_float().ok_or("nan?: not numeric")?.is_nan()))
-    });
-    native(heap, float_id, "infinite?", |_heap, receiver, _args| {
-        Ok(Value::boolean(receiver.as_float().ok_or("infinite?: not numeric")?.is_infinite()))
-    });
-    native(heap, float_id, "finite?", |_heap, receiver, _args| {
-        Ok(Value::boolean(receiver.as_float().ok_or("finite?: not numeric")?.is_finite()))
-    });
-
-    // Float constants: [Float pi], [Float e], [Float infinity], [Float nan]
-    native(heap, float_id, "pi", |_heap, _receiver, _args| {
-        Ok(Value::float(std::f64::consts::PI))
-    });
-    native(heap, float_id, "e", |_heap, _receiver, _args| {
-        Ok(Value::float(std::f64::consts::E))
-    });
-    native(heap, float_id, "infinity", |_heap, _receiver, _args| {
-        Ok(Value::float(f64::INFINITY))
-    });
-    native(heap, float_id, "nan", |_heap, _receiver, _args| {
-        Ok(Value::float(f64::NAN))
-    });
+    // constants
+    native(heap, float_id, "pi",       |_heap, _r, _a| Ok(Value::float(std::f64::consts::PI)));
+    native(heap, float_id, "e",        |_heap, _r, _a| Ok(Value::float(std::f64::consts::E)));
+    native(heap, float_id, "infinity", |_heap, _r, _a| Ok(Value::float(f64::INFINITY)));
+    native(heap, float_id, "nan",      |_heap, _r, _a| Ok(Value::float(f64::NAN)));
 
     // -- Cons prototype (type_protos[PROTO_CONS]) --
     let cons_proto = heap.make_object(object_proto);
@@ -1066,12 +970,16 @@ pub fn register_type_protos(heap: &mut Heap) {
         });
     }
 
-    // Act: flatMap: — append continuation to the chain, or queue if resolved
+    // Act: then: — the one chaining operation.
+    // appends f to the continuation chain. when the Act resolves,
+    // f is called with the resolved value. if f returns an Act,
+    // auto-flatten. if f returns a plain value, resolve with it.
+    // flatMap: and map: are aliases — no type-level distinction needed.
     {
         let chain_sym = heap.intern("__chain");
-        native(heap, act_id, "flatMap:", move |heap, receiver, args| {
-            let f = args.first().copied().ok_or("flatMap: needs a function")?;
-            let id = receiver.as_any_object().ok_or("flatMap: not an act")?;
+        native(heap, act_id, "then:", move |heap, receiver, args| {
+            let f = args.first().copied().ok_or("then: needs a function")?;
+            let id = receiver.as_any_object().ok_or("then: not an act")?;
 
             let state_sym_local = heap.intern("__state");
             let resolved_sym = heap.intern("resolved");
@@ -1098,54 +1006,13 @@ pub fn register_type_protos(heap: &mut Heap) {
                 Ok(receiver)
             }
         });
-    }
-
-    // Act: map: — same as flatMap: (identity monad wraps automatically)
-    {
-        native(heap, act_id, "map:", |heap, receiver, args| {
-            let f = args.first().copied().ok_or("map: needs a function")?;
-            let id = receiver.as_any_object().ok_or("map: not an act")?;
-
-            let state_sym_local = heap.intern("__state");
-            let resolved_sym = heap.intern("resolved");
-            let result_sym = heap.intern("__result");
-            let is_resolved = heap.get(id).slot_get(state_sym_local)
-                .map(|v| v == Value::symbol(resolved_sym)).unwrap_or(false);
-
-            if is_resolved {
-                let result = heap.get(id).slot_get(result_sym).unwrap_or(Value::NIL);
-                let new_act = heap.make_pending_act();
-                let new_act_id = new_act.as_any_object().unwrap();
-                let cont_fn_sym = heap.intern("__cont_fn");
-                let cont_val_sym = heap.intern("__cont_val");
-                heap.get_mut(new_act_id).slot_set(cont_fn_sym, f);
-                heap.get_mut(new_act_id).slot_set(cont_val_sym, result);
-                heap.ready_acts.push(new_act_id);
-                Ok(new_act)
-            } else {
-                let chain_sym = heap.intern("__chain");
-                let current_chain = heap.get(id).slot_get(chain_sym).unwrap_or(Value::NIL);
-                let new_link = heap.cons(f, current_chain);
-                heap.get_mut(id).slot_set(chain_sym, new_link);
-                Ok(receiver)
-            }
-        });
-    }
-
-    // Act: then: — sequence, ignore previous value
-    {
-        native(heap, act_id, "then:", |heap, receiver, args| {
-            let block = args.first().copied().ok_or("then: needs a block")?;
-            // then: is flatMap: that ignores the value
-            // wrap block in a closure that ignores its arg
-            // for now, just append block to the chain — scheduler calls it with result, block ignores it
-            let id = receiver.as_any_object().ok_or("then: not an act")?;
-            let chain_sym = heap.intern("__chain");
-            let current_chain = heap.get(id).slot_get(chain_sym).unwrap_or(Value::NIL);
-            let new_link = heap.cons(block, current_chain);
-            heap.get_mut(id).slot_set(chain_sym, new_link);
-            Ok(receiver)
-        });
+        // flatMap: and map: are aliases for then:
+        let then_sym = heap.intern("then:");
+        let flatmap_sym = heap.intern("flatMap:");
+        let map_sym = heap.intern("map:");
+        let then_handler = heap.get(act_id).handler_get(then_sym).unwrap();
+        heap.get_mut(act_id).handler_set(flatmap_sym, then_handler);
+        heap.get_mut(act_id).handler_set(map_sym, then_handler);
     }
 
     // Act: recover: — no-op on success, handler on failure
