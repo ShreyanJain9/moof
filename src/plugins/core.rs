@@ -1,0 +1,325 @@
+use crate::plugins::native;
+use crate::heap::*;
+use crate::object::HeapObject;
+use crate::value::Value;
+
+pub struct CorePlugin;
+
+impl super::Plugin for CorePlugin {
+    fn name(&self) -> &str { "core" }
+
+    fn register(&self, heap: &mut Heap) {
+        // pre-intern symbols used by the compiler's defmethod
+        heap.intern("self");
+
+        // -- Object prototype (root of all delegation) --
+        let object_proto = heap.make_object(Value::NIL);
+        heap.type_protos[PROTO_OBJ] = object_proto;
+        let obj_id = object_proto.as_any_object().unwrap();
+
+        // fix up root environment's parent to Object (it was NIL at allocation time)
+        if let HeapObject::Environment { parent, .. } = heap.get_mut(heap.env) {
+            *parent = object_proto;
+        }
+
+        // Object: slotAt:
+        native(heap, obj_id, "slotAt:", |heap, receiver, args| {
+            let name = args.first().and_then(|v| v.as_symbol()).ok_or("slotAt: arg must be a symbol")?;
+            if let Some(id) = receiver.as_any_object() {
+                // for Pair, support car/cdr as virtual slots
+                match heap.get(id) {
+                    HeapObject::Pair(car, cdr) => {
+                        let car_v = *car; let cdr_v = *cdr;
+                        if name == heap.sym_car { return Ok(car_v); }
+                        if name == heap.sym_cdr { return Ok(cdr_v); }
+                        return Ok(Value::NIL);
+                    }
+                    _ => {}
+                }
+                Ok(heap.get(id).slot_get(name).unwrap_or(Value::NIL))
+            } else {
+                Ok(Value::NIL) // primitives have no slots
+            }
+        });
+
+        // Object: slotAt:put:
+        native(heap, obj_id, "slotAt:put:", |heap, receiver, args| {
+            let id = receiver.as_any_object().ok_or("slotAt:put: receiver is not a mutable object")?;
+            let name = args.first().and_then(|v| v.as_symbol()).ok_or("slotAt:put: arg0 must be a symbol")?;
+            let val = args.get(1).copied().unwrap_or(Value::NIL);
+            heap.get_mut(id).slot_set(name, val);
+            Ok(val)
+        });
+
+        // Object: with: — non-destructive slot update. returns a new object.
+        native(heap, obj_id, "with:", |heap, receiver, args| {
+            let overrides = args.first().copied().ok_or("with: needs an object")?;
+            let override_id = overrides.as_any_object().ok_or("with: arg must be an object")?;
+
+            // get the original object's slots + handlers
+            let recv_id = receiver.as_any_object().ok_or("with: receiver must be an object")?;
+            let (orig_names, orig_vals, parent, orig_handlers) = match heap.get(recv_id) {
+                HeapObject::General { slot_names, slot_values, parent, handlers } => {
+                    (slot_names.clone(), slot_values.clone(), *parent, handlers.clone())
+                }
+                _ => return Err("with: receiver must be a general object".into()),
+            };
+
+            // get the override slots
+            let override_names_syms = heap.get(override_id).slot_names();
+            let override_vals: Vec<Value> = override_names_syms.iter()
+                .map(|n| heap.get(override_id).slot_get(*n).unwrap_or(Value::NIL))
+                .collect();
+
+            // build new slot arrays: original with overrides applied
+            let mut new_names = orig_names.clone();
+            let mut new_vals = orig_vals.clone();
+            for (name, val) in override_names_syms.iter().zip(override_vals.iter()) {
+                if let Some(i) = new_names.iter().position(|n| *n == *name) {
+                    new_vals[i] = *val;
+                } else {
+                    new_names.push(*name);
+                    new_vals.push(*val);
+                }
+            }
+
+            // create new object with same parent and handlers
+            let new_obj = heap.alloc_val(HeapObject::General {
+                parent,
+                slot_names: new_names,
+                slot_values: new_vals,
+                handlers: orig_handlers,
+            });
+            Ok(new_obj)
+        });
+
+        // Object: parent — works for ALL types (primitives, optimized variants, general objects)
+        native(heap, obj_id, "parent", |heap, receiver, _args| {
+            Ok(heap.prototype_of(receiver))
+        });
+
+        // Object: slotNames — works for ALL types
+        native(heap, obj_id, "slotNames", |heap, receiver, _args| {
+            if let Some(id) = receiver.as_any_object() {
+                let names = heap.get(id).slot_names();
+                let syms: Vec<Value> = names.into_iter().map(Value::symbol).collect();
+                Ok(heap.list(&syms))
+            } else {
+                Ok(Value::NIL) // primitives have no slots
+            }
+        });
+
+        // Object: handlerNames — walks the full prototype chain for ALL types
+        native(heap, obj_id, "handlerNames", |heap, receiver, _args| {
+            let names = heap.all_handler_names(receiver);
+            let syms: Vec<Value> = names.into_iter().map(Value::symbol).collect();
+            Ok(heap.list(&syms))
+        });
+
+        // Object: handle:with:
+        native(heap, obj_id, "handle:with:", |heap, receiver, args| {
+            let id = receiver.as_any_object().ok_or("handle:with: receiver is not a mutable object")?;
+            let sel = args.first().and_then(|v| v.as_symbol()).ok_or("handle:with: selector must be a symbol")?;
+            let handler = args.get(1).copied().ok_or("handle:with: need handler value")?;
+            heap.get_mut(id).handler_set(sel, handler);
+            Ok(receiver)
+        });
+
+        // Object: handlerAt: — read a handler value by selector (for aliasing)
+        native(heap, obj_id, "handlerAt:", |heap, receiver, args| {
+            let sel = args.first().and_then(|v| v.as_symbol()).ok_or("handlerAt: arg must be a symbol")?;
+            // walk the prototype chain looking for the handler
+            if let Some(id) = receiver.as_any_object() {
+                if let Some(handler) = heap.get(id).handler_get(sel) {
+                    return Ok(handler);
+                }
+            }
+            // check type proto
+            let proto = heap.prototype_of(receiver);
+            if let Some(pid) = proto.as_any_object() {
+                let mut current = pid;
+                for _ in 0..256 {
+                    if let Some(handler) = heap.get(current).handler_get(sel) {
+                        return Ok(handler);
+                    }
+                    match heap.get(current).parent().as_any_object() {
+                        Some(next) => current = next,
+                        None => break,
+                    }
+                }
+            }
+            Ok(Value::NIL)
+        });
+
+        // Object: responds: — check if a handler exists (walks prototype chain)
+        native(heap, obj_id, "responds:", |heap, receiver, args| {
+            let sel = args.first().and_then(|v| v.as_symbol()).ok_or("responds: arg must be a symbol")?;
+            let names = heap.all_handler_names(receiver);
+            Ok(Value::boolean(names.contains(&sel)))
+        });
+
+        // Object: hasOwnHandler: — check if THIS object has the handler directly (no chain walk)
+        native(heap, obj_id, "hasOwnHandler:", |heap, receiver, args| {
+            let sel = args.first().and_then(|v| v.as_symbol()).ok_or("hasOwnHandler: arg must be a symbol")?;
+            if let Some(id) = receiver.as_any_object() {
+                Ok(Value::boolean(heap.get(id).handler_get(sel).is_some()))
+            } else {
+                Ok(Value::FALSE)
+            }
+        });
+
+        // Object: clone — shallow copy
+        native(heap, obj_id, "clone", |heap, receiver, _args| {
+            if let Some(id) = receiver.as_any_object() {
+                let cloned = heap.get(id).clone();
+                Ok(heap.alloc_val(cloned))
+            } else {
+                Ok(receiver) // primitives are immutable, return self
+            }
+        });
+
+        // Object: describe
+        native(heap, obj_id, "describe", |heap, receiver, _args| {
+            let s = heap.format_value(receiver);
+            Ok(heap.alloc_string(&s))
+        });
+
+        // Object: type — returns a symbol for the type
+        native(heap, obj_id, "type", |heap, receiver, _args| {
+            let name = if receiver.is_nil() { "Nil" }
+                else if receiver.is_bool() { "Boolean" }
+                else if receiver.is_integer() { "Integer" }
+                else if receiver.is_float() { "Float" }
+                else if receiver.is_symbol() { "Symbol" }
+                else if let Some(id) = receiver.as_any_object() {
+                    match heap.get(id) {
+                        HeapObject::Closure { is_operative, .. } => {
+                            if *is_operative { "Operative" } else { "Fn" }
+                        }
+                        HeapObject::General { .. } => "Object",
+                        HeapObject::Pair(_, _) => "Cons",
+                        HeapObject::Text(_) => "String",
+                        HeapObject::Buffer(_) => "Bytes",
+                        HeapObject::Table { .. } => "Table",
+                        HeapObject::Environment { .. } => "Environment",
+                    }
+                } else { "Unknown" };
+            Ok(Value::symbol(heap.intern(name)))
+        });
+
+        // Object: identical: — bit-level identity test
+        native(heap, obj_id, "identical:", |_heap, receiver, args| {
+            let other = args.first().copied().unwrap_or(Value::NIL);
+            Ok(Value::boolean(receiver == other))
+        });
+
+        // Object: equal: — content equality
+        native(heap, obj_id, "equal:", |heap, receiver, args| {
+            let other = args.first().copied().unwrap_or(Value::NIL);
+            Ok(Value::boolean(heap.values_equal(receiver, other)))
+        });
+
+        // Object: print — outputs and returns self
+        native(heap, obj_id, "print", |heap, receiver, _args| {
+            println!("{}", heap.format_value(receiver));
+            Ok(receiver)
+        });
+
+        // Object: println — outputs and returns nil
+        native(heap, obj_id, "println", |heap, receiver, _args| {
+            println!("{}", heap.format_value(receiver));
+            Ok(Value::NIL)
+        });
+
+        // Object: show — default display for REPL (Showable protocol base)
+        native(heap, obj_id, "show", |heap, receiver, _args| {
+            let s = heap.format_value(receiver);
+            Ok(heap.alloc_string(&s))
+        });
+
+        // -- Number prototype (shared parent for Integer and Float) --
+        let number_proto = heap.make_object(object_proto);
+        heap.type_protos[PROTO_NUMBER] = number_proto;
+
+        // -- Symbol prototype --
+        let sym_proto = heap.make_object(object_proto);
+        heap.type_protos[PROTO_SYM] = sym_proto;
+        let sym_proto_id = sym_proto.as_any_object().unwrap();
+
+        // Symbol: name — the string name of the symbol
+        native(heap, sym_proto_id, "name", |heap, receiver, _args| {
+            let sym_id = receiver.as_symbol().ok_or("name: not a symbol")?;
+            let name = heap.symbol_name(sym_id).to_string();
+            Ok(heap.alloc_string(&name))
+        });
+
+        // Symbol: toString — alias for name
+        let name_sym = heap.intern("name");
+        let to_string_sym = heap.intern("toString");
+        let name_handler = heap.get(sym_proto_id).handler_get(name_sym).unwrap();
+        heap.get_mut(sym_proto_id).handler_set(to_string_sym, name_handler);
+
+        // Symbol: describe
+        native(heap, sym_proto_id, "describe", |heap, receiver, _args| {
+            let sym_id = receiver.as_symbol().ok_or("describe: not a symbol")?;
+            let name = heap.symbol_name(sym_id).to_string();
+            Ok(heap.alloc_string(&name))
+        });
+
+        // Symbol: show
+        native(heap, sym_proto_id, "show", |heap, receiver, _args| {
+            let sym_id = receiver.as_symbol().ok_or("show: not a symbol")?;
+            let name = heap.symbol_name(sym_id).to_string();
+            Ok(heap.alloc_string(&format!("'{name}")))
+        });
+
+        // -- Nil prototype --
+        let nil_proto = heap.make_object(object_proto);
+        heap.type_protos[PROTO_NIL] = nil_proto;
+        let nil_id = nil_proto.as_any_object().unwrap();
+
+        native(heap, nil_id, "describe", |heap, _receiver, _args| {
+            Ok(heap.alloc_string("nil"))
+        });
+
+        // Nil: ifTrue:ifFalse: — nil is falsy, always returns false branch
+        native(heap, nil_id, "ifTrue:ifFalse:", |_heap, _receiver, args| {
+            let false_val = args.get(1).copied().unwrap_or(Value::NIL);
+            Ok(false_val)
+        });
+
+        // -- Boolean prototype --
+        let bool_proto = heap.make_object(object_proto);
+        heap.type_protos[PROTO_BOOL] = bool_proto;
+        let bool_id = bool_proto.as_any_object().unwrap();
+
+        native(heap, bool_id, "not", |_heap, receiver, _args| {
+            Ok(Value::boolean(!receiver.is_truthy()))
+        });
+        native(heap, bool_id, "describe", |heap, receiver, _args| {
+            let s = if receiver.is_true() { "true" } else { "false" };
+            Ok(heap.alloc_string(s))
+        });
+        native(heap, bool_id, "ifTrue:ifFalse:", |_heap, receiver, args| {
+            let true_val = args.first().copied().unwrap_or(Value::NIL);
+            let false_val = args.get(1).copied().unwrap_or(Value::NIL);
+            Ok(if receiver.is_truthy() { true_val } else { false_val })
+        });
+
+        // -- Register all prototypes as globals --
+        let obj_sym = heap.intern("Object");
+        heap.env_def(obj_sym, object_proto);
+        let nil_s = heap.intern("Nil");
+        heap.env_def(nil_s, nil_proto);
+        let bool_s = heap.intern("Boolean");
+        heap.env_def(bool_s, bool_proto);
+        let symbol_s = heap.intern("Symbol");
+        heap.env_def(symbol_s, sym_proto);
+        let number_s = heap.intern("Number");
+        heap.env_def(number_s, number_proto);
+
+        // expose the root environment object as 'Env'
+        let env_sym = heap.intern("Env");
+        heap.env_def(env_sym, Value::nursery(heap.env));
+    }
+}
