@@ -173,6 +173,15 @@ impl Heap {
         self.get(self.env).slot_get(sym)
     }
 
+    /// Look up a type by name from the environment. Used by Rust code
+    /// to find moof-defined types (Ok, Err, Act, etc.) without needing
+    /// hardcoded PROTO_* constants.
+    pub fn lookup_type(&self, name: &str) -> Value {
+        self.find_symbol(name)
+            .and_then(|sym| self.env_get(sym))
+            .unwrap_or(Value::NIL)
+    }
+
     pub fn env_def(&mut self, sym: u32, val: Value) {
         self.get_mut(self.env).slot_set(sym, val);
     }
