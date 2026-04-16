@@ -17,45 +17,13 @@
 (defmethod Object map: (f) (f self))
 
 ; ═══════════════════════════════════════════════════════════
-; layer 1: Result types — Result > Ok, Err
+; layer 1: Result types (Ok, Err)
 ; ═══════════════════════════════════════════════════════════
-
-(def Result {
-  [describe] "<Result>"
-  [show] (str [self describe] "  : Result")
-})
-
-(def Ok { Result
-  value: nil
-  [describe] (str "Ok(" [@value describe] ")")
-})
-
-(def Err { Result
-  message: nil
-  [describe] (str "Err(" [@message describe] ")")
-})
-
-; Ok: then: applies f. if result is Err, propagate. otherwise wrap in Ok.
-(defmethod Ok then: (f)
-  (let ((result (f @value)))
-    ; auto-wrap: if f returned a Result, pass through. otherwise wrap in Ok.
-    (if [[result type] identical: (quote Result)] result
-      (if (some? [[result type] identical: (quote Ok)]) result
-        { Ok value: result }))))
-
-; actually, simpler: just apply f. no auto-wrapping. the user returns
-; Ok/Err explicitly if they want Result semantics. the identity monad
-; on Object handles the plain case.
-(defmethod Ok then: (f) (f @value))
-(defmethod Ok map: (f) { Ok value: (f @value) })
-(defmethod Ok recover: (f) self)
-(defmethod Ok ok? () true)
-
-; Err: short-circuit everything
-(defmethod Err then: (f) self)
-(defmethod Err map: (f) self)
-(defmethod Err recover: (f) (f @message))
-(defmethod Err ok? () false)
+;
+; Ok and Err are native types (defined in effects plugin).
+; then:, map:, ok?, recover:, describe, show all native.
+; Err is also used by make_error for application-level errors.
+; (err "msg") creates an Err. { Ok value: 42 } creates an Ok.
 
 ; ═══════════════════════════════════════════════════════════
 ; layer 2: Chainable protocol (was Flatmappable)
@@ -87,6 +55,7 @@
   (provide (ok?)
     true))
 
+; Ok and Err are native — conform them to get any protocol-provided methods
 (conform Ok Chainable)
 (conform Err Chainable)
 

@@ -59,5 +59,4 @@
 (defmethod Table show ()
   (str [self describe] "  : Table"))
 
-(defmethod Error show ()
-  (str "Error: " [self message]))
+; Ok and Err have native show handlers (effects plugin)

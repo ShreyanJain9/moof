@@ -30,10 +30,11 @@ pub const PROTO_BYTES: usize = 8;
 pub const PROTO_TABLE: usize = 9;
 pub const PROTO_NUMBER: usize = 10;
 pub const PROTO_CLOSURE: usize = 11;
-pub const PROTO_ERROR: usize = 12;
+pub const PROTO_ERR: usize = 12;
 pub const PROTO_FARREF: usize = 13;
 pub const PROTO_ACT: usize = 14;
 pub const PROTO_UPDATE: usize = 15;
+pub const PROTO_OK: usize = 16;
 
 /// What to run in a spawned vat.
 #[derive(Debug)]
@@ -115,7 +116,7 @@ impl Heap {
             sym_parent: 0, sym_describe: 0, sym_dnu: 0,
             sym_length: 0, sym_at: 0, sym_at_put: 0,
             sym_message: 0,
-            type_protos: vec![Value::NIL; 16],
+            type_protos: vec![Value::NIL; 17],
             natives: Vec::new(),
         };
 
@@ -212,10 +213,10 @@ impl Heap {
         self.alloc_val(HeapObject::new_general(parent, slot_names, slot_values))
     }
 
-    /// Create an Error object with a message string.
+    /// Create an Err value with a message string.
     pub fn make_error(&mut self, msg: &str) -> Value {
         let msg_val = self.alloc_string(msg);
-        let parent = self.type_protos[PROTO_ERROR];
+        let parent = self.type_protos[PROTO_ERR];
         let parent = if parent.is_nil() { self.type_protos[PROTO_OBJ] } else { parent };
         self.make_object_with_slots(parent, vec![self.sym_message], vec![msg_val])
     }

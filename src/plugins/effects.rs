@@ -41,25 +41,127 @@ impl Plugin for EffectsPlugin {
     fn register(&self, heap: &mut Heap) {
         let object_proto = heap.type_protos[PROTO_OBJ];
 
-        // -- Error prototype (PROTO_ERROR) --
-        let error_proto = heap.make_object(object_proto);
-        heap.type_protos[PROTO_ERROR] = error_proto;
-        let error_id = error_proto.as_any_object().unwrap();
+        // -- Result types: Ok (PROTO_OK) and Err (PROTO_ERR) --
+        // these are native so make_error can create Err values
+        // before moof stdlib loads.
 
-        native(heap, error_id, "message", |heap, receiver, _args| {
-            let id = receiver.as_any_object().ok_or("message: not an object")?;
-            Ok(heap.get(id).slot_get(heap.sym_message).unwrap_or(Value::NIL))
+        // Result prototype (shared parent)
+        let result_proto = heap.make_object(object_proto);
+        let result_id = result_proto.as_any_object().unwrap();
+        native(heap, result_id, "describe", |heap, _recv, _args| {
+            Ok(heap.alloc_string("<Result>"))
         });
-        native(heap, error_id, "describe", |heap, receiver, _args| {
-            let id = receiver.as_any_object().ok_or("describe: not an object")?;
-            let msg_val = heap.get(id).slot_get(heap.sym_message).unwrap_or(Value::NIL);
-            let msg = heap.format_value(msg_val);
-            let s = format!("Error: {}", msg);
+        let result_sym = heap.intern("Result");
+        heap.env_def(result_sym, result_proto);
+
+        // Ok prototype
+        let ok_proto = heap.make_object(result_proto);
+        heap.type_protos[PROTO_OK] = ok_proto;
+        let ok_id = ok_proto.as_any_object().unwrap();
+
+        // Ok: value slot access
+        native(heap, ok_id, "value", |heap, receiver, _args| {
+            let id = receiver.as_any_object().ok_or("value: not ok")?;
+            let val_sym = heap.intern("value");
+            Ok(heap.get(id).slot_get(val_sym).unwrap_or(Value::NIL))
+        });
+        // Ok: then: — apply f to value (monadic bind)
+        native(heap, ok_id, "then:", |heap, receiver, args| {
+            let f = args.first().copied().ok_or("then: needs a function")?;
+            let id = receiver.as_any_object().ok_or("then: not ok")?;
+            let val_sym = heap.intern("value");
+            let val = heap.get(id).slot_get(val_sym).unwrap_or(Value::NIL);
+            // can't call f from native — put in ready_acts
+            let new_act = heap.make_pending_act();
+            let new_act_id = new_act.as_any_object().unwrap();
+            let cont_fn_sym = heap.intern("__cont_fn");
+            let cont_val_sym = heap.intern("__cont_val");
+            heap.get_mut(new_act_id).slot_set(cont_fn_sym, f);
+            heap.get_mut(new_act_id).slot_set(cont_val_sym, val);
+            heap.ready_acts.push(new_act_id);
+            Ok(new_act)
+        });
+        // Ok: map: — apply f, wrap in Ok
+        native(heap, ok_id, "map:", |heap, receiver, args| {
+            let f = args.first().copied().ok_or("map: needs a function")?;
+            let id = receiver.as_any_object().ok_or("map: not ok")?;
+            let val_sym = heap.intern("value");
+            let val = heap.get(id).slot_get(val_sym).unwrap_or(Value::NIL);
+            let new_act = heap.make_pending_act();
+            let new_act_id = new_act.as_any_object().unwrap();
+            let cont_fn_sym = heap.intern("__cont_fn");
+            let cont_val_sym = heap.intern("__cont_val");
+            let wrap_ok_sym = heap.intern("__wrap_ok");
+            heap.get_mut(new_act_id).slot_set(cont_fn_sym, f);
+            heap.get_mut(new_act_id).slot_set(cont_val_sym, val);
+            heap.get_mut(new_act_id).handler_set(wrap_ok_sym, Value::TRUE);
+            heap.ready_acts.push(new_act_id);
+            Ok(new_act)
+        });
+        native(heap, ok_id, "recover:", |_heap, receiver, _args| Ok(receiver));
+        native(heap, ok_id, "ok?", |_heap, _receiver, _args| Ok(Value::TRUE));
+        native(heap, ok_id, "describe", |heap, receiver, _args| {
+            let id = receiver.as_any_object().ok_or("describe: not ok")?;
+            let val_sym = heap.intern("value");
+            let val = heap.get(id).slot_get(val_sym).unwrap_or(Value::NIL);
+            let s = format!("Ok({})", heap.format_value(val));
+            Ok(heap.alloc_string(&s))
+        });
+        native(heap, ok_id, "show", |heap, receiver, _args| {
+            let id = receiver.as_any_object().ok_or("show: not ok")?;
+            let val_sym = heap.intern("value");
+            let val = heap.get(id).slot_get(val_sym).unwrap_or(Value::NIL);
+            let s = format!("Ok({})  : Result", heap.format_value(val));
             Ok(heap.alloc_string(&s))
         });
 
-        let error_sym = heap.intern("Error");
-        heap.env_def(error_sym, error_proto);
+        let ok_sym = heap.intern("Ok");
+        heap.env_def(ok_sym, ok_proto);
+
+        // Err prototype
+        let err_proto = heap.make_object(result_proto);
+        heap.type_protos[PROTO_ERR] = err_proto;
+        let err_id = err_proto.as_any_object().unwrap();
+
+        // Err: message slot access
+        native(heap, err_id, "message", |heap, receiver, _args| {
+            let id = receiver.as_any_object().ok_or("message: not err")?;
+            Ok(heap.get(id).slot_get(heap.sym_message).unwrap_or(Value::NIL))
+        });
+        // Err: then: — short-circuit (don't call f)
+        native(heap, err_id, "then:", |_heap, receiver, _args| Ok(receiver));
+        // Err: map: — short-circuit
+        native(heap, err_id, "map:", |_heap, receiver, _args| Ok(receiver));
+        // Err: recover: — apply f to message
+        native(heap, err_id, "recover:", |heap, receiver, args| {
+            let f = args.first().copied().ok_or("recover: needs a function")?;
+            let id = receiver.as_any_object().ok_or("recover: not err")?;
+            let msg = heap.get(id).slot_get(heap.sym_message).unwrap_or(Value::NIL);
+            let new_act = heap.make_pending_act();
+            let new_act_id = new_act.as_any_object().unwrap();
+            let cont_fn_sym = heap.intern("__cont_fn");
+            let cont_val_sym = heap.intern("__cont_val");
+            heap.get_mut(new_act_id).slot_set(cont_fn_sym, f);
+            heap.get_mut(new_act_id).slot_set(cont_val_sym, msg);
+            heap.ready_acts.push(new_act_id);
+            Ok(new_act)
+        });
+        native(heap, err_id, "ok?", |_heap, _receiver, _args| Ok(Value::FALSE));
+        native(heap, err_id, "describe", |heap, receiver, _args| {
+            let id = receiver.as_any_object().ok_or("describe: not err")?;
+            let msg = heap.get(id).slot_get(heap.sym_message).unwrap_or(Value::NIL);
+            let s = format!("Err({})", heap.format_value(msg));
+            Ok(heap.alloc_string(&s))
+        });
+        native(heap, err_id, "show", |heap, receiver, _args| {
+            let id = receiver.as_any_object().ok_or("show: not err")?;
+            let msg = heap.get(id).slot_get(heap.sym_message).unwrap_or(Value::NIL);
+            let s = format!("Err({})  : Result", heap.format_value(msg));
+            Ok(heap.alloc_string(&s))
+        });
+
+        let err_sym = heap.intern("Err");
+        heap.env_def(err_sym, err_proto);
 
         // -- FarRef prototype (PROTO_FARREF) --
         let farref_proto = heap.make_object(object_proto);

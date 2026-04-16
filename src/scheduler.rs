@@ -370,7 +370,19 @@ impl Scheduler {
                                 };
                                 self.resolve_act(vat_id, act_id, final_val, false);
                             } else {
-                                self.resolve_act(vat_id, act_id, result, false);
+                                // check for __wrap_ok (from Ok map:)
+                                let vat = self.vat_mut(vat_id);
+                                let wrap_ok_sym = vat.heap.intern("__wrap_ok");
+                                let should_wrap = vat.heap.get(act_id).handler_get(wrap_ok_sym).is_some();
+                                if should_wrap {
+                                    let ok_proto = vat.heap.type_protos[crate::heap::PROTO_OK];
+                                    let val_sym = vat.heap.intern("value");
+                                    let wrapped = vat.heap.make_object_with_slots(
+                                        ok_proto, vec![val_sym], vec![result]);
+                                    self.resolve_act(vat_id, act_id, wrapped, false);
+                                } else {
+                                    self.resolve_act(vat_id, act_id, result, false);
+                                }
                             }
                         }
                         Err(e) => {
