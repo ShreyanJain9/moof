@@ -580,8 +580,13 @@ impl VM {
                     let idx = u16::from_be_bytes([b, c]) as usize;
                     let name_sym = Value::from_bits(f.constants[idx]).as_symbol()
                         .ok_or("get_global: name constant is not a symbol")?;
-                    let val = heap.env_get(name_sym)
-                        .ok_or_else(|| format!("unbound: '{}'", heap.symbol_name(name_sym)))?;
+                    let val = match heap.env_get(name_sym) {
+                        Some(v) => v,
+                        None => {
+                            let msg = format!("unbound: '{}'", heap.symbol_name(name_sym));
+                            return Ok(heap.make_error(&msg));
+                        }
+                    };
                     f.regs[a as usize] = val;
                 }
 
@@ -643,6 +648,20 @@ impl VM {
     /// Recursive dispatch (used by TryCatch, Call opcode, and DNU).
     /// For most sends, the frame-based run() loop handles dispatch directly.
     fn dispatch_send(&mut self, heap: &mut Heap, receiver: Value, selector: u32, args: &[Value]) -> Result<Value, String> {
+        // if receiver is an Err, short-circuit UNLESS the Err prototype
+        // handles this selector (show, describe, ok?, recover:, then:, etc.)
+        if Self::is_err_value(heap, receiver) && selector != heap.sym_dnu {
+            // check if Err has a handler for this selector
+            if dispatch::lookup_handler(heap, receiver, selector).is_err() {
+                return Ok(receiver);
+            }
+        }
+        // if any arg is an Err, short-circuit (poison in args)
+        for arg in args {
+            if Self::is_err_value(heap, *arg) {
+                return Ok(*arg);
+            }
+        }
         match dispatch::lookup_handler(heap, receiver, selector) {
             Ok((handler, _)) => self.call_handler_recursive(heap, handler, receiver, selector, args),
             Err(err) => {
@@ -653,15 +672,26 @@ impl VM {
                         return self.call_handler_recursive(heap, dnu_handler, receiver, heap.sym_dnu, &[sel_sym, args_list]);
                     }
                 }
-                Err(err)
+                // return Err as a moof value, not a Rust error
+                Ok(heap.make_error(&err))
             }
         }
+    }
+
+    /// Check if a value is a moof Err (PROTO_ERR prototype).
+    fn is_err_value(heap: &Heap, val: Value) -> bool {
+        let err_proto = heap.type_protos[crate::heap::PROTO_ERR];
+        if err_proto.is_nil() { return false; }
+        heap.prototype_of(val) == err_proto
     }
 
     /// Call a handler recursively (pushes frame, runs, returns result).
     fn call_handler_recursive(&mut self, heap: &mut Heap, handler: Value, receiver: Value, selector: u32, args: &[Value]) -> Result<Value, String> {
         if dispatch::is_native(heap, handler) {
-            dispatch::call_native(heap, handler, receiver, args)
+            match dispatch::call_native(heap, handler, receiver, args) {
+                Ok(val) => return Ok(val),
+                Err(msg) => return Ok(heap.make_error(&msg)),
+            }
         } else if let Some((code_idx, _)) = heap.as_closure(handler) {
             let arg_list = if selector == heap.sym_call {
                 args.first().copied().unwrap_or(Value::NIL)
@@ -670,10 +700,12 @@ impl VM {
                 full.extend_from_slice(args);
                 heap.list(&full)
             };
-            self.push_closure_frame(heap, handler, code_idx, &[arg_list], 0)?;
-            self.run(heap)
+            match self.push_closure_frame(heap, handler, code_idx, &[arg_list], 0) {
+                Ok(()) => self.run(heap),
+                Err(msg) => Ok(heap.make_error(&msg)),
+            }
         } else {
-            Err(format!("handler is not callable"))
+            Ok(heap.make_error("handler is not callable"))
         }
     }
 
