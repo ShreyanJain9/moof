@@ -23,7 +23,6 @@ pub mod opcodes;
 pub mod vm;
 pub mod store;
 pub mod plugins;
-pub mod runtime;
 pub mod scheduler;
 pub mod manifest;
 pub mod lang;

@@ -7,6 +7,15 @@
 ;
 ; body is a { } object literal. the constructor captures the body AST
 ; (nested closure capture works) and evals it in a fresh vat.
+;
+; usage:
+;   (do (ref <- (Name {}))
+;       [ref someHandler])                 ; regular send works via FarRef DnU
+;
+; KNOWN LIMITATION: the `<-` eventual-send syntax ([recv <- sel args])
+; emits (%eventual-send recv sel args) which the compiler doesn't yet
+; know how to lower. use regular sends on FarRefs — they forward across
+; vats via doesNotUnderstand: and give you the same Act semantics.
 
 ; extract-cap-vals: pull cap values from config into a list.
 (defn extract-cap-vals (config names)

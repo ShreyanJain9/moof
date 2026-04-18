@@ -13,7 +13,7 @@
 //
 // The loader tries Rust ABI first, falls back to C ABI.
 
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 

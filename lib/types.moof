@@ -1,5 +1,26 @@
 ; types.moof — remaining type-specific methods
 
+; defequal — install an equal: handler that short-circuits on
+; identity, so [T equal: T] (called on the type prototype itself,
+; not an instance) always returns true without hitting the
+; structural-comparison body. body has self and other in scope.
+;
+; (defequal Cons
+;   (if (nil? other) false ...))
+;
+; is sugar for:
+;
+; (defmethod Cons equal: (other)
+;   (if [self identical: other] true
+;     (if (nil? other) false ...)))
+(def defequal (vau args $e
+  (let ((proto   (eval [args car] $e))
+        (body    [args cdr])
+        (handler (eval `(fn (self other)
+                          (if [self identical: other] true
+                            (do ,@body))) $e)))
+    [proto handle: (quote equal:) with: handler])))
+
 ; ── Object ─────────────────────────────────────────────
 
 (defmethod Object nil? () false)
@@ -61,17 +82,12 @@
 
 ; ── Cons extras ────────────────────────────────────────
 
-; structural equality for cons lists. identity first — the Cons
-; prototype itself is a General (not a Pair), and sending [Cons
-; equal: Cons] dispatches here because the handler lives on the
-; proto. short-circuiting via identical: keeps self == self true
-; when the receiver isn't actually a pair.
-(defmethod Cons equal: (other)
-  (if [self identical: other] true
-    (if (nil? other) false
-      (if (not (cons? other)) false
-        (if (not [[self car] equal: [other car]]) false
-          [[self cdr] equal: [other cdr]])))))
+; structural equality for cons lists.
+(defequal Cons
+  (if (nil? other) false
+    (if (not (cons? other)) false
+      (if (not [[self car] equal: [other car]]) false
+        [[self cdr] equal: [other cdr]]))))
 
 (alias Cons first car)
 (alias Cons rest cdr)
@@ -89,18 +105,16 @@
 
 ; ── Table extras ───────────────────────────────────────
 
-; structural equality for Tables — compare sequential parts
-; element-wise. identity first short-circuits proto == proto.
-(defmethod Table equal: (other)
-  (if [self identical: other] true
-    (if (not [other is: Table]) false
-      (if (not (eq [self length] [other length])) false
-        (let ((len [self length])
-              (go (fn (go i)
-                    (if (eq i len) true
-                      (if (not [[self at: i] equal: [other at: i]]) false
-                        (go go [i + 1]))))))
-          (go go 0))))))
+; structural equality for Tables — compare sequential parts element-wise.
+(defequal Table
+  (if (not [other is: Table]) false
+    (if (not (eq [self length] [other length])) false
+      (let ((len [self length])
+            (go (fn (go i)
+                  (if (eq i len) true
+                    (if (not [[self at: i] equal: [other at: i]]) false
+                      (go go [i + 1]))))))
+        (go go 0)))))
 
 (defmethod Table has: (key) [self contains: key])
 (defmethod Table empty? () (eq [self length] 0))

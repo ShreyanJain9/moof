@@ -78,14 +78,11 @@
 ; preserve Set-ness.
 (conform Set Iterable)
 
-; structural equality: two sets equal iff same size and each
-; member of self is a member of other. identity first to handle
-; proto-equal-proto dispatch.
-(defmethod Set equal: (other)
-  (if [self identical: other] true
-    (if (not [other is: Set]) false
-      (if (not (eq [self size] [other size])) false
-        [[self toList] all: |x| [other includes: x]]))))
+; structural equality: same size and every member of self is in other.
+(defequal Set
+  (if (not [other is: Set]) false
+    (if (not (eq [self size] [other size])) false
+      [[self toList] all: |x| [other includes: x]])))
 
 ; ── type-preserving map / select / reject via Builder ──
 ;

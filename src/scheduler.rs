@@ -101,7 +101,7 @@ impl Vat {
         let mut heap = Heap::new();
         heap.vat_id = id;
         let vm = VM::new();
-        crate::runtime::register_type_protos(&mut heap);
+        crate::plugins::register_all(&mut heap);
         Vat {
             id,
             heap,

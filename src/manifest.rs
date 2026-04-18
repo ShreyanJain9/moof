@@ -6,7 +6,7 @@
 // binary is a blank VM with nothing in it.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use serde::Deserialize;
 
 /// A parsed moof manifest.

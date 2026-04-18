@@ -138,8 +138,7 @@ impl Chunk {
             // where dst == ret_reg
             if Op::from_u8(code[pc]) == Some(Op::Send) {
                 let dst = code[pc + 1];
-                let args_pc = pc + 4; // trailing arg data
-                let ret_pc = pc + 8;  // potential Return
+                let ret_pc = pc + 8;  // potential Return (args are at pc + 4..8)
                 if ret_pc + 3 < code.len()
                     && Op::from_u8(code[ret_pc]) == Some(Op::Return)
                     && code[ret_pc + 1] == dst

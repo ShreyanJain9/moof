@@ -863,7 +863,6 @@ impl<'a> Compiler<'a> {
         // items[0] is the operative name, items[1..] are unevaluated args
 
         // load the operative itself
-        let window_start = self.next_reg;
         let func_reg = self.alloc_reg();
         let func_const = self.add_sym_const(operative_sym);
         self.chunk.emit(Op::GetGlobal, func_reg, (func_const >> 8) as u8, func_const as u8);

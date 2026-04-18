@@ -819,7 +819,7 @@ impl VM {
             self.closure_descs[i].desc_base = base_idx;
         }
         // push frame with desc_base set correctly
-        let mut regs = vec![Value::NIL; chunk.num_regs as usize + 1];
+        let regs = vec![Value::NIL; chunk.num_regs as usize + 1];
         self.frames.push(Frame {
             regs,
             pc: 0,

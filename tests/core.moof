@@ -182,6 +182,7 @@
 
   ; member? uses equal: (structural) now — String dedup works
   (test "member? on strings"   (member? "b" (list "a" "b" "c"))   true)
+
 ))
 
 [console println: (report core-tests)]

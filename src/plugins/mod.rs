@@ -23,7 +23,6 @@ pub mod capabilities;
 pub mod dynload;
 
 use crate::heap::Heap;
-use crate::object::HeapObject;
 use crate::value::Value;
 use crate::scheduler::Vat;
 
