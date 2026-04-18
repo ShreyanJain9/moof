@@ -279,7 +279,7 @@ impl Scheduler {
     /// Create a FarRef in a vat pointing to an object in another vat.
     pub fn create_farref(&mut self, in_vat: u32, target_vat: u32, target_obj: u32) -> Value {
         let vat = self.vat_mut(in_vat);
-        let farref_proto = vat.heap.type_protos[crate::heap::PROTO_FARREF];
+        let farref_proto = vat.heap.lookup_type("FarRef");
         let tgt_vat_sym = vat.heap.intern("__target_vat");
         let tgt_obj_sym = vat.heap.intern("__target_obj");
         vat.heap.make_object_with_slots(
@@ -338,7 +338,7 @@ impl Scheduler {
                                 // wrap result: if result is an Update, merge deltas.
                                 // if result is a plain value, create Update with our delta.
                                 let vat = self.vat_mut(vat_id);
-                                let update_proto = vat.heap.type_protos[crate::heap::PROTO_UPDATE];
+                                let update_proto = vat.heap.lookup_type("Update");
                                 let is_update = !update_proto.is_nil()
                                     && vat.heap.prototype_of(result) == update_proto;
 
@@ -375,7 +375,7 @@ impl Scheduler {
                                 let wrap_ok_sym = vat.heap.intern("__wrap_ok");
                                 let should_wrap = vat.heap.get(act_id).handler_get(wrap_ok_sym).is_some();
                                 if should_wrap {
-                                    let ok_proto = vat.heap.type_protos[crate::heap::PROTO_OK];
+                                    let ok_proto = vat.heap.lookup_type("Ok");
                                     let val_sym = vat.heap.intern("value");
                                     let wrapped = vat.heap.make_object_with_slots(
                                         ok_proto, vec![val_sym], vec![result]);
@@ -668,7 +668,7 @@ impl Scheduler {
                         .map(|v| self.copy_value_across(*v, _from_vat, to_vat))
                         .collect();
                     let parent = if is_farref {
-                        self.vat(to_vat).heap.type_protos[crate::heap::PROTO_FARREF]
+                        self.vat(to_vat).heap.lookup_type("FarRef")
                     } else {
                         self.vat(to_vat).heap.type_protos[crate::heap::PROTO_OBJ]
                     };
@@ -713,7 +713,7 @@ impl Scheduler {
     /// to the receiver and return the reply. Otherwise return the value as-is.
     fn process_handler_result(&mut self, vat_id: u32, receiver_id: u32, val: Value) -> Value {
         let vat = self.vat_mut(vat_id);
-        let update_proto = vat.heap.type_protos[crate::heap::PROTO_UPDATE];
+        let update_proto = vat.heap.lookup_type("Update");
         if update_proto.is_nil() { return val; }
 
         // check if val is an Update
@@ -746,7 +746,7 @@ impl Scheduler {
 
     /// Check if a value is an Act (has PROTO_ACT as prototype).
     fn is_act(heap: &Heap, val: Value) -> bool {
-        let act_proto = heap.type_protos[crate::heap::PROTO_ACT];
+        let act_proto = heap.lookup_type("Act");
         if act_proto.is_nil() { return false; }
         let proto = heap.prototype_of(val);
         proto == act_proto

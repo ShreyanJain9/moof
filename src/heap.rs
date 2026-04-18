@@ -225,7 +225,7 @@ impl Heap {
     /// Create an Err value with a message string.
     pub fn make_error(&mut self, msg: &str) -> Value {
         let msg_val = self.alloc_string(msg);
-        let parent = self.type_protos[PROTO_ERR];
+        let parent = self.lookup_type("Err");
         let parent = if parent.is_nil() { self.type_protos[PROTO_OBJ] } else { parent };
         self.make_object_with_slots(parent, vec![self.sym_message], vec![msg_val])
     }
@@ -248,7 +248,7 @@ impl Heap {
 
     /// Create an Act for a cross-vat send (pending, with target info).
     pub fn make_act(&mut self, target_vat: u32, target_obj: u32, selector: u32) -> Value {
-        let act_proto = self.type_protos[PROTO_ACT];
+        let act_proto = self.lookup_type("Act");
         let state_sym = self.intern("__state");
         let pending_sym = self.intern("pending");
         let chain_sym = self.intern("__chain");
@@ -267,7 +267,7 @@ impl Heap {
 
     /// Create a pending Act with no target (for continuation-derived Acts).
     pub fn make_pending_act(&mut self) -> Value {
-        let act_proto = self.type_protos[PROTO_ACT];
+        let act_proto = self.lookup_type("Act");
         let state_sym = self.intern("__state");
         let pending_sym = self.intern("pending");
         let chain_sym = self.intern("__chain");

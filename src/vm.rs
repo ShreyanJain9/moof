@@ -714,7 +714,7 @@ impl VM {
 
     /// Check if a value is a moof Err (PROTO_ERR prototype).
     fn is_err_value(heap: &Heap, val: Value) -> bool {
-        let err_proto = heap.type_protos[crate::heap::PROTO_ERR];
+        let err_proto = heap.lookup_type("Err");
         if err_proto.is_nil() { return false; }
         heap.prototype_of(val) == err_proto
     }
