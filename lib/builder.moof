@@ -82,13 +82,27 @@
 
 ; ── Iterable methods that preserve type ───────────────
 ;
-; override the existing map:, select:, reject: to use Builder
-; so they return the same type as the receiver.
+; Iterable's provides use fold + cons + reverse, which always
+; returns a Cons. for collections with a natural container
+; identity (Table, String, future Set), we want map: / select: /
+; reject: to return the SAME type. these defmethods use Builder
+; to achieve that.
 ;
-; Note: these override the Iterable-provided versions.
+; Cons keeps Iterable's cons-based map: — Builder-via-Cons would
+; be O(n²) because Cons add: walks to the end. the Builder helps
+; types whose add: is O(1).
 
-; generic "collect into same type as self" — the key primitive
-(defmethod Object collectLike: (f)
-  [[self fold: (builder-for self) with: |b x|
-    (let ((result (f x)))
-      (if (some? result) [b << result] b))] result])
+; buildLike: — generic "build into a container of self's type".
+; op-fn receives (Builder, element) and returns updated Builder.
+(defmethod Object buildLike: (op-fn)
+  [[self fold: (builder-for self) with: op-fn] result])
+
+; type-preserving overrides for Table and String
+(defmethod Table  map: (f) [self buildLike: |b x| [b << (f x)]])
+(defmethod String map: (f) [self buildLike: |b x| [b << (f x)]])
+
+(defmethod Table  select: (f) [self buildLike: |b x| (if (f x) [b << x] b)])
+(defmethod String select: (f) [self buildLike: |b x| (if (f x) [b << x] b)])
+
+(defmethod Table  reject: (f) [self select: |x| (not (f x))])
+(defmethod String reject: (f) [self select: |x| (not (f x))])

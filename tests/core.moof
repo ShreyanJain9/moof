@@ -104,6 +104,17 @@
       (conform Cons Chainable)   ; should not duplicate
       [[Chainable conformers] count: |t| [t identical: Cons]])
     1)
+
+  ; Buildable: map / select / reject preserve type
+  (test "Table map preserves type"    [[#[1 2 3] map: |x| [x * 2]] typeName]    (quote Table))
+  (test "Table map content"           [#[1 2 3] map: |x| [x * 2]]               #[2 4 6])
+  (test "String map preserves type"   [["abc" map: |c| [c ++ "!"]] typeName]    (quote String))
+  (test "String map content"          ["abc" map: |c| [c ++ "!"]]               "a!b!c!")
+  (test "Table select preserves type" [[#[1 2 3 4] select: |x| [x > 2]] typeName] (quote Table))
+  (test "Table select content"        [#[1 2 3 4] select: |x| [x > 2]]          #[3 4])
+  (test "Table reject content"        [#[1 2 3 4] reject: |x| [x > 2]]          #[1 2])
+  (test "String reject preserves type" [["abcde" reject: |c| [c equal: "c"]] typeName] (quote String))
+  (test "Cons map still returns Cons" [[(list 1 2 3) map: |x| [x * 2]] typeName] (quote Cons))
 ))
 
 [console println: (report core-tests)]
