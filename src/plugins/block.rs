@@ -25,6 +25,15 @@ impl Plugin for BlockPlugin {
             }
         });
 
+        // Block: pure? — true if no FarRef captures (safe to memoize/parallelize)
+        native(heap, block_id, "pure?", |heap, receiver, _args| {
+            let id = receiver.as_any_object().ok_or("pure?: not a closure")?;
+            match heap.get(id) {
+                HeapObject::Closure { is_pure, .. } => Ok(Value::boolean(*is_pure)),
+                _ => Err("pure?: not a closure".into()),
+            }
+        });
+
         // Block: operative? — true if this closure is an operative (fexpr)
         native(heap, block_id, "operative?", |heap, receiver, _args| {
             let id = receiver.as_any_object().ok_or("operative?: not a closure")?;
@@ -44,11 +53,15 @@ impl Plugin for BlockPlugin {
                     let arity = *arity;
                     let parent = *parent;
                     let captures = captures.clone();
+                    let farref_proto = heap.lookup_type("FarRef");
+                    let is_pure = farref_proto.is_nil() ||
+                        !captures.iter().any(|(_, v)| heap.prototype_of(*v) == farref_proto);
                     let new_id = heap.alloc(HeapObject::Closure {
                         parent,
                         code_idx,
                         arity,
                         is_operative: false,
+                        is_pure,
                         captures,
                         handlers: Vec::new(),
                     });

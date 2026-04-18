@@ -1,0 +1,64 @@
+; test.moof — testing framework
+;
+; (test "name" expr expected)  → Ok or Err
+; (suite "name" test1 test2 ...) → { name results }
+; (report suite-result) → formatted string
+
+(defn assert (condition msg)
+  (if condition { Ok value: msg }
+    (err (str "assertion failed: " msg))))
+
+; deep-equal: structural comparison
+(defn deep-equal (a b)
+  (if [a identical: b] true
+    (if (and (nil? a) (nil? b)) true
+      (if [a equal: b] true
+        (if (and (cons? a) (cons? b))
+          (and (deep-equal [a car] [b car])
+               (deep-equal [a cdr] [b cdr]))
+          (let ((an [a slotNames])
+                (bn [b slotNames]))
+            (if (or (nil? an) (nil? bn)) false
+              (if (not (deep-equal an bn)) false
+                [an fold: true with: |ok name|
+                  (if ok (deep-equal [a slotAt: name] [b slotAt: name]) false)]))))))))
+
+(defn assertEqual (actual expected msg)
+  (if (deep-equal actual expected)
+    { Ok value: msg }
+    (err (str msg ": expected " [expected describe] " got " [actual describe]))))
+
+(def test (vau args $e
+  (let ((name [args car])
+        (body [[args cdr] car])
+        (expected [[[args cdr] cdr] car])
+        (actual (eval body $e))
+        (exp-val (eval expected $e)))
+    (assertEqual actual exp-val name))))
+
+(def suite (vau args $e
+  (let ((name [args car])
+        (tests [args cdr])
+        (run (fn (go remaining results)
+          (if (nil? remaining) [results reverse]
+            (let ((result (eval [remaining car] $e)))
+              (go go [remaining cdr] (cons result results)))))))
+    { name: name results: (run run tests nil) })))
+
+(defn report (s)
+  (let ((name [s slotAt: (quote name)])
+        (results [s slotAt: (quote results)])
+        (count (fn (go remaining pass fail)
+          (if (nil? remaining) (cons pass fail)
+            (if [[remaining car] ok?]
+              (go go [remaining cdr] [pass + 1] fail)
+              (go go [remaining cdr] pass [fail + 1]))))))
+    (let ((c (count count results 0 0))
+          (passed [c car])
+          (failed [c cdr])
+          (failures [[results select: |r| (not [r ok?])]
+                      fold: "" with: |acc r|
+                        [acc ++ (str "    FAIL: " [[r slotAt: (quote message)] describe] "\n")]]))
+      (str "\n  " name "\n  "
+        [passed describe] " passed, " [failed describe] " failed\n"
+        failures))))

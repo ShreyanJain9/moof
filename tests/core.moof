@@ -1,0 +1,63 @@
+; core.moof — tests for the core language
+
+(def core-tests (suite "core"
+  (test "integer add" [3 + 4] 7)
+  (test "integer sub" [10 - 3] 7)
+  (test "integer mul" [3 * 4] 12)
+  (test "integer div" [10 / 2] 5)
+  (test "integer mod" [10 % 3] 1)
+  (test "integer negate" [5 negate] -5)
+  (test "integer compare" [3 < 4] true)
+  (test "integer equal" [3 = 3] true)
+
+  (test "div by zero" [[1 / 0] ok?] false)
+  (test "err is not ok" [[1 / 0] ok?] false)
+
+  (test "string concat" ["hello" ++ " world"] "hello world")
+  (test "string length" ["hello" length] 5)
+  (test "string reverse" ["abc" reverse] "cba")
+  (test "string repeat" ["ab" repeat: 3] "ababab")
+
+  (test "list map" [(list 1 2 3) map: |x| [x * 2]] (list 2 4 6))
+  (test "list fold" [(list 1 2 3) fold: 0 with: |a x| [a + x]] 6)
+  (test "list select" [(list 1 2 3 4 5) select: |x| [x > 3]] (list 4 5))
+  (test "list reverse" [(list 1 2 3) reverse] (list 3 2 1))
+  (test "list take" [(list 1 2 3 4 5) take: 3] (list 1 2 3))
+  (test "list drop" [(list 1 2 3 4 5) drop: 2] (list 3 4 5))
+
+  (test "range" (range 5) (list 0 1 2 3 4))
+  (test "range map" [[1 to: 3] map: |x| [x * x]] (list 1 4 9))
+
+  (test "with:" [[{ x: 1 y: 2 } with: { x: 10 }] slotAt: (quote x)] 10)
+  (test "with: immutable" (let ((p { x: 1 })) [[p with: { x: 99 }] slotAt: (quote x)]) 99)
+
+  (test "some" [(Some 5) some?] true)
+  (test "none" [None some?] false)
+  (test "some then" [(Some 5) then: |x| [x + 1]] 6)
+  (test "none then" [None then: |x| [x + 1]] None)
+  (test "some or" [(Some 5) or: 0] 5)
+  (test "none or" [None or: 0] 0)
+
+  (test "ok then" [{ Ok value: 5 } then: |x| [x + 1]] 6)
+  (test "err short-circuit" [(err "nope") then: |x| [x + 1]] (err "nope"))
+  (test "err recover" [(err "nope") recover: |msg| (str "got: " msg)] "got: nope")
+
+  (test "nested capture" (let ((f (fn (a) (fn (b) (fn (c) [[a + b] + c])))))
+    (((f 100) 20) 3)) 123)
+
+  (test "do notation" (do (x <- { Ok value: 10 }) (y <- { Ok value: 20 }) [x + y]) 30)
+  (test "do err" (do (x <- (err "fail")) [x + 1]) (err "fail"))
+  (test "do option" (do (x <- (Some 10)) (y <- (Some 20)) [x + y]) 30)
+  (test "do option none" (do (x <- (Some 10)) (y <- None) [x + y]) None)
+
+  (test "update delta" [(update { count: 5 } 42) delta] { count: 5 })
+  (test "update reply" [(update { count: 5 } 42) reply] 42)
+
+  (test "str variadic" (str "a" "b" "c") "abc")
+  (test "pow" [2 pow: 10] 1024)
+  (test "gcd" [12 gcd: 8] 4)
+  (test "digits" [42 digits] (list 4 2))
+  (test "factorial" [5 factorial] 120)
+))
+
+[console println: (report core-tests)]

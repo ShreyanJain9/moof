@@ -567,11 +567,46 @@ impl VM {
                     let is_op = desc.is_operative;
                     let parent_regs = desc.capture_parent_regs.clone();
                     let capture_names = desc.capture_names.clone();
+
+                    // scan bytecode for GetGlobal refs to FarRefs (impure env access)
+                    let bytecode = &desc.chunk.code;
+                    let constants = &desc.chunk.constants;
+                    let farref_proto = heap.lookup_type("FarRef");
+                    let mut references_farref = false;
+                    if !farref_proto.is_nil() {
+                        let mut pc = 0;
+                        while pc + 3 < bytecode.len() {
+                            if crate::opcodes::Op::from_u8(bytecode[pc]) == Some(crate::opcodes::Op::GetGlobal) {
+                                let const_idx = u16::from_be_bytes([bytecode[pc+2], bytecode[pc+3]]) as usize;
+                                if const_idx < constants.len() {
+                                    let sym_val = Value::from_bits(constants[const_idx]);
+                                    if let Some(sym) = sym_val.as_symbol() {
+                                        if let Some(val) = heap.env_get(sym) {
+                                            if heap.prototype_of(val) == farref_proto {
+                                                references_farref = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            pc += 4;
+                        }
+                    }
+
                     let f = self.frames.last_mut().unwrap();
                     let cap_pairs: Vec<(u32, Value)> = capture_names.iter().zip(parent_regs.iter())
                         .map(|(&name, &r)| (name, f.regs[r as usize]))
                         .collect();
                     let closure = heap.make_closure(idx, arity, is_op, &cap_pairs);
+                    // override purity if we found FarRef references in bytecode
+                    if references_farref {
+                        if let Some(id) = closure.as_any_object() {
+                            if let crate::object::HeapObject::Closure { is_pure, .. } = heap.get_mut(id) {
+                                *is_pure = false;
+                            }
+                        }
+                    }
                     f.regs[a as usize] = closure;
                 }
 

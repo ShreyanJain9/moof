@@ -43,6 +43,7 @@ pub enum HeapObject {
         code_idx: usize,             // index into VM's closure_descs
         arity: u8,
         is_operative: bool,
+        is_pure: bool,               // true if no FarRef captures (can memoize/parallelize)
         captures: Vec<(u32, Value)>, // (name_sym, captured_value)
         handlers: Vec<(u32, Value)>, // per-instance handlers (e.g. call:)
     },

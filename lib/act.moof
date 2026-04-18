@@ -20,10 +20,19 @@
 ; layer 1: Result types (Ok, Err)
 ; ═══════════════════════════════════════════════════════════
 ;
-; Ok and Err are native types (defined in effects plugin).
-; then:, map:, ok?, recover:, describe, show all native.
-; Err is also used by make_error for application-level errors.
-; (err "msg") creates an Err. { Ok value: 42 } creates an Ok.
+; Ok and Err are native types (effects plugin) with describe,
+; show, ok? native. then:/map:/recover: are overridden here
+; in moof for synchronous execution (no scheduler roundtrip).
+
+; Ok: then: applies f synchronously (not via ready_acts)
+(defmethod Ok then: (f) (f [self slotAt: (quote value)]))
+(defmethod Ok map: (f) { Ok value: (f [self slotAt: (quote value)]) })
+(defmethod Ok recover: (f) self)
+
+; Err: short-circuit (already native, but ensure consistency)
+(defmethod Err then: (f) self)
+(defmethod Err map: (f) self)
+(defmethod Err recover: (f) (f [self slotAt: (quote message)]))
 
 ; ═══════════════════════════════════════════════════════════
 ; layer 2: Chainable protocol (was Flatmappable)

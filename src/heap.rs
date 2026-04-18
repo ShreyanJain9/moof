@@ -367,11 +367,19 @@ impl Heap {
         // closures delegate to Block prototype (→ Object)
         let parent = self.type_protos.get(PROTO_CLOSURE).copied()
             .unwrap_or_else(|| self.type_protos[PROTO_OBJ]);
+        // a closure is pure if none of its captures are FarRefs
+        let farref_proto = self.lookup_type("FarRef");
+        let is_pure = if farref_proto.is_nil() {
+            true // no FarRef type yet — assume pure
+        } else {
+            !captures.iter().any(|(_, val)| self.prototype_of(*val) == farref_proto)
+        };
         let id = self.alloc(HeapObject::Closure {
             parent,
             code_idx,
             arity,
             is_operative,
+            is_pure,
             captures: captures.to_vec(),
             handlers: Vec::new(),
         });

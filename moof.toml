@@ -38,6 +38,7 @@ files = [
   "lib/range.moof",
   "lib/act.moof",
   "lib/option.moof",
+  "lib/test.moof",
   "lib/server.moof",
 ]
 

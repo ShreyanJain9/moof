@@ -58,6 +58,13 @@
 
 ; ── Cons extras ────────────────────────────────────────
 
+; structural equality for cons lists
+(defmethod Cons equal: (other)
+  (if (nil? other) false
+    (if (not (cons? other)) false
+      (if (not [[self car] equal: [other car]]) false
+        [[self cdr] equal: [other cdr]]))))
+
 (alias Cons first car)
 (alias Cons rest cdr)
 (defmethod Cons second () [[self cdr] car])
@@ -84,6 +91,11 @@
   [[self keys] each: |k| (f k [self at: k])])
 (defmethod Table mapValues: (f)
   [[self keys] fold: #[] with: |acc k| [acc at: k put: (f [self at: k])]])
+
+; note: structural equality for General objects is handled by the
+; native equal: on Object (identity comparison). for cons lists,
+; Cons equal: does recursive structural comparison (above).
+; for objects with slots, rely on identity or explicit comparison.
 
 ; ── moved from native (Rust) → moof ──────────────────
 
