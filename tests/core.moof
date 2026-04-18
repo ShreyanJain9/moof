@@ -58,6 +58,52 @@
   (test "gcd" [12 gcd: 8] 4)
   (test "digits" [42 digits] (list 4 2))
   (test "factorial" [5 factorial] 120)
+
+  ; ── wave 1.3: prototype-as-type identity ─────────────
+
+  (test "typeName int"    [42 typeName]         (quote Integer))
+  (test "typeName float"  [3.14 typeName]       (quote Float))
+  (test "typeName string" ["hi" typeName]       (quote String))
+  (test "typeName nil"    [nil typeName]        (quote Nil))
+  (test "typeName bool"   [true typeName]       (quote Boolean))
+  (test "typeName cons"   [(list 1 2) typeName] (quote Cons))
+  (test "typeName some"   [(Some 42) typeName]  (quote Some))
+  (test "typeName none"   [None typeName]       (quote None))
+  (test "typeName ok"     [{ Ok value: 1 } typeName] (quote Ok))
+  (test "typeName err"    [(err "x") typeName]  (quote Err))
+
+  ; prototype chain reflects real inheritance
+  (test "int is Number"      [42 is: Number]        true)
+  (test "float is Number"    [3.14 is: Number]      true)
+  (test "Some is Option"     [(Some 42) is: Option] true)
+  (test "None is Option"     [None is: Option]      true)
+  (test "Option sealed"      [Option sealed?]       true)
+  (test "Option variants"    [[Option variants] count] 2)
+
+  ; prototypes list includes self, parents up to Object
+  (test "42 chain length"    [[42 prototypes] count] 4)  ; 42 Integer Number Object
+  (test "Some chain has Option" [[(Some 1) prototypes] includes: Option] true)
+
+  ; shape returns structural record
+  (test "shape has typeName" [[(Some 1) shape] slotAt: (quote typeName)] (quote Some))
+
+  ; protocol conformers registry
+  (test "Chainable has conformers"    [[Chainable conformers] empty?]  false)
+  (test "Chainable includes Ok"       (member? Ok   [Chainable conformers]) true)
+  (test "Chainable includes Cons"     (member? Cons [Chainable conformers]) true)
+  (test "Comparable includes Number"  (member? Number [Comparable conformers]) true)
+  (test "Numeric includes Number"     (member? Number [Numeric conformers])   true)
+
+  ; Cons equal: short-circuits on identity (so proto == proto works)
+  (test "Cons equal self"  [Cons equal: Cons] true)
+  (test "list equal list"  [(list 1 2 3) equal: (list 1 2 3)] true)
+  (test "list equal diff"  [(list 1 2)   equal: (list 1 2 3)] false)
+  (test "conform is deduped"
+    (do
+      (conform Cons Chainable)   ; already there
+      (conform Cons Chainable)   ; should not duplicate
+      [[Chainable conformers] count: |t| [t identical: Cons]])
+    1)
 ))
 
 [console println: (report core-tests)]

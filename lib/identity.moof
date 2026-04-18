@@ -1,0 +1,70 @@
+; identity.moof — prototype-as-type introspection
+;
+; every value answers three questions in the same uniform way:
+;   [val typeName]     → symbol naming the nearest named prototype
+;   [val prototypes]   → the full delegation chain, nearest first
+;   [val shape]        → record of typeName + slots + handlers
+;
+; plus [val is: Proto] (already on Object from types.moof) walks
+; the chain to check nominal membership.
+;
+; named prototypes declare their identity by implementing a
+; typeName handler that returns their symbol. instances inherit
+; via the chain. anonymous { x: 1 } literals fall through to
+; Object's default, which consults the native [val type].
+
+; ── typeName: nearest named prototype ─────────────────
+;
+; Object's default defers to the native [type] — this handles
+; primitives (42 → 'Integer) and unnamed general objects (→ 'Object).
+;
+; Named prototypes (Some, None, Option, Result, Ok, Err, protocols,
+; user-defined types) override typeName to return their symbol.
+; because dispatch walks the chain, instances inherit the nearest
+; named prototype's answer automatically.
+
+(defmethod Object typeName () [self type])
+
+; built-in type prototypes get explicit typeName handlers so that
+; (a) the answer is stable across VM changes and (b) [Integer typeName]
+; returns 'Integer instead of 'Object.
+
+(defmethod Integer   typeName () (quote Integer))
+(defmethod Float     typeName () (quote Float))
+(defmethod Number    typeName () (quote Number))
+(defmethod String    typeName () (quote String))
+(defmethod Cons      typeName () (quote Cons))
+(defmethod Nil       typeName () (quote Nil))
+(defmethod Boolean   typeName () (quote Boolean))
+(defmethod Symbol    typeName () (quote Symbol))
+(defmethod Table     typeName () (quote Table))
+(defmethod Block     typeName () (quote Block))
+(defmethod Ok        typeName () (quote Ok))
+(defmethod Err       typeName () (quote Err))
+(defmethod Result    typeName () (quote Result))
+(defmethod Act       typeName () (quote Act))
+(defmethod Update    typeName () (quote Update))
+(defmethod FarRef    typeName () (quote FarRef))
+(defmethod Vat       typeName () (quote Vat))
+(defmethod Protocol  typeName () (quote Protocol))
+
+; ── prototypes: full delegation chain ─────────────────
+;
+; the list includes self first, then each parent, up to Object.
+; primitives return a 3-4 element list (42 prototypes =
+; (42 Integer Number Object)).
+
+(defmethod Object prototypes ()
+  (let ((p [self parent]))
+    (if (nil? p) (list self)
+      (cons self [p prototypes]))))
+
+; ── shape: structural description ─────────────────────
+;
+; combines the three introspection hooks into one record the
+; inspector, agent, and serializer can all read uniformly.
+
+(defmethod Object shape ()
+  { typeName: [self typeName]
+    slots:    [self slotNames]
+    handlers: [self handlerNames] })

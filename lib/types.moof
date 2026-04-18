@@ -61,12 +61,17 @@
 
 ; ── Cons extras ────────────────────────────────────────
 
-; structural equality for cons lists
+; structural equality for cons lists. identity first — the Cons
+; prototype itself is a General (not a Pair), and sending [Cons
+; equal: Cons] dispatches here because the handler lives on the
+; proto. short-circuiting via identical: keeps self == self true
+; when the receiver isn't actually a pair.
 (defmethod Cons equal: (other)
-  (if (nil? other) false
-    (if (not (cons? other)) false
-      (if (not [[self car] equal: [other car]]) false
-        [[self cdr] equal: [other cdr]]))))
+  (if [self identical: other] true
+    (if (nil? other) false
+      (if (not (cons? other)) false
+        (if (not [[self car] equal: [other car]]) false
+          [[self cdr] equal: [other cdr]])))))
 
 (alias Cons first car)
 (alias Cons rest cdr)

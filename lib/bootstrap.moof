@@ -108,27 +108,6 @@
   (if [n <= 0] nil (range-build [n - 1] nil))))
 (def apply (fn (f args) (eval (cons f args))))
 
-; ═══════════════════════════════════════════════════════════
-; layer 5: pattern matching
-; ═══════════════════════════════════════════════════════════
-
-(def match-pattern? (fn (val pattern)
-  (if (eq pattern (quote _)) true [val equal: pattern])))
-
-(def match (vau (expr c1 c2) $e
-  (let ((val (eval expr $e)))
-    (if (match-pattern? val [c1 car])
-      (eval [[c1 cdr] car] $e)
-      (if (match-pattern? val [c2 car])
-        (eval [[c2 cdr] car] $e)
-        nil)))))
-
-(def match3 (vau (expr c1 c2 c3) $e
-  (let ((val (eval expr $e)))
-    (if (match-pattern? val [c1 car])
-      (eval [[c1 cdr] car] $e)
-      (if (match-pattern? val [c2 car])
-        (eval [[c2 cdr] car] $e)
-        (if (match-pattern? val [c3 car])
-          (eval [[c3 cdr] car] $e)
-          nil))))))
+; pattern matching lives in lib/pattern.moof — a proper (match val pat body ...)
+; vau with structural destructuring, constructor patterns, and bind variables,
+; dispatching through [pattern match: value] so every type handles its own.

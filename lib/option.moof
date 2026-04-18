@@ -1,34 +1,47 @@
-; option.moof — Some/None
+; option.moof — Option/Some/None as a real ADT
 ;
-; Some is BOTH the prototype AND the constructor (via call: handler).
-; (Some 42) → { Some value: 42 }. [val is: Some] → true for Some instances.
+; Option is the parent prototype. Some and None both inherit
+; from it. [(Some 42) is: Option] and [None is: Option] are
+; both true. Some is both the prototype AND the constructor
+; (via call:): (Some 42) builds { Some value: 42 }.
+
+(def Option {
+  [typeName] (quote Option)
+  [sealed?]  true
+})
 
 (def None {
-  __name: 'None
+  Option
+  [typeName] (quote None)
   [describe] "None"
-  [show] "None  : Option"
-  [then: f] self
-  [map: f] self
-  [ok?] false
-  [some?] false
-  [or: default] default
-  [recover: f] (f nil)
+  [show]     "None  : Option"
+  [then: f]  self
+  [map: f]   self
+  [ok?]      false
+  [some?]    false
+  [or: default]  default
+  [recover: f]   (f nil)
 })
 
 (def Some {
-  __name: 'Some
+  Option
   value: nil
+  [typeName]     (quote Some)
   ; (Some 42) — call: receives args as a list. self is Some.
-  [call: args] { Some value: [args car] }
-  [describe] (str "Some(" [@value describe] ")")
-  [show] (str "Some(" [@value describe] ")  : Option")
-  [then: f] (f @value)
-  [map: f] { Some value: (f @value) }
-  [ok?] true
-  [some?] true
-  [or: default] @value
-  [recover: f] self
+  [call: args]   { Some value: [args car] }
+  [describe]     (str "Some(" [@value describe] ")")
+  [show]         (str "Some(" [@value describe] ")  : Option")
+  [then: f]      (f @value)
+  [map: f]       { Some value: (f @value) }
+  [ok?]          true
+  [some?]        true
+  [or: default]  @value
+  [recover: f]   self
 })
+
+; Option knows its variants. the list is queryable for sealed-type
+; exhaustiveness checking in future pattern-matcher work.
+(defmethod Option variants () (list Some None))
 
 (conform Some Chainable)
 (conform None Chainable)

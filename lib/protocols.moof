@@ -1,9 +1,26 @@
 ; protocols.moof — protocol infrastructure
 
-(def Protocol { name: "Protocol" doc: nil requires: nil provides: nil includes: nil docs: nil })
+(def Protocol {
+  name: "Protocol"  doc: nil
+  requires: nil  provides: nil  includes: nil  docs: nil
+  conformers: nil
+})
+
+; conformers: list of types that have conformed. the registry
+; is queryable — [Chainable conformers] returns every type that
+; has Chainable installed on it.
+(defmethod Protocol conformers () [self slotAt: (quote conformers)])
+
+; record a conformance (dedup). called by `conform`.
+(defmethod Protocol addConformer: (type)
+  (let ((existing [self slotAt: (quote conformers)]))
+    (if (member? type existing) existing
+      [self slotAt: (quote conformers) put: (cons type existing)])))
 
 (defn make-protocol (name requires provides includes)
-  { Protocol name: name doc: nil requires: requires provides: provides includes: includes docs: nil })
+  { Protocol name: name doc: nil
+    requires: requires provides: provides includes: includes
+    docs: nil conformers: nil })
 
 ; conform: install provided handlers from a protocol onto a type
 (defn conform-install-provides (proto provs ks)
@@ -21,15 +38,17 @@
         (conform-includes proto [includes cdr]))))
 
 (defn conform (proto prot)
-  (let ((provs [prot slotAt: (quote provides)]))
-    (if (some? provs)
-      (conform-install-provides proto provs [provs keys])
-      nil))
-  (let ((includes [prot slotAt: (quote includes)]))
-    (if (some? includes)
-      (conform-includes proto includes)
-      nil))
-  proto)
+  (do
+    (let ((provs [prot slotAt: (quote provides)]))
+      (if (some? provs)
+        (conform-install-provides proto provs [provs keys])
+        nil))
+    (let ((includes [prot slotAt: (quote includes)]))
+      (if (some? includes)
+        (conform-includes proto includes)
+        nil))
+    [prot addConformer: proto]
+    proto))
 
 (defn conforms? (obj prot)
   (let ((reqs [prot slotAt: (quote requires)]))
@@ -110,6 +129,7 @@
                 requires: [result slotAt: (quote requires)]
                 provides: [result slotAt: (quote provides)]
                 includes: [result slotAt: (quote includes)]
-                docs: [result slotAt: (quote docs)] }))
+                docs: [result slotAt: (quote docs)]
+                conformers: nil }))
     (eval (cons (quote def) (cons name (cons prot nil))) $e)
     prot)))

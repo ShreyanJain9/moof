@@ -27,6 +27,7 @@ clock = "builtin:clock"
 files = [
   "lib/bootstrap.moof",
   "lib/protocols.moof",
+  "lib/identity.moof",
   "lib/comparable.moof",
   "lib/numeric.moof",
   "lib/iterable.moof",
