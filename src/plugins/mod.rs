@@ -106,7 +106,9 @@ pub fn builtin_type_plugin(name: &str) -> Option<Box<dyn Plugin>> {
 pub fn builtin_capability(name: &str) -> Option<Box<dyn CapabilityPlugin>> {
     match name {
         "console" => Some(Box::new(capabilities::ConsoleCapability)),
-        "clock" => Some(Box::new(capabilities::ClockCapability)),
+        "clock"   => Some(Box::new(capabilities::ClockCapability)),
+        "file"    => Some(Box::new(capabilities::FileCapability)),
+        "random"  => Some(Box::new(capabilities::RandomCapability)),
         _ => None,
     }
 }

@@ -20,7 +20,9 @@ block = "builtin:block"
 [capabilities]
 # each capability gets its own vat. accessed via FarRef → Act.
 console = "builtin:console"
-clock = "builtin:clock"
+clock   = "builtin:clock"
+file    = "builtin:file"
+random  = "builtin:random"
 
 [sources]
 # moof files eval'd into the image, in order.
@@ -49,4 +51,4 @@ files = [
 [grants]
 # which capabilities each context can access.
 # the REPL gets these as FarRef bindings.
-repl = ["console", "clock"]
+repl = ["console", "clock", "file", "random"]

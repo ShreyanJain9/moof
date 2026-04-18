@@ -230,6 +230,14 @@ impl Heap {
         self.make_object_with_slots(parent, vec![self.sym_message], vec![msg_val])
     }
 
+    /// Build an Ok(val) result. Uses the Ok prototype from the effects plugin.
+    pub fn make_ok(&mut self, val: Value) -> Value {
+        let parent = self.lookup_type("Ok");
+        let parent = if parent.is_nil() { self.type_protos[PROTO_OBJ] } else { parent };
+        let value_sym = self.intern("value");
+        self.make_object_with_slots(parent, vec![value_sym], vec![val])
+    }
+
     pub fn cons(&mut self, car: Value, cdr: Value) -> Value {
         self.alloc_val(HeapObject::Pair(car, cdr))
     }
