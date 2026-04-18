@@ -58,10 +58,10 @@
 
 (defmethod Integer times: (block)
   (if [self <= 0] nil
-    (let ((go (fn (self-go i n blk)
-                (if [i >= n] nil
-                  (do (blk i) (self-go self-go [i + 1] n blk))))))
-      (go go 0 self block))))
+    (let ((go (fn (go i)
+                (if [i >= self] nil
+                  (do (block i) (go go [i + 1]))))))
+      (go go 0))))
 
 (defmethod Integer upto:do: (limit block)
   (if [self > limit] nil
@@ -86,9 +86,9 @@
 
 (defmethod Integer digits ()
   (if [self zero?] (list 0)
-    (let ((go (fn (self-go n acc)
+    (let ((go (fn (go n acc)
                 (if [n zero?] acc
-                  (self-go self-go [n / 10] (cons [n % 10] acc))))))
+                  (go go [n / 10] (cons [n % 10] acc))))))
       (go go [self abs] nil))))
 
 (defmethod Integer factorial ()

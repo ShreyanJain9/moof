@@ -1,72 +1,46 @@
-; server.moof — defserver
+; server.moof — defserver: actors in the objectspace
 ;
 ; (defserver Name () { body })
 ; (defserver Name (cap1 cap2) { body })
 ;
 ; (Name { cap1: ref1 }) → Act<FarRef>
+;
+; body is a { } object literal. the constructor captures the body AST
+; (nested closure capture works) and evals it in a fresh vat.
 
-; serve-body: create the server object by eval'ing body-ast.
-; this fn runs inside the new vat.
-(defn serve-body (body-ast)
-  (eval body-ast Env))
-
-; bind-and-serve: bind cap names in env, then eval body.
-; runs inside the new vat. single nesting level.
-(defn bind-and-serve (cap-names cap-vals body-ast)
-  (if (some? cap-names)
-    (do (eval (list (quote def) [cap-names car]
-                   (list (quote quote) [cap-vals car])) Env)
-        (bind-and-serve [cap-names cdr] [cap-vals cdr] body-ast))
-    (eval body-ast Env)))
-
-; extract-caps: pull cap values from a config object.
-(defn extract-caps (config cap-names)
-  (if (nil? cap-names) nil
-    (cons [config slotAt: [cap-names car]]
-          (extract-caps config [cap-names cdr]))))
-
-; make-simple-server: no capabilities
-; passes body-ast through serve:with: to avoid double nesting
-(defn make-simple-server (body-ast)
-  (fn (config)
-    [Vat serve: |ba| (eval ba Env)
-      with: (list body-ast)]))
-
-; make-cap-server: with capabilities
-; uses serve:with: passing cap-names, cap-vals, and body-ast as args
-; to bind-and-serve which runs in the new vat
-(defn make-cap-server (cap-names body-ast)
-  (fn (config)
-    (let ((cap-vals (extract-caps config cap-names)))
-      ; pass cap-names, cap-vals, and body-ast as three args to the serve closure.
-      ; the closure binds each cap, then evals the body.
-      ; uses a recursive bind pattern inline (no helper fn since child vat
-      ; doesn't have server.moof loaded).
-      [Vat serve: |cn cv ba|
-        (let ((bind (fn (self-fn names vals)
-                (if (nil? names) nil
-                  (do (eval (list (quote def) [names car]
-                                 (list (quote quote) [vals car])) Env)
-                      (self-fn self-fn [names cdr] [vals cdr]))))))
-          (bind bind cn cv)
-          (eval ba Env))
-        with: (list cap-names cap-vals body-ast)])))
+; extract-cap-vals: pull cap values from config into a list.
+(defn extract-cap-vals (config names)
+  (if (nil? names) nil
+    (cons [config slotAt: [names car]]
+          (extract-cap-vals config [names cdr]))))
 
 (def defserver (vau args $e
   (let ((name [args car])
         (rest [args cdr])
-        ; args after name: either (caps) {body} or just {body}
-        ; if first arg is a cons list → cap list. if nil → empty caps ().
-        ; the body is always the last arg.
         (raw-caps [rest car])
-        ; detect: is there a cap list (including empty ())?
-        ; if raw-caps is nil or a cons, it's a cap list. body follows.
-        ; if raw-caps is a nursery object (object literal), it IS the body.
         (has-cap-decl (or (nil? raw-caps) (cons? raw-caps)))
         (cap-list (if has-cap-decl raw-caps nil))
-        (body-expr (if has-cap-decl [[rest cdr] car] raw-caps))
-        (ctor (if (some? cap-list)
-                (make-cap-server cap-list body-expr)
-                (make-simple-server body-expr))))
-    ; bind the constructor — use quasiquote to embed the closure value
-    (eval `(def ,name ,ctor) $e))))
+        (body-expr (if has-cap-decl [[rest cdr] car] raw-caps)))
+
+    (eval `(def ,name
+      ,(if (some? cap-list)
+        ; with capabilities
+        (fn (config)
+          ; pass cap names + values via serve:with:
+          ; body-expr captures naturally (nested capture fix)
+          (let ((cap-vals (extract-cap-vals config cap-list))
+                (serve-fn (fn (cap-names cap-vals)
+                  ; bind each cap name in the child vat's env
+                  (let ((bind (fn (go names vals)
+                          (if (nil? names) nil
+                            (do (eval `(def ,[names car] (quote ,[vals car])) Env)
+                                (go go [names cdr] [vals cdr]))))))
+                    (bind bind cap-names cap-vals))
+                  ; eval the body
+                  (eval body-expr Env))))
+            [Vat serve: serve-fn
+              with: (list cap-list cap-vals)]))
+        ; no capabilities — body-expr captures naturally
+        (fn (config)
+          [Vat serve: || (eval body-expr Env)])))
+      $e))))

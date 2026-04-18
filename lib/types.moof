@@ -47,10 +47,10 @@
   (if [n <= 0] ""
     [self ++ [self repeat: [n - 1]]]))
 (defmethod String reverse ()
-  (let ((go (fn (self-go s i acc)
+  (let ((go (fn (go i acc)
               (if [i < 0] acc
-                (self-go self-go s [i - 1] [acc ++ [s at: i]])))))
-    (go go self [[self length] - 1] "")))
+                (go go [i - 1] [acc ++ [self at: i]])))))
+    (go go [[self length] - 1] "")))
 (defmethod String capitalize ()
   (if [self empty?] self
     [[[self at: 0] toUpper] ++ [self substring: 1 to: [self length]]]))

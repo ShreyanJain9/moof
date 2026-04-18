@@ -39,27 +39,27 @@
 
   (provide (indexOf: x)
     (let ((len [self length])
-          (go (fn (self-go coll i)
+          (go (fn (go i)
                 (if [i >= len] nil
-                  (if [[coll at: i] equal: x] i
-                    (self-go self-go coll [i + 1]))))))
-      (go go self 0)))
+                  (if [[self at: i] equal: x] i
+                    (go go [i + 1]))))))
+      (go go 0)))
 
-  ; fold: recursive over indices (pure, no mutation)
+  ; fold: recursive over indices
   (provide (fold:with: init f)
     (let ((len [self length])
-          (go (fn (self-go coll acc i)
+          (go (fn (go acc i)
                 (if [i >= len] acc
-                  (self-go self-go coll (f acc [coll at: i]) [i + 1])))))
-      (go go self init 0)))
+                  (go go (f acc [self at: i]) [i + 1])))))
+      (go go init 0)))
 
-  ; toList: recursive build from end (pure, no mutation)
+  ; toList: recursive build from end
   (provide (toList)
     (let ((len [self length])
-          (go (fn (self-go coll acc i)
+          (go (fn (go acc i)
                 (if [i < 0] acc
-                  (self-go self-go coll (cons [coll at: i] acc) [i - 1])))))
-      (go go self nil [len - 1])))
+                  (go go (cons [self at: i] acc) [i - 1])))))
+      (go go nil [len - 1])))
 
   (include Iterable))
 
