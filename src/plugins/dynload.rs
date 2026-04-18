@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use crate::heap::Heap;
 use crate::value::Value;
-use crate::scheduler::Vat;
+use crate::vat::Vat;
 use crate::object::HeapObject;
 use super::CapabilityPlugin;
 

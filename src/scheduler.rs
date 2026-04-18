@@ -6,12 +6,12 @@
 //   - capability vats (Console, Clock, etc.) are also just vats.
 //   - all cross-vat sends return Acts.
 //   - the scheduler drains outboxes and delivers messages.
+//
+// Vat itself (the per-context execution environment) lives in vat.rs.
 
-use std::collections::VecDeque;
 use crate::heap::{Heap, OutgoingMessage, SpawnRequest};
-use crate::vm::VM;
 use crate::value::Value;
-use crate::lang::compiler::Compiler;
+use crate::vat::{Vat, Message};
 use crate::plugins::CapabilityPlugin;
 
 /// Merge two delta objects: base slots + override slots → new object.
@@ -47,119 +47,12 @@ fn merge_deltas(heap: &mut Heap, base: Value, overrides: Value) -> Value {
     heap.make_object_with_slots(Value::NIL, names, vals)
 }
 
-/// A message queued for delivery to a vat.
-pub struct Message {
-    pub receiver_id: u32,        // object ID in the target vat
-    pub selector: u32,           // method selector (symbol in target vat)
-    pub args: Vec<Value>,        // values in the target vat's heap
-    pub reply_vat_id: u32,       // which vat to resolve the Act in
-    pub reply_act_id: u32,       // Act object ID in the reply vat
-}
-
 /// A pending Act resolution: result from a cross-vat send.
 struct ActResolution {
     vat_id: u32,       // which vat the Act lives in
     act_id: u32,       // Act object ID
     result: Value,     // the resolved value (in the Act's vat heap)
     is_error: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum VatStatus {
-    Running,
-    Idle,
-    Dead,
-}
-
-/// A vat: an isolated single-threaded execution context.
-pub struct Vat {
-    pub id: u32,
-    pub heap: Heap,
-    pub vm: VM,
-    pub mailbox: VecDeque<Message>,
-    pub status: VatStatus,
-}
-
-const BOOTSTRAP_FILES: &[&str] = &[
-    "lib/bootstrap.moof",
-    "lib/protocols.moof",
-    "lib/comparable.moof",
-    "lib/numeric.moof",
-    "lib/iterable.moof",
-    "lib/indexable.moof",
-    "lib/callable.moof",
-    "lib/types.moof",
-    "lib/error.moof",
-    "lib/showable.moof",
-    "lib/range.moof",
-    "lib/act.moof",
-];
-
-impl Vat {
-    /// Create a new vat with default type plugins.
-    pub fn new(id: u32) -> Self {
-        let mut heap = Heap::new();
-        heap.vat_id = id;
-        let vm = VM::new();
-        crate::plugins::register_all(&mut heap);
-        Vat {
-            id,
-            heap,
-            vm,
-            mailbox: VecDeque::new(),
-            status: VatStatus::Idle,
-        }
-    }
-
-    /// Create a bare vat (no type plugins). Plugins registered separately.
-    pub fn new_bare(id: u32) -> Self {
-        let mut heap = Heap::new();
-        heap.vat_id = id;
-        let vm = VM::new();
-        Vat {
-            id,
-            heap,
-            vm,
-            mailbox: VecDeque::new(),
-            status: VatStatus::Idle,
-        }
-    }
-
-    /// Load bootstrap libraries into this vat.
-    pub fn load_bootstrap(&mut self) {
-        for path in BOOTSTRAP_FILES {
-            if let Ok(source) = std::fs::read_to_string(path) {
-                match self.eval_source(&source) {
-                    Ok(_) => eprintln!("  loaded {path}"),
-                    Err(e) => { eprintln!("  ~ error in {path}: {e}"); return; }
-                }
-            }
-        }
-    }
-
-    /// Evaluate source code in this vat.
-    pub fn eval_source(&mut self, source: &str) -> Result<Value, String> {
-        let tokens = crate::lang::lexer::tokenize(source).map_err(|e| format!("lex: {e}"))?;
-        let mut parser = crate::lang::parser::Parser::new(&tokens, &mut self.heap);
-        let exprs = parser.parse_all().map_err(|e| format!("parse: {e}"))?;
-        let mut last = Value::NIL;
-        for expr in &exprs {
-            let result = Compiler::compile_toplevel(&self.heap, *expr)
-                .map_err(|e| format!("compile: {e}"))?;
-            last = self.vm.eval_result(&mut self.heap, result)
-                .map_err(|e| format!("eval: {e}"))?;
-        }
-        Ok(last)
-    }
-
-    /// Dispatch a message to a receiver object in this vat.
-    pub fn dispatch_message(&mut self, msg: &Message) -> Result<Value, String> {
-        let receiver = Value::nursery(msg.receiver_id);
-        // look up selector name from this vat's symbol table
-        let sel_name = self.heap.symbol_name(msg.selector).to_string();
-        let local_sel = self.heap.intern(&sel_name);
-        self.vm.send_message(&mut self.heap, receiver, local_sel, &msg.args)
-    }
 }
 
 /// Info about a loaded dynamic plugin.

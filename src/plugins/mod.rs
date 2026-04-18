@@ -24,7 +24,7 @@ pub mod dynload;
 
 use crate::heap::Heap;
 use crate::value::Value;
-use crate::scheduler::Vat;
+use crate::vat::Vat;
 
 /// A native module that extends every vat's objectspace.
 /// Registers type prototypes and handlers on a Heap.

@@ -23,6 +23,7 @@ pub mod opcodes;
 pub mod vm;
 pub mod store;
 pub mod plugins;
+pub mod vat;
 pub mod scheduler;
 pub mod manifest;
 pub mod lang;
@@ -30,5 +31,6 @@ pub mod lang;
 // re-export the most-used types at crate root
 pub use value::Value;
 pub use heap::Heap;
-pub use scheduler::{Scheduler, Vat};
+pub use vat::Vat;
+pub use scheduler::Scheduler;
 pub use plugins::{Plugin, CapabilityPlugin};

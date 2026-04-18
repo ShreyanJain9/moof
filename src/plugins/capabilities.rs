@@ -6,7 +6,7 @@
 // plugins/mod.rs operates on whatever heap you hand it, so each
 // capability passes its own vat.heap. isolation is preserved.
 
-use crate::scheduler::Vat;
+use crate::vat::Vat;
 use crate::object::HeapObject;
 use crate::value::Value;
 use super::{CapabilityPlugin, native};
