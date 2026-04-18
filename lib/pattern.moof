@@ -1,0 +1,143 @@
+; pattern.moof — structural pattern matching via dispatch
+;
+; every pattern is a value. patterns know how to match themselves
+; against values via [pattern match: value].
+;
+; returns Ok(bindings) on success, Err on failure.
+; bindings is a cons list of (name . val) pairs.
+;
+; extending the system: define [match:] on your type's prototype.
+;
+; (match val
+;   42           "the answer"
+;   x            [x + 1]
+;   _            "other")
+
+; ── helper: construct bindings ────────────────────────
+
+(defn no-bindings () { Ok value: nil })
+(defn one-binding (name val)
+  ; bindings use 2-element lists (name val), not dotted pairs,
+  ; so append: can walk them as proper lists
+  { Ok value: (cons (list name val) nil) })
+(defn match-fail (msg) (err msg))
+
+(defn concat-bindings (a b)
+  (if (not [a ok?]) a
+    (if (not [b ok?]) b
+      { Ok value: [[a slotAt: (quote value)] append:
+                   [b slotAt: (quote value)]] })))
+
+; ── default behavior on Object ────────────────────────
+;
+; a Symbol as pattern is either _ (wildcard) or a variable (bind).
+; Any other pattern defaults to equality check via equal?.
+
+(defmethod Object match: (val)
+  (if [self equal: val] (no-bindings)
+    (match-fail "no match")))
+
+; Symbols: wildcard or variable bind
+(defmethod Symbol match: (val)
+  (if [self identical: (quote _)] (no-bindings)
+    (one-binding self val)))
+
+; Integer, Float, String, Boolean, Nil: match by equality
+; (already covered by Object default since equal: works)
+
+; Cons pattern matches cons values structurally.
+; (cons h t) as a pattern — but we can't write (cons h t) without
+; quoting since cons evaluates its args. so the pattern is written
+; as a cons literal: patterns are AST passed unevaluated via match vau.
+; When the vau sees (cons h t) as a pattern, it's actually the cons
+; cell ('cons 'h 't). We handle this by checking the head.
+
+(defmethod Cons match: (val)
+  ; self is a pattern-list (a cons cell from the parser)
+  ; check head for special forms
+  (let ((head [self car]))
+    (if [head identical: (quote quote)]
+      ; (quote sym) — match literal symbol
+      (let ((sym [[self cdr] car]))
+        (if [sym identical: val] (no-bindings) (match-fail "quote mismatch")))
+      (if [head identical: (quote list)]
+        ; (list p1 p2 p3) — match list with exact length
+        (match-list [self cdr] val)
+        (if [head identical: (quote cons)]
+          ; (cons hpat tpat) — match cons cell
+          (match-cons [[self cdr] car] [[[self cdr] cdr] car] val)
+          ; otherwise: treat as constructor — check [val type] matches head
+          (match-constructor self val))))))
+
+; match-list: pattern list (p1 p2 p3) against actual list
+(defn match-list (pats val)
+  (if (nil? pats)
+    (if (nil? val) (no-bindings) (match-fail "list too long"))
+    (if (not (cons? val)) (match-fail "not a list")
+      (concat-bindings
+        [[pats car] match: [val car]]
+        (match-list [pats cdr] [val cdr])))))
+
+; match-cons: head pattern + tail pattern against cons value
+(defn match-cons (hpat tpat val)
+  (if (not (cons? val)) (match-fail "not a cons")
+    (concat-bindings
+      [hpat match: [val car]]
+      [tpat match: [val cdr]])))
+
+; match-constructor: (Proto arg1 arg2) — check prototype chain + destructure.
+; The head of the pattern is looked up in the env (it's a symbol naming
+; a prototype). We then check [val is: Proto] and destructure.
+(defn match-constructor (pat val)
+  (let ((proto-ref [pat car])
+        (arg-pats [pat cdr]))
+    ; proto-ref is a symbol like 'Some. We need its value.
+    ; But we're in a fn, so we can eval it directly... actually the head
+    ; is already a prototype value if the caller looked it up. Since
+    ; patterns are raw AST, the head is a Symbol. Look up in the env.
+    (let ((proto (eval proto-ref Env)))
+      (if (nil? proto) (match-fail "unknown prototype")
+        (if [val is: proto]
+          (match-constructor-args arg-pats val proto)
+          (match-fail "prototype mismatch"))))))
+
+; destructure constructor args against val's slots.
+; skip meta slots (names starting with __).
+(defn match-constructor-args (pats val proto)
+  (if (nil? pats) (no-bindings)
+    (let ((proto-slots [[proto slotNames] select: |s|
+            (not [[s describe] startsWith: "__"])]))
+      (match-slots pats proto-slots val))))
+
+(defn match-slots (pats names val)
+  (if (nil? pats) (no-bindings)
+    (if (nil? names) (match-fail "too many pattern args")
+      (concat-bindings
+        [[pats car] match: [val slotAt: [names car]]]
+        (match-slots [pats cdr] [names cdr] val)))))
+
+; ── the match vau ─────────────────────────────────────
+
+(defn with-bindings (bindings body env)
+  (if (nil? bindings) (eval body env)
+    (let ((pair [bindings car])
+          (name [pair car])
+          (val [[pair cdr] car]))
+      (eval `(def ,name (quote ,val)) env)
+      (with-bindings [bindings cdr] body env))))
+
+(defn try-clauses (val clauses env)
+  (if (nil? clauses) nil
+    (if (nil? [clauses cdr]) nil
+      (let ((pat [clauses car])
+            (body [[clauses cdr] car])
+            (rest [[clauses cdr] cdr])
+            (result [pat match: val]))
+        (if [result ok?]
+          (with-bindings [result slotAt: (quote value)] body env)
+          (try-clauses val rest env))))))
+
+(def match (vau args $e
+  (let ((val (eval [args car] $e))
+        (clauses [args cdr]))
+    (try-clauses val clauses $e))))

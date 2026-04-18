@@ -7,9 +7,12 @@
 (defmethod Object tap: (block) (do (block self) self))
 (defmethod Object pipe: (f) (f self))
 (defmethod Object then: (f) (f self))
-(defmethod Object is: (type) (let ((p [self parent]))
-  (if (eq p type) true
-    (if (nil? p) false [p is: type]))))
+; (val is: Type) — true if val IS Type or Type is in val's prototype chain
+(defmethod Object is: (type)
+  (if (eq self type) true
+    (let ((p [self parent]))
+      (if (eq p type) true
+        (if (nil? p) false [p is: type])))))
 
 ; ── Nil ────────────────────────────────────────────────
 

@@ -274,11 +274,14 @@ impl VM {
                         self.frames.last_mut().unwrap().regs[dst as usize] = result;
                     } else if let Some((code_idx, _)) = heap.as_closure(handler) {
                         // closure call — push frame!
-                        let arg_list = if sel_sym == heap.sym_call {
-                            // call: — args[0] is the args list, pass directly
+                        // for call: — if handler IS the receiver (closure calling itself),
+                        // pass args directly. if handler is a separate method, prepend self.
+                        let arg_list = if sel_sym == heap.sym_call && handler == recv {
+                            // direct closure call — args[0] is the args list
                             send_args.first().copied().unwrap_or(Value::NIL)
                         } else {
-                            // method: prepend receiver as self
+                            // method dispatch (including user-defined call: handlers):
+                            // prepend receiver as self
                             let mut full = vec![recv];
                             full.extend_from_slice(&send_args);
                             heap.list(&full)
@@ -336,7 +339,7 @@ impl VM {
                         self.frames.last_mut().unwrap().regs[dst as usize] = result;
                     } else if let Some((code_idx, _)) = heap.as_closure(handler) {
                         // closure: REPLACE current frame instead of pushing
-                        let arg_list = if sel_sym == heap.sym_call {
+                        let arg_list = if sel_sym == heap.sym_call && handler == recv {
                             send_args.first().copied().unwrap_or(Value::NIL)
                         } else {
                             let mut full = vec![recv];
@@ -762,7 +765,7 @@ impl VM {
                 Err(msg) => return Ok(heap.make_error(&msg)),
             }
         } else if let Some((code_idx, _)) = heap.as_closure(handler) {
-            let arg_list = if selector == heap.sym_call {
+            let arg_list = if selector == heap.sym_call && handler == receiver {
                 args.first().copied().unwrap_or(Value::NIL)
             } else {
                 let mut full = vec![receiver];

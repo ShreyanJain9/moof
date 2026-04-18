@@ -1,15 +1,10 @@
-; option.moof — Some/None for nil-safe chaining
+; option.moof — Some/None
 ;
-; (Some 42)                → wraps a value
-; None                     → absence of a value
-; [opt then: |x| [x + 1]] → chains if Some, skips if None
-; (do (x <- (Some 5)) [x + 1]) → 6
-; (do (x <- None) [x + 1])     → None
-;
-; Option is to nil what Result is to errors.
-; use it when a value might not exist.
+; Some is BOTH the prototype AND the constructor (via call: handler).
+; (Some 42) → { Some value: 42 }. [val is: Some] → true for Some instances.
 
 (def None {
+  __name: 'None
   [describe] "None"
   [show] "None  : Option"
   [then: f] self
@@ -20,21 +15,20 @@
   [recover: f] (f nil)
 })
 
-; SomeProto is the prototype for Some values
-(def SomeProto {
+(def Some {
+  __name: 'Some
   value: nil
+  ; (Some 42) — call: receives args as a list. self is Some.
+  [call: args] { Some value: [args car] }
   [describe] (str "Some(" [@value describe] ")")
   [show] (str "Some(" [@value describe] ")  : Option")
   [then: f] (f @value)
-  [map: f] { SomeProto value: (f @value) }
+  [map: f] { Some value: (f @value) }
   [ok?] true
   [some?] true
   [or: default] @value
   [recover: f] self
 })
 
-; Some is a constructor function: (Some 42) → { SomeProto value: 42 }
-(def Some (fn (val) { SomeProto value: val }))
-
-(conform SomeProto Chainable)
+(conform Some Chainable)
 (conform None Chainable)
