@@ -1,0 +1,94 @@
+; builder.moof — round-trip protocol
+;
+; when you map: over a Cons, you get a Cons.
+; when you map: over a Table, you get a Table.
+; when you map: over a Set, you get a Set.
+;
+; the trick: every collection-shaped type implements:
+;   [self emptyKindred]   → an empty container of the same type
+;   [container add: x]    → new container with x appended
+;
+; Iterable's provided methods use these to preserve type.
+
+(defprotocol Buildable
+  "Round-trip collection construction. Types that conform get
+   map:, select:, etc. returning the same type instead of
+   generic Cons lists.
+
+   Implement emptyKindred (returns an empty of this type) and
+   add: (append an element, returning new container). The
+   Iterable methods automatically preserve type via these."
+
+  (require (emptyKindred)
+    "Return an empty container of the same concrete type as self.
+     [#[1 2 3] emptyKindred]  → #[]
+     [(list 1 2 3) emptyKindred]  → nil")
+
+  (require (add: x)
+    "Return a new container with x appended at the natural end.
+     For lists: cons + reverse or walk-to-end.
+     For tables: push to seq.
+     For sets: add if not present."))
+
+; ── default Buildable implementations ─────────────────
+
+; Cons: empty is nil, add: is cons + later reverse (handled by collect).
+; But simplest: use append:. O(n) per add, O(n²) total.
+; For efficiency, Iterable methods use a reversed-build pattern.
+
+(defmethod Cons emptyKindred () nil)
+(defmethod Cons add: (x)
+  (if (nil? self) (cons x nil)
+    (cons [self car] [[self cdr] add: x])))
+
+(defmethod Nil emptyKindred () nil)
+(defmethod Nil add: (x) (cons x nil))
+
+; Table: empty is #[], add: pushes onto the seq part
+(defmethod Table emptyKindred () #[])
+(defmethod Table add: (x) [self push: x])
+
+; String: add: concatenates.
+(defmethod String emptyKindred () "")
+(defmethod String add: (x) [self ++ [x describe]])
+
+; ── a Builder abstraction for efficient collection ────
+
+; Building via add: can be O(n²) for linked lists (cons is cheap
+; but append is O(n)). The Builder pattern batches:
+;
+; (def b [proto newBuilder])
+; [b << x]   ; add element (prepends internally)
+; [b << y]
+; [b result] ; returns final collection in correct order
+
+(def Builder {
+  source: nil    ; the prototype to build toward
+  items: nil     ; reversed list of items so far
+
+  [<< x] [self with: { items: (cons x @items) }]
+  [result]
+    ; fold items (reversed) back onto an empty kindred
+    (let ((empty [@source emptyKindred])
+          (ordered [@items reverse]))
+      (if (nil? ordered) empty
+        [ordered fold: empty with: |acc x| [acc add: x]]))
+  [describe] (str "<Builder toward " [@source describe] ">")
+})
+
+; create a Builder for a given prototype
+(defn builder-for (proto)
+  { Builder source: proto items: nil })
+
+; ── Iterable methods that preserve type ───────────────
+;
+; override the existing map:, select:, reject: to use Builder
+; so they return the same type as the receiver.
+;
+; Note: these override the Iterable-provided versions.
+
+; generic "collect into same type as self" — the key primitive
+(defmethod Object collectLike: (f)
+  [[self fold: (builder-for self) with: |b x|
+    (let ((result (f x)))
+      (if (some? result) [b << result] b))] result])
