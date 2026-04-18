@@ -79,12 +79,14 @@
 (defmethod Table entries ()
   [[self keys] map: |k| (cons k [self at: k])])
 (defmethod Table merge: (other)
-  (let ((result [self clone]))
-    [[other keys] each: |k| [result at: k put: [other at: k]]]
-    result))
+  [[other keys] fold: self with: |acc k| [acc at: k put: [other at: k]]])
 (defmethod Table eachEntry: (f)
   [[self keys] each: |k| (f k [self at: k])])
 (defmethod Table mapValues: (f)
-  (let ((result #[]))
-    [self eachEntry: |k v| [result at: k put: (f v)]]
-    result))
+  [[self keys] fold: #[] with: |acc k| [acc at: k put: (f [self at: k])]])
+
+; ── moved from native (Rust) → moof ──────────────────
+
+; Object: responds: — check if handler exists
+(defmethod Object responds: (sel)
+  [[self handlerNames] includes: sel])

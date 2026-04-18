@@ -151,12 +151,7 @@ impl super::Plugin for CorePlugin {
             Ok(Value::NIL)
         });
 
-        // Object: responds: — check if a handler exists (walks prototype chain)
-        native(heap, obj_id, "responds:", |heap, receiver, args| {
-            let sel = args.first().and_then(|v| v.as_symbol()).ok_or("responds: arg must be a symbol")?;
-            let names = heap.all_handler_names(receiver);
-            Ok(Value::boolean(names.contains(&sel)))
-        });
+        // Object: responds: — moved to moof (types.moof)
 
         // Object: hasOwnHandler: — check if THIS object has the handler directly (no chain walk)
         native(heap, obj_id, "hasOwnHandler:", |heap, receiver, args| {
