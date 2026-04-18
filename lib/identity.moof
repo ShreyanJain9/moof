@@ -59,6 +59,18 @@
     (if (nil? p) (list self)
       (cons self [p prototypes]))))
 
+; ── publicSlots: formal "non-private" slot convention ─
+;
+; slots whose name starts with `__` are private — used by types
+; for internal state they don't want surfaced (Act's __state /
+; __result / __cont_fn, Update's __delta / __reply, etc.).
+; [obj publicSlots] filters those out. pattern-match constructor
+; destructuring and shape-based inspection should use this rather
+; than re-implementing the filter.
+
+(defmethod Object publicSlots ()
+  [[self slotNames] reject: |s| [[s describe] startsWith: "__"]])
+
 ; ── shape: structural description ─────────────────────
 ;
 ; combines the three introspection hooks into one record the
@@ -66,5 +78,5 @@
 
 (defmethod Object shape ()
   { typeName: [self typeName]
-    slots:    [self slotNames]
+    slots:    [self publicSlots]
     handlers: [self handlerNames] })

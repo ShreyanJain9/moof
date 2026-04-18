@@ -101,13 +101,11 @@
           (match-constructor-args arg-pats val proto)
           (match-fail "prototype mismatch"))))))
 
-; destructure constructor args against val's slots.
-; skip meta slots (names starting with __).
+; destructure constructor args against val's public slots
+; (skipping private __-prefixed slots per Object#publicSlots).
 (defn match-constructor-args (pats val proto)
   (if (nil? pats) (no-bindings)
-    (let ((proto-slots [[proto slotNames] select: |s|
-            (not [[s describe] startsWith: "__"])]))
-      (match-slots pats proto-slots val))))
+    (match-slots pats [proto publicSlots] val)))
 
 (defn match-slots (pats names val)
   (if (nil? pats) (no-bindings)
