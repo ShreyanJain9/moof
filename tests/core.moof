@@ -152,6 +152,36 @@
   (test "Set sum"             [(Set 1 2 3) sum]                     6)
   (test "Set any"             [(Set 1 2 3) any: |x| [x > 2]]        true)
   (test "Set all"             [(Set 2 4 6) all: |x| [x even?]]      true)
+
+  ; ── wave 1.6: full type-preservation coverage ────────
+
+  ; take / drop on Table and String
+  (test "Table take preserves"  [[#[1 2 3 4 5] take: 3] typeName]   (quote Table))
+  (test "Table take content"    [#[1 2 3 4 5] take: 3]              #[1 2 3])
+  (test "Table drop preserves"  [[#[1 2 3 4 5] drop: 2] typeName]   (quote Table))
+  (test "Table drop content"    [#[1 2 3 4 5] drop: 2]              #[3 4 5])
+  (test "String take"           ["hello" take: 3]                  "hel")
+  (test "String drop"           ["hello" drop: 2]                  "llo")
+  (test "String take preserves" [["hello" take: 3] typeName]       (quote String))
+  (test "Set take preserves"    [[(Set 1 2 3 4) take: 2] typeName] (quote Set))
+
+  ; takeWhile / dropWhile
+  (test "Table takeWhile"       [#[1 2 3 4 5] takeWhile: |x| [x < 4]] #[1 2 3])
+  (test "Table dropWhile"       [#[1 2 3 4 5] dropWhile: |x| [x < 3]] #[3 4 5])
+  (test "String takeWhile"      ["aaaBBB" takeWhile: |c| [c equal: "a"]] "aaa")
+
+  ; reverse on Table
+  (test "Table reverse preserves" [[#[1 2 3] reverse] typeName]    (quote Table))
+  (test "Table reverse content"   [#[1 2 3] reverse]               #[3 2 1])
+
+  ; distinct (and the broken-forever bug fix)
+  (test "Cons distinct"         [(list 1 2 2 3 3 1) distinct]      (list 1 2 3))
+  (test "Table distinct"        [#[1 2 2 3 3] distinct]            #[1 2 3])
+  (test "String distinct"       ["aabbcca" distinct]               "abc")
+  (test "Set distinct is self"  [(Set 1 2 3) distinct]             (Set 1 2 3))
+
+  ; member? uses equal: (structural) now — String dedup works
+  (test "member? on strings"   (member? "b" (list "a" "b" "c"))   true)
 ))
 
 [console println: (report core-tests)]

@@ -203,10 +203,14 @@
   ; ── uniqueness ───────────────────────────────────────
 
   (provide (distinct)
-    [[self fold: (cons nil nil) with: |state x|
-      (if (not (member? x [state cdr]))
-        (cons (cons x [state car]) (cons x [state cdr]))
-        state)] car reverse]))
+    ; state is (reversed-output . seen). we prepend new items to
+    ; the output list and track seen items in the cdr. after the
+    ; fold, reverse the output to restore insertion order.
+    (let ((pair [self fold: (cons nil nil) with: |state x|
+                  (if (not (member? x [state cdr]))
+                    (cons (cons x [state car]) (cons x [state cdr]))
+                    state)]))
+      [[pair car] reverse])))
 
 ; ── Cons: direct implementations for efficiency ───────
 ; Cons (linked lists) gets efficient each: and fold:with:

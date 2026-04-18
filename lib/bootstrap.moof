@@ -98,9 +98,14 @@
 
 (def nil? (fn (x) (eq x nil)))
 (def some? (fn (x) (not (eq x nil))))
+(def cons? (fn (x) [[x type] identical: (quote Cons)]))
+; member? uses equal: (content equality), not eq (identity).
+; this is what callers want: String/Table/Cons members dedupe
+; structurally; primitives and prototypes still short-circuit on
+; identity because equal: on Object native first checks a == b.
 (def member? (fn (x lst)
   (if (eq lst nil) false
-    (if (eq x [lst car]) true (member? x [lst cdr])))))
+    (if [x equal: [lst car]] true (member? x [lst cdr])))))
 (defn range-build (i acc)
   (if [i < 0] acc
     (range-build [i - 1] (cons i acc))))

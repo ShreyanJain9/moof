@@ -89,8 +89,6 @@
 ; desugars entirely to then: sends.
 ; works for ANY Chainable: Acts, Results, Lists, pure values.
 
-(defn cons? (x) [[x type] identical: (quote Cons)])
-
 (defn arrow-bind? (form)
   (if (not (cons? form)) false
     (if (nil? [form cdr]) false

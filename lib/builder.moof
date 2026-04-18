@@ -106,3 +106,30 @@
 
 (defmethod Table  reject: (f) [self select: |x| (not (f x))])
 (defmethod String reject: (f) [self select: |x| (not (f x))])
+
+; rebuildLike: takes a Cons list and pours it into a container of
+; self's type. complement to buildLike: — used to wrap operations
+; whose natural output is a list (take:, drop:, reverse, distinct).
+(defmethod Object rebuildLike: (lst)
+  [lst fold: [self emptyKindred] with: |acc x| [acc add: x]])
+
+; type-preserving take / drop / takeWhile / dropWhile for Table and
+; String. Iterable's provides return a Cons; rebuildLike: pours it
+; back into self's container type. Cons keeps the Cons-returning
+; provides (no override needed — already correct type).
+
+(defmethod Table  take: (n) [self rebuildLike: [[self toList] take: n]])
+(defmethod String take: (n) [self rebuildLike: [[self toList] take: n]])
+(defmethod Table  drop: (n) [self rebuildLike: [[self toList] drop: n]])
+(defmethod String drop: (n) [self rebuildLike: [[self toList] drop: n]])
+
+(defmethod Table  takeWhile: (f) [self rebuildLike: [[self toList] takeWhile: f]])
+(defmethod String takeWhile: (f) [self rebuildLike: [[self toList] takeWhile: f]])
+(defmethod Table  dropWhile: (f) [self rebuildLike: [[self toList] dropWhile: f]])
+(defmethod String dropWhile: (f) [self rebuildLike: [[self toList] dropWhile: f]])
+
+(defmethod Table  reverse  () [self rebuildLike: [[self toList] reverse]])
+; String.reverse has its own direct O(n) impl in types.moof.
+
+(defmethod Table  distinct () [self rebuildLike: [[self toList] distinct]])
+(defmethod String distinct () [self rebuildLike: [[self toList] distinct]])

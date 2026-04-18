@@ -98,6 +98,16 @@
 (defmethod Set select: (f) [self buildLike: |b x| (if (f x) [b << x] b)])
 (defmethod Set reject: (f) [self select: |x| (not (f x))])
 
+; take / drop / takeWhile / dropWhile on Set — iterate in insertion
+; order (stable), return a new Set. reverse / distinct are identity:
+; sets are unordered (no meaningful reversal) and already unique.
+(defmethod Set take:      (n) [self rebuildLike: [[self toList] take: n]])
+(defmethod Set drop:      (n) [self rebuildLike: [[self toList] drop: n]])
+(defmethod Set takeWhile: (f) [self rebuildLike: [[self toList] takeWhile: f]])
+(defmethod Set dropWhile: (f) [self rebuildLike: [[self toList] dropWhile: f]])
+(defmethod Set reverse    ()  self)
+(defmethod Set distinct   ()  self)
+
 ; ── from: and toSet constructors ───────────────────────
 
 (defmethod Set from: (iter)
