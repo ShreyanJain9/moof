@@ -115,6 +115,43 @@
   (test "Table reject content"        [#[1 2 3 4] reject: |x| [x > 2]]          #[1 2])
   (test "String reject preserves type" [["abcde" reject: |c| [c equal: "c"]] typeName] (quote String))
   (test "Cons map still returns Cons" [[(list 1 2 3) map: |x| [x * 2]] typeName] (quote Cons))
+
+  ; ── wave 1.5: Set ────────────────────────────────────
+  (test "Set dedup"           [(Set 1 2 3 2 1) size]                3)
+  (test "Set typeName"        [(Set 1 2 3) typeName]                (quote Set))
+  (test "Set includes"        [(Set 1 2 3) includes: 2]             true)
+  (test "Set excludes"        [(Set 1 2 3) includes: 4]             false)
+  (test "Set add new"         [[(Set 1 2) add: 3] size]             3)
+  (test "Set add dup"         [[(Set 1 2 3) add: 2] size]           3)
+  (test "Set remove"          [[(Set 1 2 3) remove: 2] size]        2)
+  (test "Set union size"      [[(Set 1 2) union: (Set 2 3)] size]   3)
+  (test "Set intersection"    [[(Set 1 2 3) intersection: (Set 3 4 5)] size]   1)
+  (test "Set difference"      [[(Set 1 2 3) difference: (Set 3 4 5)] size]    2)
+  (test "Set subset?"         [(Set 1 2) subset?: (Set 1 2 3)]      true)
+  (test "Set not subset?"     [(Set 1 4) subset?: (Set 1 2 3)]      false)
+  (test "Set disjoint?"       [(Set 1 2) disjoint?: (Set 3 4)]      true)
+  (test "Set not disjoint?"   [(Set 1 2) disjoint?: (Set 2 3)]      false)
+  (test "Set empty?"          [(Set) empty?]                       true)
+
+  ; Buildable for Set: map/select preserve type
+  (test "Set map preserves type" [[(Set 1 2 3) map: |x| [x * 2]] typeName] (quote Set))
+  (test "Set select preserves type" [[(Set 1 2 3 4) select: |x| [x > 2]] typeName] (quote Set))
+
+  ; toSet constructors
+  (test "Cons toSet"          [[(list 1 2 3 2 1) toSet] size]       3)
+  (test "Table toSet"         [[#[1 2 3 2 1] toSet] size]           3)
+
+  ; structural equality
+  (test "Set equal same"      [(Set 1 2 3) equal: (Set 3 2 1)]      true)
+  (test "Set equal diff"      [(Set 1 2 3) equal: (Set 1 2)]        false)
+
+  ; rendering
+  (test "Set describe"        [(Set 1 2 3) describe]                "{1, 2, 3}")
+
+  ; Iterable methods via each: — all work for free
+  (test "Set sum"             [(Set 1 2 3) sum]                     6)
+  (test "Set any"             [(Set 1 2 3) any: |x| [x > 2]]        true)
+  (test "Set all"             [(Set 2 4 6) all: |x| [x even?]]      true)
 ))
 
 [console println: (report core-tests)]

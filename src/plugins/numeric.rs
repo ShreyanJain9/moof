@@ -44,7 +44,13 @@ impl Plugin for NumericPlugin {
         native(heap, int_id, "negate", |_heap, receiver, _args| {
             Ok(Value::integer(-receiver.as_integer().ok_or("negate: not int")?))
         });
-        native(heap, int_id, "describe", |_heap, receiver, _args| Ok(receiver));
+        // describe returns the decimal representation as a String.
+        // Object's describe would work via format_value, but installing
+        // it directly avoids the heap.format_value round-trip.
+        native(heap, int_id, "describe", |heap, receiver, _args| {
+            let n = receiver.as_integer().ok_or("describe: not an integer")?;
+            Ok(heap.alloc_string(&n.to_string()))
+        });
 
         // bitwise
         int_binop(heap, int_id, "bitAnd:",    |a, b| Value::integer(a & b));

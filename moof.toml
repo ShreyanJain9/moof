@@ -40,6 +40,7 @@ files = [
   "lib/act.moof",
   "lib/option.moof",
   "lib/builder.moof",
+  "lib/set.moof",
   "lib/pattern.moof",
   "lib/test.moof",
   "lib/server.moof",

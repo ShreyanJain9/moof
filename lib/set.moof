@@ -1,0 +1,107 @@
+; set.moof — unordered unique collection
+;
+; Set is a collection of unique elements, ordered only by
+; insertion (Table's keyed-part ordering). backed by a Table
+; where members are keys and values are just `true`. O(1)
+; includes: via Table contains:.
+;
+; Set is BOTH a prototype AND a constructor:
+;   (Set 1 2 3 2)   → {1, 2, 3}    (dedup)
+;   [Set from: lst] → same as (apply Set lst)
+;   [lst toSet]     → from Cons
+;
+; conforms to Iterable (map/filter/fold via each:) and to
+; Buildable (map: and select: preserve Set-ness via builder).
+
+(def Set {
+  items: #[]    ; internal Table; keys ARE the set members
+
+  [typeName] (quote Set)
+
+  ; (Set 1 2 3) — call: receives args as a list
+  [call: args]
+    [args fold: { Set items: #[] } with: |s x| [s add: x]]
+
+  [add: x]
+    (if [@items contains: x] self
+      { Set items: [@items at: x put: true] })
+
+  [remove: x]
+    (if [@items contains: x]
+      { Set items: [@items remove: x] }
+      self)
+
+  [includes: x]  [@items contains: x]
+  [has: x]       [@items contains: x]
+
+  [toList]       [@items keys]
+  [size]         [[@items keys] count]
+  [count]        [self size]
+  [empty?]       (eq [self size] 0)
+
+  ; ── Iterable + Buildable hooks ──────────────────────
+  [each: f]       [[@items keys] each: f]
+  [emptyKindred]  { Set items: #[] }
+
+  ; ── set-theoretic operations ────────────────────────
+  [union: other]
+    [[other toList] fold: self with: |s x| [s add: x]]
+
+  [intersection: other]
+    [[[self toList] select: |x| [other includes: x]]
+      fold: { Set items: #[] } with: |s x| [s add: x]]
+
+  [difference: other]
+    [[[self toList] reject: |x| [other includes: x]]
+      fold: { Set items: #[] } with: |s x| [s add: x]]
+
+  [subset?: other]
+    [[self toList] all: |x| [other includes: x]]
+
+  [superset?: other]
+    [other subset?: self]
+
+  [disjoint?: other]
+    (not [[self toList] any: |x| [other includes: x]])
+
+  ; ── display ─────────────────────────────────────────
+  [describe]
+    (str "{" [[self toList] join: ", "] "}")
+
+  [show]
+    (str [self describe] "  : Set")
+})
+
+; conforming to Iterable gives map/select/reject/fold/etc.
+; each: + emptyKindred + add: → all the collection ops, and
+; via the Buildable overrides added below, map:/select:/reject:
+; preserve Set-ness.
+(conform Set Iterable)
+
+; structural equality: two sets equal iff same size and each
+; member of self is a member of other. identity first to handle
+; proto-equal-proto dispatch.
+(defmethod Set equal: (other)
+  (if [self identical: other] true
+    (if (not [other is: Set]) false
+      (if (not (eq [self size] [other size])) false
+        [[self toList] all: |x| [other includes: x]]))))
+
+; ── type-preserving map / select / reject via Builder ──
+;
+; Iterable's provides return Cons. Set wants Set back.
+; buildLike: (from builder.moof) folds through Builder into
+; emptyKindred. since Set's add: dedups, Builder.result's fold
+; preserves uniqueness naturally.
+
+(defmethod Set map:    (f) [self buildLike: |b x| [b << (f x)]])
+(defmethod Set select: (f) [self buildLike: |b x| (if (f x) [b << x] b)])
+(defmethod Set reject: (f) [self select: |x| (not (f x))])
+
+; ── from: and toSet constructors ───────────────────────
+
+(defmethod Set from: (iter)
+  [iter fold: { Set items: #[] } with: |s x| [s add: x]])
+
+(defmethod Cons  toSet () [Set from: self])
+(defmethod Table toSet () [Set from: self])
