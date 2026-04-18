@@ -32,7 +32,7 @@ pub struct Compiler<'a> {
     pub closure_descs: Vec<ClosureDesc>,
     locals: Vec<(u32, u8)>,
     captures: Vec<(u32, u8, u8)>, // (symbol_id, parent_reg, local_reg)
-    parent_locals: Vec<(u32, u8)>, // locals from the enclosing compiler
+    parent_locals: Vec<(u32, u8)>, // locals from the enclosing compiler (includes its captures)
 }
 
 impl<'a> Compiler<'a> {
@@ -75,6 +75,26 @@ impl<'a> Compiler<'a> {
             return Some(local_reg);
         }
         None
+    }
+
+    /// Build parent_locals for a sub-compiler. Includes both this compiler's
+    /// locals AND any parent_locals entries that aren't already captured.
+    /// Forces intermediate captures so grandparent variables are accessible.
+    fn build_sub_parent_locals(&mut self) -> Vec<(u32, u8)> {
+        // force-capture all parent_locals entries into our own locals
+        // so they're available in our frame for the sub to capture from
+        for i in 0..self.parent_locals.len() {
+            let (sym, _parent_reg) = self.parent_locals[i];
+            // check if we already have this as a local or capture
+            let already_local = self.locals.iter().any(|(s, _)| *s == sym);
+            if !already_local {
+                let parent_reg = self.parent_locals[i].1;
+                let local_reg = self.alloc_reg();
+                self.captures.push((sym, parent_reg, local_reg));
+                self.locals.push((sym, local_reg));
+            }
+        }
+        self.locals.clone()
     }
 
     fn add_sym_const(&mut self, sym_id: u32) -> u16 {
@@ -258,9 +278,9 @@ impl<'a> Compiler<'a> {
                     param_syms.push(env_sym); // env is last param
                     let arity = param_syms.len() as u8;
 
-                    // compile body
+                    // compile body — force-capture ancestor variables
                     let mut sub = Compiler::new(self.heap, "<vau>");
-                    sub.parent_locals = self.locals.clone();
+                    sub.parent_locals = self.build_sub_parent_locals();
                     sub.chunk.arity = arity;
                     for &sym in &param_syms {
                         let reg = sub.alloc_reg();
@@ -339,7 +359,7 @@ impl<'a> Compiler<'a> {
                     let arity = positional.len() as u8;
 
                     let mut sub = Compiler::new(self.heap, "<fn>");
-                    sub.parent_locals = self.locals.clone();
+                    sub.parent_locals = self.build_sub_parent_locals();
                     sub.chunk.arity = arity;
                     for &sym in &positional {
                         let reg = sub.alloc_reg();

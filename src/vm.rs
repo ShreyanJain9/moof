@@ -603,9 +603,15 @@ impl VM {
                 }
 
                 Op::Eval => {
-                    let f = self.frames.last_mut().unwrap();
-                    let ast = f.regs[b as usize];
-                    let env_val = if c != 0 { f.regs[c as usize] } else { Value::NIL };
+                    let ast = self.frames.last().unwrap().regs[b as usize];
+                    let env_val = if c != 0 { self.frames.last().unwrap().regs[c as usize] } else { Value::NIL };
+                    let saved_frame_depth = self.frames.len();
+
+                    // if ast is an Err, short-circuit — don't try to compile it
+                    if Self::is_err_value(heap, ast) {
+                        self.frames.last_mut().unwrap().regs[a as usize] = ast;
+                        continue;
+                    }
 
                     // temporarily inject env slots as bindings
                     let mut saved_values: Vec<(u32, Option<Value>)> = Vec::new();
@@ -620,9 +626,26 @@ impl VM {
                         }
                     }
 
-                    let compile_result = crate::lang::compiler::Compiler::compile_toplevel(heap, ast)
-                        .map_err(|e| format!("eval compile: {e}"))?;
-                    let result = self.eval_result(heap, compile_result);
+                    let compile_result = match crate::lang::compiler::Compiler::compile_toplevel(heap, ast) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            // compiler error → Err value
+                            let err = heap.make_error(&format!("eval compile: {e}"));
+                            // restore bindings before returning
+                            for (name, old_val) in saved_values {
+                                match old_val {
+                                    Some(v) => { heap.env_def(name, v); }
+                                    None => { heap.env_remove(name); }
+                                }
+                            }
+                            self.frames.last_mut().unwrap().regs[a as usize] = err;
+                            continue;
+                        }
+                    };
+                    let result = match self.eval_result(heap, compile_result) {
+                        Ok(v) => v,
+                        Err(e) => heap.make_error(&e),
+                    };
 
                     // restore bindings
                     for (name, old_val) in saved_values {
@@ -632,7 +655,18 @@ impl VM {
                         }
                     }
 
-                    self.frames.last_mut().unwrap().regs[a as usize] = result?;
+                    // ensure we're back to the right frame (eval_result may have
+                    // pushed/popped frames; on error the stack might differ)
+                    while self.frames.len() > saved_frame_depth {
+                        self.frames.pop();
+                    }
+                    if let Some(f) = self.frames.last_mut() {
+                        if (a as usize) < f.regs.len() {
+                            f.regs[a as usize] = result;
+                        }
+                    } else {
+                        return Ok(result);
+                    }
                 }
 
                 // TryCatch and Throw removed — errors are Result values.
