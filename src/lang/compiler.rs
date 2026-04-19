@@ -188,8 +188,14 @@ impl<'a> Compiler<'a> {
                     return Err("unquote outside of quasiquote".into());
                 }
 
-                "send" => {
-                    // (send receiver 'selector args...)
+                "%eventual-send" | "send" => {
+                    // (send receiver 'selector args...) — synchronous send.
+                    // (%eventual-send receiver 'selector args...) — the
+                    // parser emits this for `[recv <- sel args]`. semantically
+                    // equivalent today: FarRef receivers already forward via
+                    // doesNotUnderstand:, returning an Act. local receivers
+                    // resolve immediately. the `<-` syntax reads as "this
+                    // crosses a vat boundary" — documentation at call sites.
                     let items = self.heap.list_to_vec(expr);
                     if items.len() < 3 {
                         return Err("send: need at least receiver and selector".into());
