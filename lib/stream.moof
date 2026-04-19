@@ -24,25 +24,15 @@
   ; subclasses override [next] to produce values. default is empty.
   [next] None
 
-  ; Iterable base: drive next until exhausted.
+  ; Iterable base: drive next until exhausted. all other
+  ; Iterable methods (fold:with:, toList, map:, etc.) derive
+  ; from this via the provided protocol surface — no direct
+  ; overrides needed.
   [each: f]
     (let ((r [self next]))
       (if [r is: None] nil
         (let ((_ (f [r slotAt: (quote value)])))
           [self each: f])))
-
-  ; direct fold:with: — critical. Iterable's provided fold:with:
-  ; calls self.toList, and the provided toList calls self.fold:with:,
-  ; so any Iterable-conforming type with neither defined directly
-  ; mutually-recurses into a stack/heap blowup. Stream defines
-  ; fold:with: here via each: (stateful accumulator) to break
-  ; the cycle.
-  [fold:with: init f]
-    (let ((state { acc: init }))
-      (let ((_ [self each: |x|
-                [state slotAt: (quote acc) put:
-                  (f [state slotAt: (quote acc)] x)]]))
-        [state slotAt: (quote acc)]))
 
   ; bounded take — safe for infinite streams, returns a Cons list.
   ; overrides Iterable's fold-based take: which would materialize

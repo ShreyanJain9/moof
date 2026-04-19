@@ -71,14 +71,35 @@
 ; ═══════════════════════════════════════════════════════════
 ; layer 3: definition forms
 ; ═══════════════════════════════════════════════════════════
+;
+; defmethod and defn now accept multi-expression bodies. multiple
+; exprs get nested into a let-with-throwaway chain:
+;   (e1 e2 e3) → (let ((_ e1)) (let ((_ e2)) e3))
+; this sequences for side effects while keeping outer captures
+; visible to the compiler (`do` would route through a vau and
+; hide captures from capture analysis).
+;
+; `eq` is used directly instead of `nil?` because `nil?` is
+; defined later in this file.
 
-(def defn (vau (name params body) $e
-  (eval `(def ,name (fn ,params ,body)) $e)))
+(def %seq-body (fn (exprs)
+  (if (eq [exprs cdr] nil)
+    [exprs car]
+    `(let ((_ ,[exprs car])) ,(%seq-body [exprs cdr])))))
 
-(def defmethod (vau (proto selector params body) $e
-  (let ((p (eval proto $e))
+(def defn (vau args $e
+  (let ((name [args car])
+        (params [[args cdr] car])
+        (body (%seq-body [[args cdr] cdr])))
+    (eval `(def ,name (fn ,params ,body)) $e))))
+
+(def defmethod (vau args $e
+  (let ((proto (eval [args car] $e))
+        (selector [[args cdr] car])
+        (params [[[args cdr] cdr] car])
+        (body (%seq-body [[[args cdr] cdr] cdr]))
         (handler (eval `(fn ,(cons (quote self) params) ,body) $e)))
-    [p handle: selector with: handler])))
+    [proto handle: selector with: handler])))
 
 (def alias (vau (proto new-sel existing-sel) $e
   (let ((p (eval proto $e))

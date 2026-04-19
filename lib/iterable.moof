@@ -31,25 +31,32 @@
      The return value of each: is unspecified — use fold:with:
      if you need to accumulate a result.")
 
-  ; ── conversion ───────────────────────────────────────
+  ; ── folding ──────────────────────────────────────────
   ;
-  ; ⚠️  toList and fold:with: are MUTUALLY recursive in their
-  ; provided forms (toList uses fold:with:, fold:with: uses
-  ; toList). any Iterable-conforming type MUST define AT LEAST
-  ; ONE of them directly — otherwise `[v toList]` spins into an
-  ; unbounded stack+heap blowup. Cons defines both directly.
-  ; Stream defines fold:with: directly via each:.
+  ; fold:with: derives DIRECTLY from each: (not via toList) so
+  ; there's no circular dependency among the provided methods.
+  ; every Iterable-conforming type needs only `each:` to get
+  ; the full suite — no need to override fold:with:/toList
+  ; by hand to escape a mutual-recursion trap.
+  ;
+  ; the accumulator lives in a mutable slot on a fresh state
+  ; object (one per fold). each: walks, each step updates the
+  ; slot, at the end we read it out.
+
+  (provide (fold:with: init f)
+    (let ((state { acc: init }))
+      (let ((_ [self each: |x|
+                [state slotAt: (quote acc) put:
+                  (f [state slotAt: (quote acc)] x)]]))
+        [state slotAt: (quote acc)])))
+
+  ; ── conversion ───────────────────────────────────────
 
   (provide (toList)
     [[self fold: nil with: |acc x| (cons x acc)] reverse])
 
   (provide (toTable)
     [self fold: #[] with: |t x| [t push: x]])
-
-  ; ── folding ──────────────────────────────────────────
-
-  (provide (fold:with: init f)
-    [[self toList] fold: init with: f])
 
   (provide (reduce: f)
     (let ((lst [self toList]))
