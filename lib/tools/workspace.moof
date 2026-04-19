@@ -1,16 +1,24 @@
 ; workspace.moof — the user's session as a first-class value
 ;
-; a Workspace is a named root of a moof session: a title, an
-; ordered sequence of Blocks (content units), and a namespace
-; of bindings. every Block is itself a moof value, inspectable
-; and linkable.
+; a Workspace is a named root of a moof session: a title, an ordered
+; sequence of Blocks (content units), and a namespace of bindings. every
+; Block is itself a moof value, inspectable and linkable.
+;
+; Blocks (Heading, Paragraph, CodeBlock, ObjectRef) are VALUES — pure,
+; immutable, comparable. the Workspace itself is a SERVER VAT: its state
+; (blocks, bindings) changes via Update, accessed via FarRef.
+;
+;   (do (w <- (Workspace "scratch"))
+;       (_ <- [w add: (Heading "Goals")])
+;       (_ <- [w bind: (quote target) to: 42])
+;       [w render: 'text])
 ;
 ; Block hierarchy:
 ;
 ;   Block (abstract)
 ;   ├── Heading     title text + level (h1/h2/h3)
 ;   ├── Paragraph   prose text
-;   ├── CodeBlock   moof source + last-result
+;   ├── CodeBlock   moof source + last-result (both immutable)
 ;   └── ObjectRef   pointer to a bound value
 ;
 ; every Block implements [render: medium] → a medium-specific
@@ -47,25 +55,24 @@
   [render: medium]  @text
 })
 
+; CodeBlock is pure: code + optional result, both set at construction.
+; to update a CodeBlock's result, construct a new one via (CodeBlock code
+; result). there is no in-place evaluation cache; a notebook runner maps
+; an unresolved CodeBlock to a new one with the eval result.
 (def CodeBlock {
   Block
-  code:   nil       ; usually a String (for display) or an AST
+  code:   nil
   result: nil
-  evaled: false
   [typeName] (quote CodeBlock)
   [call: args]
-    { CodeBlock code: [args car] result: nil evaled: false }
-
-  ; mutate in place — the notebook runner calls this after eval.
-  [setResult: v]
-    (do [self slotAt: (quote result) put: v]
-        [self slotAt: (quote evaled) put: true]
-        self)
+    (let ((code-val [args car])
+          (result-val (if (nil? [args cdr]) nil [[args cdr] car])))
+      { CodeBlock code: code-val result: result-val })
 
   [render: medium]
-    (if @evaled
-      (str "    " [@code describe] "\n    ⇒ " [@result describe])
-      (str "    " [@code describe]))
+    (if (nil? @result)
+      (str "    " [@code describe])
+      (str "    " [@code describe] "\n    ⇒ " [@result describe]))
 })
 
 (def ObjectRef {
@@ -81,57 +88,43 @@
 })
 
 ; ══════════════════════════════════════════════════════════
-; Workspace — the named root of a session
+; Workspace — the named root of a session, as a server vat
 ; ══════════════════════════════════════════════════════════
+;
+; a Workspace holds mutable session state: the ordered block list and
+; the name→value binding table. state changes are Updates; the
+; scheduler applies them between messages. no userland slot mutation.
 
-(def Workspace {
-  Block
-  title:    "untitled"
-  blocks:   nil
-  bindings: #[]
+(defn Workspace (title)
+  [Vat serve:with:
+    (fn (ws-title)
+      { title:    ws-title
+        blocks:   nil
+        bindings: #[]
 
-  [typeName] (quote Workspace)
+        [typeName] (quote Workspace)
 
-  [call: args]
-    { Workspace title: [args car] blocks: nil bindings: #[] }
+        [getTitle]       @title
+        [getBlocks]      @blocks
+        [getBindings]    @bindings
+        [blockCount]     (if (nil? @blocks) 0 [@blocks count])
+        [lookup: name]   [@bindings at: name]
 
-  ; add a block at the end; returns self for chaining.
-  [add: block]
-    (let ((next (if (nil? @blocks)
-                  (cons block nil)
-                  [@blocks append: (cons block nil)])))
-      (let ((_ [self slotAt: (quote blocks) put: next]))
-        self))
+        [add: block]
+          (let ((next (if (nil? @blocks)
+                        (cons block nil)
+                        [@blocks append: (cons block nil)])))
+            (update { blocks: next } self))
 
-  ; bindings: named slots on the workspace.
-  [bind: name to: val]
-    (let ((_ [self slotAt: (quote bindings) put: [@bindings at: name put: val]]))
-      self)
+        [bind: name to: val]
+          (update { bindings: [@bindings at: name put: val] } self)
 
-  [lookup: name]   [@bindings at: name]
+        [render: medium]
+          (str "═ " @title " ═\n\n"
+               (if (nil? @blocks) "  (empty)"
+                 [[@blocks map: |b| [b render: medium]] join: "\n\n"]))
 
-  [blockCount]     (if (nil? @blocks) 0 [@blocks count])
-
-  [render: medium]
-    (str "═ " @title " ═\n\n"
-         (if (nil? @blocks) "  (empty)"
-           [[@blocks map: |b| [b render: medium]] join: "\n\n"]))
-})
-
-; [workspace show] — print this workspace to the console.
-(defmethod Workspace show ()
-  [console println: [self render: (quote text)]])
-
-; [workspace inspect] — moldable inspector
-(defmethod Workspace inspect ()
-  { Inspector
-    target:  self
-    aspects: (aspects
-       (quote text)     |w| [w render: (quote text)]
-       (quote describe) |w|
-         (str "<Workspace " [w slotAt: (quote title)]
-              " (" [w blockCount] " blocks)>")
-       (quote blocks)   |w|
-         (str [[w slotAt: (quote title)] describe] "\n"
-              [[[w slotAt: (quote blocks)] map: |b|
-                 (str "  " [[b typeName] describe])] join: "\n"])) })
+        [describe]
+          (str "<Workspace " [@title describe] ">")
+      })
+    (list title)])

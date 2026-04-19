@@ -98,40 +98,36 @@
   (if (not (cons? form)) false
     [[form car] identical: (quote let)]))
 
-; do-bind-and-continue: bind a name LOCALLY via `let` so each invocation
-; of the do chain gets its own scope. using `def` here would pollute the
-; enclosing env and cause races when multiple do-chains run interleaved
-; on the same env — tests running async in parallel stomp on each other's
-; `(x <- expr)` bindings.
-(defn do-bind-and-continue (name val rest env)
-  (eval `(let ((,name (quote ,val))) (do ,@rest)) env))
-
-(defn do-expand (forms env)
+; do-transform: convert a do body into a single source form that, when
+; compiled once, chains every binding through then: with proper lexical
+; scoping. emitting source (not calling eval mid-chain) lets the compiler
+; handle closure capture — no env threading, no late-binding surprises.
+;
+;   (do (a <- e1) (b <- e2) body)
+; becomes
+;   [e1 then: |a| [e2 then: |b| body]]
+;
+; plain expressions (non-arrow-bind) sequence via |_|. a trailing (let ...)
+; wraps the rest in a let scope, preserving the useful pattern.
+(defn do-transform (forms)
   (if (nil? forms) nil
     (if (nil? [forms cdr])
-      ; last expression — eval directly
-      (eval [forms car] env)
-      ; multiple expressions — check head
+      [forms car]
       (let ((head [forms car])
             (rest [forms cdr]))
         (if (arrow-bind? head)
-          ; (name <- expr) → bind via then:
           (let ((name [head car])
                 (expr [[[head cdr] cdr] car]))
-            [(eval expr env) then:
-              |__do_v__| (do-bind-and-continue name __do_v__ rest env)])
+            `[,expr then: (fn (,name) ,(do-transform rest))])
           (if (let-form? head)
-            ; (let binds) → wrap rest in let scope
-            (eval `(let ,[[head cdr] car] (do ,@rest)) env)
-            ; plain expression → sequence via then: (ignore value)
-            [(eval head env) then:
-              |_| (do-expand rest env)]))))))
+            `(let ,[[head cdr] car] ,(do-transform rest))
+            `[,head then: (fn (_) ,(do-transform rest))]))))))
 
 ; Force `do` into the rebound set so the compiler falls back to the vau
 ; instead of using its built-in fast-path for sequencing.
 (def do nil)
 (def do (vau body $e
-  (do-expand body $e)))
+  (eval (do-transform body) $e)))
 
 ; ═══════════════════════════════════════════════════════════
 ; layer 5: Act (effect type)

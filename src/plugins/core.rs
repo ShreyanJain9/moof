@@ -42,14 +42,11 @@ impl super::Plugin for CorePlugin {
             }
         });
 
-        // Object: slotAt:put:
-        native(heap, obj_id, "slotAt:put:", |heap, receiver, args| {
-            let id = receiver.as_any_object().ok_or("slotAt:put: receiver is not a mutable object")?;
-            let name = args.first().and_then(|v| v.as_symbol()).ok_or("slotAt:put: arg0 must be a symbol")?;
-            let val = args.get(1).copied().unwrap_or(Value::NIL);
-            heap.get_mut(id).slot_set(name, val);
-            Ok(val)
-        });
+        // slotAt:put: used to live here as a primitive mutation handler;
+        // it is deliberately NOT registered now. the only sanctioned way
+        // to change state is a server's Update return. the VM's internal
+        // slot_set is used by process_handler_result to apply Update deltas,
+        // but there is no userland-callable message for in-place slot writes.
 
         // Object: with: — non-destructive slot update. returns a new object.
         native(heap, obj_id, "with:", |heap, receiver, args| {

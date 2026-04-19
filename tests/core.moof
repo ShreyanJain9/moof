@@ -456,17 +456,21 @@
   (test "heading render"    [(Heading "hi") render: (quote text)]      "# hi")
   (test "heading level"     [(Heading 2 "sub") render: (quote text)]   "## sub")
   (test "paragraph render"  [(Paragraph "hello world") render: (quote text)] "hello world")
-  (test "workspace empty"   [(Workspace "untitled") blockCount]      0)
+
+  (test "workspace empty"
+    (do (w <- (Workspace "untitled"))
+        [w blockCount])
+    0)
   (test "workspace add"
-    (let ((w (Workspace "test")))
-      (do [w add: (Paragraph "a")]
-          [w add: (Paragraph "b")]
-          [w blockCount]))
+    (do (w <- (Workspace "test"))
+        (_ <- [w add: (Paragraph "a")])
+        (_ <- [w add: (Paragraph "b")])
+        [w blockCount])
     2)
   (test "workspace bind"
-    (let ((w (Workspace "w")))
-      (do [w bind: (quote x) to: 42]
-          [w lookup: (quote x)]))
+    (do (w <- (Workspace "w"))
+        (_ <- [w bind: (quote x) to: 42])
+        [w lookup: (quote x)])
     42)
 ))
 
