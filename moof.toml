@@ -53,6 +53,7 @@ files = [
   # flow — transformation + matching
   "lib/flow/transducer.moof",
   "lib/flow/stream.moof",
+  "lib/flow/reactive.moof",
   "lib/flow/pattern.moof",
 
   # tools — meta and composition

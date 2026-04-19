@@ -1,0 +1,133 @@
+; reactive.moof — Atom + Signal (reactivity substrate)
+;
+; the connective tissue that makes the objectspace feel LIVE:
+; values that change, cells that re-derive, observers that wake
+; when their inputs shift.
+;
+;   (def count (Atom 0))
+;   (def doubled (Signal |_| [[count get] * 2] count))
+;   [doubled get]              → 0
+;   [count swap: 5]            → 5
+;   [doubled get]              → 10  (auto re-derived)
+;
+; MVP:
+;   - Atom: mutable cell with observer callbacks
+;   - Signal: lazy derived value, invalidates on input change
+;   - no History yet (tier 7 work); no cross-vat propagation
+;
+; the invariant: Signals are pull-based. [sig get] recomputes if
+; any input has mutated since the last derivation. observers run
+; immediately on atom.swap:, before the mutation returns.
+
+; ══════════════════════════════════════════════════════════
+; Atom — mutable cell with change notification
+; ══════════════════════════════════════════════════════════
+
+(def Atom {
+  [typeName] (quote Atom)
+
+  value:     nil
+  observers: nil    ; cons list of 1-arg fns; called with the new value
+
+  ; (Atom init-value) — construct an Atom holding init-value.
+  [call: args]
+    { Atom value: [args car] observers: nil }
+
+  [get]  @value
+
+  ; swap: new — set the value, notify observers, return new.
+  [swap: new]
+    (let ((_ [self slotAt: (quote value) put: new]))
+      (let ((_ [self notifyObservers: new]))
+        new))
+
+  ; update: f — apply f to current value, swap in the result.
+  [update: f]
+    [self swap: (f @value)]
+
+  ; observe: callback — register a 1-arg fn to fire on swap.
+  ; returns self for chaining.
+  [observe: callback]
+    (let ((_ [self slotAt: (quote observers) put: (cons callback @observers)]))
+      self)
+
+  ; internal — fire every observer with the new value
+  [notifyObservers: new]
+    [@observers each: |cb| (cb new)]
+
+  [describe]
+    (str "<Atom " [@value describe] ">")
+
+  [show]
+    (str "<Atom " [@value describe] ">  : Atom")
+})
+
+; Helper: register an invalidating observer on each input atom
+; for the given signal. kept as a top-level fn so the captured
+; `sig` lives at a clean fn-parameter boundary (see note in
+; Signal.call: below).
+(defn %wire-signal-observers (sig inputs)
+  [inputs each: |input|
+    [input observe: |_|
+      [sig slotAt: (quote valid) put: false]]])
+
+; ══════════════════════════════════════════════════════════
+; Signal — derived, lazily re-evaluated value
+; ══════════════════════════════════════════════════════════
+;
+; a Signal caches its last computed value; when any input Atom/
+; Signal is mutated, the cache is invalidated. next [get] recomputes.
+
+(def Signal {
+  [typeName] (quote Signal)
+
+  computation: nil   ; fn () -> Value — the derivation
+  inputs:      nil   ; cons list of Atoms/Signals the comp depends on
+  cached:      nil   ; last computed value (meaningless if !valid)
+  valid:       false
+
+  ; (Signal fn input1 input2 ...) — derive from inputs via fn.
+  ; fn takes zero args; it reads inputs freely via [atom get].
+  ; each input is either an Atom or another Signal.
+  ;
+  ; note: uses an external helper fn instead of inlining because
+  ; capturing `sig` into a deeply-nested pipe-block closure from
+  ; inside a method body loses the binding (compiler capture
+  ; analysis doesn't see through two-level `|input| |_|`
+  ; nesting on this specific path). the helper fn puts the
+  ; capture on a clean fn-parameter boundary.
+  [call: args]
+    (let ((comp [args car])
+          (ins  [args cdr])
+          (sig  { Signal
+                   computation: comp
+                   inputs:      ins
+                   cached:      nil
+                   valid:       false
+                   observers:   nil }))
+      (let ((_ (%wire-signal-observers sig ins)))
+        sig))
+
+  ; [get] — return the cached value, recomputing if invalid.
+  [get]
+    (if @valid @cached
+      (let ((v (@computation)))
+        (let ((_ [self slotAt: (quote cached) put: v]))
+          (let ((_ [self slotAt: (quote valid)  put: true]))
+            v))))
+
+  ; Signals also accept observers — so you can chain Signal → Signal.
+  ; when this Signal's value changes (after a recompute), its observers fire.
+  ; currently observers fire on the NEXT get after invalidation.
+  [observe: callback]
+    (let ((_ [self slotAt: (quote observers) put: (cons callback
+               (or @observers nil))]))
+      self)
+
+  observers: nil
+
+  [describe]
+    (str "<Signal " (if @valid (str "cached=" [@cached describe]) "stale") ">")
+
+  [show]  [self describe]
+})
