@@ -1,0 +1,100 @@
+; bag.moof — multiset: a collection of elements with counts
+;
+;   (Bag "apple" "apple" "banana")      → {apple×2, banana×1}
+;   [b count: "apple"]                  → 2
+;   [b size]                            → 3   (total occurrences)
+;   [b uniqueCount]                     → 2   (distinct elements)
+;
+; backed by a Table { element → count }. conforms to Iterable
+; (each: visits each element count-many times — same shape as
+; iterating a list of repeated elements).
+;
+; element comparison goes through the Table's values_equal, which
+; handles primitives + Strings content-equally; Cons/General keys
+; compare by identity, so use primitives for bag keys.
+
+(def Bag {
+  [typeName] (quote Bag)
+
+  items: #[]    ; internal Table { element => count }
+
+  ; (Bag x y z) — construct a Bag from variadic args (with multiplicity)
+  [call: args]
+    [args fold: { Bag items: #[] } with: |b x| [b add: x]]
+
+  ; add: x — increment count for x, returning a new Bag
+  [add: x]
+    (let ((existing [@items at: x]))
+      { Bag items: [@items at: x put: (if (nil? existing) 1 [existing + 1])] })
+
+  ; remove: x — decrement count for x, removing entirely at 0
+  [remove: x]
+    (let ((existing [@items at: x]))
+      (if (nil? existing) self
+        (if (eq existing 1)
+          { Bag items: [@items remove: x] }
+          { Bag items: [@items at: x put: [existing - 1]] })))
+
+  ; count: x — how many times x appears (0 if absent)
+  [count: x]
+    (let ((n [@items at: x]))
+      (if (nil? n) 0 n))
+
+  ; size — total occurrences (sum of all counts)
+  [size]
+    [[@items values] fold: 0 with: |a n| [a + n]]
+
+  ; uniqueCount — distinct elements
+  [uniqueCount]
+    [[@items keys] count]
+
+  [empty?]
+    (eq [self uniqueCount] 0)
+
+  ; includes: x — at least one occurrence?
+  [includes: x]  [@items contains: x]
+
+  ; unique — the Set of distinct elements
+  [unique]  [[@items keys] toSet]
+
+  ; counts — the underlying Table
+  [counts]  @items
+
+  ; each: f — visit each element count-many times
+  [each: f]
+    [[@items keys] each: |k|
+      [[@items at: k] times: |_| (f k)]]
+
+  ; describe / show
+  [describe]
+    (str "{"
+         [[[@items keys] map: |k|
+            (str [k describe] "×" [[@items at: k] describe])]
+          join: ", "]
+         "}")
+  [show]
+    (str [self describe] "  : Bag")
+})
+
+(conform Bag Iterable)
+(conform Bag Hashable)
+
+; structural equality — same unique elements with same counts.
+; walks each key and compares counts (Table.equal: only compares
+; the seq part, which is empty for a Bag; the KEYED part is where
+; the actual state lives).
+(defequal Bag
+  (if (not [other is: Bag]) false
+    (if (not (eq [self uniqueCount] [other uniqueCount])) false
+      [[[self counts] keys] all: |k|
+        (eq [self count: k] [other count: k])])))
+
+; toBag constructors for other collections
+(defmethod Cons  toBag () [self fold: { Bag items: #[] } with: |b x| [b add: x]])
+(defmethod Table toBag () [self fold: { Bag items: #[] } with: |b x| [b add: x]])
+(defmethod Set   toBag () [self fold: { Bag items: #[] } with: |b x| [b add: x]])
+
+; alias on Cons — `[(list a b c) tally]` returns a Bag.
+; (the existing Iterable's `tally` returns a Table of counts; this
+; gives you the proper type instead.)
+(alias Cons tallyBag toBag)

@@ -438,6 +438,21 @@
           (let ((_ [a swap: 5]))
             [s get]))))
     50)
+
+  ; ── wave 4.8: Bag — multiset ────────────────────────
+
+  (test "bag typeName"   [(Bag "x") typeName]          (quote Bag))
+  (test "bag counts"     [(Bag "a" "a" "b") count: "a"] 2)
+  (test "bag size"       [(Bag "a" "a" "b") size]       3)
+  (test "bag uniqueCount" [(Bag "a" "a" "b") uniqueCount] 2)
+  (test "bag absent"     [(Bag "a") count: "z"]         0)
+  (test "bag includes"   [(Bag "a") includes: "a"]      true)
+  (test "bag add"        [[(Bag "a") add: "a"] count: "a"] 2)
+  (test "bag remove dec" [[(Bag "a" "a") remove: "a"] count: "a"] 1)
+  (test "bag remove gone" [[(Bag "a") remove: "a"] includes: "a"] false)
+  (test "bag equal"      [(Bag "a" "b" "a") equal: (Bag "a" "a" "b")] true)
+  (test "bag diff"       [(Bag "a") equal: (Bag "b")] false)
+  (test "cons toBag"     [[(list 1 1 2 3 3 3) toBag] count: 3] 3)
 ))
 
 [console println: (report core-tests)]

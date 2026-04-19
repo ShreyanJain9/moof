@@ -47,6 +47,7 @@ files = [
   "lib/data/option.moof",
   "lib/data/builder.moof",
   "lib/data/set.moof",
+  "lib/data/bag.moof",
   "lib/data/hashable.moof",
   "lib/data/reference.moof",
 

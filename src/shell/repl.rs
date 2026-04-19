@@ -200,8 +200,18 @@ pub fn run() {
         // if moof code requested a GC via [Vat requestGc], run it now.
         let vat = sched.vat_mut(repl_vat_id);
         if vat.heap.gc_requested {
+            // collect VM roots — closure_descs constants are Values
+            // embedded in bytecode chunks that live outside the heap.
+            // missing these causes string literals and other constant
+            // values to be tombstoned on GC, and subsequent uses
+            // panic with mysterious "<object#N> does not understand"
+            // errors.
+            let extra: Vec<moof::Value> = vat.vm.closure_descs_ref().iter()
+                .flat_map(|d| d.chunk.constants.iter()
+                    .map(|b| moof::Value::from_bits(*b)))
+                .collect();
             vat.heap.gc_requested = false;
-            let stats = vat.heap.gc(&[]);
+            let stats = vat.heap.gc(&extra);
             eprintln!("  ~ gc: freed {} slots ({} live / {} total)",
                 stats.freed, stats.live, stats.before);
         }
