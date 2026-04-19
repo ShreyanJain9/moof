@@ -188,11 +188,14 @@
   ; invariant: structurally-equal values hash equal, and the
   ; hash is deterministic across processes (no randomization).
 
-  ; primitives are self-hashes or fixed values
-  (test "int hash self"      [42 hash]               42)
-  (test "nil hash zero"      [nil hash]              0)
-  (test "bool hash stable"   [true hash]             1)
-  (test "bool hash diff"     (not (eq [true hash] [false hash])) true)
+  ; primitives hash via their NaN-boxed bit pattern so distinct
+  ; values never collide across types (no more Integer 1 = Boolean true).
+  (test "int hash deterministic" (eq [42 hash] [42 hash])             true)
+  (test "bool diff"          (not (eq [true hash] [false hash]))   true)
+  (test "int vs bool"        (not (eq [1 hash] [true hash]))       true)
+  (test "int vs nil"         (not (eq [0 hash] [nil hash]))        true)
+  (test "int vs float"       (not (eq [0 hash] [0.0 hash]))        true)
+  (test "int 2 vs false"     (not (eq [2 hash] [false hash]))      true)
 
   ; deterministic — same hash every call
   (test "string det"         (eq ["hi" hash] ["hi" hash])         true)

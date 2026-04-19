@@ -52,10 +52,16 @@ impl Plugin for NumericPlugin {
             Ok(heap.alloc_string(&n.to_string()))
         });
 
-        // hash — integer is its own hash (identity works; Hashable's
-        // invariant [a equal: b] ⇒ [a hash] = [b hash] holds trivially).
+        // hash — FNV-1a over the full 8 bytes of the NaN-boxed
+        // Value. moof Integer is i48-in-NaN-box, so stuffing the
+        // raw u64 into Value::integer would mask away the type
+        // tag bits. FNV mixes the whole bit pattern (tag + payload)
+        // into a well-distributed 48-bit hash. distinct primitive
+        // values — Integer 1, Boolean true, Nil, Float 0.0 — all
+        // get distinct hashes.
         native(heap, int_id, "hash", |_heap, receiver, _args| {
-            Ok(Value::integer(receiver.as_integer().ok_or("hash: not int")?))
+            let bits = receiver.to_bits().to_le_bytes();
+            Ok(Value::integer(crate::plugins::fnv1a_64(&bits) as i64))
         });
 
         // bitwise
@@ -138,12 +144,12 @@ impl Plugin for NumericPlugin {
             Ok(heap.alloc_string(&format!("{}", receiver.as_float().ok_or("describe: not a float")?)))
         });
 
-        // hash — use the bit pattern. NaN values may hash unequally
-        // to each other (there are many NaN bit patterns), matching
-        // IEEE 754 where NaN != NaN — our values_equal agrees.
+        // hash — FNV-1a over the IEEE bits. NaN values have many
+        // representations and may hash unequally to each other
+        // (matching IEEE where NaN != NaN — values_equal agrees).
         native(heap, float_id, "hash", |_heap, receiver, _args| {
-            let f = receiver.as_float().ok_or("hash: not float")?;
-            Ok(Value::integer(f.to_bits() as i64))
+            let bits = receiver.to_bits().to_le_bytes();
+            Ok(Value::integer(crate::plugins::fnv1a_64(&bits) as i64))
         });
 
         // constants

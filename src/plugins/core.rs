@@ -292,9 +292,12 @@ impl super::Plugin for CorePlugin {
             Ok(false_val)
         });
 
-        // Nil: hash — a fixed value. empty-list / nil canonical hash.
-        native(heap, nil_id, "hash", |_heap, _receiver, _args| {
-            Ok(Value::integer(0))
+        // Nil: hash — FNV-1a over the NaN-box bits of Nil. the
+        // type tag is in the high bits, so this hash is distinct
+        // from Integer 0 / Float 0.0 / Boolean false.
+        native(heap, nil_id, "hash", |_heap, receiver, _args| {
+            let bits = receiver.to_bits().to_le_bytes();
+            Ok(Value::integer(crate::plugins::fnv1a_64(&bits) as i64))
         });
 
         // -- Boolean prototype --
@@ -315,9 +318,11 @@ impl super::Plugin for CorePlugin {
             Ok(if receiver.is_truthy() { true_val } else { false_val })
         });
 
-        // Boolean: hash — fixed values for true / false.
+        // Boolean: hash — FNV-1a over the NaN-box bits. distinct
+        // from Integer 1 / Integer 2 / Nil / Float bits.
         native(heap, bool_id, "hash", |_heap, receiver, _args| {
-            Ok(Value::integer(if receiver.is_true() { 1 } else { 2 }))
+            let bits = receiver.to_bits().to_le_bytes();
+            Ok(Value::integer(crate::plugins::fnv1a_64(&bits) as i64))
         });
 
         // -- Register all prototypes as globals --
