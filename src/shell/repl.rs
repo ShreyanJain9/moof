@@ -78,7 +78,7 @@ pub fn run() {
         if let Ok(source) = std::fs::read_to_string(source_path) {
             let vat = sched.vat_mut(repl_vat_id);
             match vat.eval_source(&source) {
-                Ok(_) => eprintln!("  loaded {source_path}"),
+                Ok(_) => {},
                 Err(e) => { eprintln!("  ~ error in {source_path}: {e}"); return; }
             }
         } else {

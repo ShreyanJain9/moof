@@ -1,14 +1,24 @@
-; test.moof — testing framework
+; test.moof — testing framework, act-aware
 ;
-; (test "name" expr expected)  → Ok or Err
-; (suite "name" test1 test2 ...) → { name results }
-; (report suite-result) → formatted string
+; (test "name" expr expected)  → Ok or Err, or Act<Ok|Err> if body is async
+; (suite "name" test1 test2 ...) → Act<{ name results }>
+; (report suite-result-or-act) → Act<String>
+;
+; the framework chains every test body through then: so sync and async
+; tests compose uniformly. for sync bodies, then: degrades to identity
+; (Object#then: f = (f self)), so nothing changes. for Act-returning
+; bodies, the result lives inside an Act until the scheduler resolves it.
+;
+; the REPL drains Acts implicitly, so
+;   [(report core-tests) then: |s| [console println: s]]
+; prints the report once all async tests complete.
 
 (defn assert (condition msg)
   (if condition { Ok value: msg }
     (err (str "assertion failed: " msg))))
 
-; deep-equal: structural comparison
+; deep-equal: structural comparison. acts are compared by identity —
+; callers should unwrap first via then:.
 (defn deep-equal (a b)
   (if [a identical: b] true
     (if (and (nil? a) (nil? b)) true
@@ -28,37 +38,59 @@
     { Ok value: msg }
     (err (str msg ": expected " [expected describe] " got " [actual describe]))))
 
+; await-apply: if v is an Act, chain f via then:; otherwise call f
+; directly. we can't use Object#then: as a universal identity because
+; Cons#then: is flatMap and Result types have their own then: semantics.
+(defn await-apply (v f)
+  (if [v is: Act] [v then: f] (f v)))
+
+; test: eval body, then if it's an Act chain the assertion; otherwise
+; assert directly.
 (def test (vau args $e
   (let ((name [args car])
         (body [[args cdr] car])
         (expected [[[args cdr] cdr] car])
-        (actual (eval body $e))
         (exp-val (eval expected $e)))
-    (assertEqual actual exp-val name))))
+    (await-apply (eval body $e) |v| (assertEqual v exp-val name)))))
 
+; collect-acts: (maybe-act1 maybe-act2 ...) → (val1 val2 ...), possibly
+; wrapped in an Act if any element was async. values pass through;
+; Acts are awaited via then:.
+(defn collect-acts (xs)
+  (if (nil? xs) nil
+    (await-apply [xs car] |v|
+      (await-apply (collect-acts [xs cdr]) |rest| (cons v rest)))))
+
+; suite: eval each test expression and chain through collect-acts so the
+; resulting {name, results} record only materializes once every test
+; (sync or async) has resolved.
 (def suite (vau args $e
   (let ((name [args car])
-        (tests [args cdr])
-        (run (fn (go remaining results)
-          (if (nil? remaining) [results reverse]
-            (let ((result (eval [remaining car] $e)))
-              (go go [remaining cdr] (cons result results)))))))
-    { name: name results: (run run tests nil) })))
+        (test-exprs [args cdr])
+        (eval-all (fn (go remaining)
+                    (if (nil? remaining) nil
+                      (cons (eval [remaining car] $e)
+                            (go go [remaining cdr]))))))
+    (await-apply (collect-acts (eval-all eval-all test-exprs)) |results|
+      { name: name results: results }))))
 
+; report: format a suite result as a string. chains through then: so it
+; works equally for direct suite records and Act-of-suite-records.
 (defn report (s)
-  (let ((name [s slotAt: (quote name)])
-        (results [s slotAt: (quote results)])
-        (count (fn (go remaining pass fail)
-          (if (nil? remaining) (cons pass fail)
-            (if [[remaining car] ok?]
-              (go go [remaining cdr] [pass + 1] fail)
-              (go go [remaining cdr] pass [fail + 1]))))))
-    (let ((c (count count results 0 0))
-          (passed [c car])
-          (failed [c cdr])
-          (failures [[results select: |r| (not [r ok?])]
-                      fold: "" with: |acc r|
-                        [acc ++ (str "    FAIL: " [[r slotAt: (quote message)] describe] "\n")]]))
-      (str "\n  " name "\n  "
-        [passed describe] " passed, " [failed describe] " failed\n"
-        failures))))
+  (await-apply s |suite-val|
+    (let ((name [suite-val slotAt: (quote name)])
+          (results [suite-val slotAt: (quote results)])
+          (count (fn (go remaining pass fail)
+            (if (nil? remaining) (cons pass fail)
+              (if [[remaining car] ok?]
+                (go go [remaining cdr] [pass + 1] fail)
+                (go go [remaining cdr] pass [fail + 1]))))))
+      (let ((c (count count results 0 0))
+            (passed [c car])
+            (failed [c cdr])
+            (failures [[results select: |r| (not [r ok?])]
+                        fold: "" with: |acc r|
+                          [acc ++ (str "    FAIL: " [[r slotAt: (quote message)] describe] "\n")]]))
+        (str "\n  " name "\n  "
+          [passed describe] " passed, " [failed describe] " failed\n"
+          failures)))))

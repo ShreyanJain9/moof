@@ -98,10 +98,13 @@
   (if (not (cons? form)) false
     [[form car] identical: (quote let)]))
 
-; do-bind-and-continue: bind a name in the env, then keep expanding.
+; do-bind-and-continue: bind a name LOCALLY via `let` so each invocation
+; of the do chain gets its own scope. using `def` here would pollute the
+; enclosing env and cause races when multiple do-chains run interleaved
+; on the same env — tests running async in parallel stomp on each other's
+; `(x <- expr)` bindings.
 (defn do-bind-and-continue (name val rest env)
-  (let ((__ (eval `(def ,name (quote ,val)) env)))
-    (do-expand rest env)))
+  (eval `(let ((,name (quote ,val))) (do ,@rest)) env))
 
 (defn do-expand (forms env)
   (if (nil? forms) nil

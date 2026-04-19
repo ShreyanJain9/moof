@@ -203,7 +203,7 @@ impl Scheduler {
     /// Act resolutions. Runs until quiescent.
     pub fn drain(&mut self) {
         // loop until no more work
-        for _ in 0..1000 {  // safety bound
+        for _ in 0..100_000 {  // safety bound
             let mut did_work = false;
 
             // 0. process ready Acts (continuations on already-resolved Acts)
@@ -433,13 +433,30 @@ impl Scheduler {
     /// Copy a closure from the parent vat and run it in the child vat.
     /// Copies the ClosureDesc (bytecode + constants) and any captured values.
     fn run_closure_in_vat(&mut self, closure_val: Value, from_vat_id: u32, to_vat_id: u32, args: &[Value]) -> Result<Value, String> {
-        // --- phase 1: extract everything from source vat (no borrows of target) ---
-        let from_vat = &self.vats[from_vat_id as usize];
-        let (code_idx, _) = from_vat.heap.as_closure(closure_val)
-            .ok_or("spawn: not a closure")?;
+        let new_closure = self.copy_closure_across(closure_val, from_vat_id, to_vat_id)
+            .ok_or("spawn: failed to migrate closure")?;
 
+        // copy args across heaps
+        let mut new_args: Vec<Value> = Vec::new();
+        for arg in args {
+            new_args.push(self.copy_value_across(*arg, from_vat_id, to_vat_id));
+        }
+
+        // call the closure with args
+        let vat = self.vat_mut(to_vat_id);
+        vat.vm.call_value(&mut vat.heap, new_closure, &new_args)
+    }
+
+    /// Migrate a closure from one vat to another: copy its ClosureDescs,
+    /// remap captures, install descs into the target VM, and build a new
+    /// closure value there. Returns None if the value isn't a closure or
+    /// migration fails. Used both for spawning child vats and for crossing
+    /// closures as message args / captured values.
+    fn copy_closure_across(&mut self, closure_val: Value, from_vat_id: u32, to_vat_id: u32) -> Option<Value> {
+        let from_vat = &self.vats[from_vat_id as usize];
+        let (code_idx, _) = from_vat.heap.as_closure(closure_val)?;
         if code_idx >= from_vat.vm.closure_descs_ref().len() {
-            return Err("spawn: closure code_idx out of bounds".into());
+            return None;
         }
 
         let src_desc = &from_vat.vm.closure_descs_ref()[code_idx];
@@ -451,7 +468,6 @@ impl Scheduler {
         let src_descs: Vec<_> = from_vat.vm.closure_descs_ref()[src_desc_base..]
             .iter()
             .map(|d| {
-                // clone constant values for remapping
                 let const_vals: Vec<Value> = d.chunk.constants.iter()
                     .map(|&bits| Value::from_bits(bits))
                     .collect();
@@ -462,7 +478,6 @@ impl Scheduler {
             })
             .collect();
 
-        // extract capture data from the closure heap object
         let captures: Vec<(String, Value)> = from_vat.heap.closure_captures(closure_val)
             .iter()
             .map(|(sym, val)| {
@@ -470,8 +485,7 @@ impl Scheduler {
             })
             .collect();
 
-        // --- phase 2: remap and install into target vat ---
-        // remap captured values
+        // remap captured values into target heap
         let mut new_captures: Vec<(u32, Value)> = Vec::new();
         for (sym_name, val) in &captures {
             let new_sym = self.vat_mut(to_vat_id).heap.intern(sym_name);
@@ -484,7 +498,6 @@ impl Scheduler {
         let new_code_idx = target_base + (code_idx - src_desc_base);
 
         for (mut chunk, param_names, is_op, cap_names, cap_parent, cap_local, cap_vals, rest_reg, const_vals) in src_descs {
-            // remap constants
             chunk.constants = const_vals.iter()
                 .map(|v| self.copy_value_across(*v, from_vat_id, to_vat_id).to_bits())
                 .collect();
@@ -503,23 +516,12 @@ impl Scheduler {
             self.vat_mut(to_vat_id).vm.add_closure_desc(desc);
         }
 
-        // create the closure in the target heap
-        let new_closure = self.vat_mut(to_vat_id).heap.make_closure(
+        Some(self.vat_mut(to_vat_id).heap.make_closure(
             new_code_idx,
             src_chunk_arity,
             src_is_operative,
             &new_captures,
-        );
-
-        // copy args across heaps
-        let mut new_args: Vec<Value> = Vec::new();
-        for arg in args {
-            new_args.push(self.copy_value_across(*arg, from_vat_id, to_vat_id));
-        }
-
-        // call the closure with args
-        let vat = self.vat_mut(to_vat_id);
-        vat.vm.call_value(&mut vat.heap, new_closure, &new_args)
+        ))
     }
 
     /// Copy a value from one vat's heap to another.
@@ -593,6 +595,13 @@ impl Scheduler {
                         crate::object::HeapObject::Table { seq: new_seq, map: new_map }
                     );
                 }
+                crate::object::HeapObject::Closure { .. } => {
+                    if let Some(new_closure) = self.copy_closure_across(val, _from_vat, to_vat) {
+                        return new_closure;
+                    }
+                    eprintln!("  ~ warning: failed to migrate closure across vats");
+                    return Value::NIL;
+                }
                 _ => {
                     eprintln!("  ~ warning: cannot copy heap object across vats (yet)");
                     return Value::NIL;
@@ -648,6 +657,20 @@ impl Scheduler {
     /// Resolve an Act: set state to resolved, store result, run continuations.
     /// If the final value is itself an Act (monadic bind), set up forwarding.
     fn resolve_act(&mut self, vat_id: u32, act_id: u32, result: Value, is_error: bool) {
+        // if we're asked to resolve with another Act, don't drain our chain
+        // yet — forward to the inner Act so our chain runs with the inner's
+        // actual resolved value. without this, the chain would see the
+        // pending Act object as current_val.
+        {
+            let vat = self.vat_mut(vat_id);
+            if !is_error && Self::is_act(&vat.heap, result) {
+                let inner_act_id = result.as_any_object().unwrap();
+                if inner_act_id != act_id {
+                    self.setup_forwarding(vat_id, inner_act_id, act_id);
+                    return;
+                }
+            }
+        }
         let vat = self.vat_mut(vat_id);
         let state_sym = vat.heap.intern("__state");
         let result_sym = vat.heap.intern("__result");
@@ -677,7 +700,11 @@ impl Scheduler {
                                 let inner_chain = vat.heap.get(inner_act_id)
                                     .slot_get(chain_sym).unwrap_or(Value::NIL);
                                 let mut new_chain = inner_chain;
-                                for r_cont in remaining.iter().rev() {
+                                // drain order matches chain-list-reversed. to get drain
+                                // order [r0, r1, r2] we want chain = (r2 . r1 . r0 . rest),
+                                // i.e. cons in forward order so the earliest-to-drain ends
+                                // up deepest in the cons spine.
+                                for r_cont in remaining.iter() {
                                     new_chain = vat.heap.cons(*r_cont, new_chain);
                                 }
                                 vat.heap.get_mut(inner_act_id).slot_set(chain_sym, new_chain);

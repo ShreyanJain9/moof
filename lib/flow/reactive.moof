@@ -1,133 +1,124 @@
-; reactive.moof — atoms and signals, message-passing discipline
+; reactive.moof — atoms and signals as real server vats
 ;
-; every mutation is encapsulated inside the object: from outside,
-; the only interface is a message send. change propagation is
-; also messages — subscribers register via [x subscribe: observer]
-; and receive [observer notify: new-value] when state transitions.
+; every Atom runs in its own vat. state lives behind the vat
+; boundary; you hold a FarRef and send it messages. every read
+; returns an Act; every write is an Update applied by the
+; scheduler between messages. no userland slot mutation.
 ;
-;   (def count   (Atom 0))
-;   (def doubled (Signal || [[count get] * 2] count))
-;   [count subscribe: doubled]
-;   [count swap: 5]     ; count's swap: notifies its subscribers
-;   [doubled get]       ; 10  (recomputed from invalid cache)
+;   (do (count   <- (Atom 0))
+;       (doubled <- (Signal || [[count get] * 2] count))
+;       (_ <- [count subscribe: doubled])
+;       (_ <- [count swap: 5])
+;       (v <- [doubled get])
+;       v)                     ; 10
 ;
-; note: today these are single-vat values — atom and signal live
-; in the same heap as the code reading them. a future cross-vat
-; server version (one vat per Atom) will share the same message
-; contract so existing code won't change. it's gated on closure
-; migration across vats, which the scheduler doesn't do yet.
-;
-; the non-negotiable: from the CALLER's perspective, the ONLY
-; way to read or change state is a message send. no shared slot
-; pokes from the outside, no observer-callback closures reaching
-; in to mutate.
+; the test framework is act-aware, so single-expression tests like
+;   (test "get" (do (a <- (Atom 10)) [a get]) 10)
+; work as written.
 
 ; ══════════════════════════════════════════════════════════
 ; Atom — a cell with observable state transitions
 ; ══════════════════════════════════════════════════════════
+;
+; state and subscribers live in slots of the server object. swap:
+; returns an Update the scheduler applies; the scheduler's reply
+; is the new value. subscribers are notified via cross-vat sends
+; queued during the handler — they run in the recipient vats
+; later, after swap:'s Update has been applied.
 
-(def Atom {
-  [typeName] (quote Atom)
+(defn Atom (initial)
+  [Vat serve:with:
+    (fn (init)
+      { value: init
+        subscribers: nil
 
-  value:       nil
-  subscribers: nil
+        [typeName] (quote Atom)
 
-  [call: args]
-    { Atom value: [args car] subscribers: nil }
+        [get] @value
 
-  [get]  @value
+        [swap: new]
+          (let ((_ [@subscribers each: |s| [s notify: new]]))
+            (update { value: new } new))
 
-  ; swap: — set state and notify subscribers. the mutation is
-  ; INTERNAL; the caller only sees the send-reply round-trip.
-  [swap: new]
-    (let ((_ [self slotAt: (quote value) put: new]))
-      (let ((_ [@subscribers each: |s| [s notify: new]]))
-        new))
+        [update: f]
+          [self swap: (f @value)]
 
-  [update: f]
-    [self swap: (f @value)]
+        [subscribe: sub]
+          (update { subscribers: (cons sub @subscribers) } self)
 
-  [subscribe: sub]
-    (let ((_ [self slotAt: (quote subscribers) put:
-              (cons sub @subscribers)]))
-      self)
+        [unsubscribe: sub]
+          (update { subscribers: [@subscribers reject: |s| [s identical: sub]] }
+                  self)
 
-  [unsubscribe: sub]
-    (let ((_ [self slotAt: (quote subscribers) put:
-              [@subscribers reject: |s| [s identical: sub]]]))
-      self)
-
-  [describe]
-    (str "<Atom " [@value describe] ">")
-  [show]
-    (str [self describe] "  : Atom")
-})
+        [describe]
+          (str "<Atom " [@value describe] ">")
+        [show]
+          (str [self describe] "  : Atom")
+      })
+    (list initial)])
 
 ; ══════════════════════════════════════════════════════════
 ; Signal — derived, lazily re-evaluated
 ; ══════════════════════════════════════════════════════════
 ;
-; Signals are driven entirely by messages. when an input Atom or
-; Signal fires notify: at us, our handler invalidates our cache
-; and propagates (calling notify: on OUR subscribers). pull-based:
-; next [get] recomputes.
+; Signal runs in its own vat. computation is a closure captured
+; at construction; inputs are the FarRefs it reads from. get
+; pulls cached value if valid, otherwise re-computes. notify:
+; invalidates cache and cascades to downstream subscribers.
 ;
-; subscription is wired externally — the caller is responsible
-; for [input subscribe: sig] after construction. keeps Signal
-; itself ignorant of its inputs' identity (just their contract).
+; cross-vat closure migration is required (the computation captures
+; its input FarRefs). this relies on the scheduler's copy_value_across
+; handling closures correctly.
 
-(def Signal {
-  [typeName] (quote Signal)
+(defn Signal args
+  (let ((computation [args car])
+        (inputs [args cdr]))
+    [Vat serve:with:
+      (fn (comp inps)
+        { computation: comp
+          inputs: inps
+          cached: nil
+          valid: false
+          subscribers: nil
 
-  computation: nil
-  inputs:      nil
-  cached:      nil
-  valid:       false
-  subscribers: nil
+          [typeName] (quote Signal)
 
-  ; (Signal computation input1 input2 ...)
-  [call: args]
-    { Signal
-      computation: [args car]
-      inputs:      [args cdr]
-      cached:      nil
-      valid:       false
-      subscribers: nil }
+          [get]
+            (if @valid @cached
+              (let ((v (@computation)))
+                (update { cached: v valid: true } v)))
 
-  [get]
-    (if @valid @cached
-      (let ((v (@computation)))
-        (let ((_ [self slotAt: (quote cached) put: v]))
-          (let ((_ [self slotAt: (quote valid) put: true]))
-            v))))
+          [notify: _]
+            (let ((_ [@subscribers each: |s| [s notify: nil]]))
+              (update { valid: false } nil))
 
-  ; notify: — an input fired. invalidate cache and cascade to our
-  ; own subscribers. we pass nil as the new value; downstream
-  ; consumers re-pull via [get] to get the fresh computation.
-  [notify: _]
-    (let ((_ [self slotAt: (quote valid) put: false]))
-      (let ((_ [@subscribers each: |s| [s notify: nil]]))
-        nil))
+          [subscribe: sub]
+            (update { subscribers: (cons sub @subscribers) } self)
 
-  [subscribe: sub]
-    (let ((_ [self slotAt: (quote subscribers) put:
-              (cons sub @subscribers)]))
-      self)
+          [inputs] @inputs
 
-  [describe]
-    (str "<Signal " (if @valid (str "cached=" [@cached describe]) "stale") ">")
-  [show]  [self describe]
-})
+          [describe]
+            (str "<Signal " (if @valid (str "cached=" [@cached describe]) "stale") ">")
+          [show]  [self describe]
+      })
+      (list computation inputs)]))
 
 ; ══════════════════════════════════════════════════════════
-; wire-up convenience — subscribe each input to a signal
+; wire-up — subscribe the signal to each of its input sources
 ; ══════════════════════════════════════════════════════════
 ;
-; `(wire-reactive sig)` is the Signal-construction contract:
-; every Signal carries its inputs explicitly; this helper
-; subscribes the signal to each of them. returns the signal.
+; (wire-reactive sig) subscribes sig to every FarRef in its inputs.
+; inputs is a list of FarRefs (Atoms or Signals). [input subscribe: sig]
+; is a cross-vat send that returns an Act; we chain all of them and
+; resolve to sig.
 
-(defn wire-reactive (sig)
-  (let ((_ [[sig slotAt: (quote inputs)] each:
-            |input| [input subscribe: sig]]))
-    sig))
+(defn subscribe-each (sig inputs)
+  (if (nil? inputs) sig
+    (do (_ <- [[inputs car] subscribe: sig])
+        (subscribe-each sig [inputs cdr]))))
+
+(defn wire-reactive (sig-act)
+  (do (sig <- sig-act)
+      (ins <- [sig inputs])
+      (_ <- (subscribe-each sig ins))
+      sig))
