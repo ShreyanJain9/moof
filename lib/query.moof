@@ -1,0 +1,119 @@
+; query.moof — declarative queries as first-class values
+;
+; a Query is a VALUE you assemble by composing primitive steps
+; (where:, orderBy:, take:, drop:, map:). the Query isn't run
+; until you ask; it's also inspectable, serializable, and ship-
+; across-vats-able. think SQL but as data you can pass around.
+;
+;   (def recent-vegetarian
+;     [[[[[from recipes]
+;         where: |r| [r isVegetarian]]
+;         orderBy: |r| [r modifiedAt]]
+;         take: 10]])
+;
+;   [recent-vegetarian run]        → resolved result
+;   [recent-vegetarian inspect]    → Inspector with 'steps / 'explain aspects
+;   [recent-vegetarian steps]      → the raw list of (filter ... ) forms
+;
+; internally a Query is a source + a Cons list of step records.
+; each step is a tagged record { kind: 'filter arg: pred-fn }.
+; [run] folds the steps against the source, returning a Cons
+; (the canonical query result — future: Query-backed Cursor).
+
+; ══════════════════════════════════════════════════════════
+; Query type
+; ══════════════════════════════════════════════════════════
+
+(def Query {
+  [typeName] (quote Query)
+  source: nil
+  steps:  nil      ; Cons list of step records, in application order
+
+  ; ── builders — each returns a new Query with one more step ──
+  [where: pred]      [self addStep: { kind: (quote filter) arg: pred }]
+  [reject: pred]     [self addStep: { kind: (quote reject) arg: pred }]
+  [orderBy: keyfn]   [self addStep: { kind: (quote sort)   arg: keyfn }]
+  [take: n]          [self addStep: { kind: (quote limit)  arg: n }]
+  [drop: n]          [self addStep: { kind: (quote offset) arg: n }]
+  [map: f]           [self addStep: { kind: (quote map)    arg: f }]
+  [distinct]         [self addStep: { kind: (quote distinct) arg: nil }]
+
+  [addStep: step]
+    { Query source: @source steps: [@steps append: (list step)] }
+
+  ; ── running — fold the steps over the source's element list ──
+  [run]
+    [@steps fold: [@source toList] with: |xs step| (apply-step xs step)]
+
+  ; ── terminal shortcuts — run and reduce ──
+  [count]    [[self run] count]
+  [first]    [[self run] first]
+  [toList]   [self run]
+  [any]      [[self run] empty?] ; inverted; returns false if empty
+  [sum]      [[self run] sum]
+
+  ; ── describe / show ───────────────────────────────────
+  [describe]
+    (str "<Query: " [@source typeName]
+         " + " [@steps count] " steps>")
+  [show] [self describe]
+})
+
+; ── apply-step — dispatch a single step against the xs list ──
+
+(defn apply-step (xs step)
+  (let ((kind [step slotAt: (quote kind)])
+        (arg  [step slotAt: (quote arg)]))
+    (if [kind identical: (quote filter)]   [xs select: arg]
+      (if [kind identical: (quote reject)] [xs reject: arg]
+        (if [kind identical: (quote sort)]   [xs sortBy: arg]
+          (if [kind identical: (quote limit)]  [xs take: arg]
+            (if [kind identical: (quote offset)] [xs drop: arg]
+              (if [kind identical: (quote map)]    [xs map: arg]
+                (if [kind identical: (quote distinct)] [xs distinct]
+                  xs)))))))))
+
+; ══════════════════════════════════════════════════════════
+; constructors
+; ══════════════════════════════════════════════════════════
+
+; (from source) — start a query against any Iterable source
+(defn from (source)
+  { Query source: source steps: nil })
+
+; [source queried] — as a method, for chaining fluency
+(defmethod Object queried () (from self))
+
+; ══════════════════════════════════════════════════════════
+; Inspector aspects
+; ══════════════════════════════════════════════════════════
+
+(defmethod Query inspect ()
+  { Inspector
+    target:  self
+    aspects: (aspects
+       (quote describe) |q| [q describe]
+       (quote steps)    |q|
+         (let ((steps [q slotAt: (quote steps)]))
+           (if (nil? steps) "(no steps — raw source)"
+             (str "query plan:\n"
+                  [[steps map: |s|
+                     (str "  "
+                          [[s slotAt: (quote kind)] describe]
+                          " "
+                          [[s slotAt: (quote arg)] describe])]
+                   join: "\n"])))
+       (quote source)   |q|
+         (str "source: " [[q slotAt: (quote source)] describe])
+       (quote result)   |q|
+         (str "result (" [[q run] count] " rows):\n"
+              [[[q run] map: |x| (str "  " [x describe])] join: "\n"])
+       (quote explain)  |q|
+         (let ((steps [q slotAt: (quote steps)]))
+           (str "from " [[q slotAt: (quote source)] typeName] "\n"
+                (if (nil? steps) "(identity query)"
+                  [[steps map: |s|
+                     (str "  → "
+                          [[s slotAt: (quote kind)] describe])]
+                   join: "\n"]))))
+  })

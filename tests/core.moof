@@ -316,6 +316,43 @@
   ; default aspect falls through to describe
   (test "unknown aspect nil"   [[42 inspect] render: (quote nope)]      nil)
 
+  ; ── wave 3.5: Queryable — queries as first-class values ──
+  ;
+  ; queries are DATA — built by composition, inspected before
+  ; running, composable across calls. [q run] executes.
+
+  (test "empty query runs"     [(from (list 1 2 3)) run]               (list 1 2 3))
+  (test "where filters"        [[(from (list 1 2 3 4 5)) where: |x| [x > 2]] run] (list 3 4 5))
+  (test "take limits"          [[(from (list 1 2 3 4 5)) take: 2] run]  (list 1 2))
+  (test "drop skips"           [[(from (list 1 2 3 4 5)) drop: 2] run]  (list 3 4 5))
+  (test "map transforms"       [[(from (list 1 2 3)) map: |x| [x * 2]] run] (list 2 4 6))
+  (test "distinct dedups"      [[(from (list 1 2 2 3 3 1)) distinct] run] (list 1 2 3))
+
+  (test "where + take compose"
+    [[[(from (list 1 2 3 4 5)) where: |x| [x > 2]] take: 2] run]
+    (list 3 4))
+
+  (test "reject"               [[(from (list 1 2 3 4)) reject: |x| [x > 2]] run] (list 1 2))
+
+  (test "count terminal"       [[(from (list 1 2 3 4 5)) where: |x| [x > 2]] count] 3)
+  (test "sum terminal"         [[(from (list 1 2 3 4 5)) where: |x| [x > 2]] sum]   12)
+
+  ; queries are Query-typed values
+  (test "query typeName"       [(from (list)) typeName]                  (quote Query))
+
+  ; Inspector aspects for Query
+  (test "query has steps aspect"
+    (member? (quote steps) [[(from (list)) inspect] aspectNames]) true)
+
+  ; building doesn't mutate — each step returns a new Query
+  (test "query immutable"
+    (let ((q1 (from (list 1 2 3))))
+      (let ((q2 [q1 where: |x| [x > 1]]))
+        [q1 count]))
+    3)
+
+  ; [obj queried] — method shortcut for (from obj)
+  (test "queried shortcut"     [[[(list 1 2 3) queried] take: 2] run]    (list 1 2))
 ))
 
 [console println: (report core-tests)]

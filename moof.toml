@@ -47,6 +47,7 @@ files = [
   "lib/transducer.moof",
   "lib/stream.moof",
   "lib/inspect.moof",
+  "lib/query.moof",
   "lib/pattern.moof",
   "lib/test.moof",
   "lib/server.moof",
