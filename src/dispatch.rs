@@ -7,54 +7,49 @@
 // 3. If found: execute (bytecode → VM, native → rust closure)
 // 4. If not found: send doesNotUnderstand: to receiver
 
-use crate::heap::{Heap, PROTO_CONS, PROTO_STR, PROTO_BYTES, PROTO_TABLE, PROTO_CLOSURE};
-use crate::object::HeapObject;
+use crate::heap::Heap;
 use crate::value::Value;
 
 const MAX_DELEGATION_DEPTH: usize = 256;
 
-/// Perform message dispatch. This is called by the VM for every SEND instruction.
+/// Perform message dispatch. This is called by the VM for every SEND.
 ///
-/// Returns the handler value and the object ID where it was found, or an error.
-/// The VM is responsible for actually executing the handler (bytecode or native).
-pub fn lookup_handler(heap: &Heap, receiver: Value, selector: u32) -> Result<(Value, Value), String> {
-    // 1. if receiver is a heap object, check its handler table + delegation chain
+/// Returns (handler_value, receiver). The VM is responsible for actually
+/// executing the handler (bytecode or native).
+///
+/// Uses a monomorphic inline-ish cache keyed by (prototype, selector).
+/// Most sends find their handler on a type prototype (e.g. Cons#each:
+/// lives on the Cons proto, hit by every list operation), so caching
+/// lookup_in_chain results keyed by the starting proto handles the
+/// bulk of the load. Instance-local handlers are handled on a fast
+/// path before the cache is consulted — they're rare and we don't
+/// want to pollute the cache with per-instance keys.
+pub fn lookup_handler(heap: &mut Heap, receiver: Value, selector: u32) -> Result<(Value, Value), String> {
+    // Fast path: instance has its own handler installed directly (object
+    // literals with [sel] handlers, closures, etc.). Never cached — each
+    // instance would be its own key.
     if let Some(id) = receiver.as_any_object() {
-        if let Some(handler) = lookup_in_chain(heap, id, selector)? {
+        if let Some(handler) = heap.get(id).handler_get(selector) {
             return Ok((handler, receiver));
         }
     }
 
-    // 2. look in the type prototype
-    let tag = receiver.type_tag() as usize;
-    let proto = if let Some(id) = receiver.as_any_object() {
-        // for heap objects, also check variant-specific protos
-        let variant_proto = match heap.get(id) {
-            HeapObject::Pair(_, _) => heap.type_protos.get(PROTO_CONS),
-            HeapObject::Text(_) => heap.type_protos.get(PROTO_STR),
-            HeapObject::Buffer(_) => heap.type_protos.get(PROTO_BYTES),
-            HeapObject::Table { .. } => heap.type_protos.get(PROTO_TABLE),
-            HeapObject::Closure { .. } => heap.type_protos.get(PROTO_CLOSURE),
-            HeapObject::General { .. } | HeapObject::Environment { .. } => None,
-        };
-        // try variant proto first, then generic object proto
-        if let Some(Some(vp)) = variant_proto.map(|p| p.as_any_object()) {
-            if let Some(handler) = lookup_in_chain(heap, vp, selector)? {
-                return Ok((handler, receiver));
-            }
-        }
-        heap.type_protos.get(tag).copied().unwrap_or(Value::NIL)
-    } else {
-        heap.type_protos.get(tag).copied().unwrap_or(Value::NIL)
-    };
-
+    // Determine the prototype we'd walk. For heap variants this is the
+    // type-prototype (Cons/String/Table/...). For primitives it's
+    // type_protos[tag]. For general objects it's their parent slot.
+    let proto = heap.prototype_of(receiver);
     if let Some(proto_id) = proto.as_any_object() {
+        // Cache check. (proto_id, selector) → handler.
+        if let Some(&cached) = heap.send_cache.get(&(proto_id, selector)) {
+            return Ok((cached, receiver));
+        }
+        // Miss: walk from the proto.
         if let Some(handler) = lookup_in_chain(heap, proto_id, selector)? {
+            heap.send_cache.insert((proto_id, selector), handler);
             return Ok((handler, receiver));
         }
     }
 
-    // 3. not found — return error (caller handles doesNotUnderstand: dispatch)
     let sel_name = heap.symbol_name(selector);
     Err(format!("{} does not understand '{}'", heap.format_value(receiver), sel_name))
 }

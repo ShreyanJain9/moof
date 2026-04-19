@@ -78,9 +78,14 @@ pub struct Heap {
     /// directly from a native handler — VM frames are live.
     pub gc_requested: bool,
     /// Allocation counter since the last completed GC. when it
-    /// crosses a threshold, alloc flips gc_requested so the next
-    /// safepoint triggers a collection.
+    /// crosses `alloc_budget`, alloc flips gc_requested so the
+    /// next safepoint triggers a collection.
     allocs_since_gc: usize,
+    /// Ratio-based GC budget: after each gc, set to live*2 (but
+    /// no less than MIN_GC_BUDGET). this adapts to working set —
+    /// steady-state programs get rare GCs, allocation-heavy ones
+    /// get frequent ones.
+    alloc_budget: usize,
     symbols: Vec<String>,
     sym_reverse: std::collections::HashMap<String, u32>,
     pub env: u32,                                      // root environment object ID
@@ -111,6 +116,17 @@ pub struct Heap {
 
     // native handlers: name_sym → Rust closure
     pub natives: Vec<(u32, NativeFn)>,
+    /// Parallel index: sym → position in `natives`. replaces the
+    /// linear scan that `find_native` used to do — every native
+    /// call previously walked the whole natives Vec.
+    native_idx: std::collections::HashMap<u32, usize>,
+
+    /// Send-site monomorphic cache. key: (starting_proto_id, selector).
+    /// value: the handler value (native-sym or closure) resolved by
+    /// chain walking from that prototype. every lookup_handler call
+    /// checks this first — a hit skips the chain walk entirely.
+    /// flushed on handler_set via moof-level [obj handle:with:].
+    pub send_cache: std::collections::HashMap<(u32, u32), Value>,
 }
 
 pub type NativeFn = Box<dyn Fn(&mut Heap, Value, &[Value]) -> Result<Value, String>>;
@@ -122,6 +138,7 @@ impl Heap {
             free_list: Vec::new(),
             gc_requested: false,
             allocs_since_gc: 0,
+            alloc_budget: Self::MIN_GC_BUDGET,
             symbols: Vec::new(),
             sym_reverse: std::collections::HashMap::new(),
             env: 0,
@@ -138,6 +155,8 @@ impl Heap {
             sym_message: 0,
             type_protos: vec![Value::NIL; 17],
             natives: Vec::new(),
+            native_idx: std::collections::HashMap::new(),
+            send_cache: std::collections::HashMap::new(),
         };
 
         // allocate root environment object (gets ID 0)
@@ -214,15 +233,17 @@ impl Heap {
 
     // -- object allocation --
 
-    /// Threshold: after this many allocs since the last GC, request
-    /// another one. tuned to the typical boot+suite-run working set
-    /// (~5-10k new live). keeps garbage under a couple multiples
-    /// of the live set without constant collection overhead.
-    const GC_ALLOC_THRESHOLD: usize = 16384;
+    /// Floor for the GC budget — keeps GCs from firing during the
+    /// first few allocations at program start.
+    pub const MIN_GC_BUDGET: usize = 2048;
+    /// Growth factor after a GC: next_budget = live_count * this.
+    /// 2x means ~50% collector-amortized overhead in the worst
+    /// case; tighten to 1.5 for more-frequent-smaller collections.
+    pub const GC_GROWTH_FACTOR: usize = 2;
 
     pub fn alloc(&mut self, obj: HeapObject) -> u32 {
         self.allocs_since_gc += 1;
-        if self.allocs_since_gc >= Self::GC_ALLOC_THRESHOLD {
+        if self.allocs_since_gc >= self.alloc_budget {
             self.gc_requested = true;
         }
         // prefer freelist (reuse) over append (grow)
@@ -234,6 +255,13 @@ impl Heap {
             self.objects.push(obj);
             id
         }
+    }
+
+    /// Called by gc() after a collection completes to reset the
+    /// budget based on the new live count.
+    pub(crate) fn set_alloc_budget_from_live(&mut self, live: usize) {
+        self.alloc_budget = (live * Self::GC_GROWTH_FACTOR).max(Self::MIN_GC_BUDGET);
+        self.allocs_since_gc = 0;
     }
 
     pub fn alloc_val(&mut self, obj: HeapObject) -> Value {
@@ -386,11 +414,16 @@ impl Heap {
         let unique = format!("{name}#{idx}");
         let sym = self.intern(&unique);
         self.natives.push((sym, Box::new(f)));
+        self.native_idx.insert(sym, idx);
         Value::symbol(sym) // the handler value IS the symbol — dispatch looks it up
     }
 
     pub fn find_native(&self, sym: u32) -> Option<usize> {
-        self.natives.iter().position(|(s, _)| *s == sym)
+        // O(1) hashmap lookup. previously this was a linear scan over
+        // the natives Vec — a real cost when every native call paid
+        // for it. the map is maintained in lockstep with the Vec by
+        // register_native.
+        self.native_idx.get(&sym).copied()
     }
 
     /// Value equality (like Ruby's eql?). Compares content for strings.

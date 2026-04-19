@@ -122,6 +122,11 @@ impl super::Plugin for CorePlugin {
             let sel = args.first().and_then(|v| v.as_symbol()).ok_or("handle:with: selector must be a symbol")?;
             let handler = args.get(1).copied().ok_or("handle:with: need handler value")?;
             heap.get_mut(id).handler_set(sel, handler);
+            // flush send cache — any previously-cached (proto, sel) entries
+            // might now be stale, since the new handler could shadow one
+            // higher in the chain. crude but correct; in practice handler_set
+            // is rare after boot, so the resulting cache warm-up is cheap.
+            heap.send_cache.clear();
             Ok(receiver)
         });
 
