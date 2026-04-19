@@ -1,0 +1,145 @@
+; transducer.moof — collection-independent transformation pipelines
+;
+; a transducer is a value-function that takes a step function
+; (a 2-arg reducing fn |acc x| → acc) and returns a new step
+; function. transducers compose via ordinary function composition,
+; and the composed pipeline applies uniformly to any collection,
+; stream, signal, or channel without materializing intermediate
+; collections.
+;
+; the one-implementation-many-types promise in action:
+;
+;   (def vegetarian-count-over-30
+;     (chain (filter-xf vegetarian?)
+;            (map-xf caloriesPerServing)
+;            (filter-xf |c| [c > 300])))
+;
+;   [recipes-list   transduce: vegetarian-count-over-30]
+;   [recipes-stream transduce: vegetarian-count-over-30]   ; lazy (future)
+;   [recipes-signal transduce: vegetarian-count-over-30]   ; reactive (future)
+;
+; same transducer value, different substrates.
+
+; ══════════════════════════════════════════════════════════
+; stateless transducers
+; ══════════════════════════════════════════════════════════
+
+; map-xf — transform each element via f, pass through unchanged count
+(defn map-xf (f)
+  (fn (rf)
+    (fn (acc x) (rf acc (f x)))))
+
+; filter-xf — pass elements satisfying pred, drop the rest
+(defn filter-xf (pred)
+  (fn (rf)
+    (fn (acc x) (if (pred x) (rf acc x) acc))))
+
+; remove-xf — inverse of filter-xf
+(defn remove-xf (pred)
+  (filter-xf (fn (x) (not (pred x)))))
+
+; ══════════════════════════════════════════════════════════
+; stateful transducers
+; ══════════════════════════════════════════════════════════
+;
+; state is held on a fresh mutable object created once per
+; transduction. each invocation of `(xf rf)` produces its own
+; state, so transducers can be reused across multiple runs
+; without leaking counters between them.
+
+; NOTE: these stateful transducers sequence side-effects via
+; let-with-throwaway (`(let ((_ mutate) (...)` instead of `(do ...)`)
+; because moof's `do` is a vau and the compiler's capture analysis
+; doesn't see through vau expansions — referenced outer variables
+; (like `rf`) get lost. the let idiom keeps capture explicit.
+
+; take-xf — keep the first n elements, ignore the rest
+(defn take-xf (n)
+  (fn (rf)
+    (let ((state { remaining: n }))
+      (fn (acc x)
+        (let ((r [state slotAt: (quote remaining)]))
+          (if [r <= 0] acc
+            (let ((_ [state slotAt: (quote remaining) put: [r - 1]]))
+              (rf acc x))))))))
+
+; drop-xf — skip the first n elements, pass the rest
+(defn drop-xf (n)
+  (fn (rf)
+    (let ((state { remaining: n }))
+      (fn (acc x)
+        (let ((r [state slotAt: (quote remaining)]))
+          (if [r <= 0] (rf acc x)
+            (let ((_ [state slotAt: (quote remaining) put: [r - 1]]))
+              acc)))))))
+
+; take-while-xf — keep leading elements while pred holds, then stop
+(defn take-while-xf (pred)
+  (fn (rf)
+    (let ((state { done: false }))
+      (fn (acc x)
+        (if [state slotAt: (quote done)] acc
+          (if (pred x) (rf acc x)
+            (let ((_ [state slotAt: (quote done) put: true]))
+              acc)))))))
+
+; drop-while-xf — skip leading elements while pred holds, pass the rest
+(defn drop-while-xf (pred)
+  (fn (rf)
+    (let ((state { dropping: true }))
+      (fn (acc x)
+        (if [state slotAt: (quote dropping)]
+          (if (pred x) acc
+            (let ((_ [state slotAt: (quote dropping) put: false]))
+              (rf acc x)))
+          (rf acc x))))))
+
+; distinct-xf — emit each unique element at most once
+(defn distinct-xf ()
+  (fn (rf)
+    (let ((state { seen: #[] }))
+      (fn (acc x)
+        (let ((seen [state slotAt: (quote seen)]))
+          (if [seen contains: x] acc
+            (let ((_ [state slotAt: (quote seen) put: [seen at: x put: true]]))
+              (rf acc x))))))))
+
+; ══════════════════════════════════════════════════════════
+; composition
+; ══════════════════════════════════════════════════════════
+;
+; (chain xf1 xf2 xf3) produces a transducer that applies xf1,
+; then xf2, then xf3 to each element in order. right-to-left
+; composition of the underlying functions — the outer xf wraps
+; the inner xf's rf.
+
+(defn compose2 (a b)
+  (fn (rf) (a (b rf))))
+
+(def chain (fn xfs
+  (if (nil? xfs) (fn (rf) rf)
+    (if (nil? [xfs cdr]) [xfs car]
+      (compose2 [xfs car]
+        (apply chain [xfs cdr]))))))
+
+; ══════════════════════════════════════════════════════════
+; running transducers against a collection
+; ══════════════════════════════════════════════════════════
+
+; [coll transduce: xf] — apply xf to a builder step function and
+; fold self, returning a container of self's type.
+(defmethod Object transduce: (xf)
+  [self into: [self emptyKindred] via: xf])
+
+; [coll into: empty via: xf] — fold self through the transducer
+; into a container shaped like `empty`. uses the Buildable protocol
+; (via Builder) so the output type matches empty's type.
+(defmethod Object into:via: (empty xf)
+  [[self fold: (builder-for empty) with:
+    (xf |b x| [b << x])] result])
+
+; [coll transduce: xf init: val with: rf] — fully-explicit transduction.
+; the step function and initial value are user-supplied; returns
+; whatever the fold accumulates.
+(defmethod Object transduce:init:with: (xf init rf)
+  [self fold: init with: (xf rf)])

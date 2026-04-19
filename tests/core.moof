@@ -224,6 +224,42 @@
   (test "Integer conforms"   (member? Integer [Hashable conformers]) true)
   (test "String conforms"    (member? String  [Hashable conformers]) true)
 
+  ; ── wave 3.1: transducers — one pipeline, any substrate ──
+
+  ; stateless
+  (test "map-xf"       [(list 1 2 3) transduce: (map-xf |x| [x * 2])]     (list 2 4 6))
+  (test "filter-xf"    [(list 1 2 3 4) transduce: (filter-xf |x| [x > 2])] (list 3 4))
+  (test "remove-xf"    [(list 1 2 3 4) transduce: (remove-xf |x| [x > 2])] (list 1 2))
+
+  ; stateful
+  (test "take-xf"      [(list 1 2 3 4 5) transduce: (take-xf 3)]          (list 1 2 3))
+  (test "drop-xf"      [(list 1 2 3 4 5) transduce: (drop-xf 2)]          (list 3 4 5))
+  (test "take-while"   [(list 1 2 3 4 5) transduce: (take-while-xf |x| [x < 3])] (list 1 2))
+  (test "drop-while"   [(list 1 2 3 4 5) transduce: (drop-while-xf |x| [x < 3])] (list 3 4 5))
+  (test "distinct-xf"  [(list 1 2 2 3 3 1) transduce: (distinct-xf)]      (list 1 2 3))
+
+  ; chain — compose several transducers into one pipeline
+  (test "chain map+filter"
+    [(list 1 2 3 4 5) transduce: (chain (map-xf |x| [x * 2]) (filter-xf |x| [x > 4]))]
+    (list 6 8 10))
+  (test "chain map+filter+take"
+    [(list 1 2 3 4 5) transduce: (chain (map-xf |x| [x * 2]) (filter-xf |x| [x > 4]) (take-xf 2))]
+    (list 6 8))
+
+  ; type preservation via transduce: — same substrate transducer,
+  ; different input collection types, output matches input
+  (test "xf preserves Table"  [[#[1 2 3] transduce: (map-xf |x| [x * 10])] typeName] (quote Table))
+  (test "xf Table content"    [#[1 2 3] transduce: (map-xf |x| [x * 10])] #[10 20 30])
+  (test "xf preserves Set"    [[(Set 1 2 3) transduce: (map-xf |x| [x * 10])] typeName] (quote Set))
+
+  ; into:via: — target container type explicitly
+  (test "into: Table via map" [(list 1 2 3) into: #[] via: (map-xf |x| [x * 10])] #[10 20 30])
+  (test "into: Set via map"   [[(list 1 1 2 2 3) into: (Set) via: (map-xf |x| [x * 2])] size] 3)
+
+  ; transduce:init:with: — full manual: user provides init and rf
+  (test "transduce sum"
+    [(list 1 2 3 4 5) transduce: (map-xf |x| [x * 2]) init: 0 with: |a x| [a + x]]
+    30)
 ))
 
 [console println: (report core-tests)]
