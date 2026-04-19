@@ -453,6 +453,30 @@
   (test "bag equal"      [(Bag "a" "b" "a") equal: (Bag "a" "a" "b")] true)
   (test "bag diff"       [(Bag "a") equal: (Bag "b")] false)
   (test "cons toBag"     [[(list 1 1 2 3 3 3) toBag] count: 3] 3)
+
+  ; ── wave 4.9: Signal → Signal propagation ────────────
+
+  ; Signal chain: b depends on a, c depends on b. mutating a
+  ; should invalidate both b and c via cascade.
+  (test "signal chain"
+    (let ((a (Atom 1)))
+      (let ((b (Signal || [[a get] * 2] a)))
+        (let ((c (Signal || [[b get] + 100] b)))
+          (let ((_ [c get]))
+            (let ((_ [a swap: 5]))
+              [c get])))))
+    110)
+
+  ; Multi-input signal — s depends on a AND b. changing either
+  ; input invalidates s.
+  (test "multi-input signal"
+    (let ((a (Atom 10)))
+      (let ((b (Atom 20)))
+        (let ((s (Signal || [[a get] + [b get]] a b)))
+          (let ((_ [s get]))
+            (let ((_ [b swap: 5]))
+              [s get])))))
+    15)
 ))
 
 [console println: (report core-tests)]

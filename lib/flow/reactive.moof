@@ -63,13 +63,15 @@
 })
 
 ; Helper: register an invalidating observer on each input atom
-; for the given signal. kept as a top-level fn so the captured
-; `sig` lives at a clean fn-parameter boundary (see note in
-; Signal.call: below).
+; OR signal for the given signal. the callback fires sig's own
+; invalidate, which propagates down the dependency DAG — any
+; signals observing sig will see the change too.
+;
+; kept as a top-level fn so captured `sig` lives at a clean
+; fn-parameter boundary (see note in Signal.call: below).
 (defn %wire-signal-observers (sig inputs)
   [inputs each: |input|
-    [input observe: |_|
-      [sig slotAt: (quote valid) put: false]]])
+    [input observe: |_| [sig invalidate]]])
 
 ; ══════════════════════════════════════════════════════════
 ; Signal — derived, lazily re-evaluated value
@@ -116,13 +118,22 @@
           (let ((_ [self slotAt: (quote valid)  put: true]))
             v))))
 
-  ; Signals also accept observers — so you can chain Signal → Signal.
-  ; when this Signal's value changes (after a recompute), its observers fire.
-  ; currently observers fire on the NEXT get after invalidation.
+  ; [invalidate] — mark cache stale AND propagate to own observers.
+  ; called by our input-observation callback when any input changes.
+  ; the observer chain means Signal → Signal → Signal cascades
+  ; correctly: each invalidate fires the next link's invalidate.
+  [invalidate]
+    (let ((_ [self slotAt: (quote valid) put: false]))
+      [@observers each: |cb| (cb nil)])
+
+  ; Signals accept observers the same way Atoms do. register a
+  ; 1-arg callback; it fires (with nil) whenever this Signal's
+  ; cached value is invalidated.
   [observe: callback]
-    (let ((_ [self slotAt: (quote observers) put: (cons callback
-               (or @observers nil))]))
-      self)
+    (let ((current @observers))
+      (let ((new-list (cons callback (if (nil? current) nil current))))
+        (let ((_ [self slotAt: (quote observers) put: new-list]))
+          self)))
 
   observers: nil
 
