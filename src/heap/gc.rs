@@ -115,6 +115,8 @@ impl Heap {
         }
 
         let live = before - self.free_list.len();
+        self.allocs_since_gc = 0;
+        self.gc_requested = false;
         GcStats {
             before,
             live,

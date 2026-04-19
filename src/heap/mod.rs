@@ -77,6 +77,10 @@ pub struct Heap {
     /// points and runs the actual collection. never run GC
     /// directly from a native handler — VM frames are live.
     pub gc_requested: bool,
+    /// Allocation counter since the last completed GC. when it
+    /// crosses a threshold, alloc flips gc_requested so the next
+    /// safepoint triggers a collection.
+    allocs_since_gc: usize,
     symbols: Vec<String>,
     sym_reverse: std::collections::HashMap<String, u32>,
     pub env: u32,                                      // root environment object ID
@@ -117,6 +121,7 @@ impl Heap {
             objects: Vec::new(),
             free_list: Vec::new(),
             gc_requested: false,
+            allocs_since_gc: 0,
             symbols: Vec::new(),
             sym_reverse: std::collections::HashMap::new(),
             env: 0,
@@ -209,7 +214,17 @@ impl Heap {
 
     // -- object allocation --
 
+    /// Threshold: after this many allocs since the last GC, request
+    /// another one. tuned to the typical boot+suite-run working set
+    /// (~5-10k new live). keeps garbage under a couple multiples
+    /// of the live set without constant collection overhead.
+    const GC_ALLOC_THRESHOLD: usize = 16384;
+
     pub fn alloc(&mut self, obj: HeapObject) -> u32 {
+        self.allocs_since_gc += 1;
+        if self.allocs_since_gc >= Self::GC_ALLOC_THRESHOLD {
+            self.gc_requested = true;
+        }
         // prefer freelist (reuse) over append (grow)
         if let Some(id) = self.free_list.pop() {
             self.objects[id as usize] = obj;
