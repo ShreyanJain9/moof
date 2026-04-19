@@ -197,13 +197,6 @@ impl<'a> Parser<'a> {
         self.advance(); // [
         let receiver = self.parse_expr()?;
 
-        // check for eventual send: [obj <- sel: arg]
-        let eventual = if let Token::Arrow = self.peek() {
-            self.advance(); true
-        } else {
-            false
-        };
-
         let mut sel_parts = Vec::new();
         let mut args = Vec::new();
 
@@ -236,7 +229,7 @@ impl<'a> Parser<'a> {
         }
 
         let selector = sel_parts.join("");
-        let send_sym = self.intern(if eventual { "%eventual-send" } else { "send" });
+        let send_sym = self.intern("send");
         let sel_sym = self.intern(&selector);
         let sel_val = self.quoted(sel_sym);
 

@@ -129,7 +129,7 @@ impl<'a> Compiler<'a> {
             let sym_id = expr.as_symbol().unwrap();
             let name = self.heap.symbol_name(sym_id);
             // skip well-known internal symbols
-            if name == "send" || name == "%dot" || name == "%object-literal" || name == "%eventual-send" || name == "%table-literal" {
+            if name == "send" || name == "%dot" || name == "%object-literal" || name == "%table-literal" {
                 self.emit_load_const(dst, expr);
             } else if let Some(reg) = self.find_local(sym_id) {
                 // local variable — just copy from its register
@@ -188,14 +188,12 @@ impl<'a> Compiler<'a> {
                     return Err("unquote outside of quasiquote".into());
                 }
 
-                "%eventual-send" | "send" => {
-                    // (send receiver 'selector args...) — synchronous send.
-                    // (%eventual-send receiver 'selector args...) — the
-                    // parser emits this for `[recv <- sel args]`. semantically
-                    // equivalent today: FarRef receivers already forward via
-                    // doesNotUnderstand:, returning an Act. local receivers
-                    // resolve immediately. the `<-` syntax reads as "this
-                    // crosses a vat boundary" — documentation at call sites.
+                "send" => {
+                    // (send receiver 'selector args...) — the one send.
+                    // FarRef receivers forward via doesNotUnderstand: and
+                    // return an Act; local receivers resolve immediately.
+                    // same wire protocol either way; the receiver's type
+                    // tells you whether it crosses a vat.
                     let items = self.heap.list_to_vec(expr);
                     if items.len() < 3 {
                         return Err("send: need at least receiver and selector".into());

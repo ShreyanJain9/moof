@@ -1,0 +1,33 @@
+; reactive-demo.moof — Atom and Signal through pure messages.
+; every line exercises the subscribe/notify protocol.
+;
+;   (reload "examples/reactive-demo.moof")
+
+(def count   (Atom 0))
+(def doubled (wire-reactive (Signal || [[count get] * 2] count)))
+
+[count get]          ; 0
+[doubled get]        ; 0  (2 * 0)
+
+[count swap: 5]      ; 5  — notifies subscribers; doubled invalidates
+[doubled get]        ; 10  — recomputed
+
+; signal chain: changes propagate a → b → c via message cascade
+(def a (Atom 1))
+(def b (wire-reactive (Signal || [[a get] + 100] a)))
+(def c (wire-reactive (Signal || [[b get] * 10]  b)))
+
+[c get]              ; (1 + 100) * 10 = 1010
+[a swap: 5]          ; 5
+[c get]              ; (5 + 100) * 10 = 1050  — full cascade
+
+; multi-input signal
+(def x (Atom 10))
+(def y (Atom 20))
+(def sum (wire-reactive (Signal || [[x get] + [y get]] x y)))
+
+[sum get]            ; 30
+[x swap: 100]        ; 100 — sum invalidated via x's subscribers
+[sum get]            ; 120
+[y swap: 200]        ; 200
+[sum get]            ; 300

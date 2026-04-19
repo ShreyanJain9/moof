@@ -1,144 +1,133 @@
-; reactive.moof — Atom + Signal (reactivity substrate)
+; reactive.moof — atoms and signals, message-passing discipline
 ;
-; the connective tissue that makes the objectspace feel LIVE:
-; values that change, cells that re-derive, observers that wake
-; when their inputs shift.
+; every mutation is encapsulated inside the object: from outside,
+; the only interface is a message send. change propagation is
+; also messages — subscribers register via [x subscribe: observer]
+; and receive [observer notify: new-value] when state transitions.
 ;
-;   (def count (Atom 0))
-;   (def doubled (Signal |_| [[count get] * 2] count))
-;   [doubled get]              → 0
-;   [count swap: 5]            → 5
-;   [doubled get]              → 10  (auto re-derived)
+;   (def count   (Atom 0))
+;   (def doubled (Signal || [[count get] * 2] count))
+;   [count subscribe: doubled]
+;   [count swap: 5]     ; count's swap: notifies its subscribers
+;   [doubled get]       ; 10  (recomputed from invalid cache)
 ;
-; MVP:
-;   - Atom: mutable cell with observer callbacks
-;   - Signal: lazy derived value, invalidates on input change
-;   - no History yet (tier 7 work); no cross-vat propagation
+; note: today these are single-vat values — atom and signal live
+; in the same heap as the code reading them. a future cross-vat
+; server version (one vat per Atom) will share the same message
+; contract so existing code won't change. it's gated on closure
+; migration across vats, which the scheduler doesn't do yet.
 ;
-; the invariant: Signals are pull-based. [sig get] recomputes if
-; any input has mutated since the last derivation. observers run
-; immediately on atom.swap:, before the mutation returns.
+; the non-negotiable: from the CALLER's perspective, the ONLY
+; way to read or change state is a message send. no shared slot
+; pokes from the outside, no observer-callback closures reaching
+; in to mutate.
 
 ; ══════════════════════════════════════════════════════════
-; Atom — mutable cell with change notification
+; Atom — a cell with observable state transitions
 ; ══════════════════════════════════════════════════════════
 
 (def Atom {
   [typeName] (quote Atom)
 
-  value:     nil
-  observers: nil    ; cons list of 1-arg fns; called with the new value
+  value:       nil
+  subscribers: nil
 
-  ; (Atom init-value) — construct an Atom holding init-value.
   [call: args]
-    { Atom value: [args car] observers: nil }
+    { Atom value: [args car] subscribers: nil }
 
   [get]  @value
 
-  ; swap: new — set the value, notify observers, return new.
+  ; swap: — set state and notify subscribers. the mutation is
+  ; INTERNAL; the caller only sees the send-reply round-trip.
   [swap: new]
     (let ((_ [self slotAt: (quote value) put: new]))
-      (let ((_ [self notifyObservers: new]))
+      (let ((_ [@subscribers each: |s| [s notify: new]]))
         new))
 
-  ; update: f — apply f to current value, swap in the result.
   [update: f]
     [self swap: (f @value)]
 
-  ; observe: callback — register a 1-arg fn to fire on swap.
-  ; returns self for chaining.
-  [observe: callback]
-    (let ((_ [self slotAt: (quote observers) put: (cons callback @observers)]))
+  [subscribe: sub]
+    (let ((_ [self slotAt: (quote subscribers) put:
+              (cons sub @subscribers)]))
       self)
 
-  ; internal — fire every observer with the new value
-  [notifyObservers: new]
-    [@observers each: |cb| (cb new)]
+  [unsubscribe: sub]
+    (let ((_ [self slotAt: (quote subscribers) put:
+              [@subscribers reject: |s| [s identical: sub]]]))
+      self)
 
   [describe]
     (str "<Atom " [@value describe] ">")
-
   [show]
-    (str "<Atom " [@value describe] ">  : Atom")
+    (str [self describe] "  : Atom")
 })
 
-; Helper: register an invalidating observer on each input atom
-; OR signal for the given signal. the callback fires sig's own
-; invalidate, which propagates down the dependency DAG — any
-; signals observing sig will see the change too.
-;
-; kept as a top-level fn so captured `sig` lives at a clean
-; fn-parameter boundary (see note in Signal.call: below).
-(defn %wire-signal-observers (sig inputs)
-  [inputs each: |input|
-    [input observe: |_| [sig invalidate]]])
-
 ; ══════════════════════════════════════════════════════════
-; Signal — derived, lazily re-evaluated value
+; Signal — derived, lazily re-evaluated
 ; ══════════════════════════════════════════════════════════
 ;
-; a Signal caches its last computed value; when any input Atom/
-; Signal is mutated, the cache is invalidated. next [get] recomputes.
+; Signals are driven entirely by messages. when an input Atom or
+; Signal fires notify: at us, our handler invalidates our cache
+; and propagates (calling notify: on OUR subscribers). pull-based:
+; next [get] recomputes.
+;
+; subscription is wired externally — the caller is responsible
+; for [input subscribe: sig] after construction. keeps Signal
+; itself ignorant of its inputs' identity (just their contract).
 
 (def Signal {
   [typeName] (quote Signal)
 
-  computation: nil   ; fn () -> Value — the derivation
-  inputs:      nil   ; cons list of Atoms/Signals the comp depends on
-  cached:      nil   ; last computed value (meaningless if !valid)
+  computation: nil
+  inputs:      nil
+  cached:      nil
   valid:       false
+  subscribers: nil
 
-  ; (Signal fn input1 input2 ...) — derive from inputs via fn.
-  ; fn takes zero args; it reads inputs freely via [atom get].
-  ; each input is either an Atom or another Signal.
-  ;
-  ; note: uses an external helper fn instead of inlining because
-  ; capturing `sig` into a deeply-nested pipe-block closure from
-  ; inside a method body loses the binding (compiler capture
-  ; analysis doesn't see through two-level `|input| |_|`
-  ; nesting on this specific path). the helper fn puts the
-  ; capture on a clean fn-parameter boundary.
+  ; (Signal computation input1 input2 ...)
   [call: args]
-    (let ((comp [args car])
-          (ins  [args cdr])
-          (sig  { Signal
-                   computation: comp
-                   inputs:      ins
-                   cached:      nil
-                   valid:       false
-                   observers:   nil }))
-      (let ((_ (%wire-signal-observers sig ins)))
-        sig))
+    { Signal
+      computation: [args car]
+      inputs:      [args cdr]
+      cached:      nil
+      valid:       false
+      subscribers: nil }
 
-  ; [get] — return the cached value, recomputing if invalid.
   [get]
     (if @valid @cached
       (let ((v (@computation)))
         (let ((_ [self slotAt: (quote cached) put: v]))
-          (let ((_ [self slotAt: (quote valid)  put: true]))
+          (let ((_ [self slotAt: (quote valid) put: true]))
             v))))
 
-  ; [invalidate] — mark cache stale AND propagate to own observers.
-  ; called by our input-observation callback when any input changes.
-  ; the observer chain means Signal → Signal → Signal cascades
-  ; correctly: each invalidate fires the next link's invalidate.
-  [invalidate]
+  ; notify: — an input fired. invalidate cache and cascade to our
+  ; own subscribers. we pass nil as the new value; downstream
+  ; consumers re-pull via [get] to get the fresh computation.
+  [notify: _]
     (let ((_ [self slotAt: (quote valid) put: false]))
-      [@observers each: |cb| (cb nil)])
+      (let ((_ [@subscribers each: |s| [s notify: nil]]))
+        nil))
 
-  ; Signals accept observers the same way Atoms do. register a
-  ; 1-arg callback; it fires (with nil) whenever this Signal's
-  ; cached value is invalidated.
-  [observe: callback]
-    (let ((current @observers))
-      (let ((new-list (cons callback (if (nil? current) nil current))))
-        (let ((_ [self slotAt: (quote observers) put: new-list]))
-          self)))
-
-  observers: nil
+  [subscribe: sub]
+    (let ((_ [self slotAt: (quote subscribers) put:
+              (cons sub @subscribers)]))
+      self)
 
   [describe]
     (str "<Signal " (if @valid (str "cached=" [@cached describe]) "stale") ">")
-
   [show]  [self describe]
 })
+
+; ══════════════════════════════════════════════════════════
+; wire-up convenience — subscribe each input to a signal
+; ══════════════════════════════════════════════════════════
+;
+; `(wire-reactive sig)` is the Signal-construction contract:
+; every Signal carries its inputs explicitly; this helper
+; subscribes the signal to each of them. returns the signal.
+
+(defn wire-reactive (sig)
+  (let ((_ [[sig slotAt: (quote inputs)] each:
+            |input| [input subscribe: sig]]))
+    sig))
