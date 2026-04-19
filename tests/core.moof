@@ -278,11 +278,13 @@
   (test "stream sum"            [(stream-range 1 5) sum]                 10)
   (test "stream count"          [(stream-range 0 5) count]               5)
 
-  ; stateful nature — each stream iterates once, state advances
+  ; stateful nature — each stream iterates once, state advances.
+  ; can't use `do` here: Cons#then: is flatMap, so `do [s take: 3]
+  ; [s take: 2]` would concatenate-via-mapping rather than sequence.
+  ; let-throwaway is the right tool when side-effects return Cons.
   (test "stream state advances"
     (let ((s (stream-iterate 0 |x| [x + 1])))
-      (do (let ((_ [s take: 3]))
-            [s take: 2])))
+      (let ((_ [s take: 3])) [s take: 2]))
     (list 3 4))
 
   ; transducers on finite streams work — [stream transduce: xf]
@@ -408,21 +410,14 @@
 
   ; ── wave 4.6: Atom + Signal — reactivity substrate ──
 
-  (test "atom get"           (let ((a (Atom 10))) [a get])                     10)
-  (test "atom swap"
-    (let ((a (Atom 0)))
-      (let ((_ [a swap: 42])) [a get]))
-    42)
-  (test "atom update"
-    (let ((a (Atom 5)))
-      (let ((_ [a update: |n| [n * 3]])) [a get]))
-    15)
+  (test "atom get"     (let ((a (Atom 10))) [a get])                        10)
+  (test "atom swap"    (let ((a (Atom 0)))  (do [a swap: 42]      [a get])) 42)
+  (test "atom update"  (let ((a (Atom 5)))  (do [a update: |n| [n * 3]] [a get])) 15)
   (test "atom observes"
-    (let ((a (Atom 0)))
-      (let ((m { fired: false }))
-        (let ((_ [a observe: |_| [m slotAt: (quote fired) put: true]]))
-          (let ((_ [a swap: 1]))
-            [m slotAt: (quote fired)]))))
+    (let ((a (Atom 0)) (m { fired: false }))
+      (do [a observe: |_| [m slotAt: (quote fired) put: true]]
+          [a swap: 1]
+          [m slotAt: (quote fired)]))
     true)
 
   (test "signal derives"
@@ -434,9 +429,7 @@
   (test "signal re-derives"
     (let ((a (Atom 3)))
       (let ((s (Signal || [[a get] * 10] a)))
-        (let ((_ [s get]))
-          (let ((_ [a swap: 5]))
-            [s get]))))
+        (do [s get] [a swap: 5] [s get])))
     50)
 
   ; ── wave 4.8: Bag — multiset ────────────────────────
@@ -462,20 +455,15 @@
     (let ((a (Atom 1)))
       (let ((b (Signal || [[a get] * 2] a)))
         (let ((c (Signal || [[b get] + 100] b)))
-          (let ((_ [c get]))
-            (let ((_ [a swap: 5]))
-              [c get])))))
+          (do [c get] [a swap: 5] [c get]))))
     110)
 
   ; Multi-input signal — s depends on a AND b. changing either
   ; input invalidates s.
   (test "multi-input signal"
-    (let ((a (Atom 10)))
-      (let ((b (Atom 20)))
-        (let ((s (Signal || [[a get] + [b get]] a b)))
-          (let ((_ [s get]))
-            (let ((_ [b swap: 5]))
-              [s get])))))
+    (let ((a (Atom 10)) (b (Atom 20)))
+      (let ((s (Signal || [[a get] + [b get]] a b)))
+        (do [s get] [b swap: 5] [s get])))
     15)
 ))
 
