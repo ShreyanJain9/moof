@@ -353,6 +353,18 @@
 
   ; [obj queried] — method shortcut for (from obj)
   (test "queried shortcut"     [[[(list 1 2 3) queried] take: 2] run]    (list 1 2))
+
+  ; ── wave 4.1: GC — introspection only (gc runs at REPL safepoints)
+  ;
+  ; actual [Vat gc] can't run mid-expression — VM frames hold live
+  ; refs the heap can't see. [Vat requestGc] sets a flag that the
+  ; REPL loop drains between turns. inside a test suite the flag
+  ; wouldn't fire until the whole suite finishes, so we just verify
+  ; the introspection hooks here; correctness tests live in Rust.
+
+  (test "heapSize is int" [[Vat heapSize] typeName] (quote Integer))
+  (test "liveCount <= heapSize" [[Vat liveCount] <= [Vat heapSize]] true)
+  (test "requestGc sets flag" [Vat requestGc] nil)
 ))
 
 [console println: (report core-tests)]

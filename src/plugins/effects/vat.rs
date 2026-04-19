@@ -25,6 +25,26 @@ pub fn register(heap: &mut Heap) {
         spawn_request(heap, args, true, true)
     });
 
+    // [Vat heapSize] — total slots allocated (live + freelist).
+    native(heap, vat_id_obj, "heapSize", |heap, _receiver, _args| {
+        Ok(Value::integer(heap.object_count() as i64))
+    });
+
+    // [Vat liveCount] — live slots (heapSize - freelist).
+    native(heap, vat_id_obj, "liveCount", |heap, _receiver, _args| {
+        Ok(Value::integer(heap.live_count() as i64))
+    });
+
+    // [Vat requestGc] — request a GC at the next REPL safepoint.
+    // can't run directly from a native because VM frames hold live
+    // references the heap doesn't know about; the REPL loop drains
+    // the flag and runs the actual collection when the frame stack
+    // is empty.
+    native(heap, vat_id_obj, "requestGc", |heap, _receiver, _args| {
+        heap.gc_requested = true;
+        Ok(Value::NIL)
+    });
+
     native(heap, vat_id_obj, "describe", |heap, _receiver, _args| {
         Ok(heap.alloc_string("<Vat>"))
     });

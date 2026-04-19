@@ -11,8 +11,10 @@
 
 mod format;
 mod image;
+mod gc;
 
 pub use image::HeapImage;
+pub use gc::GcStats;
 
 use crate::object::HeapObject;
 use crate::value::Value;
@@ -64,6 +66,17 @@ pub struct OutgoingMessage {
 
 pub struct Heap {
     objects: Vec<HeapObject>,
+    /// Indexes into `objects` that have been freed by GC and can
+    /// be reused on alloc. Swept objects are tombstoned in place
+    /// (replaced with an empty General) so the slot is safe to
+    /// read — but callers shouldn't be holding refs to freed
+    /// slots in the first place.
+    free_list: Vec<u32>,
+    /// Set by moof code (e.g. [Vat requestGc]) when a GC is
+    /// desired. The scheduler / REPL loop polls this at safe
+    /// points and runs the actual collection. never run GC
+    /// directly from a native handler — VM frames are live.
+    pub gc_requested: bool,
     symbols: Vec<String>,
     sym_reverse: std::collections::HashMap<String, u32>,
     pub env: u32,                                      // root environment object ID
@@ -102,6 +115,8 @@ impl Heap {
     pub fn new() -> Self {
         let mut h = Heap {
             objects: Vec::new(),
+            free_list: Vec::new(),
+            gc_requested: false,
             symbols: Vec::new(),
             sym_reverse: std::collections::HashMap::new(),
             env: 0,
@@ -195,9 +210,15 @@ impl Heap {
     // -- object allocation --
 
     pub fn alloc(&mut self, obj: HeapObject) -> u32 {
-        let id = self.objects.len() as u32;
-        self.objects.push(obj);
-        id
+        // prefer freelist (reuse) over append (grow)
+        if let Some(id) = self.free_list.pop() {
+            self.objects[id as usize] = obj;
+            id
+        } else {
+            let id = self.objects.len() as u32;
+            self.objects.push(obj);
+            id
+        }
     }
 
     pub fn alloc_val(&mut self, obj: HeapObject) -> Value {
@@ -504,8 +525,13 @@ impl Heap {
         (positional, None)
     }
 
-    /// Total object count (for stats).
+    /// Total object count (includes freelist slots).
     pub fn object_count(&self) -> usize { self.objects.len() }
+
+    /// Live object count (heap size minus freelist).
+    pub fn live_count(&self) -> usize {
+        self.objects.len() - self.free_list.len()
+    }
 
     pub fn objects_ref(&self) -> &[HeapObject] { &self.objects }
     pub fn symbols_ref(&self) -> &[String] { &self.symbols }

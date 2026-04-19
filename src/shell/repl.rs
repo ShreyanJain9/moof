@@ -195,6 +195,16 @@ pub fn run() {
                 Err(e) => eprintln!("  ~ compile: {e}"),
             }
         }
+
+        // safepoint: frames are empty after the expression finishes.
+        // if moof code requested a GC via [Vat requestGc], run it now.
+        let vat = sched.vat_mut(repl_vat_id);
+        if vat.heap.gc_requested {
+            vat.heap.gc_requested = false;
+            let stats = vat.heap.gc(&[]);
+            eprintln!("  ~ gc: freed {} slots ({} live / {} total)",
+                stats.freed, stats.live, stats.before);
+        }
     }
 
     // save image
