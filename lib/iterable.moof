@@ -32,6 +32,13 @@
      if you need to accumulate a result.")
 
   ; ── conversion ───────────────────────────────────────
+  ;
+  ; ⚠️  toList and fold:with: are MUTUALLY recursive in their
+  ; provided forms (toList uses fold:with:, fold:with: uses
+  ; toList). any Iterable-conforming type MUST define AT LEAST
+  ; ONE of them directly — otherwise `[v toList]` spins into an
+  ; unbounded stack+heap blowup. Cons defines both directly.
+  ; Stream defines fold:with: directly via each:.
 
   (provide (toList)
     [[self fold: nil with: |acc x| (cons x acc)] reverse])

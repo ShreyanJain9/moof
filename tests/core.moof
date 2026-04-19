@@ -260,6 +260,38 @@
   (test "transduce sum"
     [(list 1 2 3 4 5) transduce: (map-xf |x| [x * 2]) init: 0 with: |a x| [a + x]]
     30)
+
+  ; ── wave 3.2: Stream — lazy Iterable via next ────────
+  ; all tests bounded: take:/toList on finite sources only.
+  ; infinite streams are never materialized without a take: guard.
+
+  (test "stream-range to list"  [(stream-range 0 5) toList]    (list 0 1 2 3 4))
+  (test "stream-range typeName" [(stream-range 0 5) typeName]  (quote Stream))
+  (test "stream-iterate take"   [(stream-iterate 0 |x| [x + 1]) take: 5] (list 0 1 2 3 4))
+  (test "stream-iterate pow"    [(stream-iterate 1 |x| [x * 2]) take: 5] (list 1 2 4 8 16))
+  (test "stream-from take"      [(stream-from (list 10 20 30)) take: 2]  (list 10 20))
+  (test "stream-from toList"    [(stream-from (list 1 2 3)) toList]      (list 1 2 3))
+  (test "stream-repeat take"    [(stream-repeat 7) take: 3]              (list 7 7 7))
+  (test "stream-of"             [(stream-of 1 2 3) toList]               (list 1 2 3))
+
+  ; Iterable methods via each: — sum/count/etc. on bounded streams
+  (test "stream sum"            [(stream-range 1 5) sum]                 10)
+  (test "stream count"          [(stream-range 0 5) count]               5)
+
+  ; stateful nature — each stream iterates once, state advances
+  (test "stream state advances"
+    (let ((s (stream-iterate 0 |x| [x + 1])))
+      (do (let ((_ [s take: 3]))
+            [s take: 2])))
+    (list 3 4))
+
+  ; transducers on finite streams work — [stream transduce: xf]
+  ; goes via Stream's type-preserving into:via: path? actually
+  ; transduce: uses builder which on Stream emptyKindred... we
+  ; haven't defined that. for now test with toList+transduce.
+  (test "stream through transducer"
+    [[(stream-range 0 10) toList] transduce: (map-xf |x| [x * x])]
+    (list 0 1 4 9 16 25 36 49 64 81))
 ))
 
 [console println: (report core-tests)]

@@ -1,0 +1,108 @@
+; stream.moof — lazy sequences
+;
+; a Stream is a potentially-infinite lazy Iterable. pulling a
+; value is explicit: [s next] returns (Some v) if more, None
+; if exhausted. each: drives next until exhausted; take:/drop:
+; safely handle infinite streams by bounding the pull.
+;
+; conforming to Iterable gives map / filter / fold / etc. for
+; free — but those materialize the stream, so be careful with
+; infinite sources. always take: first:
+;
+;   [[(stream-iterate 0 |n| [n + 1]) take: 5] toList]  ; safe
+;   [(stream-iterate 0 |n| [n + 1]) toList]            ; loops forever
+;
+; state is held on a mutable object created once per stream
+; instance. like stateful transducers, sequencing uses
+; let-with-throwaway to keep outer captures visible to the compiler.
+
+(def Stream {
+  [typeName] (quote Stream)
+  [describe] "<Stream>"
+  [show]     "<Stream>  : Stream"
+
+  ; subclasses override [next] to produce values. default is empty.
+  [next] None
+
+  ; Iterable base: drive next until exhausted.
+  [each: f]
+    (let ((r [self next]))
+      (if [r is: None] nil
+        (let ((_ (f [r slotAt: (quote value)])))
+          [self each: f])))
+
+  ; direct fold:with: — critical. Iterable's provided fold:with:
+  ; calls self.toList, and the provided toList calls self.fold:with:,
+  ; so any Iterable-conforming type with neither defined directly
+  ; mutually-recurses into a stack/heap blowup. Stream defines
+  ; fold:with: here via each: (stateful accumulator) to break
+  ; the cycle.
+  [fold:with: init f]
+    (let ((state { acc: init }))
+      (let ((_ [self each: |x|
+                [state slotAt: (quote acc) put:
+                  (f [state slotAt: (quote acc)] x)]]))
+        [state slotAt: (quote acc)]))
+
+  ; bounded take — safe for infinite streams, returns a Cons list.
+  ; overrides Iterable's fold-based take: which would materialize
+  ; the full stream first.
+  [take: n]
+    (if [n <= 0] nil
+      (let ((r [self next]))
+        (if [r is: None] nil
+          (cons [r slotAt: (quote value)] [self take: [n - 1]]))))
+
+  ; skip n elements, return self (stateful — subsequent pulls
+  ; continue past the dropped prefix).
+  [drop: n]
+    (if [n <= 0] self
+      (let ((r [self next]))
+        (if [r is: None] self
+          [self drop: [n - 1]])))
+})
+
+(conform Stream Iterable)
+
+; ══════════════════════════════════════════════════════════
+; constructors
+; ══════════════════════════════════════════════════════════
+
+; stream-iterate — infinite: seed, f(seed), f(f(seed)), ...
+(defn stream-iterate (seed f)
+  (let ((state { cur: seed }))
+    { Stream
+      [next]
+        (let ((v [state slotAt: (quote cur)]))
+          (let ((_ [state slotAt: (quote cur) put: (f v)]))
+            (Some v)))
+    }))
+
+; stream-range — [from, to) as integers
+(defn stream-range (from to)
+  (let ((state { cur: from }))
+    { Stream
+      [next]
+        (let ((v [state slotAt: (quote cur)]))
+          (if [v >= to] None
+            (let ((_ [state slotAt: (quote cur) put: [v + 1]]))
+              (Some v))))
+    }))
+
+; stream-from — wrap a Cons list as a Stream
+(defn stream-from (lst)
+  (let ((state { rest: lst }))
+    { Stream
+      [next]
+        (let ((r [state slotAt: (quote rest)]))
+          (if (nil? r) None
+            (let ((_ [state slotAt: (quote rest) put: [r cdr]]))
+              (Some [r car]))))
+    }))
+
+; stream-repeat — infinite stream of the same value
+(defn stream-repeat (val)
+  { Stream [next] (Some val) })
+
+; stream-of — finite stream of the given values (variadic)
+(defn stream-of args (stream-from args))
