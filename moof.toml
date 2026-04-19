@@ -48,6 +48,7 @@ files = [
   "lib/data/builder.moof",
   "lib/data/set.moof",
   "lib/data/hashable.moof",
+  "lib/data/reference.moof",
 
   # flow — transformation + matching
   "lib/flow/transducer.moof",

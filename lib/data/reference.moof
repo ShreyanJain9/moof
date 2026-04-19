@@ -1,0 +1,74 @@
+; reference.moof — represented objects
+;
+; a Reference is a moof value that PROXIES an external source of
+; truth. contrast with a *stored* value (native moof object, fully
+; owned). a File represents a filesystem path; a GitBlob would
+; represent a content-addressed git object; an HTTPResource a URL.
+;
+; common protocol:
+;   [ref address]     canonical external identifier
+;   [ref content]     Act<String> — fetch current content
+;   [ref exists?]     Act<Boolean>
+;
+; each conforming type implements these by delegating to the
+; appropriate capability. the user sees ONE object (the reference);
+; the fetch/cache machinery is a type detail.
+
+(defprotocol Reference
+  "Proxies an external source of truth. Stored values ARE their
+   content; represented values POINT AT external content the
+   capability layer fetches on demand. Every Reference has an
+   `address` — a canonical identifier (path, url, hash). Content
+   access returns an Act so the vat boundary is explicit."
+
+  (require (address)
+    "Canonical identifier. filesystem path, URL, commit hash, etc.
+     must be unique per external entity — [a equal: b] on address
+     means a and b point at the same thing.")
+
+  (provide (describe)
+    (str "<" [[self typeName] describe] " " [[self address] describe] ">")))
+
+; ══════════════════════════════════════════════════════════
+; File — a filesystem path as a first-class moof value
+; ══════════════════════════════════════════════════════════
+;
+; usage:
+;   (def readme (File "README.md"))
+;   [readme address]             → "README.md"
+;   [readme content]             → Act<String> (goes through file cap)
+;   [readme exists?]             → Act<Boolean>
+;   [readme write: "new text"]   → Act<nil>
+;
+; all effectful ops return Acts via the `file` capability FarRef.
+; pure ops (address, typeName, describe) don't cross a vat.
+
+(def File {
+  [typeName]   (quote File)
+  path: nil
+
+  ; (File "path") — construct a File proxy
+  [call: args]  { File path: [args car] }
+
+  ; Reference protocol
+  [address]  @path
+
+  ; effectful operations — all return Acts via the file capability.
+  ; the `file` FarRef is captured from the defining vat's env at
+  ; File-proto-definition time, so all File instances share it.
+  [content]         [file read: @path]
+  [exists?]         [file exists: @path]
+  [isFile?]         [file isFile: @path]
+  [isDir?]          [file isDir: @path]
+  [write: s]        [file write: @path contents: s]
+  [append: s]       [file append: @path contents: s]
+  [delete]          [file delete: @path]
+  [list]            [file list: @path]
+
+  [describe]
+    (str "<File " [@path describe] ">")
+  [show]
+    (str "<File " @path ">  : File")
+})
+
+(conform File Reference)

@@ -393,6 +393,18 @@
   ; round-trip
   (test "round-trip int"   [json parse: [json serialize: 42]]           42)
   (test "round-trip list"  [json parse: [json serialize: (list 1 2 3)]] (list 1 2 3))
+
+  ; ── wave 4.5: Reference + File as value ────────────
+
+  (test "File type"          [(File "a.txt") typeName]       (quote File))
+  (test "File address"       [(File "a.txt") address]        "a.txt")
+  (test "File describe"      [(File "x") describe]           "<File x>")
+
+  ; Reference conformance registry — File conforms to the
+  ; Reference protocol (shares required methods), not to its
+  ; prototype chain, so [x is: Reference] is false but
+  ; (member? File [Reference conformers]) is true.
+  (test "File conforms"      (member? File [Reference conformers])  true)
 ))
 
 [console println: (report core-tests)]
