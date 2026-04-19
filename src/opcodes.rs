@@ -128,34 +128,63 @@ impl Chunk {
         self.code.len()
     }
 
-    /// Peephole: replace Send + Return with TailCall where the Send destination
-    /// matches the Return register. Turns recursive calls into frame reuse.
+    /// Peephole: replace Send + <tail> with TailCall when the Send's
+    /// destination register is eventually Returned without intervening
+    /// use. Turns recursive calls into frame reuse.
+    ///
+    /// Base case — direct Send+Return:
+    ///   Send(dst, recv, sel) [nargs args]  Return(dst)
+    ///
+    /// Extended — Send in an `(if ...)` branch whose terminal is Return.
+    /// the compiler emits Send at the branch, then Jump to the shared
+    /// end where Return lives. following up to a few Jump hops catches
+    /// branch-terminal tail calls that the simple peephole missed:
+    ///   Send(dst, ...)  Jump → ... Jump → Return(dst)
+    ///
+    /// we cap jump-chasing at 4 hops so we never loop and never spend
+    /// too long inspecting any single Send.
     pub fn optimize_tail_calls(&mut self) {
-        let code = &mut self.code;
+        let code_len = self.code.len();
         let mut pc = 0;
-        while pc + 11 < code.len() {
-            // pattern: Send(dst, recv, sel) [nargs, a0, a1, a2] Return(ret_reg, _, _)
-            // where dst == ret_reg
-            if Op::from_u8(code[pc]) == Some(Op::Send) {
-                let dst = code[pc + 1];
-                let ret_pc = pc + 8;  // potential Return (args are at pc + 4..8)
-                if ret_pc + 3 < code.len()
-                    && Op::from_u8(code[ret_pc]) == Some(Op::Return)
-                    && code[ret_pc + 1] == dst
-                {
-                    // replace Send with TailCall
-                    code[pc] = Op::TailCall as u8;
+        while pc + 11 < code_len {
+            if Op::from_u8(self.code[pc]) == Some(Op::Send) {
+                let dst = self.code[pc + 1];
+                // Send is 8 bytes (opcode + dst/recv/sel + nargs/a0/a1/a2);
+                // the instruction immediately after starts at pc + 8.
+                if self.reaches_return_with_dst(pc + 8, dst, 4) {
+                    self.code[pc] = Op::TailCall as u8;
                 }
             }
             pc += 4;
-            // skip Send/TailCall trailing data
             if pc >= 4 {
-                let prev = Op::from_u8(code[pc - 4]);
+                let prev = Op::from_u8(self.code[pc - 4]);
                 if prev == Some(Op::Send) || prev == Some(Op::TailCall) {
                     pc += 4;
                 }
             }
         }
+    }
+
+    /// Does `pc` eventually land on a Return that returns register `dst`,
+    /// following up to `hops` unconditional jumps? Return false for any
+    /// other opcode (conservative: better to miss a TCO than wrongly
+    /// rewrite a Send whose dst gets reused).
+    fn reaches_return_with_dst(&self, mut pc: usize, dst: u8, hops: u32) -> bool {
+        let code_len = self.code.len();
+        for _ in 0..=hops {
+            if pc + 3 >= code_len { return false; }
+            match Op::from_u8(self.code[pc]) {
+                Some(Op::Return) => return self.code[pc + 1] == dst,
+                Some(Op::Jump) => {
+                    let offset = i16::from_be_bytes([self.code[pc + 1], self.code[pc + 2]]) as isize;
+                    let next = pc as isize + 4 + offset;
+                    if next < 0 || (next as usize) >= code_len { return false; }
+                    pc = next as usize;
+                }
+                _ => return false,
+            }
+        }
+        false
     }
 
     // emit a jump with a placeholder offset, returns the position to patch
