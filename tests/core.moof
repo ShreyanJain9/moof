@@ -292,6 +292,30 @@
   (test "stream through transducer"
     [[(stream-range 0 10) toList] transduce: (map-xf |x| [x * x])]
     (list 0 1 4 9 16 25 36 49 64 81))
+
+  ; ── wave 3.4: Inspector — moldable views ────────────
+  ;
+  ; every value has [inspect] returning an Inspector with
+  ; multiple named aspects. each type adds its own.
+
+  (test "int has inspector"    [[42 inspect] typeName]                  (quote Inspector))
+  (test "int aspect names"     (member? (quote describe) [[42 inspect] aspectNames]) true)
+  (test "int describe aspect"  [[42 inspect] render: (quote describe)]  "42")
+  (test "int shape aspect not nil" [[[42 inspect] render: (quote shape)] is: Nil] false)
+
+  ; per-type aspects
+  (test "cons has list aspect" (member? (quote list) [[(list 1 2 3) inspect] aspectNames]) true)
+  (test "cons summary"         [[(list 1 2 3) inspect] render: (quote summary)] "Cons: 3 elements, first = 1")
+  (test "set summary"          [[(Set 1 2 3) inspect] render: (quote summary)] "Set: 3 elements")
+  (test "table has grid"       (member? (quote grid) [[#[1 2 3] inspect] aspectNames]) true)
+
+  ; Protocol inspector — queryable protocol surface
+  (test "protocol has conformers aspect"
+    (member? (quote conformers) [[Chainable inspect] aspectNames]) true)
+
+  ; default aspect falls through to describe
+  (test "unknown aspect nil"   [[42 inspect] render: (quote nope)]      nil)
+
 ))
 
 [console println: (report core-tests)]

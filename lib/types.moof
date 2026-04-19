@@ -64,6 +64,8 @@
 (defmethod Nil flatMap: (f) nil)
 (defmethod Nil sum () 0)
 (defmethod Nil product () 1)
+(defmethod Nil join () "")
+(defmethod Nil join: (sep) "")
 
 ; ── Boolean ────────────────────────────────────────────
 

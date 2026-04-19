@@ -46,6 +46,7 @@ files = [
   "lib/hashable.moof",
   "lib/transducer.moof",
   "lib/stream.moof",
+  "lib/inspect.moof",
   "lib/pattern.moof",
   "lib/test.moof",
   "lib/server.moof",

@@ -1,0 +1,165 @@
+; inspect.moof — moldable views for every value
+;
+; every value answers [v inspect] with an Inspector: a bundle
+; of NAMED ASPECTS, each a different way of looking at the
+; same data. a File's inspector might offer aspects like
+; 'preview, 'hex, 'tree, 'history. a Table's might offer
+; 'grid, 'schema, 'summary. the medium (REPL, canvas,
+; notebook, agent) picks the aspect it wants.
+;
+; this is GT's moldable-tools pattern. tools mold to data —
+; each type declares its own views; the stdlib ships a
+; generous default; the inspector composes.
+;
+; single-medium for now: aspect producers return Strings (text
+; renderings). a later wave wires this to canvas / HTML / etc
+; by parameterizing on a `medium` argument.
+
+(def Inspector {
+  [typeName] (quote Inspector)
+  target:  nil    ; the inspected value
+  aspects: #[]    ; Table { name: producer-fn } where producer-fn = |target| -> String
+
+  ; list the aspect names this inspector offers
+  [aspectNames] [@aspects keys]
+
+  ; render a specific aspect by name (returns String; nil if no such aspect)
+  [render: name]
+    (let ((producer [@aspects at: name]))
+      (if (nil? producer) nil
+        (producer @target)))
+
+  ; the default aspect is the first one declared — fallback for
+  ; renderers that just want "something reasonable."
+  [default]
+    (let ((names [@aspects keys]))
+      (if (nil? names) [@target describe]
+        [self render: [names car]]))
+
+  [describe]
+    (str "<Inspector " [@target typeName] " (" [[@aspects keys] count] " aspects)>")
+
+  [show]  [self describe]
+})
+
+; ══════════════════════════════════════════════════════════
+; helpers for authoring aspect sets
+; ══════════════════════════════════════════════════════════
+
+; aspects: (name fn name fn ...) → Table. keeps the defmethod
+; body concise instead of writing out a full #[...] literal.
+(defn aspects args (aspects-build #[] args))
+
+(defn aspects-build (acc pairs)
+  (if (nil? pairs) acc
+    (aspects-build [acc at: [pairs car] put: [[pairs cdr] car]]
+                   [[pairs cdr] cdr])))
+
+; ══════════════════════════════════════════════════════════
+; Object — the default inspector every value inherits
+; ══════════════════════════════════════════════════════════
+;
+; three aspects every value has:
+;   describe     — the one-line string form
+;   shape        — typeName + public slots + handlers as data
+;   prototypes   — full delegation chain
+
+(defmethod Object inspect ()
+  { Inspector
+    target:  self
+    aspects: (aspects
+       (quote describe)   |v| [v describe]
+       (quote shape)      |v| [[v shape] describe]
+       (quote prototypes) |v| [[[v prototypes] map: |p| [p typeName]] describe])
+  })
+
+; ══════════════════════════════════════════════════════════
+; Cons — list view, in addition to the defaults
+; ══════════════════════════════════════════════════════════
+
+(defmethod Cons inspect ()
+  { Inspector
+    target:  self
+    aspects: (aspects
+       (quote describe) |v| [v describe]
+       (quote list)     |v|
+         (str "(" [v count] " elements)\n"
+              [[v map: |x| (str "  " [x describe])] join: "\n"])
+       (quote summary)  |v|
+         (str "Cons: " [v count] " elements, first = " [[v first] describe]))
+  })
+
+; ══════════════════════════════════════════════════════════
+; Table — grid view (key => value rows)
+; ══════════════════════════════════════════════════════════
+
+(defmethod Table inspect ()
+  { Inspector
+    target:  self
+    aspects: (aspects
+       (quote describe) |v| [v describe]
+       (quote grid)     |v|
+         (let ((seq-rows [[v toList] map: |x| (str "  " [x describe])])
+               (map-rows [[v keys] map: |k|
+                            (str "  " [k describe] " => " [[v at: k] describe])]))
+           (str "seq (" [[v toList] count] "):\n"
+                [seq-rows join: "\n"]
+                "\nmap (" [[v keys] count] "):\n"
+                [map-rows join: "\n"]))
+       (quote summary)  |v|
+         (str "Table: " [[v toList] count] " seq, " [[v keys] count] " keyed"))
+  })
+
+; ══════════════════════════════════════════════════════════
+; Set — list of members + summary
+; ══════════════════════════════════════════════════════════
+
+(defmethod Set inspect ()
+  { Inspector
+    target:  self
+    aspects: (aspects
+       (quote describe) |v| [v describe]
+       (quote members)  |v|
+         (str "{" [v size] " elements}\n"
+              [[[v toList] map: |x| (str "  " [x describe])] join: "\n"])
+       (quote summary)  |v|
+         (str "Set: " [v size] " elements"))
+  })
+
+; ══════════════════════════════════════════════════════════
+; Stream — aspects bound by explicit take (infinite-safe)
+; ══════════════════════════════════════════════════════════
+
+(defmethod Stream inspect ()
+  { Inspector
+    target:  self
+    aspects: (aspects
+       (quote describe) |v| [v describe]
+       (quote peek)     |v|
+         ; peek the first 5 — destructive on the stream, but safe
+         (str "first 5:\n"
+              [[[v take: 5] map: |x| (str "  " [x describe])] join: "\n"]))
+  })
+
+; ══════════════════════════════════════════════════════════
+; Protocol — the introspection target we dreamed about
+; ══════════════════════════════════════════════════════════
+
+(defmethod Protocol inspect ()
+  { Inspector
+    target:  self
+    aspects: (aspects
+       (quote describe)    |v| (str "<Protocol " [v slotAt: (quote name)] ">")
+       (quote requires)    |v|
+         (let ((reqs [v slotAt: (quote requires)]))
+           (if (nil? reqs) "(no required methods)"
+             (str "requires:\n"
+                  [[reqs map: |r| (str "  " [r describe])] join: "\n"])))
+       (quote conformers)  |v|
+         (let ((cs [v conformers]))
+           (if (nil? cs) "(no conformers)"
+             (str "conformers:\n"
+                  [[cs map: |c| (str "  " [c typeName])] join: "\n"])))
+       (quote doc)         |v|
+         (or [v slotAt: (quote doc)] "(no docstring)"))
+  })
