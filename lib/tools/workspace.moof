@@ -114,10 +114,10 @@
           (let ((next (if (nil? @blocks)
                         (cons block nil)
                         [@blocks append: (cons block nil)])))
-            (update { blocks: next } self))
+            (update { blocks: next } nil))
 
         [bind: name to: val]
-          (update { bindings: [@bindings at: name put: val] } self)
+          (update { bindings: [@bindings at: name put: val] } nil)
 
         [render: medium]
           (str "═ " @title " ═\n\n"

@@ -44,11 +44,11 @@
           [self swap: (f @value)]
 
         [subscribe: sub]
-          (update { subscribers: (cons sub @subscribers) } self)
+          (update { subscribers: (cons sub @subscribers) } nil)
 
         [unsubscribe: sub]
           (update { subscribers: [@subscribers reject: |s| [s identical: sub]] }
-                  self)
+                  nil)
 
         [describe]
           (str "<Atom " [@value describe] ">")
@@ -99,7 +99,7 @@
               (update { valid: false } nil))
 
           [subscribe: sub]
-            (update { subscribers: (cons sub @subscribers) } self)
+            (update { subscribers: (cons sub @subscribers) } nil)
 
           [inputs] @inputs
 

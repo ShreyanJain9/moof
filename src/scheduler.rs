@@ -657,6 +657,7 @@ impl Scheduler {
     /// Resolve an Act: set state to resolved, store result, run continuations.
     /// If the final value is itself an Act (monadic bind), set up forwarding.
     fn resolve_act(&mut self, vat_id: u32, act_id: u32, result: Value, is_error: bool) {
+        eprintln!("[resolve] vat={vat_id} act={act_id} result={} err={is_error}", self.vat_mut(vat_id).heap.format_value(result));
         // if we're asked to resolve with another Act, don't drain our chain
         // yet — forward to the inner Act so our chain runs with the inner's
         // actual resolved value. without this, the chain would see the
@@ -689,6 +690,7 @@ impl Scheduler {
 
             for (i, cont) in conts.iter().enumerate() {
                 let vat = self.vat_mut(vat_id);
+                eprintln!("[drain] vat={vat_id} act={act_id} i={i} current_val={}", vat.heap.format_value(current_val));
                 match vat.vm.call_value(&mut vat.heap, *cont, &[current_val]) {
                     Ok(val) => {
                         let vat = self.vat_mut(vat_id);

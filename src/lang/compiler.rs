@@ -861,10 +861,58 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// Walk raw AST (as it would be passed to an operative) and force-capture
+    /// any symbol reference that resolves to a parent local. This is the
+    /// "greedy" fix for the vau opacity problem: the compiler can't see which
+    /// free vars an operative will actually use at runtime, so capture all
+    /// symbols that look like they could be var references. Spurious captures
+    /// waste a closure slot but don't break correctness.
+    fn force_capture_in_ast(&mut self, val: Value) {
+        // primitives — nothing to capture
+        if val.is_nil() || val.is_true() || val.is_false()
+            || val.is_integer() || val.is_float() {
+            return;
+        }
+        // symbol — try to resolve as a local; find_local forces capture from
+        // parent_locals if matched. skip reserved/builtin symbols.
+        if let Some(sym_id) = val.as_symbol() {
+            let name = self.heap.symbol_name(sym_id);
+            if matches!(name,
+                "send" | "%dot" | "%object-literal" | "%table-literal"
+                | "quote" | "quasiquote" | "unquote" | "unquote-splicing"
+                | "fn" | "vau" | "if" | "let" | "do" | "def" | "Env" | "self") {
+                return;
+            }
+            let _ = self.find_local(sym_id);
+            return;
+        }
+        // heap value — descend into cons cells; ignore strings/tables/etc.
+        if let Some(id) = val.as_any_object() {
+            if let HeapObject::Pair(car, cdr) = self.heap.get(id) {
+                let car = *car;
+                let cdr = *cdr;
+                self.force_capture_in_ast(car);
+                self.force_capture_in_ast(cdr);
+            }
+        }
+    }
+
     /// Compile a call to a known operative — quote args, pass as list + env.
     fn compile_operative_call(&mut self, expr: Value, operative_sym: u32, dst: u8) -> Result<(), String> {
         let items = self.heap.list_to_vec(expr);
         // items[0] is the operative name, items[1..] are unevaluated args
+
+        // Pre-capture any free variables referenced inside the operative's
+        // args. The compiler doesn't descend into operative args (they're
+        // raw AST passed via constants), so closures that wrap an operative
+        // call would otherwise miss free vars — e.g. (fn (a) (do ... a ...))
+        // wouldn't capture `a` for the closure, and `a` would be unbound
+        // when the do expansion runs in a different vat. Walking the AST
+        // and force-capturing every symbol that's a local-in-scope is
+        // conservative and safe; spurious captures are cheap.
+        for i in 1..items.len() {
+            self.force_capture_in_ast(items[i]);
+        }
 
         // load the operative itself
         let func_reg = self.alloc_reg();

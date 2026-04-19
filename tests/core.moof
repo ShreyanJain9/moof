@@ -435,6 +435,14 @@
         [s get])
     3)
 
+  ; do-inside-computation works because the compiler now pre-captures
+  ; free vars in operative-call args (phase 9 — the vau-opacity fix).
+  (test "signal with transform"
+    (do (a <- (Atom 3))
+        (s <- (Signal || (do (v <- [a get]) [v * 10]) a))
+        [s get])
+    30)
+
   ; ── wave 4.8: Bag — multiset ────────────────────────
 
   (test "bag typeName"   [(Bag "x") typeName]          (quote Bag))
