@@ -365,6 +365,34 @@
   (test "heapSize is int" [[Vat heapSize] typeName] (quote Integer))
   (test "liveCount <= heapSize" [[Vat liveCount] <= [Vat heapSize]] true)
   (test "requestGc sets flag" [Vat requestGc] nil)
+
+  ; ── wave 4.4: JSON — universal interchange ──────────
+  ;
+  ; json → moof type map: null → nil, true/false → Boolean,
+  ; number → Integer or Float, string → String, array → Cons,
+  ; object → Table (keyed part).
+
+  (test "json null"      [json parse: "null"]     nil)
+  (test "json true"      [json parse: "true"]     true)
+  (test "json false"     [json parse: "false"]    false)
+  (test "json int"       [json parse: "42"]       42)
+  (test "json float"     [[json parse: "3.14"] typeName]    (quote Float))
+  (test "json string"    [json parse: "\"hi\""]   "hi")
+  (test "json array"     [json parse: "[1,2,3]"]  (list 1 2 3))
+
+  ; parse errors
+  (test "json bad parse" [[json parse: "nope"] ok?]          false)
+
+  ; serialize the common cases
+  (test "serialize int"    [json serialize: 42]            "42")
+  (test "serialize string" [json serialize: "hi"]          "\"hi\"")
+  (test "serialize nil"    [json serialize: nil]           "null")
+  (test "serialize list"   [json serialize: (list 1 2 3)]  "[1,2,3]")
+  (test "serialize bool"   [json serialize: true]          "true")
+
+  ; round-trip
+  (test "round-trip int"   [json parse: [json serialize: 42]]           42)
+  (test "round-trip list"  [json parse: [json serialize: (list 1 2 3)]] (list 1 2 3))
 ))
 
 [console println: (report core-tests)]

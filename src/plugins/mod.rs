@@ -21,6 +21,7 @@ pub mod effects;
 pub mod block;
 pub mod capabilities;
 pub mod dynload;
+pub mod json;
 
 use crate::heap::Heap;
 use crate::value::Value;
@@ -109,6 +110,7 @@ pub fn builtin_type_plugin(name: &str) -> Option<Box<dyn Plugin>> {
         "collections" => Some(Box::new(collections::CollectionsPlugin)),
         "block" => Some(Box::new(block::BlockPlugin)),
         "effects" => Some(Box::new(effects::EffectsPlugin)),
+        "json" => Some(Box::new(json::JsonPlugin)),
         _ => None,
     }
 }
@@ -149,7 +151,7 @@ pub fn register_from_manifest(heap: &mut Heap, types: &std::collections::HashMap
 
 /// Register all default type plugins (fallback when no manifest).
 pub fn register_all(heap: &mut Heap) {
-    for name in ["core", "numeric", "collections", "block", "effects"] {
+    for name in ["core", "numeric", "collections", "block", "effects", "json"] {
         if let Some(p) = builtin_type_plugin(name) { p.register(heap); }
     }
 }
