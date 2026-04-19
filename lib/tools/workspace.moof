@@ -1,0 +1,137 @@
+; workspace.moof — the user's session as a first-class value
+;
+; a Workspace is a named root of a moof session: a title, an
+; ordered sequence of Blocks (content units), and a namespace
+; of bindings. every Block is itself a moof value, inspectable
+; and linkable.
+;
+; Block hierarchy:
+;
+;   Block (abstract)
+;   ├── Heading     title text + level (h1/h2/h3)
+;   ├── Paragraph   prose text
+;   ├── CodeBlock   moof source + last-result
+;   └── ObjectRef   pointer to a bound value
+;
+; every Block implements [render: medium] → a medium-specific
+; output. 'text is the single medium we ship today.
+
+(def Block {
+  [typeName] (quote Block)
+  [render: medium]
+    (str "<" [[self typeName] describe] ">")
+})
+
+(def Heading {
+  Block
+  text:  ""
+  level: 1
+  [typeName] (quote Heading)
+  [call: args]
+    (let ((first-arg [args car])
+          (rest      [args cdr]))
+      (if [[first-arg typeName] identical: (quote Integer)]
+        { Heading level: first-arg text: [rest car] }
+        { Heading level: 1 text: first-arg }))
+  [render: medium]
+    (let ((hashes ["#" repeat: @level]))
+      (str hashes " " @text))
+})
+
+(def Paragraph {
+  Block
+  text: ""
+  [typeName] (quote Paragraph)
+  [call: args]
+    { Paragraph text: [args car] }
+  [render: medium]  @text
+})
+
+(def CodeBlock {
+  Block
+  code:   nil       ; usually a String (for display) or an AST
+  result: nil
+  evaled: false
+  [typeName] (quote CodeBlock)
+  [call: args]
+    { CodeBlock code: [args car] result: nil evaled: false }
+
+  ; mutate in place — the notebook runner calls this after eval.
+  [setResult: v]
+    (do [self slotAt: (quote result) put: v]
+        [self slotAt: (quote evaled) put: true]
+        self)
+
+  [render: medium]
+    (if @evaled
+      (str "    " [@code describe] "\n    ⇒ " [@result describe])
+      (str "    " [@code describe]))
+})
+
+(def ObjectRef {
+  Block
+  target: nil
+  label:  ""
+  [typeName] (quote ObjectRef)
+  [call: args]
+    { ObjectRef target: [args car] label: "" }
+  [render: medium]
+    (str "  → " (if [@label equal: ""] [@target describe]
+                  (str @label ": " [@target describe])))
+})
+
+; ══════════════════════════════════════════════════════════
+; Workspace — the named root of a session
+; ══════════════════════════════════════════════════════════
+
+(def Workspace {
+  Block
+  title:    "untitled"
+  blocks:   nil
+  bindings: #[]
+
+  [typeName] (quote Workspace)
+
+  [call: args]
+    { Workspace title: [args car] blocks: nil bindings: #[] }
+
+  ; add a block at the end; returns self for chaining.
+  [add: block]
+    (let ((next (if (nil? @blocks)
+                  (cons block nil)
+                  [@blocks append: (cons block nil)])))
+      (let ((_ [self slotAt: (quote blocks) put: next]))
+        self))
+
+  ; bindings: named slots on the workspace.
+  [bind: name to: val]
+    (let ((_ [self slotAt: (quote bindings) put: [@bindings at: name put: val]]))
+      self)
+
+  [lookup: name]   [@bindings at: name]
+
+  [blockCount]     (if (nil? @blocks) 0 [@blocks count])
+
+  [render: medium]
+    (str "═ " @title " ═\n\n"
+         (if (nil? @blocks) "  (empty)"
+           [[@blocks map: |b| [b render: medium]] join: "\n\n"]))
+})
+
+; [workspace show] — print this workspace to the console.
+(defmethod Workspace show ()
+  [console println: [self render: (quote text)]])
+
+; [workspace inspect] — moldable inspector
+(defmethod Workspace inspect ()
+  { Inspector
+    target:  self
+    aspects: (aspects
+       (quote text)     |w| [w render: (quote text)]
+       (quote describe) |w|
+         (str "<Workspace " [w slotAt: (quote title)]
+              " (" [w blockCount] " blocks)>")
+       (quote blocks)   |w|
+         (str [[w slotAt: (quote title)] describe] "\n"
+              [[[w slotAt: (quote blocks)] map: |b|
+                 (str "  " [[b typeName] describe])] join: "\n"])) })

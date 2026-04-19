@@ -60,6 +60,7 @@ files = [
   # tools — meta and composition
   "lib/tools/inspect.moof",
   "lib/tools/query.moof",
+  "lib/tools/workspace.moof",
   "lib/tools/test.moof",
   "lib/tools/server.moof",
 ]
