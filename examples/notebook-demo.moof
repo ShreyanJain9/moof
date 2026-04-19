@@ -1,0 +1,29 @@
+; notebook-demo.moof — a sample Workspace to show off the
+; GUI notebook. in the REPL:
+;
+;   (reload "examples/notebook-demo.moof")
+;   (:notebook ws)
+;
+; a window will open showing the rendered workspace. close it
+; to return to the REPL.
+
+(def ws (Workspace "hello, moof"))
+
+[ws add: (Heading "welcome")]
+[ws add: (Paragraph "this is moof — a living objectspace. every object here is a first-class value.")]
+
+[ws add: (Heading 2 "primitives")]
+[ws add: (Paragraph "strings, integers, floats, symbols, booleans, nil. all inspectable.")]
+[ws add: (CodeBlock "(Set 1 2 3 1 2)")]
+
+[ws add: (Heading 2 "transducers")]
+[ws add: (Paragraph "a pipeline is a value. compose it once, run it across any collection.")]
+[ws add: (CodeBlock "(chain (map-xf |x| [x * 2]) (filter-xf |x| [x > 5]))")]
+
+[ws add: (Heading 2 "reactivity")]
+[ws add: (Paragraph "atoms hold mutable values. signals derive from them. change an atom and signals re-derive automatically.")]
+[ws add: (CodeBlock "(def count (Atom 0))")]
+[ws add: (CodeBlock "(def doubled (Signal || [[count get] * 2] count))")]
+
+[ws add: (Heading 2 "the objectspace")]
+[ws add: (Paragraph "every object has an inspector with multiple aspects. every query is a value. every reference proxies external state. welcome to the medium.")]
