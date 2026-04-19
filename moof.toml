@@ -27,30 +27,37 @@ random  = "builtin:random"
 [sources]
 # moof files eval'd into the image, in order.
 files = [
-  "lib/bootstrap.moof",
-  "lib/protocols.moof",
-  "lib/identity.moof",
-  "lib/comparable.moof",
-  "lib/numeric.moof",
-  "lib/iterable.moof",
-  "lib/indexable.moof",
-  "lib/callable.moof",
-  "lib/types.moof",
-  "lib/error.moof",
-  "lib/showable.moof",
-  "lib/range.moof",
-  "lib/act.moof",
-  "lib/option.moof",
-  "lib/builder.moof",
-  "lib/set.moof",
-  "lib/hashable.moof",
-  "lib/transducer.moof",
-  "lib/stream.moof",
-  "lib/inspect.moof",
-  "lib/query.moof",
-  "lib/pattern.moof",
-  "lib/test.moof",
-  "lib/server.moof",
+  # kernel — language core, loaded first
+  "lib/kernel/bootstrap.moof",
+  "lib/kernel/protocols.moof",
+  "lib/kernel/identity.moof",
+  "lib/kernel/types.moof",
+  "lib/kernel/error.moof",
+  "lib/kernel/showable.moof",
+
+  # data — value types + their protocols
+  "lib/data/comparable.moof",
+  "lib/data/numeric.moof",
+  "lib/data/iterable.moof",
+  "lib/data/indexable.moof",
+  "lib/data/callable.moof",
+  "lib/data/range.moof",
+  "lib/data/act.moof",
+  "lib/data/option.moof",
+  "lib/data/builder.moof",
+  "lib/data/set.moof",
+  "lib/data/hashable.moof",
+
+  # flow — transformation + matching
+  "lib/flow/transducer.moof",
+  "lib/flow/stream.moof",
+  "lib/flow/pattern.moof",
+
+  # tools — meta and composition
+  "lib/tools/inspect.moof",
+  "lib/tools/query.moof",
+  "lib/tools/test.moof",
+  "lib/tools/server.moof",
 ]
 
 [grants]

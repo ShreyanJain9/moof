@@ -14,11 +14,11 @@
 ;   (if [self identical: other] true
 ;     (if (nil? other) false ...)))
 (def defequal (vau args $e
-  (let ((proto   (eval [args car] $e))
-        (body    [args cdr])
-        (handler (eval `(fn (self other)
-                          (if [self identical: other] true
-                            (do ,@body))) $e)))
+  (let ((proto     (eval [args car] $e))
+        (body-seq  (%seq-body [args cdr]))
+        (handler   (eval `(fn (self other)
+                            (if [self identical: other] true
+                              ,body-seq)) $e)))
     [proto handle: (quote equal:) with: handler])))
 
 ; ── Object ─────────────────────────────────────────────

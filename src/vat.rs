@@ -37,18 +37,19 @@ pub struct Vat {
 }
 
 const BOOTSTRAP_FILES: &[&str] = &[
-    "lib/bootstrap.moof",
-    "lib/protocols.moof",
-    "lib/comparable.moof",
-    "lib/numeric.moof",
-    "lib/iterable.moof",
-    "lib/indexable.moof",
-    "lib/callable.moof",
-    "lib/types.moof",
-    "lib/error.moof",
-    "lib/showable.moof",
-    "lib/range.moof",
-    "lib/act.moof",
+    "lib/kernel/bootstrap.moof",
+    "lib/kernel/protocols.moof",
+    "lib/kernel/identity.moof",
+    "lib/kernel/types.moof",
+    "lib/kernel/error.moof",
+    "lib/kernel/showable.moof",
+    "lib/data/comparable.moof",
+    "lib/data/numeric.moof",
+    "lib/data/iterable.moof",
+    "lib/data/indexable.moof",
+    "lib/data/callable.moof",
+    "lib/data/range.moof",
+    "lib/data/act.moof",
 ];
 
 impl Vat {
