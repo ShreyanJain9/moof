@@ -138,6 +138,14 @@ impl Plugin for CollectionsPlugin {
         native(heap, str_id, "describe", |_heap, receiver, _args| {
             Ok(receiver) // strings describe as themselves
         });
+
+        // hash — FNV-1a over UTF-8 bytes. deterministic across
+        // processes, stable for content-addressing.
+        native(heap, str_id, "hash", |heap, receiver, _args| {
+            let id = receiver.as_any_object().ok_or("hash: not a string")?;
+            let s = heap.get_string(id).ok_or("hash: not Text")?;
+            Ok(Value::integer(crate::plugins::fnv1a_64(s.as_bytes()) as i64))
+        });
         native(heap, str_id, "indexOf:", |heap, receiver, args| {
             let id = receiver.as_any_object().ok_or("indexOf: not a string")?;
             let sub_id = args.first().and_then(|v| v.as_any_object()).ok_or("indexOf: arg not a string")?;

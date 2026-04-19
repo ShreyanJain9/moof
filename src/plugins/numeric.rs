@@ -52,6 +52,12 @@ impl Plugin for NumericPlugin {
             Ok(heap.alloc_string(&n.to_string()))
         });
 
+        // hash — integer is its own hash (identity works; Hashable's
+        // invariant [a equal: b] ⇒ [a hash] = [b hash] holds trivially).
+        native(heap, int_id, "hash", |_heap, receiver, _args| {
+            Ok(Value::integer(receiver.as_integer().ok_or("hash: not int")?))
+        });
+
         // bitwise
         int_binop(heap, int_id, "bitAnd:",    |a, b| Value::integer(a & b));
         int_binop(heap, int_id, "bitOr:",     |a, b| Value::integer(a | b));
@@ -130,6 +136,14 @@ impl Plugin for NumericPlugin {
         });
         native(heap, float_id, "describe", |heap, receiver, _args| {
             Ok(heap.alloc_string(&format!("{}", receiver.as_float().ok_or("describe: not a float")?)))
+        });
+
+        // hash — use the bit pattern. NaN values may hash unequally
+        // to each other (there are many NaN bit patterns), matching
+        // IEEE 754 where NaN != NaN — our values_equal agrees.
+        native(heap, float_id, "hash", |_heap, receiver, _args| {
+            let f = receiver.as_float().ok_or("hash: not float")?;
+            Ok(Value::integer(f.to_bits() as i64))
         });
 
         // constants

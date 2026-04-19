@@ -183,6 +183,44 @@
   ; member? uses equal: (structural) now — String dedup works
   (test "member? on strings"   (member? "b" (list "a" "b" "c"))   true)
 
+  ; ── wave 3.0: Hashable — content hashing substrate ───
+  ;
+  ; invariant: structurally-equal values hash equal, and the
+  ; hash is deterministic across processes (no randomization).
+
+  ; primitives are self-hashes or fixed values
+  (test "int hash self"      [42 hash]               42)
+  (test "nil hash zero"      [nil hash]              0)
+  (test "bool hash stable"   [true hash]             1)
+  (test "bool hash diff"     (not (eq [true hash] [false hash])) true)
+
+  ; deterministic — same hash every call
+  (test "string det"         (eq ["hi" hash] ["hi" hash])         true)
+  (test "list det"           (eq [(list 1 2 3) hash] [(list 1 2 3) hash]) true)
+
+  ; structurally equal → equal hash
+  (test "equal strings"      (eq ["hi" hash] ["hi" hash])         true)
+  (test "equal tables"       (eq [#[1 2 3] hash] [#[1 2 3] hash]) true)
+
+  ; different values → different hashes
+  (test "diff ints"          (not (eq [42 hash] [43 hash]))       true)
+  (test "diff lists"         (not (eq [(list 1 2) hash] [(list 1 2 3) hash])) true)
+
+  ; Sets hash order-independently
+  (test "set order indep"    (eq [(Set 1 2 3) hash] [(Set 3 1 2) hash]) true)
+
+  ; typeName factors in
+  (test "some vs none diff"  (not (eq [(Some nil) hash] [None hash])) true)
+  (test "some stable"        (eq [(Some 42) hash] [(Some 42) hash]) true)
+  (test "some diff value"    (not (eq [(Some 42) hash] [(Some 43) hash])) true)
+
+  ; anonymous objects hash structurally
+  (test "anon obj stable"    (eq [{ x: 3 y: 4 } hash] [{ x: 3 y: 4 } hash]) true)
+
+  ; conformers registry includes primitives
+  (test "Integer conforms"   (member? Integer [Hashable conformers]) true)
+  (test "String conforms"    (member? String  [Hashable conformers]) true)
+
 ))
 
 [console println: (report core-tests)]

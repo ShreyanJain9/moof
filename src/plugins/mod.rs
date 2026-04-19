@@ -46,6 +46,18 @@ pub trait CapabilityPlugin {
     fn setup(&self, vat: &mut Vat) -> u32;
 }
 
+/// Deterministic FNV-1a 64-bit hash. Used for String/Bytes content
+/// hashing — deterministic (no randomization) so content addressing
+/// is stable across processes and images.
+pub fn fnv1a_64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
 /// Register a native handler on a prototype.
 pub fn native(
     heap: &mut Heap,

@@ -268,6 +268,15 @@ impl super::Plugin for CorePlugin {
             Ok(heap.alloc_string(&format!("'{name}")))
         });
 
+        // Symbol: hash — interned id (stable within a heap; content-
+        // stable across heaps because equal symbols have equal names).
+        // mix through fnv1a of the name to make cross-heap hashes agree.
+        native(heap, sym_proto_id, "hash", |heap, receiver, _args| {
+            let sym_id = receiver.as_symbol().ok_or("hash: not a symbol")?;
+            let name = heap.symbol_name(sym_id);
+            Ok(Value::integer(crate::plugins::fnv1a_64(name.as_bytes()) as i64))
+        });
+
         // -- Nil prototype --
         let nil_proto = heap.make_object(object_proto);
         heap.type_protos[PROTO_NIL] = nil_proto;
@@ -281,6 +290,11 @@ impl super::Plugin for CorePlugin {
         native(heap, nil_id, "ifTrue:ifFalse:", |_heap, _receiver, args| {
             let false_val = args.get(1).copied().unwrap_or(Value::NIL);
             Ok(false_val)
+        });
+
+        // Nil: hash — a fixed value. empty-list / nil canonical hash.
+        native(heap, nil_id, "hash", |_heap, _receiver, _args| {
+            Ok(Value::integer(0))
         });
 
         // -- Boolean prototype --
@@ -299,6 +313,11 @@ impl super::Plugin for CorePlugin {
             let true_val = args.first().copied().unwrap_or(Value::NIL);
             let false_val = args.get(1).copied().unwrap_or(Value::NIL);
             Ok(if receiver.is_truthy() { true_val } else { false_val })
+        });
+
+        // Boolean: hash — fixed values for true / false.
+        native(heap, bool_id, "hash", |_heap, receiver, _args| {
+            Ok(Value::integer(if receiver.is_true() { 1 } else { 2 }))
         });
 
         // -- Register all prototypes as globals --

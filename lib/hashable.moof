@@ -1,0 +1,97 @@
+; hashable.moof — content hashing for every value
+;
+; hash is the substrate for content-addressing: two values that
+; are structurally equal hash identically, and the hash is stable
+; across processes and images. this is what makes the (future)
+; content-addressed store feasible, what makes O(1) HashSet
+; membership possible, and what makes a Recipe object in one
+; workspace recognizably the same as its copy in another.
+;
+; primitives (Integer, Float, String, Symbol, Boolean, Nil) have
+; native hash handlers. composite types (Cons, Table, Set, user-
+; defined General objects) compose their children's hashes via
+; hash-combine. user types inherit a sensible default from Object
+; based on their typeName + public slot contents.
+
+(defprotocol Hashable
+  "Content hashing. Implement hash returning an Integer such that
+     [a equal: b]  ⇒  [a hash] = [b hash]
+   collisions are allowed but rare — the hash should distribute
+   uniformly across the content-space of the type. deterministic:
+   same value, same hash, every time, every process."
+
+  (require (hash)
+    "Return an Integer hash of self's content."))
+
+; ── hash-combine: deterministic mixing of two hashes ──
+;
+; FNV-like: xor and multiply by a 64-bit prime. simple, fast,
+; good-enough distribution for structural hashing. the wrap
+; behavior of moof's Integer arithmetic gives us mod 2^64 for free.
+
+(def FNV-PRIME 1099511628211)
+
+(defn hash-combine (a b)
+  [[a bitXor: b] * FNV-PRIME])
+
+; ── Cons — fold element hashes into the accumulator ──
+;
+; the empty list is nil, whose hash is 0 (native). a one-element
+; list (1) hashes as combine(hash(1), 0). list order matters:
+; (1 2) and (2 1) hash differently.
+
+(defmethod Cons hash ()
+  (if (nil? [self cdr])
+    (hash-combine [[self car] hash] 0)
+    (hash-combine [[self car] hash] [[self cdr] hash])))
+
+; ── Table — hash sequential part then keyed part ──
+;
+; sequential elements are ordered. keyed entries are (conceptually)
+; unordered, so we sort by key's hash before folding — two Tables
+; with the same entries in different insertion order hash the same.
+
+(defmethod Table hash ()
+  (let ((seq-hash [[self toList] hash])
+        (key-hashes [[[self keys] map: |k|
+                       (hash-combine [k hash] [[self at: k] hash])]
+                     sort])
+        (keyed-hash [key-hashes fold: 0 with: |acc h| (hash-combine acc h)]))
+    (hash-combine seq-hash keyed-hash)))
+
+; ── Set — sets are unordered, so sort element hashes ──
+
+(defmethod Set hash ()
+  [[[[self toList] map: |x| [x hash]] sort]
+    fold: 0 with: |acc h| (hash-combine acc h)])
+
+; ── Object default — typeName + public slots ──
+;
+; anonymous objects hash by typeName ('Object) + their slots.
+; named prototypes (Some, None, user types) hash with their name
+; in the mix, so { Point x: 3 y: 4 } ≠ { Vector x: 3 y: 4 }
+; even though they have the same slot shape.
+
+(defmethod Object hash ()
+  [[self publicSlots] fold: [[self typeName] hash]
+    with: |acc name|
+      (hash-combine acc
+        (hash-combine [name hash]
+                      [[self slotAt: name] hash]))])
+
+; ── conformance registry ──
+;
+; conform every type to Hashable — lets [Hashable conformers]
+; answer "who can i hash?" and makes future Hashable-requires-aware
+; collections (HashSet, HashMap) trust these types.
+
+(conform Integer Hashable)
+(conform Float   Hashable)
+(conform String  Hashable)
+(conform Symbol  Hashable)
+(conform Boolean Hashable)
+(conform Nil     Hashable)
+(conform Cons    Hashable)
+(conform Table   Hashable)
+(conform Set     Hashable)
+(conform Object  Hashable)

@@ -867,17 +867,6 @@ impl<'a> Compiler<'a> {
         let func_const = self.add_sym_const(operative_sym);
         self.chunk.emit(Op::GetGlobal, func_reg, (func_const >> 8) as u8, func_const as u8);
 
-        // build a cons list of the unevaluated args as AST data
-        // each arg is stored as a constant (it's already a Value — a cons cell or literal)
-        let args_reg = self.alloc_reg();
-        self.chunk.emit(Op::LoadNil, args_reg, 0, 0);
-        for i in (1..items.len()).rev() {
-            let arg_reg = self.alloc_reg();
-            // store the raw AST as a constant — DON'T compile it
-            self.emit_load_const(arg_reg, items[i]);
-            self.chunk.emit(Op::Cons, args_reg, arg_reg, args_reg);
-        }
-
         // capture the current local environment as a heap object
         let env_reg = self.alloc_reg();
         let locals_snapshot: Vec<(u32, u8)> = self.locals.clone();

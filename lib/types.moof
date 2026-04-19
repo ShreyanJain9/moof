@@ -44,6 +44,7 @@
 (defmethod Nil each: (f) nil)
 (defmethod Nil map: (f) nil)
 (defmethod Nil select: (f) nil)
+(defmethod Nil reject: (f) nil)
 (defmethod Nil fold:with: (init f) init)
 (defmethod Nil count () 0)
 (defmethod Nil toList () nil)
@@ -52,6 +53,17 @@
 (defmethod Nil any: (f) false)
 (defmethod Nil all: (f) true)
 (defmethod Nil append: (other) other)
+(defmethod Nil sort () nil)
+(defmethod Nil sortBy: (f) nil)
+(defmethod Nil distinct () nil)
+(defmethod Nil take: (n) nil)
+(defmethod Nil drop: (n) nil)
+(defmethod Nil takeWhile: (f) nil)
+(defmethod Nil dropWhile: (f) nil)
+(defmethod Nil find: (f) nil)
+(defmethod Nil flatMap: (f) nil)
+(defmethod Nil sum () 0)
+(defmethod Nil product () 1)
 
 ; ── Boolean ────────────────────────────────────────────
 
