@@ -3,24 +3,18 @@
 (def Protocol {
   name: "Protocol"  doc: nil
   requires: nil  provides: nil  includes: nil  docs: nil
-  conformers: nil
 })
 
-; conformers: list of types that have conformed. the registry
-; is queryable — [Chainable conformers] returns every type that
-; has Chainable installed on it.
-(defmethod Protocol conformers () [self slotAt: (quote conformers)])
-
-; record a conformance (dedup). called by `conform`.
-(defmethod Protocol addConformer: (type)
-  (let ((existing [self slotAt: (quote conformers)]))
-    (if (member? type existing) existing
-      [self slotAt: (quote conformers) put: (cons type existing)])))
+; conformance is determined structurally at query time (see
+; `conforms?`). no stored registry. a type conforms iff it
+; responds to every required selector. `conform` only installs
+; the provided methods on the type — no side-effect on the
+; protocol itself.
 
 (defn make-protocol (name requires provides includes)
   { Protocol name: name doc: nil
     requires: requires provides: provides includes: includes
-    docs: nil conformers: nil })
+    docs: nil })
 
 ; conform: install provided handlers from a protocol onto a type
 (defn conform-install-provides (proto provs ks)
@@ -47,7 +41,6 @@
       (if (some? includes)
         (conform-includes proto includes)
         nil))
-    [prot addConformer: proto]
     proto))
 
 (defn conforms? (obj prot)
@@ -129,7 +122,6 @@
                 requires: [result slotAt: (quote requires)]
                 provides: [result slotAt: (quote provides)]
                 includes: [result slotAt: (quote includes)]
-                docs: [result slotAt: (quote docs)]
-                conformers: nil }))
+                docs: [result slotAt: (quote docs)] }))
     (eval (cons (quote def) (cons name (cons prot nil))) $e)
     prot)))

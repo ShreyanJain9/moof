@@ -40,8 +40,8 @@
   [empty?]       (eq [self size] 0)
 
   ; ── Iterable + Buildable hooks ──────────────────────
-  [each: f]       [[@items keys] each: f]
-  [emptyKindred]  { Set items: #[] }
+  [fold:with: init f]  [[@items keys] fold: init with: f]
+  [emptyKindred]       { Set items: #[] }
 
   ; ── set-theoretic operations ────────────────────────
   [union: other]

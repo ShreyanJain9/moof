@@ -14,41 +14,35 @@
 ; conforms to Indexable (String, Table) gets Iterable through
 ; protocol inclusion.
 ;
-; implementation note: provided methods use toList + recursion.
-; all implementations are pure — no mutation. recursive helpers use
-; the self-passing pattern (fn (self-go ...) (self-go self-go ...))
+; implementation note: the required method is fold:with: — the
+; universal reducer. everything else (each:, map:, select:, fold-
+; like aggregations) derives from fold:with:. all provided methods
+; are pure: no mutation, no mutable scratch state. recursive helpers
+; use the self-passing pattern (fn (self-go ...) (self-go self-go ...))
 ; in place of letrec.
 
 (defprotocol Iterable
-  "Collections. Implement each: to get map, filter, fold, sort,
-   group, zip, take, drop, flatten, and ~30 more operations.
-   The each: handler is the universal iterator: it visits every
-   element exactly once, in order, calling a block for each one."
+  "Collections. Implement fold:with: to get map, filter, each,
+   sort, group, zip, take, drop, flatten, and ~30 more operations.
+   fold:with: is the universal reducer: thread an accumulator
+   through every element, pure and stateless."
 
-  (require (each: block)
-    "Call block once for each element, in order.
-     [self each: |x| [x print]] prints every element.
-     The return value of each: is unspecified — use fold:with:
-     if you need to accumulate a result.")
+  (require (fold:with: init f)
+    "Reduce: thread acc through every element via f.
+     [self fold: 0 with: |a x| [a + x]] → sum.
+     Returns the final accumulator. Every Iterable-conforming
+     type provides this directly — no mutation, no mutual
+     recursion. All other collection operations derive from it.")
 
-  ; ── folding ──────────────────────────────────────────
+  ; ── iteration ────────────────────────────────────────
   ;
-  ; fold:with: derives DIRECTLY from each: (not via toList) so
-  ; there's no circular dependency among the provided methods.
-  ; every Iterable-conforming type needs only `each:` to get
-  ; the full suite — no need to override fold:with:/toList
-  ; by hand to escape a mutual-recursion trap.
-  ;
-  ; the accumulator lives in a mutable slot on a fresh state
-  ; object (one per fold). each: walks, each step updates the
-  ; slot, at the end we read it out.
+  ; each: is derived from fold:with:. we use the fold's
+  ; accumulator as a scratchpad for the block's return — which
+  ; is fine since each:'s own return is unspecified. no state
+  ; object, no mutation: fold threads everything purely.
 
-  (provide (fold:with: init f)
-    (let ((state { acc: init }))
-      (let ((_ [self each: |x|
-                [state slotAt: (quote acc) put:
-                  (f [state slotAt: (quote acc)] x)]]))
-        [state slotAt: (quote acc)])))
+  (provide (each: f)
+    [self fold: nil with: |_ x| (f x)])
 
   ; ── conversion ───────────────────────────────────────
 

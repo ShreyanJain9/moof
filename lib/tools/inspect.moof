@@ -155,11 +155,6 @@
            (if (nil? reqs) "(no required methods)"
              (str "requires:\n"
                   [[reqs map: |r| (str "  " [r describe])] join: "\n"])))
-       (quote conformers)  |v|
-         (let ((cs [v conformers]))
-           (if (nil? cs) "(no conformers)"
-             (str "conformers:\n"
-                  [[cs map: |c| (str "  " [c typeName])] join: "\n"])))
        (quote doc)         |v|
          (or [v slotAt: (quote doc)] "(no docstring)"))
   })

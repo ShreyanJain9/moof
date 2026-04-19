@@ -60,10 +60,13 @@
   ; counts — the underlying Table
   [counts]  @items
 
-  ; each: f — visit each element count-many times
-  [each: f]
-    [[@items keys] each: |k|
-      [[@items at: k] times: |_| (f k)]]
+  ; fold:with: — visit each element count-many times, threading acc
+  [fold:with: init f]
+    (let ((repeat (fn (repeat acc k n)
+                    (if [n <= 0] acc
+                      (repeat repeat (f acc k) k [n - 1])))))
+      [[@items keys] fold: init with: |acc k|
+        (repeat repeat acc k [@items at: k])])
 
   ; describe / show
   [describe]

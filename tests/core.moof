@@ -87,23 +87,14 @@
   ; shape returns structural record
   (test "shape has typeName" [[(Some 1) shape] slotAt: (quote typeName)] (quote Some))
 
-  ; protocol conformers registry
-  (test "Chainable has conformers"    [[Chainable conformers] empty?]  false)
-  (test "Chainable includes Ok"       (member? Ok   [Chainable conformers]) true)
-  (test "Chainable includes Cons"     (member? Cons [Chainable conformers]) true)
-  (test "Comparable includes Number"  (member? Number [Comparable conformers]) true)
-  (test "Numeric includes Number"     (member? Number [Numeric conformers])   true)
+  ; conformance is structural, not a stored registry. a type
+  ; conforms to a protocol iff it responds to every required
+  ; selector — no list of conformers is maintained.
 
   ; Cons equal: short-circuits on identity (so proto == proto works)
   (test "Cons equal self"  [Cons equal: Cons] true)
   (test "list equal list"  [(list 1 2 3) equal: (list 1 2 3)] true)
   (test "list equal diff"  [(list 1 2)   equal: (list 1 2 3)] false)
-  (test "conform is deduped"
-    (do
-      (conform Cons Chainable)   ; already there
-      (conform Cons Chainable)   ; should not duplicate
-      [[Chainable conformers] count: |t| [t identical: Cons]])
-    1)
 
   ; Buildable: map / select / reject preserve type
   (test "Table map preserves type"    [[#[1 2 3] map: |x| [x * 2]] typeName]    (quote Table))
@@ -220,10 +211,6 @@
   ; anonymous objects hash structurally
   (test "anon obj stable"    (eq [{ x: 3 y: 4 } hash] [{ x: 3 y: 4 } hash]) true)
 
-  ; conformers registry includes primitives
-  (test "Integer conforms"   (member? Integer [Hashable conformers]) true)
-  (test "String conforms"    (member? String  [Hashable conformers]) true)
-
   ; ── wave 3.1: transducers — one pipeline, any substrate ──
 
   ; stateless
@@ -279,13 +266,21 @@
   (test "stream count"          [(stream-range 0 5) count]               5)
 
   ; stateful nature — each stream iterates once, state advances.
-  ; can't use `do` here: Cons#then: is flatMap, so `do [s take: 3]
-  ; [s take: 2]` would concatenate-via-mapping rather than sequence.
-  ; let-throwaway is the right tool when side-effects return Cons.
-  (test "stream state advances"
+  ; pure streams: the same stream always yields the same prefix.
+  ; to advance, call [rest] or [drop: n] — both return a fresh
+  ; stream without mutating the original.
+  (test "stream is persistent"
     (let ((s (stream-iterate 0 |x| [x + 1])))
       (let ((_ [s take: 3])) [s take: 2]))
+    (list 0 1))
+
+  (test "stream drop advances"
+    [[(stream-iterate 0 |x| [x + 1]) drop: 3] take: 2]
     (list 3 4))
+
+  (test "stream rest advances"
+    [[(stream-iterate 0 |x| [x + 1]) rest] take: 2]
+    (list 1 2))
 
   ; transducers on finite streams work — [stream transduce: xf]
   ; goes via Stream's type-preserving into:via: path? actually
@@ -312,8 +307,8 @@
   (test "table has grid"       (member? (quote grid) [[#[1 2 3] inspect] aspectNames]) true)
 
   ; Protocol inspector — queryable protocol surface
-  (test "protocol has conformers aspect"
-    (member? (quote conformers) [[Chainable inspect] aspectNames]) true)
+  (test "protocol has requires aspect"
+    (member? (quote requires) [[Chainable inspect] aspectNames]) true)
 
   ; default aspect falls through to describe
   (test "unknown aspect nil"   [[42 inspect] render: (quote nope)]      nil)
@@ -402,11 +397,10 @@
   (test "File address"       [(File "a.txt") address]        "a.txt")
   (test "File describe"      [(File "x") describe]           "<File x>")
 
-  ; Reference conformance registry — File conforms to the
-  ; Reference protocol (shares required methods), not to its
-  ; prototype chain, so [x is: Reference] is false but
-  ; (member? File [Reference conformers]) is true.
-  (test "File conforms"      (member? File [Reference conformers])  true)
+  ; Reference conformance is structural — File satisfies the
+  ; protocol by implementing its required selectors, not by
+  ; being in Reference's prototype chain.
+  (test "File is not Reference via chain" [(File "/tmp/x") is: Reference] false)
 
   ; ── Atom + Signal — reactivity substrate ────────────
   ;

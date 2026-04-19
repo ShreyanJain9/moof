@@ -79,11 +79,12 @@
         (hash-combine [name hash]
                       [[self slotAt: name] hash]))])
 
-; ── conformance registry ──
+; ── installing Hashable on primitives ──
 ;
-; conform every type to Hashable — lets [Hashable conformers]
-; answer "who can i hash?" and makes future Hashable-requires-aware
-; collections (HashSet, HashMap) trust these types.
+; conform every primitive type to Hashable. this installs the
+; protocol's provided methods (hash-combine etc.) on each one.
+; conformance is otherwise structural — any type with a `hash`
+; method satisfies Hashable regardless of whether it ran `conform`.
 
 (conform Integer Hashable)
 (conform Float   Hashable)

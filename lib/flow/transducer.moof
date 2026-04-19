@@ -1,38 +1,68 @@
-; transducer.moof — collection-independent transformation pipelines
+; transducer.moof — collection-independent transformation pipelines, pure
 ;
-; a transducer is a value-function that takes a step function
-; (a 2-arg reducing fn |acc x| → acc) and returns a new step
-; function. transducers compose via ordinary function composition,
-; and the composed pipeline applies uniformly to any collection,
-; stream, signal, or channel without materializing intermediate
-; collections.
+; a transducer is an opaque value with two parts: an initial state,
+; and a `wrap` function that takes a reducing step and returns a new
+; reducing step. transducers compose via state-threading: the wrapped
+; step operates on a (states, acc) pair — each xf's state occupies
+; one slot in a list, peeled off as control flows inward through the
+; composed chain. the user's reducer ignores states entirely.
+;
+; state is DATA, not a hidden slot. every transducer is pure: same
+; input → same output → same final state. nothing to reset between
+; runs because nothing is held between runs.
 ;
 ; the one-implementation-many-types promise in action:
 ;
-;   (def vegetarian-count-over-30
+;   (def vegetarian-prep
 ;     (chain (filter-xf vegetarian?)
 ;            (map-xf caloriesPerServing)
 ;            (filter-xf |c| [c > 300])))
 ;
-;   [recipes-list   transduce: vegetarian-count-over-30]
-;   [recipes-stream transduce: vegetarian-count-over-30]   ; lazy (future)
-;   [recipes-signal transduce: vegetarian-count-over-30]   ; reactive (future)
+;   [recipes-list   transduce: vegetarian-prep]
+;   [recipes-stream transduce: vegetarian-prep]
+;   [recipes-signal transduce: vegetarian-prep]   ; (future)
 ;
-; same transducer value, different substrates.
+; ══════════════════════════════════════════════════════════
+; contract
+; ══════════════════════════════════════════════════════════
+;
+; an xf is an object { init: <state-value>  wrap: (rf) -> rf' }.
+; an rf takes (states, acc, x) and returns (cons states' acc').
+;
+; stateless xfs declare init = nil and pass states through.
+; stateful xfs declare init = initial-state-value and consume
+; the car of states as their own state, passing the cdr inward.
+;
+; composition: chain of xfs has init = list of each xf's init
+; (in chain order). the outermost wrap peels the first state
+; and forwards the rest down the pipe.
 
 ; ══════════════════════════════════════════════════════════
 ; stateless transducers
 ; ══════════════════════════════════════════════════════════
+;
+; init is nil (single slot, unused). the wrap function forwards
+; states unchanged through the inner rf. no state bookkeeping.
 
-; map-xf — transform each element via f, pass through unchanged count
+; map-xf — transform each element via f
 (defn map-xf (f)
-  (fn (rf)
-    (fn (acc x) (rf acc (f x)))))
+  { init: (list nil)
+    wrap: (fn (rf)
+      (fn (states acc x)
+        (let ((my [states car]) (rest [states cdr]))
+          (let ((r (rf rest acc (f x))))
+            (cons (cons my [r car]) [r cdr]))))) })
 
 ; filter-xf — pass elements satisfying pred, drop the rest
 (defn filter-xf (pred)
-  (fn (rf)
-    (fn (acc x) (if (pred x) (rf acc x) acc))))
+  { init: (list nil)
+    wrap: (fn (rf)
+      (fn (states acc x)
+        (let ((my [states car]) (rest [states cdr]))
+          (if (pred x)
+            (let ((r (rf rest acc x)))
+              (cons (cons my [r car]) [r cdr]))
+            (cons states acc))))) })
 
 ; remove-xf — inverse of filter-xf
 (defn remove-xf (pred)
@@ -42,92 +72,97 @@
 ; stateful transducers
 ; ══════════════════════════════════════════════════════════
 ;
-; state is held on a fresh mutable object created once per
-; transduction. each invocation of `(xf rf)` produces its own
-; state, so transducers can be reused across multiple runs
-; without leaking counters between them.
-
-; NOTE: these stateful transducers sequence side-effects via
-; let-with-throwaway (`(let ((_ mutate) (...)` instead of `(do ...)`)
-; because moof's `do` is a vau and the compiler's capture analysis
-; doesn't see through vau expansions — referenced outer variables
-; (like `rf`) get lost. the let idiom keeps capture explicit.
+; init declares the initial state value. the wrap function reads
+; the car of states as its own state, computes, and returns a new
+; states list with the updated value back at car.
 
 ; take-xf — keep the first n elements, ignore the rest
 (defn take-xf (n)
-  (fn (rf)
-    (let ((state { remaining: n }))
-      (fn (acc x)
-        (let ((r [state slotAt: (quote remaining)]))
-          (if [r <= 0] acc
-            (let ((_ [state slotAt: (quote remaining) put: [r - 1]]))
-              (rf acc x))))))))
+  { init: (list n)
+    wrap: (fn (rf)
+      (fn (states acc x)
+        (let ((rem [states car]) (rest [states cdr]))
+          (if [rem <= 0]
+            (cons states acc)
+            (let ((r (rf rest acc x)))
+              (cons (cons [rem - 1] [r car]) [r cdr])))))) })
 
 ; drop-xf — skip the first n elements, pass the rest
 (defn drop-xf (n)
-  (fn (rf)
-    (let ((state { remaining: n }))
-      (fn (acc x)
-        (let ((r [state slotAt: (quote remaining)]))
-          (if [r <= 0] (rf acc x)
-            (let ((_ [state slotAt: (quote remaining) put: [r - 1]]))
-              acc)))))))
+  { init: (list n)
+    wrap: (fn (rf)
+      (fn (states acc x)
+        (let ((rem [states car]) (rest [states cdr]))
+          (if [rem <= 0]
+            (let ((r (rf rest acc x)))
+              (cons (cons rem [r car]) [r cdr]))
+            (cons (cons [rem - 1] rest) acc))))) })
 
 ; take-while-xf — keep leading elements while pred holds, then stop
 (defn take-while-xf (pred)
-  (fn (rf)
-    (let ((state { done: false }))
-      (fn (acc x)
-        (if [state slotAt: (quote done)] acc
-          (if (pred x) (rf acc x)
-            (let ((_ [state slotAt: (quote done) put: true]))
-              acc)))))))
+  { init: (list false)    ; done?
+    wrap: (fn (rf)
+      (fn (states acc x)
+        (let ((done [states car]) (rest [states cdr]))
+          (if done
+            (cons states acc)
+            (if (pred x)
+              (let ((r (rf rest acc x)))
+                (cons (cons done [r car]) [r cdr]))
+              (cons (cons true rest) acc)))))) })
 
 ; drop-while-xf — skip leading elements while pred holds, pass the rest
 (defn drop-while-xf (pred)
-  (fn (rf)
-    (let ((state { dropping: true }))
-      (fn (acc x)
-        (if [state slotAt: (quote dropping)]
-          (if (pred x) acc
-            (let ((_ [state slotAt: (quote dropping) put: false]))
-              (rf acc x)))
-          (rf acc x))))))
+  { init: (list true)    ; dropping?
+    wrap: (fn (rf)
+      (fn (states acc x)
+        (let ((dropping [states car]) (rest [states cdr]))
+          (if dropping
+            (if (pred x)
+              (cons states acc)
+              (let ((r (rf rest acc x)))
+                (cons (cons false [r car]) [r cdr])))
+            (let ((r (rf rest acc x)))
+              (cons (cons dropping [r car]) [r cdr])))))) })
 
 ; distinct-xf — emit each unique element at most once
 (defn distinct-xf ()
-  (fn (rf)
-    (let ((state { seen: #[] }))
-      (fn (acc x)
-        (let ((seen [state slotAt: (quote seen)]))
-          (if [seen contains: x] acc
-            (let ((_ [state slotAt: (quote seen) put: [seen at: x put: true]]))
-              (rf acc x))))))))
+  { init: (list #[])    ; seen table
+    wrap: (fn (rf)
+      (fn (states acc x)
+        (let ((seen [states car]) (rest [states cdr]))
+          (if [seen contains: x]
+            (cons states acc)
+            (let ((r (rf rest acc x)))
+              (cons (cons [seen at: x put: true] [r car]) [r cdr])))))) })
 
 ; ══════════════════════════════════════════════════════════
 ; composition
 ; ══════════════════════════════════════════════════════════
 ;
-; (chain xf1 xf2 xf3) produces a transducer that applies xf1,
-; then xf2, then xf3 to each element in order. right-to-left
-; composition of the underlying functions — the outer xf wraps
-; the inner xf's rf.
+; (chain xf1 xf2 xf3) produces a transducer whose init is the list
+; of each xf's init (in order), and whose wrap composes the wraps
+; right-to-left so xf1 is the outermost layer.
 
-(defn compose2 (a b)
-  (fn (rf) (a (b rf))))
+; identity — empty chain
+(def identity-xf
+  { init: nil
+    wrap: (fn (rf) rf) })
 
 (def chain (fn xfs
-  (if (nil? xfs) (fn (rf) rf)
+  (if (nil? xfs) identity-xf
     (if (nil? [xfs cdr]) [xfs car]
-      (compose2 [xfs car]
-        (apply chain [xfs cdr]))))))
+      { init: [xfs fold: nil with: |acc xf| [acc append: xf.init]]
+        wrap: (fn (rf)
+          [[xfs reverse] fold: rf with:
+            |acc-rf xf| (xf.wrap acc-rf)]) }))))
 
 ; ══════════════════════════════════════════════════════════
 ; running transducers against a collection
 ; ══════════════════════════════════════════════════════════
 
-; [coll transduce: xf] — apply xf to a builder step function and
-; fold self, returning a container of self's type.
+; [coll transduce: xf] — apply xf through Buildable into an empty
+; container of self's type. same substrate as into: but inferred.
 (defmethod Object transduce: (xf)
   [self into: [self emptyKindred] via: xf])
 
@@ -135,11 +170,20 @@
 ; into a container shaped like `empty`. uses the Buildable protocol
 ; (via Builder) so the output type matches empty's type.
 (defmethod Object into:via: (empty xf)
-  [[self fold: (builder-for empty) with:
-    (xf |b x| [b << x])] result])
+  (let ((wrapped (xf.wrap
+                   (fn (states b x) (cons states [b << x])))))
+    (let ((final [self fold: (cons xf.init (builder-for empty))
+                       with: |full x|
+                         (wrapped [full car] [full cdr] x)]))
+      [[final cdr] result])))
 
 ; [coll transduce: xf init: val with: rf] — fully-explicit transduction.
 ; the step function and initial value are user-supplied; returns
 ; whatever the fold accumulates.
 (defmethod Object transduce:init:with: (xf init rf)
-  [self fold: init with: (xf rf)])
+  (let ((wrapped (xf.wrap
+                   (fn (states acc x) (cons states (rf acc x))))))
+    (let ((final [self fold: (cons xf.init init)
+                       with: |full x|
+                         (wrapped [full car] [full cdr] x)]))
+      [final cdr])))
