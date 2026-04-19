@@ -424,11 +424,16 @@
         [a get])
     15)
 
-  ; signal tests deferred until cross-vat closure migration — the
-  ; computation captures input FarRefs and the scheduler needs to
-  ; walk and re-intern those during spawn. for now, exercise Atom
-  ; lifecycle directly; reactive-demo.moof exercises the pipeline
-  ; end-to-end once migration lands.
+  ; Signal runs in its own vat. the computation closure captures
+  ; input FarRefs, migrates via the scheduler's closure walker, and
+  ; runs cross-vat. a single-send body like `[a get]` works directly;
+  ; pipelines with a post-step chain through the Signal's own then:
+  ; handling.
+  (test "signal derives"
+    (do (a <- (Atom 3))
+        (s <- (Signal || [a get] a))
+        [s get])
+    3)
 
   ; ── wave 4.8: Bag — multiset ────────────────────────
 

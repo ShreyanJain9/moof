@@ -83,10 +83,16 @@
 
           [typeName] (quote Signal)
 
+          ; get — return cached if valid, else run the (possibly async)
+          ; computation and update cache. the computation captures input
+          ; FarRefs, so reads like [a get] return Acts; users wrap the
+          ; computation body in `do` to thread them through. the handler
+          ; returns either @cached directly or an Act-of-Update; the
+          ; scheduler handles both.
           [get]
             (if @valid @cached
-              (let ((v (@computation)))
-                (update { cached: v valid: true } v)))
+              [(@computation) then:
+                |v| (update { cached: v valid: true } v)])
 
           [notify: _]
             (let ((_ [@subscribers each: |s| [s notify: nil]]))
