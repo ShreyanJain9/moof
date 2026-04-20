@@ -53,11 +53,11 @@
   (if (nil? forms) { doc: nil caps: nil inherits: nil body: nil }
     (let ((head [forms car])
           (rest (%defserver-parse [forms cdr])))
-      (if (%is-cons-headed? head (quote needs))
+      (if (%is-cons-headed? head 'needs)
         [rest with: { caps: [head cdr] }]
-        (if (%is-cons-headed? head (quote inherits))
+        (if (%is-cons-headed? head 'inherits)
           [rest with: { inherits: [[head cdr] car] }]
-          (if [[head typeName] identical: (quote String)]
+          (if [[head typeName] identical: 'String]
             [rest with: { doc: head }]
             ; otherwise: body is the last non-metadata form
             [rest with: { body: head }]))))))
@@ -77,11 +77,10 @@
         (params [rest car])
         (forms [rest cdr])
         (parsed (%defserver-parse forms))
-        (body (if [parsed slotAt: (quote inherits)]
-                (%override-parent [parsed slotAt: (quote body)]
-                                  [parsed slotAt: (quote inherits)])
-                [parsed slotAt: (quote body)]))
-        (caps [parsed slotAt: (quote caps)])
+        (body (if parsed.inherits
+                (%override-parent parsed.body parsed.inherits)
+                parsed.body))
+        (caps parsed.caps)
         ; variadic when params is a symbol (not a cons/list, not nil)
         (variadic (and (not (cons? params)) (not (nil? params))))
         ; final construction param list: user init params + capability params

@@ -33,18 +33,18 @@
 
 (defn conform (proto prot)
   (do
-    (let ((provs [prot slotAt: (quote provides)]))
+    (let ((provs prot.provides))
       (if (some? provs)
         (conform-install-provides proto provs [provs keys])
         nil))
-    (let ((includes [prot slotAt: (quote includes)]))
+    (let ((includes prot.includes))
       (if (some? includes)
         (conform-includes proto includes)
         nil))
     proto))
 
 (defn conforms? (obj prot)
-  (let ((reqs [prot slotAt: (quote requires)]))
+  (let ((reqs prot.requires))
     (if (nil? reqs) true
       (let ((check (fn (self-check remaining)
               (if (nil? remaining) true
@@ -66,7 +66,7 @@
 ; return a new accumulator { requires provides includes docs }
 (defn process-clause (clause acc env)
   (if (nil? clause) acc
-    (if [[clause car] identical: (quote require)]
+    (if [[clause car] identical: 'require]
       ; (require (sel params...) "doc")
       (let ((sig [[clause cdr] car])
             (sel [sig car])
@@ -74,26 +74,26 @@
             (method-doc (if (some? [[clause cdr] cdr])
                          [[[clause cdr] cdr] car] nil)))
         [acc with: {
-          requires: (cons sel [acc slotAt: (quote requires)])
-          docs: [[acc slotAt: (quote docs)] at: sel put:
-            { params: params doc: method-doc kind: (quote require) }] }])
-      (if [[clause car] identical: (quote provide)]
+          requires: (cons sel acc.requires)
+          docs: [acc.docs at: sel put:
+            { params: params doc: method-doc kind: 'require }] }])
+      (if [[clause car] identical: 'provide]
         ; (provide (sel params...) body...)
         (let ((sig [[clause cdr] car])
               (sel [sig car])
               (params [sig cdr])
               (body [[clause cdr] cdr])
-              (handler (eval (cons (quote fn)
-                        (cons (cons (quote self) params) body)) env)))
+              (handler (eval (cons 'fn
+                        (cons (cons 'self params) body)) env)))
           [acc with: {
-            provides: [[acc slotAt: (quote provides)] at: sel put: handler]
-            docs: [[acc slotAt: (quote docs)] at: sel put:
-              { params: params doc: nil kind: (quote provide) }] }])
-        (if [[clause car] identical: (quote include)]
+            provides: [acc.provides at: sel put: handler]
+            docs: [acc.docs at: sel put:
+              { params: params doc: nil kind: 'provide }] }])
+        (if [[clause car] identical: 'include]
           ; (include Protocol)
           [acc with: {
             includes: (cons (eval [[clause cdr] car] env)
-                           [acc slotAt: (quote includes)]) }]
+                           acc.includes) }]
           acc)))))
 
 ; process-clauses: fold over clause list
@@ -107,7 +107,7 @@
         (raw-clauses [args cdr])
         ; check for optional docstring
         (has-docstring (if (some? raw-clauses)
-                        [[[raw-clauses car] type] identical: (quote String)]
+                        [[[raw-clauses car] type] identical: 'String]
                         false))
         (doc-str (if has-docstring [raw-clauses car] nil))
         (clauses (if has-docstring [raw-clauses cdr] raw-clauses))
@@ -119,9 +119,9 @@
         (prot { Protocol
                 name: [name describe]
                 doc: doc-str
-                requires: [result slotAt: (quote requires)]
-                provides: [result slotAt: (quote provides)]
-                includes: [result slotAt: (quote includes)]
-                docs: [result slotAt: (quote docs)] }))
-    (eval (cons (quote def) (cons name (cons prot nil))) $e)
+                requires: result.requires
+                provides: result.provides
+                includes: result.includes
+                docs: result.docs }))
+    (eval (cons 'def (cons name (cons prot nil))) $e)
     prot)))

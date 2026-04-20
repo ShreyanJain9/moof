@@ -16,7 +16,7 @@
 (def Set {
   items: #[]    ; internal Table; keys ARE the set members
 
-  [typeName] (quote Set)
+  [typeName] 'Set
 
   ; (Set 1 2 3) — call: receives args as a list
   [call: args]

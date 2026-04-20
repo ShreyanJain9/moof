@@ -25,7 +25,7 @@
 ; output. 'text is the single medium we ship today.
 
 (def Block {
-  [typeName] (quote Block)
+  [typeName] 'Block
   [render: medium]
     (str "<" [[self typeName] describe] ">")
 })
@@ -34,11 +34,11 @@
   Block
   text:  ""
   level: 1
-  [typeName] (quote Heading)
+  [typeName] 'Heading
   [call: args]
     (let ((first-arg [args car])
           (rest      [args cdr]))
-      (if [[first-arg typeName] identical: (quote Integer)]
+      (if [[first-arg typeName] identical: 'Integer]
         { Heading level: first-arg text: [rest car] }
         { Heading level: 1 text: first-arg }))
   [render: medium]
@@ -49,7 +49,7 @@
 (def Paragraph {
   Block
   text: ""
-  [typeName] (quote Paragraph)
+  [typeName] 'Paragraph
   [call: args]
     { Paragraph text: [args car] }
   [render: medium]  @text
@@ -63,7 +63,7 @@
   Block
   code:   nil
   result: nil
-  [typeName] (quote CodeBlock)
+  [typeName] 'CodeBlock
   [call: args]
     (let ((code-val [args car])
           (result-val (if (nil? [args cdr]) nil [[args cdr] car])))
@@ -79,7 +79,7 @@
   Block
   target: nil
   label:  ""
-  [typeName] (quote ObjectRef)
+  [typeName] 'ObjectRef
   [call: args]
     { ObjectRef target: [args car] label: "" }
   [render: medium]
@@ -104,7 +104,7 @@
     blocks:   nil
     bindings: #[]
 
-    [typeName] (quote Workspace)
+    [typeName] 'Workspace
 
     [getTitle]       @title
     [getBlocks]      @blocks

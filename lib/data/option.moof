@@ -6,13 +6,13 @@
 ; (via call:): (Some 42) builds { Some value: 42 }.
 
 (def Option {
-  [typeName] (quote Option)
+  [typeName] 'Option
   [sealed?]  true
 })
 
 (def None {
   Option
-  [typeName] (quote None)
+  [typeName] 'None
   [describe] "None"
   [show]     "None  : Option"
   [then: f]  self
@@ -26,7 +26,7 @@
 (def Some {
   Option
   value: nil
-  [typeName]     (quote Some)
+  [typeName]     'Some
   ; (Some 42) — call: receives args as a list. self is Some.
   [call: args]   { Some value: [args car] }
   [describe]     (str "Some(" [@value describe] ")")

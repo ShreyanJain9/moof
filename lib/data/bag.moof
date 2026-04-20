@@ -14,7 +14,7 @@
 ; compare by identity, so use primitives for bag keys.
 
 (def Bag {
-  [typeName] (quote Bag)
+  [typeName] 'Bag
 
   items: #[]    ; internal Table { element => count }
 

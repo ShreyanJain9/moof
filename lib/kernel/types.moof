@@ -19,7 +19,7 @@
         (handler   (eval `(fn (self other)
                             (if [self identical: other] true
                               ,body-seq)) $e)))
-    [proto handle: (quote equal:) with: handler])))
+    [proto handle: 'equal: with: handler])))
 
 ; ── Object ─────────────────────────────────────────────
 

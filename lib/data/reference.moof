@@ -44,7 +44,7 @@
 ; pure ops (address, typeName, describe) don't cross a vat.
 
 (def File {
-  [typeName]   (quote File)
+  [typeName]   'File
   path: nil
 
   ; (File "path") — construct a File proxy

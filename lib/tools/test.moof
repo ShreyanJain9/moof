@@ -78,8 +78,8 @@
 ; works equally for direct suite records and Act-of-suite-records.
 (defn report (s)
   (await-apply s |suite-val|
-    (let ((name [suite-val slotAt: (quote name)])
-          (results [suite-val slotAt: (quote results)])
+    (let ((name suite-val.name)
+          (results suite-val.results)
           (count (fn (go remaining pass fail)
             (if (nil? remaining) (cons pass fail)
               (if [[remaining car] ok?]
@@ -90,7 +90,7 @@
             (failed [c cdr])
             (failures [[results select: |r| (not [r ok?])]
                         fold: "" with: |acc r|
-                          [acc ++ (str "    FAIL: " [[r slotAt: (quote message)] describe] "\n")]]))
+                          [acc ++ (str "    FAIL: " [r.message describe] "\n")]]))
         (str "\n  " name "\n  "
           [passed describe] " passed, " [failed describe] " failed\n"
           failures)))))

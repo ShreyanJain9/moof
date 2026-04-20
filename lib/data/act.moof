@@ -25,14 +25,14 @@
 ; in moof for synchronous execution (no scheduler roundtrip).
 
 ; Ok: then: applies f synchronously (not via ready_acts)
-(defmethod Ok then: (f) (f [self slotAt: (quote value)]))
-(defmethod Ok map: (f) { Ok value: (f [self slotAt: (quote value)]) })
+(defmethod Ok then: (f) (f @value))
+(defmethod Ok map: (f) { Ok value: (f @value) })
 (defmethod Ok recover: (f) self)
 
 ; Err: short-circuit (already native, but ensure consistency)
 (defmethod Err then: (f) self)
 (defmethod Err map: (f) self)
-(defmethod Err recover: (f) (f [self slotAt: (quote message)]))
+(defmethod Err recover: (f) (f @message))
 
 ; ═══════════════════════════════════════════════════════════
 ; layer 2: Chainable protocol (was Flatmappable)
@@ -92,11 +92,11 @@
 (defn arrow-bind? (form)
   (if (not (cons? form)) false
     (if (nil? [form cdr]) false
-      [[[form cdr] car] identical: (quote <-)])))
+      [[[form cdr] car] identical: '<-])))
 
 (defn let-form? (form)
   (if (not (cons? form)) false
-    [[form car] identical: (quote let)]))
+    [[form car] identical: 'let]))
 
 ; do-transform: convert a do body into a single source form that, when
 ; compiled once, chains every binding through then: with proper lexical

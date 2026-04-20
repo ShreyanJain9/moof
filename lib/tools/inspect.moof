@@ -16,7 +16,7 @@
 ; by parameterizing on a `medium` argument.
 
 (def Inspector {
-  [typeName] (quote Inspector)
+  [typeName] 'Inspector
   target:  nil    ; the inspected value
   aspects: #[]    ; Table { name: producer-fn } where producer-fn = |target| -> String
 
@@ -68,9 +68,9 @@
   { Inspector
     target:  self
     aspects: (aspects
-       (quote describe)   |v| [v describe]
-       (quote shape)      |v| [[v shape] describe]
-       (quote prototypes) |v| [[[v prototypes] map: |p| [p typeName]] describe])
+       'describe   |v| [v describe]
+       'shape      |v| [[v shape] describe]
+       'prototypes |v| [[[v prototypes] map: |p| [p typeName]] describe])
   })
 
 ; ══════════════════════════════════════════════════════════
@@ -81,11 +81,11 @@
   { Inspector
     target:  self
     aspects: (aspects
-       (quote describe) |v| [v describe]
-       (quote list)     |v|
+       'describe |v| [v describe]
+       'list     |v|
          (str "(" [v count] " elements)\n"
               [[v map: |x| (str "  " [x describe])] join: "\n"])
-       (quote summary)  |v|
+       'summary  |v|
          (str "Cons: " [v count] " elements, first = " [[v first] describe]))
   })
 
@@ -97,8 +97,8 @@
   { Inspector
     target:  self
     aspects: (aspects
-       (quote describe) |v| [v describe]
-       (quote grid)     |v|
+       'describe |v| [v describe]
+       'grid     |v|
          (let ((seq-rows [[v toList] map: |x| (str "  " [x describe])])
                (map-rows [[v keys] map: |k|
                             (str "  " [k describe] " => " [[v at: k] describe])]))
@@ -106,7 +106,7 @@
                 [seq-rows join: "\n"]
                 "\nmap (" [[v keys] count] "):\n"
                 [map-rows join: "\n"]))
-       (quote summary)  |v|
+       'summary  |v|
          (str "Table: " [[v toList] count] " seq, " [[v keys] count] " keyed"))
   })
 
@@ -118,11 +118,11 @@
   { Inspector
     target:  self
     aspects: (aspects
-       (quote describe) |v| [v describe]
-       (quote members)  |v|
+       'describe |v| [v describe]
+       'members  |v|
          (str "{" [v size] " elements}\n"
               [[[v toList] map: |x| (str "  " [x describe])] join: "\n"])
-       (quote summary)  |v|
+       'summary  |v|
          (str "Set: " [v size] " elements"))
   })
 
@@ -134,8 +134,8 @@
   { Inspector
     target:  self
     aspects: (aspects
-       (quote describe) |v| [v describe]
-       (quote peek)     |v|
+       'describe |v| [v describe]
+       'peek     |v|
          ; peek the first 5 — destructive on the stream, but safe
          (str "first 5:\n"
               [[[v take: 5] map: |x| (str "  " [x describe])] join: "\n"]))
@@ -149,12 +149,12 @@
   { Inspector
     target:  self
     aspects: (aspects
-       (quote describe)    |v| (str "<Protocol " [v slotAt: (quote name)] ">")
-       (quote requires)    |v|
-         (let ((reqs [v slotAt: (quote requires)]))
+       'describe    |v| (str "<Protocol " v.name ">")
+       'requires    |v|
+         (let ((reqs v.requires))
            (if (nil? reqs) "(no required methods)"
              (str "requires:\n"
                   [[reqs map: |r| (str "  " [r describe])] join: "\n"])))
-       (quote doc)         |v|
-         (or [v slotAt: (quote doc)] "(no docstring)"))
+       'doc         |v|
+         (or v.doc "(no docstring)"))
   })

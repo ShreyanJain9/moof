@@ -17,7 +17,7 @@
 ; recomputation — no memoization yet (would require mutation).
 
 (def Stream {
-  [typeName] (quote Stream)
+  [typeName] 'Stream
   [describe] "<Stream>"
   [show]     "<Stream>  : Stream"
 
@@ -30,7 +30,7 @@
   [fold:with: init f]
     (let ((r [self next]))
       (if [r is: None] init
-        [[self rest] fold: (f init [r slotAt: (quote value)]) with: f]))
+        [[self rest] fold: (f init r.value) with: f]))
 
   ; bounded take — safe for infinite streams. overrides Iterable's
   ; provided take: (which materializes via toList).
@@ -38,7 +38,7 @@
     (if [n <= 0] nil
       (let ((r [self next]))
         (if [r is: None] nil
-          (cons [r slotAt: (quote value)] [[self rest] take: [n - 1]]))))
+          (cons r.value [[self rest] take: [n - 1]]))))
 
   ; skip n — returns the remaining stream.
   [drop: n]

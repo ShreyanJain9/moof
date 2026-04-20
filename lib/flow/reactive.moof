@@ -33,7 +33,7 @@
   { value:       initial
     subscribers: nil
 
-    [typeName] (quote Atom)
+    [typeName] 'Atom
 
     [get] @value
 
@@ -92,7 +92,7 @@
     valid:       false
     subscribers: nil
 
-    [typeName] (quote Signal)
+    [typeName] 'Signal
 
     [get]
       (if @valid @cached

@@ -98,7 +98,7 @@
         (selector [[args cdr] car])
         (params [[[args cdr] cdr] car])
         (body (%seq-body [[[args cdr] cdr] cdr]))
-        (handler (eval `(fn ,(cons (quote self) params) ,body) $e)))
+        (handler (eval `(fn ,(cons 'self params) ,body) $e)))
     [proto handle: selector with: handler])))
 
 (def alias (vau (proto new-sel existing-sel) $e
@@ -119,7 +119,7 @@
 
 (def nil? (fn (x) (eq x nil)))
 (def some? (fn (x) (not (eq x nil))))
-(def cons? (fn (x) [[x type] identical: (quote Cons)]))
+(def cons? (fn (x) [[x type] identical: 'Cons]))
 ; member? uses equal: (content equality), not eq (identity).
 ; this is what callers want: String/Table/Cons members dedupe
 ; structurally; primitives and prototypes still short-circuit on
