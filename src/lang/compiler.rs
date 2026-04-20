@@ -798,8 +798,7 @@ impl<'a> Compiler<'a> {
                 self.emit_load_const(dst, form);
                 return Ok(());
             }
-            crate::object::HeapObject::General { .. } |
-            crate::object::HeapObject::Environment { .. } => {
+            crate::object::HeapObject::General { .. } => {
                 self.emit_load_const(dst, form);
                 return Ok(());
             }

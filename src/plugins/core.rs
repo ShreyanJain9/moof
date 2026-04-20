@@ -18,7 +18,7 @@ impl super::Plugin for CorePlugin {
         let obj_id = object_proto.as_any_object().unwrap();
 
         // fix up root environment's parent to Object (it was NIL at allocation time)
-        if let HeapObject::Environment { parent, .. } = heap.get_mut(heap.env) {
+        if let HeapObject::General { parent, .. } = heap.get_mut(heap.env) {
             *parent = object_proto;
         }
 
@@ -211,7 +211,6 @@ impl super::Plugin for CorePlugin {
                             HeapObject::Text(_) => "String",
                             HeapObject::Buffer(_) => "Bytes",
                             HeapObject::Table { .. } => "Table",
-                            HeapObject::Environment { .. } => "Environment",
                         }
                     }
                 } else { "Unknown" };

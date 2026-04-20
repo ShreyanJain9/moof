@@ -54,9 +54,6 @@ impl Heap {
                     .collect();
                 format!("{{ {} }}", slots.join(" "))
             }
-            HeapObject::Environment { bindings, .. } => {
-                format!("<environment: {} bindings>", bindings.len())
-            }
         }
     }
 
@@ -169,9 +166,6 @@ impl Heap {
                 };
 
                 format!("  {{ {nslots} slots, {nhandlers} handlers{handler_info}\n{}\n  }}", lines.join("\n"))
-            }
-            HeapObject::Environment { bindings, .. } => {
-                format!("<environment: {} bindings>", bindings.len())
             }
         }
     }

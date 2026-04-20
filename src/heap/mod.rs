@@ -159,10 +159,15 @@ impl Heap {
             send_cache: std::collections::HashMap::new(),
         };
 
-        // allocate root environment object (gets ID 0)
-        h.env = h.alloc(HeapObject::Environment {
+        // allocate root environment object (gets ID 0). The env is a plain
+        // General: bindings live in its slot_names/slot_values, parent
+        // delegates to Object (fixed up once PROTO_OBJ is registered). No
+        // more Environment variant — envs are just objects with slots that
+        // grow dynamically via slot_set.
+        h.env = h.alloc(HeapObject::General {
             parent: Value::NIL, // fixed up in register_type_protos
-            bindings: std::collections::HashMap::new(),
+            slot_names: Vec::new(),
+            slot_values: Vec::new(),
             handlers: Vec::new(),
         });
 
@@ -201,6 +206,19 @@ impl Heap {
         &self.symbols[id as usize]
     }
 
+    /// Canonicalize a Table/HashMap key: intern String content as a symbol
+    /// so two equal strings land in the same bucket. Other Values pass
+    /// through (bit-hashing is correct for everything else).
+    pub fn canonicalize_key(&mut self, key: Value) -> Value {
+        if let Some(id) = key.as_any_object() {
+            if let HeapObject::Text(s) = self.get(id) {
+                let s = s.clone();
+                return Value::symbol(self.intern(&s));
+            }
+        }
+        key
+    }
+
     /// Look up a symbol ID by name without interning. Returns None if not found.
     pub fn find_symbol(&self, name: &str) -> Option<u32> {
         self.sym_reverse.get(name).copied()
@@ -226,9 +244,7 @@ impl Heap {
     }
 
     pub fn env_remove(&mut self, sym: u32) {
-        if let HeapObject::Environment { bindings, .. } = self.get_mut(self.env) {
-            bindings.remove(&sym);
-        }
+        self.get_mut(self.env).slot_remove(sym);
     }
 
     // -- object allocation --
@@ -315,7 +331,7 @@ impl Heap {
     }
 
     pub fn alloc_table_seq(&mut self, items: Vec<Value>) -> Value {
-        self.alloc_val(HeapObject::Table { seq: items, map: Vec::new() })
+        self.alloc_val(HeapObject::Table { seq: items, map: indexmap::IndexMap::new() })
     }
 
     /// Create an Act for a cross-vat send (pending, with target info).
@@ -571,8 +587,7 @@ impl Heap {
         // for heap objects, check the variant first
         if let Some(id) = val.as_any_object() {
             match self.get(id) {
-                HeapObject::General { parent, .. } |
-                HeapObject::Environment { parent, .. } => return *parent,
+                HeapObject::General { parent, .. } => return *parent,
                 HeapObject::Pair(_, _) => return self.type_protos.get(PROTO_CONS).copied().unwrap_or(Value::NIL),
                 HeapObject::Text(_) => return self.type_protos.get(PROTO_STR).copied().unwrap_or(Value::NIL),
                 HeapObject::Buffer(_) => return self.type_protos.get(PROTO_BYTES).copied().unwrap_or(Value::NIL),
@@ -592,14 +607,10 @@ impl Heap {
         // start with the receiver's own handlers — General and Environment
         // both carry per-instance handler tables (closures are Generals).
         if let Some(id) = val.as_any_object() {
-            match self.get(id) {
-                HeapObject::General { handlers, .. }
-                | HeapObject::Environment { handlers, .. } => {
-                    for &(sel, _) in handlers {
-                        if seen.insert(sel) { names.push(sel); }
-                    }
+            if let HeapObject::General { handlers, .. } = self.get(id) {
+                for &(sel, _) in handlers {
+                    if seen.insert(sel) { names.push(sel); }
                 }
-                _ => {}
             }
         }
 
@@ -609,8 +620,7 @@ impl Heap {
             if proto.is_nil() { break; }
             let Some(id) = proto.as_any_object() else { break; };
             let (handlers, next) = match self.get(id) {
-                HeapObject::General { handlers, parent, .. }
-                | HeapObject::Environment { handlers, parent, .. } => (handlers, *parent),
+                HeapObject::General { handlers, parent, .. } => (handlers, *parent),
                 _ => break,
             };
             for &(sel, _) in handlers {

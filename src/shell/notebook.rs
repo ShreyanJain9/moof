@@ -148,7 +148,6 @@ fn type_name_of(heap: &Heap, val: Value) -> String {
             HeapObject::Text(_) => "String".to_string(),
             HeapObject::Buffer(_) => "Bytes".to_string(),
             HeapObject::Table { .. } => "Table".to_string(),
-            HeapObject::Environment { .. } => "Environment".to_string(),
         }
     } else {
         "primitive".to_string()

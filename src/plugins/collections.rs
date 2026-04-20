@@ -209,20 +209,16 @@ impl Plugin for CollectionsPlugin {
 
         native(heap, table_id, "at:", |heap, receiver, args| {
             let id = receiver.as_any_object().ok_or("at: not a table")?;
-            let key = args.first().copied().unwrap_or(Value::NIL);
+            let raw_key = args.first().copied().unwrap_or(Value::NIL);
+            let key = heap.canonicalize_key(raw_key);
             match heap.get(id) {
                 HeapObject::Table { seq, map } => {
-                    // try integer index into seq first
                     if let Some(idx) = key.as_integer() {
                         if idx >= 0 && (idx as usize) < seq.len() {
                             return Ok(seq[idx as usize]);
                         }
                     }
-                    // then check map (content equality for strings)
-                    for (k, v) in map {
-                        if heap.values_equal(*k, key) { return Ok(*v); }
-                    }
-                    Ok(Value::NIL)
+                    Ok(map.get(&key).copied().unwrap_or(Value::NIL))
                 }
                 _ => Err("at: not a Table".into()),
             }
@@ -230,7 +226,8 @@ impl Plugin for CollectionsPlugin {
         // at:put: — returns a NEW table (non-destructive)
         native(heap, table_id, "at:put:", |heap, receiver, args| {
             let id = receiver.as_any_object().ok_or("at:put: not a table")?;
-            let key = args.first().copied().unwrap_or(Value::NIL);
+            let raw_key = args.first().copied().unwrap_or(Value::NIL);
+            let key = heap.canonicalize_key(raw_key);
             let val = args.get(1).copied().unwrap_or(Value::NIL);
             match heap.get(id) {
                 HeapObject::Table { seq, map } => {
@@ -242,13 +239,7 @@ impl Plugin for CollectionsPlugin {
                             return Ok(heap.alloc_val(HeapObject::Table { seq: new_seq, map: new_map }));
                         }
                     }
-                    // map entry: update existing or append
-                    let existing = new_map.iter().position(|(k, _)| heap.values_equal(*k, key));
-                    if let Some(pos) = existing {
-                        new_map[pos].1 = val;
-                    } else {
-                        new_map.push((key, val));
-                    }
+                    new_map.insert(key, val);
                     Ok(heap.alloc_val(HeapObject::Table { seq: new_seq, map: new_map }))
                 }
                 _ => Err("at:put: not a Table".into()),
@@ -277,7 +268,7 @@ impl Plugin for CollectionsPlugin {
         native(heap, table_id, "keys", |heap, receiver, _args| {
             let id = receiver.as_any_object().ok_or("keys: not a table")?;
             let keys: Vec<Value> = match heap.get(id) {
-                HeapObject::Table { map, .. } => map.iter().map(|(k, _)| *k).collect(),
+                HeapObject::Table { map, .. } => map.keys().copied().collect(),
                 _ => return Err("keys: not a Table".into()),
             };
             Ok(heap.list(&keys))
@@ -285,7 +276,7 @@ impl Plugin for CollectionsPlugin {
         native(heap, table_id, "values", |heap, receiver, _args| {
             let id = receiver.as_any_object().ok_or("values: not a table")?;
             let vals: Vec<Value> = match heap.get(id) {
-                HeapObject::Table { map, .. } => map.iter().map(|(_, v)| *v).collect(),
+                HeapObject::Table { map, .. } => map.values().copied().collect(),
                 _ => return Err("values: not a Table".into()),
             };
             Ok(heap.list(&vals))
@@ -296,16 +287,14 @@ impl Plugin for CollectionsPlugin {
         });
         native(heap, table_id, "contains:", |heap, receiver, args| {
             let id = receiver.as_any_object().ok_or("contains: not a table")?;
-            let key = args.first().copied().unwrap_or(Value::NIL);
+            let raw_key = args.first().copied().unwrap_or(Value::NIL);
+            let key = heap.canonicalize_key(raw_key);
             match heap.get(id) {
                 HeapObject::Table { seq, map } => {
                     for v in seq {
-                        if heap.values_equal(*v, key) { return Ok(Value::TRUE); }
+                        if heap.values_equal(*v, raw_key) { return Ok(Value::TRUE); }
                     }
-                    for (k, _) in map {
-                        if heap.values_equal(*k, key) { return Ok(Value::TRUE); }
-                    }
-                    Ok(Value::FALSE)
+                    Ok(Value::boolean(map.contains_key(&key)))
                 }
                 _ => Err("contains: not a Table".into()),
             }
@@ -313,13 +302,12 @@ impl Plugin for CollectionsPlugin {
         // remove: — returns a NEW table with key removed (non-destructive)
         native(heap, table_id, "remove:", |heap, receiver, args| {
             let id = receiver.as_any_object().ok_or("remove: not a table")?;
-            let key = args.first().copied().unwrap_or(Value::NIL);
+            let raw_key = args.first().copied().unwrap_or(Value::NIL);
+            let key = heap.canonicalize_key(raw_key);
             match heap.get(id) {
                 HeapObject::Table { seq, map } => {
-                    let new_map: Vec<(Value, Value)> = map.iter()
-                        .filter(|(k, _)| !heap.values_equal(*k, key))
-                        .cloned()
-                        .collect();
+                    let mut new_map = map.clone();
+                    new_map.shift_remove(&key);
                     Ok(heap.alloc_val(HeapObject::Table { seq: seq.clone(), map: new_map }))
                 }
                 _ => Err("remove: not a Table".into()),

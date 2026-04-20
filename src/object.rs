@@ -2,23 +2,23 @@
 //
 // The VM has optimized internal representations for common shapes,
 // but semantically everything is an object that responds to messages.
-//
-// Fixed-shape slots: an object's slot NAMES are sealed at creation.
-// Only values can change. Handlers are open — add them anytime.
 
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use serde::{Serialize, Deserialize};
 use crate::value::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HeapObject {
-    /// General object: parent + fixed named slots + open handlers.
-    /// Closures are Generals with __code_idx / __arity / __is_operative
-    /// slots plus their captures as regular slots. A native `call:` on
-    /// the Closure prototype invokes the stored bytecode.
+    /// General object: parent + named slots + handlers.
+    /// Slots are NOT fixed-shape — new slots can be added via slot_set.
+    /// (Used to be fixed; we relaxed that when folding Environment in. If
+    /// a use-site wants to reject adding new slots, it can check slot_get
+    /// first.)
+    /// Closures are Generals with code_idx / arity / is_operative / is_pure
+    /// slots plus their captures as regular slots.
     General {
         parent: Value,
-        slot_names: Vec<u32>,           // symbol IDs, fixed at creation
+        slot_names: Vec<u32>,           // symbol IDs
         slot_values: Vec<Value>,        // values, same length as slot_names
         handlers: Vec<(u32, Value)>,    // selector → handler value
     },
@@ -33,19 +33,13 @@ pub enum HeapObject {
     Buffer(Vec<u8>),
 
     /// Lua-style table: sequential part + keyed part.
-    /// One data structure replaces both Array and HashMap.
+    /// `map` is IndexMap-backed → O(1) keyed lookup AND insertion-order
+    /// iteration (crucial for stable describe/show of sets + bags). String
+    /// keys are content-normalized at insert-time via canonicalize_key —
+    /// equal strings land in the same bucket.
     Table {
-        seq: Vec<Value>,              // sequential (integer-indexed, 0-based)
-        map: Vec<(Value, Value)>,     // keyed (arbitrary key-value pairs)
-    },
-
-    /// Environment: dynamic-shape binding object.
-    /// Unlike General (fixed shape), new bindings can be added at any time.
-    /// Used as the root namespace — `def` writes here, `GetGlobal` reads here.
-    Environment {
-        parent: Value,                        // scope chain (NIL for root)
-        bindings: HashMap<u32, Value>,        // sym → value, O(1), dynamic
-        handlers: Vec<(u32, Value)>,          // like all objects
+        seq: Vec<Value>,
+        map: IndexMap<Value, Value>,
     },
 }
 
@@ -72,8 +66,7 @@ impl HeapObject {
     /// Get the parent value (for delegation).
     pub fn parent(&self) -> Value {
         match self {
-            HeapObject::General { parent, .. } |
-            HeapObject::Environment { parent, .. } => *parent,
+            HeapObject::General { parent, .. } => *parent,
             // optimized types delegate to their type prototype (resolved by dispatch)
             _ => Value::NIL,
         }
@@ -86,32 +79,37 @@ impl HeapObject {
                 slot_names.iter().position(|n| *n == name)
                     .map(|i| slot_values[i])
             }
-            HeapObject::Environment { bindings, .. } => {
-                bindings.get(&name).copied()
-            }
-            HeapObject::Pair(_car, _cdr) => {
-                None // handled by dispatch via Cons prototype
-            }
+            HeapObject::Pair(_car, _cdr) => None, // handled by dispatch via Cons proto
             _ => None,
         }
     }
 
-    /// Set a slot value by name. Returns false if slot doesn't exist (shape is fixed).
+    /// Set a slot value by name. Grows the object if the slot doesn't exist —
+    /// environments add bindings this way. Always succeeds (returns true for
+    /// legacy callers that checked the result).
     pub fn slot_set(&mut self, name: u32, val: Value) -> bool {
         match self {
             HeapObject::General { slot_names, slot_values, .. } => {
                 if let Some(i) = slot_names.iter().position(|n| *n == name) {
                     slot_values[i] = val;
-                    true
                 } else {
-                    false // shape is fixed — can't add slots
+                    slot_names.push(name);
+                    slot_values.push(val);
                 }
-            }
-            HeapObject::Environment { bindings, .. } => {
-                bindings.insert(name, val);
-                true // dynamic shape — always succeeds
+                true
             }
             _ => false,
+        }
+    }
+
+    /// Remove a slot by name. No-op if the slot doesn't exist or the
+    /// object can't be shrunk. Used by env_remove during eval's save/restore.
+    pub fn slot_remove(&mut self, name: u32) {
+        if let HeapObject::General { slot_names, slot_values, .. } = self {
+            if let Some(i) = slot_names.iter().position(|n| *n == name) {
+                slot_names.remove(i);
+                slot_values.remove(i);
+            }
         }
     }
 
@@ -119,7 +117,6 @@ impl HeapObject {
     pub fn slot_names(&self) -> Vec<u32> {
         match self {
             HeapObject::General { slot_names, .. } => slot_names.clone(),
-            HeapObject::Environment { bindings, .. } => bindings.keys().copied().collect(),
             _ => Vec::new(),
         }
     }
@@ -127,8 +124,7 @@ impl HeapObject {
     /// Look up a handler by selector (symbol ID).
     pub fn handler_get(&self, selector: u32) -> Option<Value> {
         match self {
-            HeapObject::General { handlers, .. } |
-            HeapObject::Environment { handlers, .. } => {
+            HeapObject::General { handlers, .. } => {
                 handlers.iter().find(|(s, _)| *s == selector).map(|(_, v)| *v)
             }
             _ => None,
@@ -138,8 +134,7 @@ impl HeapObject {
     /// Set (or add) a handler. Handlers are open — always succeeds.
     pub fn handler_set(&mut self, selector: u32, handler: Value) {
         match self {
-            HeapObject::General { handlers, .. } |
-            HeapObject::Environment { handlers, .. } => {
+            HeapObject::General { handlers, .. } => {
                 if let Some(entry) = handlers.iter_mut().find(|(s, _)| *s == selector) {
                     entry.1 = handler;
                 } else {
@@ -156,8 +151,7 @@ impl HeapObject {
     /// Get all handler names (for introspection).
     pub fn handler_names(&self) -> Vec<u32> {
         match self {
-            HeapObject::General { handlers, .. } |
-            HeapObject::Environment { handlers, .. } => {
+            HeapObject::General { handlers, .. } => {
                 handlers.iter().map(|(s, _)| *s).collect()
             }
             _ => Vec::new(),

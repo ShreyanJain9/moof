@@ -546,15 +546,21 @@ impl VM {
                     for i in 0..nseq {
                         seq.push(f.regs[f.code[f.pc + i] as usize]);
                     }
-                    let mut map = Vec::with_capacity(nmap);
+                    // collect raw key/val regs first; canonicalize keys via
+                    // the heap so String literals become symbol-hashed.
+                    let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(nmap);
                     for i in 0..nmap {
                         let ki = nseq + i * 2;
                         let vi = nseq + i * 2 + 1;
                         let key = f.regs[f.code[f.pc + ki] as usize];
                         let val = f.regs[f.code[f.pc + vi] as usize];
-                        map.push((key, val));
+                        pairs.push((key, val));
                     }
                     f.pc += padded;
+                    let mut map: indexmap::IndexMap<Value, Value> = indexmap::IndexMap::with_capacity(nmap);
+                    for (k, v) in pairs {
+                        map.insert(heap.canonicalize_key(k), v);
+                    }
                     f.regs[a as usize] = heap.alloc_val(crate::object::HeapObject::Table { seq, map });
                 }
 

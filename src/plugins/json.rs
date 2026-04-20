@@ -99,11 +99,11 @@ fn from_json(heap: &mut Heap, jv: &JV) -> Value {
         }
         JV::Object(obj) => {
             // JSON object → Table with keyed part.
-            let mut map: Vec<(Value, Value)> = Vec::with_capacity(obj.len());
+            let mut map: indexmap::IndexMap<Value, Value> = indexmap::IndexMap::with_capacity(obj.len());
             for (k, v) in obj {
                 let key = heap.alloc_string(k);
                 let val = from_json(heap, v);
-                map.push((key, val));
+                map.insert(key, val);
             }
             heap.alloc_val(HeapObject::Table { seq: Vec::new(), map })
         }
@@ -171,7 +171,6 @@ fn to_json(heap: &Heap, v: Value) -> Result<JV, String> {
             }
             Ok(JV::Object(obj))
         }
-        HeapObject::Environment { .. } => Err("cannot serialize environment".into()),
         HeapObject::Buffer(_) => Err("cannot serialize bytes (use base64 first)".into()),
     }
 }

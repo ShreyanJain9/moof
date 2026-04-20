@@ -595,7 +595,7 @@ impl Scheduler {
                     let new_seq: Vec<Value> = seq.iter()
                         .map(|v| self.copy_value_across(*v, _from_vat, to_vat))
                         .collect();
-                    let new_map: Vec<(Value, Value)> = map.iter()
+                    let new_map: indexmap::IndexMap<Value, Value> = map.iter()
                         .map(|(k, v)| {
                             let nk = self.copy_value_across(*k, _from_vat, to_vat);
                             let nv = self.copy_value_across(*v, _from_vat, to_vat);

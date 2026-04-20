@@ -147,11 +147,6 @@ impl Heap {
                     mark_value_id(*v, worklist, marked);
                 }
             }
-            HeapObject::Environment { parent, bindings, handlers } => {
-                mark_value_id(*parent, worklist, marked);
-                for (_, v) in bindings { mark_value_id(*v, worklist, marked); }
-                for (_, v) in handlers { mark_value_id(*v, worklist, marked); }
-            }
         }
     }
 }
