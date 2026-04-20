@@ -1,47 +1,99 @@
 ; server.moof — defserver: parameterized server vats
 ;
-; (defserver Name (param1 param2 ...) body)
-;   → defines Name as a fn taking (param1 param2 ...) that spawns a new
-;     server vat. body evaluates inside the child vat with params bound,
-;     and must return the server object (whose handlers become its message
-;     surface). `(Name arg1 arg2)` returns Act<FarRef>.
-;
-; (defserver Name params body)       ; params is a single symbol → variadic
-;   → the symbol becomes bound to the full arg list inside the body.
+; a defserver form declares a server as a set of sections — docstring,
+; capabilities, inheritance, body — in any order. only the body is
+; required. no parser magic: defserver is a vau that walks its args and
+; desugars.
 ;
 ;   (defserver Atom (initial)
+;     "a cell with observable state transitions"
+;     (needs)
+;     (inherits)
 ;     { value: initial
+;       subscribers: nil
 ;       [get] @value
-;       [swap: new] (update { value: new } new) })
+;       [swap: new]
+;         [[self _notify-chain @subscribers new] then:
+;           |_| (update { value: new } new)]
+;       ... })
 ;
-;   (do (a <- (Atom 0))
-;       (_ <- [a swap: 42])
-;       [a get])                    ; Act<42>
+;   (defserver Logger (tag)
+;     (needs console)
+;     { [log: msg] [console println: (str tag ": " msg)] })
 ;
-; no capability support yet — for services that need console/clock/etc.,
-; pass them explicitly as regular params.
+; construction: positional. init params first, capabilities after in the
+; order (needs …) declared them.
+;
+;   (Atom 0)
+;   (Logger "net" console-ref)
+;
+; sections (all optional except body):
+;   "docstring"          → queryable via [Name describe] / doc tooling
+;   (needs cap1 cap2 …)  → explicit capability params, added after inits
+;   (inherits Proto)     → swap the body's object-literal parent for Proto
+;   { … }                → the server's object — slots + handlers
+;
+; variadic init params (a symbol instead of a list) are supported but
+; can't be combined with (needs …): with var args, caps would blur into
+; the rest-list, so use one or the other.
+
+(defn %is-cons-headed? (form head)
+  (and (cons? form)
+       [[form car] identical: head]))
+
+(defn %list-cat (a b)
+  (if (nil? a) b
+    (if (nil? b) a
+      [a append: b])))
+
+; walk the forms after params, classifying each. returns a 4-slot record.
+; the body (object literal) MUST appear last — every other form is
+; metadata and contributes to the preceding sections.
+(defn %defserver-parse (forms)
+  (if (nil? forms) { doc: nil caps: nil inherits: nil body: nil }
+    (let ((head [forms car])
+          (rest (%defserver-parse [forms cdr])))
+      (if (%is-cons-headed? head (quote needs))
+        [rest with: { caps: [head cdr] }]
+        (if (%is-cons-headed? head (quote inherits))
+          [rest with: { inherits: [[head cdr] car] }]
+          (if [[head typeName] identical: (quote String)]
+            [rest with: { doc: head }]
+            ; otherwise: body is the last non-metadata form
+            [rest with: { body: head }]))))))
+
+; %override-parent body-ast new-parent → replace the %object-literal's
+; parent with new-parent. the body is already parsed into
+; (%object-literal parent (slot-names) slot-vals… methods inits), so
+; we surgically swap the second element.
+(defn %override-parent (body-ast new-parent)
+  (cons [body-ast car]
+        (cons new-parent
+              [[body-ast cdr] cdr])))
 
 (def defserver (vau args $e
   (let ((name [args car])
         (rest [args cdr])
         (params [rest car])
-        (after-params [rest cdr])
-        ; optional docstring: if there are 2+ forms after params, the first
-        ; is the docstring. detect by cdr-of-cdr being non-nil.
-        (more [after-params cdr])
-        (has-doc (some? more))
-        (body (if has-doc [more car] [after-params car]))
+        (forms [rest cdr])
+        (parsed (%defserver-parse forms))
+        (body (if [parsed slotAt: (quote inherits)]
+                (%override-parent [parsed slotAt: (quote body)]
+                                  [parsed slotAt: (quote inherits)])
+                [parsed slotAt: (quote body)]))
+        (caps [parsed slotAt: (quote caps)])
         ; variadic when params is a symbol (not a cons/list, not nil)
-        (variadic (and (not (cons? params)) (not (nil? params)))))
-    ; variadic: (fn params body) binds params to the full arg list.
-    ; positional (list of syms): `(list ,@params)` reconstructs the arg
-    ; list to hand to serve:with:.
+        (variadic (and (not (cons? params)) (not (nil? params))))
+        ; final construction param list: user init params + capability params
+        (all-params (if variadic params (%list-cat params caps))))
     (if variadic
       (eval `(def ,name
         (fn ,params
           [Vat serve:with: (fn ,params ,body) ,params]))
         $e)
       (eval `(def ,name
-        (fn ,params
-          [Vat serve:with: (fn ,params ,body) (list ,@params)]))
+        (fn ,all-params
+          [Vat serve:with:
+            (fn ,all-params ,body)
+            (list ,@all-params)]))
         $e)))))
