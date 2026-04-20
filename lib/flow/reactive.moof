@@ -29,32 +29,41 @@
 (defn Atom (initial)
   [Vat serve:with:
     (fn (init)
-      { value: init
-        subscribers: nil
+      ; notify-all: chain notify messages sequentially so the Act returned
+      ; by swap only resolves after every subscriber has acknowledged. this
+      ; is the causal glue that lets swap guarantee "my effects propagate
+      ; before my reply." defined here INSIDE the spawn closure so it lives
+      ; in the Atom's child vat — BOOTSTRAP_FILES don't include reactive.moof.
+      (let ((notify-all (fn (notify-all subs new)
+                          (if (nil? subs) new
+                            [[[subs car] notify: new] then:
+                              |_| (notify-all notify-all [subs cdr] new)]))))
+        { value: init
+          subscribers: nil
 
-        [typeName] (quote Atom)
+          [typeName] (quote Atom)
 
-        [get] @value
+          [get] @value
 
-        [swap: new]
-          (let ((_ [@subscribers each: |s| [s notify: new]]))
-            (update { value: new } new))
+          [swap: new]
+            [(notify-all notify-all @subscribers new) then:
+              |_| (update { value: new } new)]
 
-        [update: f]
-          [self swap: (f @value)]
+          [update: f]
+            [self swap: (f @value)]
 
-        [subscribe: sub]
-          (update { subscribers: (cons sub @subscribers) } nil)
+          [subscribe: sub]
+            (update { subscribers: (cons sub @subscribers) } nil)
 
-        [unsubscribe: sub]
-          (update { subscribers: [@subscribers reject: |s| [s identical: sub]] }
-                  nil)
+          [unsubscribe: sub]
+            (update { subscribers: [@subscribers reject: |s| [s identical: sub]] }
+                    nil)
 
-        [describe]
-          (str "<Atom " [@value describe] ">")
-        [show]
-          (str [self describe] "  : Atom")
-      })
+          [describe]
+            (str "<Atom " [@value describe] ">")
+          [show]
+            (str [self describe] "  : Atom")
+        }))
     (list initial)])
 
 ; ══════════════════════════════════════════════════════════

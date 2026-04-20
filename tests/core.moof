@@ -443,6 +443,18 @@
         [s get])
     30)
 
+  ; full reactive pipeline: Atom swap notifies all subscribers before
+  ; replying (causal propagation via notify-all chain), so a subsequent
+  ; [s get] on a wired signal sees invalidated cache and recomputes.
+  (test "signal reacts to swap"
+    (do (a <- (Atom 3))
+        (s <- (wire-reactive (Signal || (do (v <- [a get]) [v * 10]) a)))
+        (v1 <- [s get])
+        (_ <- [a swap: 5])
+        (v2 <- [s get])
+        (list v1 v2))
+    (list 30 50))
+
   ; ── wave 4.8: Bag — multiset ────────────────────────
 
   (test "bag typeName"   [(Bag "x") typeName]          (quote Bag))
