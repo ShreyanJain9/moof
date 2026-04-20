@@ -189,16 +189,18 @@ impl super::Plugin for CorePlugin {
                 else if receiver.is_float() { "Float" }
                 else if receiver.is_symbol() { "Symbol" }
                 else if let Some(id) = receiver.as_any_object() {
-                    match heap.get(id) {
-                        HeapObject::Closure { is_operative, .. } => {
-                            if *is_operative { "Operative" } else { "Fn" }
+                    // closures are Generals now — detect via __code_idx
+                    if let Some((_, is_op)) = heap.as_closure(receiver) {
+                        if is_op { "Operative" } else { "Fn" }
+                    } else {
+                        match heap.get(id) {
+                            HeapObject::General { .. } => "Object",
+                            HeapObject::Pair(_, _) => "Cons",
+                            HeapObject::Text(_) => "String",
+                            HeapObject::Buffer(_) => "Bytes",
+                            HeapObject::Table { .. } => "Table",
+                            HeapObject::Environment { .. } => "Environment",
                         }
-                        HeapObject::General { .. } => "Object",
-                        HeapObject::Pair(_, _) => "Cons",
-                        HeapObject::Text(_) => "String",
-                        HeapObject::Buffer(_) => "Bytes",
-                        HeapObject::Table { .. } => "Table",
-                        HeapObject::Environment { .. } => "Environment",
                     }
                 } else { "Unknown" };
             Ok(Value::symbol(heap.intern(name)))

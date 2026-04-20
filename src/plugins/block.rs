@@ -1,6 +1,5 @@
 use crate::plugins::{Plugin, native};
 use crate::heap::*;
-use crate::object::HeapObject;
 use crate::value::Value;
 
 pub struct BlockPlugin;
@@ -18,60 +17,33 @@ impl Plugin for BlockPlugin {
 
         // Block: arity — return the arity of the closure
         native(heap, block_id, "arity", |heap, receiver, _args| {
-            let id = receiver.as_any_object().ok_or("arity: not a closure")?;
-            match heap.get(id) {
-                HeapObject::Closure { arity, .. } => Ok(Value::integer(*arity as i64)),
-                _ => Err("arity: not a closure".into()),
-            }
+            heap.closure_arity(receiver)
+                .map(|n| Value::integer(n as i64))
+                .ok_or_else(|| "arity: not a closure".into())
         });
 
         // Block: pure? — true if no FarRef captures (safe to memoize/parallelize)
         native(heap, block_id, "pure?", |heap, receiver, _args| {
-            let id = receiver.as_any_object().ok_or("pure?: not a closure")?;
-            match heap.get(id) {
-                HeapObject::Closure { is_pure, .. } => Ok(Value::boolean(*is_pure)),
-                _ => Err("pure?: not a closure".into()),
+            if heap.as_closure(receiver).is_none() {
+                return Err("pure?: not a closure".into());
             }
+            Ok(Value::boolean(heap.closure_is_pure(receiver)))
         });
 
         // Block: operative? — true if this closure is an operative (fexpr)
         native(heap, block_id, "operative?", |heap, receiver, _args| {
-            let id = receiver.as_any_object().ok_or("operative?: not a closure")?;
-            match heap.get(id) {
-                HeapObject::Closure { is_operative, .. } => Ok(Value::boolean(*is_operative)),
-                _ => Err("operative?: not a closure".into()),
-            }
+            let (_, is_op) = heap.as_closure(receiver).ok_or("operative?: not a closure")?;
+            Ok(Value::boolean(is_op))
         });
 
-        // Block: wrap — convert operative to applicative (Kernel's wrap)
-        // [operative wrap] => applicative (same code, args evaluated by caller)
+        // Block: wrap — convert operative to applicative (Kernel's wrap).
+        // [operative wrap] => applicative (same code, args evaluated by caller).
+        // Produces a new closure General with is_operative=false.
         native(heap, block_id, "wrap", |heap, receiver, _args| {
-            let id = receiver.as_any_object().ok_or("wrap: not a closure")?;
-            match heap.get(id) {
-                HeapObject::Closure { code_idx, arity, captures, parent, .. } => {
-                    let code_idx = *code_idx;
-                    let arity = *arity;
-                    let parent = *parent;
-                    let captures = captures.clone();
-                    let farref_proto = heap.lookup_type("FarRef");
-                    let is_pure = farref_proto.is_nil() ||
-                        !captures.iter().any(|(_, v)| heap.prototype_of(*v) == farref_proto);
-                    let new_id = heap.alloc(HeapObject::Closure {
-                        parent,
-                        code_idx,
-                        arity,
-                        is_operative: false,
-                        is_pure,
-                        captures,
-                        handlers: Vec::new(),
-                    });
-                    let val = Value::nursery(new_id);
-                    let call_sym = heap.sym_call;
-                    heap.get_mut(new_id).handler_set(call_sym, val);
-                    Ok(val)
-                }
-                _ => Err("wrap: not a closure".into()),
-            }
+            let (code_idx, _) = heap.as_closure(receiver).ok_or("wrap: not a closure")?;
+            let arity = heap.closure_arity(receiver).unwrap_or(0);
+            let captures = heap.closure_captures(receiver);
+            Ok(heap.make_closure(code_idx, arity, false, &captures))
         });
 
         // Block: describe — human-readable description

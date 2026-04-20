@@ -66,10 +66,11 @@ fn spawn_request(heap: &mut Heap, args: &[Value], with_args: bool, serve: bool) 
             return Err("spawn:with: first arg must be a closure".into());
         }
         SpawnPayload::ClosureWithArgs(first, heap.list_to_vec(args_val))
+    } else if heap.as_closure(first).is_some() {
+        SpawnPayload::Closure(first)
     } else {
         match first.as_any_object().map(|id| heap.get(id)) {
-            Some(HeapObject::Text(s))     => SpawnPayload::Source(s.clone()),
-            Some(HeapObject::Closure { .. }) => SpawnPayload::Closure(first),
+            Some(HeapObject::Text(s)) => SpawnPayload::Source(s.clone()),
             _ => return Err("spawn: argument must be a block or source string".into()),
         }
     };

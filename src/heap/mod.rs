@@ -439,49 +439,126 @@ impl Heap {
         false
     }
 
-    /// Create a closure object. Returns a nursery Value.
+    /// Create a closure object: a General with PROTO_CLOSURE parent and a
+    /// standard set of metadata slots (__code_idx, __arity, __is_operative,
+    /// __is_pure) followed by the captures as regular named slots. A `call:`
+    /// handler pointing to self is installed so dispatch finds it; the VM's
+    /// is-closure fast path reads the __code_idx slot to invoke bytecode.
     pub fn make_closure(&mut self, code_idx: usize, arity: u8, is_operative: bool, captures: &[(u32, Value)]) -> Value {
-        // closures delegate to Block prototype (→ Object)
         let parent = self.type_protos.get(PROTO_CLOSURE).copied()
             .unwrap_or_else(|| self.type_protos[PROTO_OBJ]);
-        // a closure is pure if none of its captures are FarRefs
+
+        // compute is_pure before borrowing self mutably for intern.
         let farref_proto = self.lookup_type("FarRef");
         let is_pure = if farref_proto.is_nil() {
-            true // no FarRef type yet — assume pure
+            true
         } else {
             !captures.iter().any(|(_, val)| self.prototype_of(*val) == farref_proto)
         };
-        let id = self.alloc(HeapObject::Closure {
+
+        // metadata slots first, then captures.
+        let code_idx_sym = self.intern("__code_idx");
+        let arity_sym = self.intern("__arity");
+        let is_op_sym = self.intern("__is_operative");
+        let is_pure_sym = self.intern("__is_pure");
+
+        let mut slot_names: Vec<u32> = Vec::with_capacity(4 + captures.len());
+        let mut slot_values: Vec<Value> = Vec::with_capacity(4 + captures.len());
+        slot_names.push(code_idx_sym);  slot_values.push(Value::integer(code_idx as i64));
+        slot_names.push(arity_sym);     slot_values.push(Value::integer(arity as i64));
+        slot_names.push(is_op_sym);     slot_values.push(Value::boolean(is_operative));
+        slot_names.push(is_pure_sym);   slot_values.push(Value::boolean(is_pure));
+        for (sym, val) in captures {
+            slot_names.push(*sym);
+            slot_values.push(*val);
+        }
+
+        let id = self.alloc(HeapObject::General {
             parent,
-            code_idx,
-            arity,
-            is_operative,
-            is_pure,
-            captures: captures.to_vec(),
+            slot_names,
+            slot_values,
             handlers: Vec::new(),
         });
         let val = Value::nursery(id);
-        // set call: handler to self — dispatch uses this to invoke the closure
+        // set call: handler to self — VM dispatch looks up call: on the
+        // receiver, finds this self-reference, sees a closure-shaped General
+        // (has __code_idx slot), and jumps to bytecode.
         let call_sym = self.sym_call;
         self.get_mut(id).handler_set(call_sym, val);
         val
     }
 
-    /// Check if a value is a closure object. Returns (code_idx, is_operative) if so.
+    /// Check if a value is a closure object. Returns (code_idx, is_operative)
+    /// if so. Detection is parent-based: closures delegate to PROTO_CLOSURE.
+    /// Slot access uses fixed INDEXES (not names) to stay robust against
+    /// cross-vat symbol-id mismatch during migration.
     pub fn as_closure(&self, val: Value) -> Option<(usize, bool)> {
         let id = val.as_any_object()?;
-        match self.get(id) {
-            HeapObject::Closure { code_idx, is_operative, .. } => Some((*code_idx, *is_operative)),
-            _ => None,
+        let HeapObject::General { parent, slot_values, slot_names, .. } = self.get(id) else {
+            return None;
+        };
+        // closure detection: parent must be PROTO_CLOSURE
+        let closure_proto = self.type_protos.get(PROTO_CLOSURE).copied().unwrap_or(Value::NIL);
+        if *parent != closure_proto || slot_names.len() < Self::CLOSURE_META_SLOTS {
+            return None;
         }
+        let code_idx = slot_values[0].as_integer()? as usize;
+        let is_op = slot_values[2].is_true();
+        Some((code_idx, is_op))
     }
 
-    /// Get the captured values from a closure object.
+    /// Get the captured values from a closure object — every slot whose name
+    /// doesn't start with `__` (the metadata prefix).
+    /// Metadata slots are always the first 4 entries in a closure's slot
+    /// list: __code_idx, __arity, __is_operative, __is_pure. Captures
+    /// follow. Skipping by INDEX (not by name) keeps this cross-vat-safe:
+    /// migrated closures may carry source-heap symbol ids until the next
+    /// intern pass, so we avoid symbol_name on slot_names entirely.
+    const CLOSURE_META_SLOTS: usize = 4;
+
     pub fn closure_captures(&self, val: Value) -> Vec<(u32, Value)> {
         let Some(id) = val.as_any_object() else { return Vec::new(); };
-        match self.get(id) {
-            HeapObject::Closure { captures, .. } => captures.clone(),
-            _ => Vec::new(),
+        let HeapObject::General { slot_names, slot_values, .. } = self.get(id) else {
+            return Vec::new();
+        };
+        if slot_names.len() <= Self::CLOSURE_META_SLOTS {
+            return Vec::new();
+        }
+        slot_names.iter().skip(Self::CLOSURE_META_SLOTS)
+            .zip(slot_values.iter().skip(Self::CLOSURE_META_SLOTS))
+            .map(|(s, v)| (*s, *v))
+            .collect()
+    }
+
+    /// Check if a closure is "pure" (no FarRef captures, safe to memoize).
+    pub fn closure_is_pure(&self, val: Value) -> bool {
+        let Some(id) = val.as_any_object() else { return false; };
+        let HeapObject::General { slot_values, slot_names, .. } = self.get(id) else {
+            return false;
+        };
+        if slot_names.len() < Self::CLOSURE_META_SLOTS { return false; }
+        slot_values[3].is_true()
+    }
+
+    /// Return a closure's arity, if it is one.
+    pub fn closure_arity(&self, val: Value) -> Option<u8> {
+        let id = val.as_any_object()?;
+        let HeapObject::General { slot_values, slot_names, .. } = self.get(id) else {
+            return None;
+        };
+        if slot_names.len() < Self::CLOSURE_META_SLOTS { return None; }
+        Some(slot_values[1].as_integer()? as u8)
+    }
+
+    /// Override the is_pure metadata flag on a closure. Needed because
+    /// the compiler's post-construction FarRef scan may discover impurity
+    /// after make_closure has already set the default.
+    pub fn set_closure_pure(&mut self, val: Value, is_pure: bool) {
+        let Some(id) = val.as_any_object() else { return; };
+        if let HeapObject::General { slot_values, slot_names, .. } = self.get_mut(id) {
+            if slot_names.len() >= Self::CLOSURE_META_SLOTS {
+                slot_values[3] = Value::boolean(is_pure);
+            }
         }
     }
 
@@ -491,7 +568,6 @@ impl Heap {
         if let Some(id) = val.as_any_object() {
             match self.get(id) {
                 HeapObject::General { parent, .. } |
-                HeapObject::Closure { parent, .. } |
                 HeapObject::Environment { parent, .. } => return *parent,
                 HeapObject::Pair(_, _) => return self.type_protos.get(PROTO_CONS).copied().unwrap_or(Value::NIL),
                 HeapObject::Text(_) => return self.type_protos.get(PROTO_STR).copied().unwrap_or(Value::NIL),
@@ -509,12 +585,11 @@ impl Heap {
         let mut names = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
-        // start with the receiver's own handlers — General, Closure, and
-        // Environment all carry per-instance handler tables.
+        // start with the receiver's own handlers — General and Environment
+        // both carry per-instance handler tables (closures are Generals).
         if let Some(id) = val.as_any_object() {
             match self.get(id) {
                 HeapObject::General { handlers, .. }
-                | HeapObject::Closure { handlers, .. }
                 | HeapObject::Environment { handlers, .. } => {
                     for &(sel, _) in handlers {
                         if seen.insert(sel) { names.push(sel); }
@@ -531,7 +606,6 @@ impl Heap {
             let Some(id) = proto.as_any_object() else { break; };
             let (handlers, next) = match self.get(id) {
                 HeapObject::General { handlers, parent, .. }
-                | HeapObject::Closure { handlers, parent, .. }
                 | HeapObject::Environment { handlers, parent, .. } => (handlers, *parent),
                 _ => break,
             };

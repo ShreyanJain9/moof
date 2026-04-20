@@ -799,7 +799,6 @@ impl<'a> Compiler<'a> {
                 return Ok(());
             }
             crate::object::HeapObject::General { .. } |
-            crate::object::HeapObject::Closure { .. } |
             crate::object::HeapObject::Environment { .. } => {
                 self.emit_load_const(dst, form);
                 return Ok(());

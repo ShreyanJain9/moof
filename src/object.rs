@@ -13,6 +13,9 @@ use crate::value::Value;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HeapObject {
     /// General object: parent + fixed named slots + open handlers.
+    /// Closures are Generals with __code_idx / __arity / __is_operative
+    /// slots plus their captures as regular slots. A native `call:` on
+    /// the Closure prototype invokes the stored bytecode.
     General {
         parent: Value,
         slot_names: Vec<u32>,           // symbol IDs, fixed at creation
@@ -34,18 +37,6 @@ pub enum HeapObject {
     Table {
         seq: Vec<Value>,              // sequential (integer-indexed, 0-based)
         map: Vec<(Value, Value)>,     // keyed (arbitrary key-value pairs)
-    },
-
-    /// Closure: a compiled function or operative.
-    /// Parent chain leads to Block prototype → Object.
-    Closure {
-        parent: Value,                // Block/Closure prototype (→ Object)
-        code_idx: usize,             // index into VM's closure_descs
-        arity: u8,
-        is_operative: bool,
-        is_pure: bool,               // true if no FarRef captures (can memoize/parallelize)
-        captures: Vec<(u32, Value)>, // (name_sym, captured_value)
-        handlers: Vec<(u32, Value)>, // per-instance handlers (e.g. call:)
     },
 
     /// Environment: dynamic-shape binding object.
@@ -82,7 +73,6 @@ impl HeapObject {
     pub fn parent(&self) -> Value {
         match self {
             HeapObject::General { parent, .. } |
-            HeapObject::Closure { parent, .. } |
             HeapObject::Environment { parent, .. } => *parent,
             // optimized types delegate to their type prototype (resolved by dispatch)
             _ => Value::NIL,
@@ -95,10 +85,6 @@ impl HeapObject {
             HeapObject::General { slot_names, slot_values, .. } => {
                 slot_names.iter().position(|n| *n == name)
                     .map(|i| slot_values[i])
-            }
-            HeapObject::Closure { captures, .. } => {
-                // captured values are accessible as slots
-                captures.iter().find(|(n, _)| *n == name).map(|(_, v)| *v)
             }
             HeapObject::Environment { bindings, .. } => {
                 bindings.get(&name).copied()
@@ -121,14 +107,6 @@ impl HeapObject {
                     false // shape is fixed — can't add slots
                 }
             }
-            HeapObject::Closure { captures, .. } => {
-                if let Some(cap) = captures.iter_mut().find(|(n, _)| *n == name) {
-                    cap.1 = val;
-                    true
-                } else {
-                    false
-                }
-            }
             HeapObject::Environment { bindings, .. } => {
                 bindings.insert(name, val);
                 true // dynamic shape — always succeeds
@@ -141,7 +119,6 @@ impl HeapObject {
     pub fn slot_names(&self) -> Vec<u32> {
         match self {
             HeapObject::General { slot_names, .. } => slot_names.clone(),
-            HeapObject::Closure { captures, .. } => captures.iter().map(|(n, _)| *n).collect(),
             HeapObject::Environment { bindings, .. } => bindings.keys().copied().collect(),
             _ => Vec::new(),
         }
@@ -151,7 +128,6 @@ impl HeapObject {
     pub fn handler_get(&self, selector: u32) -> Option<Value> {
         match self {
             HeapObject::General { handlers, .. } |
-            HeapObject::Closure { handlers, .. } |
             HeapObject::Environment { handlers, .. } => {
                 handlers.iter().find(|(s, _)| *s == selector).map(|(_, v)| *v)
             }
@@ -163,7 +139,6 @@ impl HeapObject {
     pub fn handler_set(&mut self, selector: u32, handler: Value) {
         match self {
             HeapObject::General { handlers, .. } |
-            HeapObject::Closure { handlers, .. } |
             HeapObject::Environment { handlers, .. } => {
                 if let Some(entry) = handlers.iter_mut().find(|(s, _)| *s == selector) {
                     entry.1 = handler;
@@ -182,7 +157,6 @@ impl HeapObject {
     pub fn handler_names(&self) -> Vec<u32> {
         match self {
             HeapObject::General { handlers, .. } |
-            HeapObject::Closure { handlers, .. } |
             HeapObject::Environment { handlers, .. } => {
                 handlers.iter().map(|(s, _)| *s).collect()
             }

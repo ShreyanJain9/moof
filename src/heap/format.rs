@@ -27,11 +27,13 @@ impl Heap {
     }
 
     fn format_object(&self, id: u32) -> String {
+        // closures are Generals with __code_idx — detect + format specially.
+        if let Some((_, is_op)) = self.as_closure(Value::nursery(id)) {
+            let arity = self.closure_arity(Value::nursery(id)).unwrap_or(0);
+            return if is_op { format!("<operative arity:{arity}>") }
+                   else { format!("<fn arity:{arity}>") };
+        }
         match self.get(id) {
-            HeapObject::Closure { is_operative, arity, .. } => {
-                if *is_operative { format!("<operative arity:{arity}>") }
-                else { format!("<fn arity:{arity}>") }
-            }
             HeapObject::Pair(_, _) => self.format_list(id),
             HeapObject::Text(s) => format!("\"{}\"", s.replace('"', "\\\"")),
             HeapObject::Buffer(b) => format!("<bytes:{}>", b.len()),
@@ -106,11 +108,12 @@ impl Heap {
     }
 
     fn display_object(&self, id: u32) -> String {
+        if let Some((_, is_op)) = self.as_closure(Value::nursery(id)) {
+            let arity = self.closure_arity(Value::nursery(id)).unwrap_or(0);
+            return if is_op { format!("<operative arity:{arity}>") }
+                   else { format!("<fn arity:{arity}>") };
+        }
         match self.get(id) {
-            HeapObject::Closure { is_operative, arity, .. } => {
-                if *is_operative { format!("<operative arity:{arity}>") }
-                else { format!("<fn arity:{arity}>") }
-            }
             HeapObject::Pair(_, _) => {
                 let formatted = self.format_list(id);
                 let len = self.list_len(id);

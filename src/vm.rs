@@ -604,12 +604,9 @@ impl VM {
                     let closure = heap.make_closure(idx, arity, is_op, &cap_pairs);
                     // override purity if we found FarRef references in bytecode
                     if references_farref {
-                        if let Some(id) = closure.as_any_object() {
-                            if let crate::object::HeapObject::Closure { is_pure, .. } = heap.get_mut(id) {
-                                *is_pure = false;
-                            }
-                        }
+                        heap.set_closure_pure(closure, false);
                     }
+                    let f = self.frames.last_mut().unwrap();
                     f.regs[a as usize] = closure;
                 }
 

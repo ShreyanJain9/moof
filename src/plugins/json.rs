@@ -171,7 +171,6 @@ fn to_json(heap: &Heap, v: Value) -> Result<JV, String> {
             }
             Ok(JV::Object(obj))
         }
-        HeapObject::Closure { .. } => Err("cannot serialize closure".into()),
         HeapObject::Environment { .. } => Err("cannot serialize environment".into()),
         HeapObject::Buffer(_) => Err("cannot serialize bytes (use base64 first)".into()),
     }

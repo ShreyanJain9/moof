@@ -539,8 +539,19 @@ impl Scheduler {
             let new_sym = self.vat_mut(to_vat).heap.intern(&name);
             return Value::symbol(new_sym);
         }
-        // heap objects: for now, copy strings
+        // heap objects
         if let Some(obj_id) = val.as_any_object() {
+            // closures live as Generals now — detect via __code_idx slot and
+            // route through copy_closure_across so the bytecode desc migrates
+            // too (the slot's integer code_idx is meaningless in the target
+            // vat's closure_descs list without it).
+            if self.vat(_from_vat).heap.as_closure(val).is_some() {
+                if let Some(new_closure) = self.copy_closure_across(val, _from_vat, to_vat) {
+                    return new_closure;
+                }
+                eprintln!("  ~ warning: failed to migrate closure across vats");
+                return Value::NIL;
+            }
             let from_heap = &self.vat(_from_vat).heap;
             match from_heap.get(obj_id) {
                 crate::object::HeapObject::Text(s) => {
@@ -594,13 +605,6 @@ impl Scheduler {
                     return self.vat_mut(to_vat).heap.alloc_val(
                         crate::object::HeapObject::Table { seq: new_seq, map: new_map }
                     );
-                }
-                crate::object::HeapObject::Closure { .. } => {
-                    if let Some(new_closure) = self.copy_closure_across(val, _from_vat, to_vat) {
-                        return new_closure;
-                    }
-                    eprintln!("  ~ warning: failed to migrate closure across vats");
-                    return Value::NIL;
                 }
                 _ => {
                     eprintln!("  ~ warning: cannot copy heap object across vats (yet)");
