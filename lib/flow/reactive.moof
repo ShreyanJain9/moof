@@ -26,40 +26,43 @@
 ; reply would race the cache-invalidation message.
 
 (defserver Atom (initial)
-  { value:       initial
-    subscribers: nil
+  "A cell with observable state transitions. swap: notifies every
+   subscriber before returning, so downstream invalidations land before
+   the reply — no races on cache staleness."
 
-    [typeName] (quote Atom)
+  value:       initial
+  subscribers: nil
 
-    [get] @value
+  [typeName] (quote Atom)
 
-    ; [_notify-chain subs new] — chain notify sends sequentially, so the
-    ; returned Act resolves only after every subscriber has acknowledged.
-    ; same-vat self-send, so recursion is just dispatch, no globals needed.
-    [_notify-chain subs new]
-      (if (nil? subs) new
-        [[[subs car] notify: new] then:
-          |_| [self _notify-chain [subs cdr] new]])
+  [get] @value
 
-    [swap: new]
-      [[self _notify-chain @subscribers new] then:
-        |_| (update { value: new } new)]
+  ; [_notify-chain subs new] — chain notify sends sequentially, so the
+  ; returned Act resolves only after every subscriber has acknowledged.
+  ; same-vat self-send, so recursion is just dispatch, no globals needed.
+  [_notify-chain subs new]
+    (if (nil? subs) new
+      [[[subs car] notify: new] then:
+        |_| [self _notify-chain [subs cdr] new]])
 
-    [update: f]
-      [self swap: (f @value)]
+  [swap: new]
+    [[self _notify-chain @subscribers new] then:
+      |_| (update { value: new } new)]
 
-    [subscribe: sub]
-      (update { subscribers: (cons sub @subscribers) } nil)
+  [update: f]
+    [self swap: (f @value)]
 
-    [unsubscribe: sub]
-      (update { subscribers: [@subscribers reject: |s| [s identical: sub]] }
-              nil)
+  [subscribe: sub]
+    (update { subscribers: (cons sub @subscribers) } nil)
 
-    [describe]
-      (str "<Atom " [@value describe] ">")
-    [show]
-      (str [self describe] "  : Atom")
-  })
+  [unsubscribe: sub]
+    (update { subscribers: [@subscribers reject: |s| [s identical: sub]] }
+            nil)
+
+  [describe]
+    (str "<Atom " [@value describe] ">")
+  [show]
+    (str [self describe] "  : Atom"))
 
 ; ══════════════════════════════════════════════════════════
 ; Signal — derived, lazily re-evaluated
@@ -76,34 +79,37 @@
 ; Act-of-Update — the scheduler handles both.
 
 (defserver Signal args
+  "A derived cell. computation is a closure over input FarRefs; get
+   returns the cached value if valid, else recomputes and caches. notify
+   invalidates the cache and cascades to downstream subscribers."
+
   ; args is the variadic param: (computation input1 input2 ...). slots
   ; destructure directly — no let wrapper needed.
-  { computation: [args car]
-    inputs:      [args cdr]
-    cached:      nil
-    valid:       false
-    subscribers: nil
+  computation: [args car]
+  inputs:      [args cdr]
+  cached:      nil
+  valid:       false
+  subscribers: nil
 
-    [typeName] (quote Signal)
+  [typeName] (quote Signal)
 
-    [get]
-      (if @valid @cached
-        [(@computation) then:
-          |v| (update { cached: v valid: true } v)])
+  [get]
+    (if @valid @cached
+      [(@computation) then:
+        |v| (update { cached: v valid: true } v)])
 
-    [notify: _]
-      (let ((_ [@subscribers each: |s| [s notify: nil]]))
-        (update { valid: false } nil))
+  [notify: _]
+    (let ((_ [@subscribers each: |s| [s notify: nil]]))
+      (update { valid: false } nil))
 
-    [subscribe: sub]
-      (update { subscribers: (cons sub @subscribers) } nil)
+  [subscribe: sub]
+    (update { subscribers: (cons sub @subscribers) } nil)
 
-    [inputs] @inputs
+  [inputs] @inputs
 
-    [describe]
-      (str "<Signal " (if @valid (str "cached=" [@cached describe]) "stale") ">")
-    [show]  [self describe]
-  })
+  [describe]
+    (str "<Signal " (if @valid (str "cached=" [@cached describe]) "stale") ">")
+  [show]  [self describe])
 
 ; ══════════════════════════════════════════════════════════
 ; wire-up — subscribe the signal to each of its input sources

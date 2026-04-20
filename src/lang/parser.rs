@@ -169,6 +169,25 @@ impl<'a> Parser<'a> {
 
     fn parse_list(&mut self) -> Result<Value, String> {
         self.advance(); // (
+
+        // special-case defserver: its body is object-literal content
+        // (slots + handlers) WITHOUT an enclosing { }. we detect here so
+        // the author can write
+        //
+        //   (defserver Atom (initial)
+        //     value: initial
+        //     [get] @value
+        //     ...)
+        //
+        // instead of the uglier `{ ... }` wrapping. at vau level it still
+        // receives (defserver name params body) — we just synthesize the
+        // object literal for body ourselves.
+        if let Token::Symbol(s) = self.peek() {
+            if s == "defserver" {
+                return self.parse_defserver_form();
+            }
+        }
+
         let mut items = Vec::new();
         let mut dotted_tail = None;
 
@@ -191,6 +210,131 @@ impl<'a> Parser<'a> {
             result = self.heap.cons(item, result);
         }
         Ok(result)
+    }
+
+    /// Parse (defserver NAME PARAMS body...) where body is object-literal
+    /// content (slots, handlers, do-block) without { } wrapping. The body
+    /// is gathered into a single %object-literal form so the defserver vau
+    /// gets its usual three-arg shape: (defserver name params body-expr).
+    fn parse_defserver_form(&mut self) -> Result<Value, String> {
+        let defserver_sym = self.intern("defserver");
+        self.advance(); // defserver
+
+        let name_expr = self.parse_expr()?;
+        let params_expr = self.parse_expr()?;
+
+        // optional docstring (first string literal after params).
+        let mut doc: Option<Value> = None;
+        if let Token::String(_) = self.peek() {
+            doc = Some(self.parse_expr()?);
+        }
+
+        // body can be either an explicit { ... } object literal (back-compat)
+        // or direct object-literal content (slots/handlers) until ).
+        let body = if *self.peek() == Token::LBrace {
+            let b = self.parse_expr()?;
+            self.expect(&Token::RParen)?;
+            b
+        } else {
+            self.parse_object_body_until(Token::RParen)?
+        };
+
+        let mut items = vec![defserver_sym, name_expr, params_expr];
+        if let Some(d) = doc { items.push(d); }
+        items.push(body);
+        Ok(self.heap.list(&items))
+    }
+
+    /// Parse object-literal content (slots, handlers, do-block) until the
+    /// given closing token. Shared between `{ ... }` and defserver bodies.
+    /// The closing token is consumed.
+    fn parse_object_body_until(&mut self, end: Token) -> Result<Value, String> {
+        let obj_sym = self.intern("%object-literal");
+        let parent = self.intern("Object");
+        let mut slot_names: Vec<Value> = Vec::new();
+        let mut slot_values: Vec<Value> = Vec::new();
+        let mut methods: Vec<Value> = Vec::new();
+        let mut init_exprs: Vec<Value> = Vec::new();
+
+        loop {
+            if *self.peek() == end {
+                self.advance();
+                break;
+            }
+            match self.peek().clone() {
+                Token::Keyword(ref k) => {
+                    let name = k.trim_end_matches(':').to_string();
+                    self.advance();
+                    let name_sym = self.intern(&name);
+                    slot_names.push(self.quoted(name_sym));
+                    slot_values.push(self.parse_expr()?);
+                }
+                Token::LBracket => {
+                    self.advance(); // [
+                    let mut selector = String::new();
+                    let mut params: Vec<Value> = Vec::new();
+                    loop {
+                        match self.peek().clone() {
+                            Token::RBracket => { self.advance(); break; }
+                            Token::Symbol(ref s) => {
+                                if selector.is_empty() && params.is_empty() {
+                                    selector = s.clone();
+                                    self.advance();
+                                } else {
+                                    let p = self.intern(s);
+                                    params.push(p);
+                                    self.advance();
+                                }
+                            }
+                            Token::Keyword(ref k) => {
+                                selector.push_str(k);
+                                self.advance();
+                                if let Token::Symbol(ref p) = self.peek().clone() {
+                                    let psym = self.intern(p);
+                                    params.push(psym);
+                                    self.advance();
+                                } else {
+                                    return Err("expected param name after keyword in method signature".into());
+                                }
+                            }
+                            Token::Eof => return Err("unterminated method signature".into()),
+                            ref t => return Err(format!("unexpected {t:?} in method signature")),
+                        }
+                    }
+                    let body = self.parse_expr()?;
+                    let fn_sym = self.intern("fn");
+                    let self_sym = self.intern("self");
+                    let mut fn_params = vec![self_sym];
+                    fn_params.extend(params);
+                    let param_list = self.heap.list(&fn_params);
+                    let fn_expr = self.heap.list(&[fn_sym, param_list, body]);
+                    let sel_sym = self.intern(&selector);
+                    methods.push(self.quoted(sel_sym));
+                    methods.push(fn_expr);
+                }
+                Token::Symbol(ref s) if s == "do" => {
+                    self.advance();
+                    loop {
+                        if *self.peek() == end { break; }
+                        if *self.peek() == Token::Eof {
+                            return Err("unterminated object body".into());
+                        }
+                        init_exprs.push(self.parse_expr()?);
+                    }
+                }
+                Token::Eof => return Err("unterminated object body".into()),
+                ref tok => return Err(format!("expected slot, method, or do in object body, got {tok:?}")),
+            }
+        }
+
+        let names_list = self.heap.list(&slot_names);
+        let methods_list = self.heap.list(&methods);
+        let init_list = self.heap.list(&init_exprs);
+        let mut all = vec![obj_sym, parent, names_list];
+        all.extend(slot_values);
+        all.push(methods_list);
+        all.push(init_list);
+        Ok(self.heap.list(&all))
     }
 
     fn parse_send(&mut self) -> Result<Value, String> {

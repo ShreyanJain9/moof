@@ -25,7 +25,12 @@
   (let ((name [args car])
         (rest [args cdr])
         (params [rest car])
-        (body [[rest cdr] car])
+        (after-params [rest cdr])
+        ; optional docstring: if there are 2+ forms after params, the first
+        ; is the docstring. detect by cdr-of-cdr being non-nil.
+        (more [after-params cdr])
+        (has-doc (some? more))
+        (body (if has-doc [more car] [after-params car]))
         ; variadic when params is a symbol (not a cons/list, not nil)
         (variadic (and (not (cons? params)) (not (nil? params)))))
     ; variadic: (fn params body) binds params to the full arg list.
