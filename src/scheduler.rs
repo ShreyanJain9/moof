@@ -559,13 +559,10 @@ impl Scheduler {
                     return self.vat_mut(to_vat).heap.alloc_string(&s);
                 }
                 crate::object::HeapObject::General { slot_names, slot_values, .. } => {
-                    // slot 0 is always `parent` by invariant — drop it here
-                    // and reconstruct via make_object_with_slots, which
-                    // prepends its own parent slot in the target heap.
-                    let names: Vec<String> = slot_names.iter().skip(1)
+                    let names: Vec<String> = slot_names.iter()
                         .map(|s| from_heap.symbol_name(*s).to_string())
                         .collect();
-                    let vals: Vec<Value> = slot_values.iter().skip(1).copied().collect();
+                    let vals: Vec<Value> = slot_values.iter().copied().collect();
                     let is_farref = names.iter().any(|n| n == "__target_vat");
                     let new_names: Vec<u32> = names.iter()
                         .map(|n| self.vat_mut(to_vat).heap.intern(n))
@@ -573,13 +570,13 @@ impl Scheduler {
                     let new_vals: Vec<Value> = vals.iter()
                         .map(|v| self.copy_value_across(*v, _from_vat, to_vat))
                         .collect();
-                    let parent = if is_farref {
+                    let proto = if is_farref {
                         self.vat(to_vat).heap.lookup_type("FarRef")
                     } else {
                         self.vat(to_vat).heap.type_protos[crate::heap::PROTO_OBJ]
                     };
                     return self.vat_mut(to_vat).heap.make_object_with_slots(
-                        parent, new_names, new_vals,
+                        proto, new_names, new_vals,
                     );
                 }
                 crate::object::HeapObject::Pair(car, cdr) => {

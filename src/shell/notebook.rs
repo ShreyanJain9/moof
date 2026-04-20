@@ -122,7 +122,7 @@ fn type_name_of(heap: &Heap, val: Value) -> String {
                     // chunk returns a quoted symbol literal, extract it.
                     let _ = handler;
                 }
-                cur = heap.get(id).parent();
+                cur = heap.get(id).proto();
             } else {
                 break;
             }
@@ -132,9 +132,9 @@ fn type_name_of(heap: &Heap, val: Value) -> String {
     if let Some(id) = val.as_any_object() {
         match heap.get(id) {
             HeapObject::General { .. } => {
-                let parent = heap.get(id).parent();
-                // try parent's typeName slot
-                if let Some(pid) = parent.as_any_object() {
+                let proto = heap.get(id).proto();
+                // try proto's typeName slot
+                if let Some(pid) = proto.as_any_object() {
                     if let Some(name_sym) = heap.find_symbol("__name") {
                         if let Some(n) = heap.get(pid).slot_get(name_sym) {
                             if let Some(s) = n.as_symbol() {

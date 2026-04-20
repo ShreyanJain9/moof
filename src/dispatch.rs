@@ -65,9 +65,9 @@ fn lookup_in_chain(heap: &Heap, start_id: u32, selector: u32) -> Result<Option<V
             return Ok(Some(handler));
         }
 
-        // walk to parent
-        let parent = obj.parent();
-        match parent.as_any_object() {
+        // walk the prototype chain (VM-internal)
+        let proto = obj.proto();
+        match proto.as_any_object() {
             Some(pid) => current_id = pid,
             None => return Ok(None),
         }

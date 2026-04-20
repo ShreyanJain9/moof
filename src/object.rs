@@ -3,12 +3,13 @@
 // The VM has optimized internal representations for common shapes,
 // but semantically everything is an object that responds to messages.
 //
-// Invariant: a General's slot_values[0] is always the object's parent,
-// and slot_names[0] is always the interned symbol `parent`. That way
-// parent is a first-class slot — slot_get / slot_names / slot_set find
-// it naturally, and there's no "parent is a special field" branch
-// anywhere in the slot protocol. Construction is done via Heap methods
-// that know sym_parent and prepend the slot automatically.
+// Prototype delegation is a VM-internal mechanism: every General has
+// a `proto` field used only for message-dispatch chain walking. It's
+// NOT a slot. It doesn't appear in slotNames. It can't be read via
+// slotAt:. If userland wants a chain-walk concept (e.g. Environments
+// pointing at outer scopes for variable lookup), they put that on a
+// real slot — `bindings`, `outer`, whatever — and the semantics are
+// defined by the type, not by the VM.
 
 use indexmap::IndexMap;
 use serde::{Serialize, Deserialize};
@@ -16,15 +17,17 @@ use crate::value::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HeapObject {
-    /// General object: named slots + open handlers.
-    /// By convention slot_names[0] == sym_parent, slot_values[0] == parent.
+    /// General object: a prototype pointer (VM-internal, for dispatch)
+    /// plus named slots and handlers. Slots are user-facing data; the
+    /// proto is not.
     General {
-        slot_names: Vec<u32>,           // slot[0] is always `parent`
-        slot_values: Vec<Value>,        // slot_values[0] is the parent value
-        handlers: Vec<(u32, Value)>,    // selector → handler value
+        proto: Value,                   // VM-internal dispatch pointer (NOT a slot)
+        slot_names: Vec<u32>,
+        slot_values: Vec<Value>,
+        handlers: Vec<(u32, Value)>,
     },
 
-    /// Optimized cons pair: parent is always the Cons prototype.
+    /// Optimized cons pair: proto is always the Cons prototype.
     Pair(Value, Value),
 
     /// Optimized string.
@@ -44,42 +47,41 @@ pub enum HeapObject {
 }
 
 impl HeapObject {
-    /// Construct a General with explicit slot 0 = parent. Callers that
-    /// don't have sym_parent available should go through Heap::make_object
-    /// or Heap::make_object_with_slots instead.
-    pub fn new_general(parent_sym: u32, parent: Value, extra_names: Vec<u32>, extra_values: Vec<Value>) -> Self {
-        debug_assert_eq!(extra_names.len(), extra_values.len());
-        let mut slot_names = Vec::with_capacity(extra_names.len() + 1);
-        let mut slot_values = Vec::with_capacity(extra_values.len() + 1);
-        slot_names.push(parent_sym);
-        slot_values.push(parent);
-        slot_names.extend(extra_names);
-        slot_values.extend(extra_values);
-        HeapObject::General { slot_names, slot_values, handlers: Vec::new() }
-    }
-
-    pub fn new_empty(parent_sym: u32, parent: Value) -> Self {
+    pub fn new_general(proto: Value, slot_names: Vec<u32>, slot_values: Vec<Value>) -> Self {
+        debug_assert_eq!(slot_names.len(), slot_values.len());
         HeapObject::General {
-            slot_names: vec![parent_sym],
-            slot_values: vec![parent],
+            proto,
+            slot_names,
+            slot_values,
             handlers: Vec::new(),
         }
     }
 
-    /// Get the parent value. By convention it's always slot_values[0] on
-    /// a General; optimized types don't have their own parent, they
-    /// delegate to their type prototype (resolved by prototype_of).
-    pub fn parent(&self) -> Value {
+    pub fn new_empty(proto: Value) -> Self {
+        HeapObject::General {
+            proto,
+            slot_names: Vec::new(),
+            slot_values: Vec::new(),
+            handlers: Vec::new(),
+        }
+    }
+
+    /// The VM-internal prototype used for dispatch's chain walk. Not a
+    /// slot — this is the language's delegation machinery.
+    pub fn proto(&self) -> Value {
         match self {
-            HeapObject::General { slot_values, .. } => {
-                slot_values.first().copied().unwrap_or(Value::NIL)
-            }
+            HeapObject::General { proto, .. } => *proto,
             _ => Value::NIL,
         }
     }
 
-    /// Look up a slot value by name (symbol ID). Parent falls out of this
-    /// naturally because it's stored at slot_names[0] == sym_parent.
+    pub fn set_proto(&mut self, p: Value) {
+        if let HeapObject::General { proto, .. } = self {
+            *proto = p;
+        }
+    }
+
+    /// Look up a slot value by name (symbol ID).
     pub fn slot_get(&self, name: u32) -> Option<Value> {
         match self {
             HeapObject::General { slot_names, slot_values, .. } => {
@@ -91,8 +93,7 @@ impl HeapObject {
         }
     }
 
-    /// Set a slot value by name. Grows the object if the slot doesn't
-    /// exist. Writing `parent` reparents (finds slot_names[0]).
+    /// Set a slot value by name. Grows the object if the slot doesn't exist.
     pub fn slot_set(&mut self, name: u32, val: Value) -> bool {
         match self {
             HeapObject::General { slot_names, slot_values, .. } => {
@@ -108,23 +109,18 @@ impl HeapObject {
         }
     }
 
-    /// Remove a slot by name. No-op for parent (slot 0) — removing it
-    /// would break the invariant. Used by env_remove during eval's
-    /// save/restore.
+    /// Remove a slot by name. No-op for non-General or missing slots.
     pub fn slot_remove(&mut self, name: u32) {
         if let HeapObject::General { slot_names, slot_values, .. } = self {
-            // don't remove slot 0 — that's parent, and removing it would
-            // violate the invariant.
             if let Some(i) = slot_names.iter().position(|n| *n == name) {
-                if i == 0 { return; }
                 slot_names.remove(i);
                 slot_values.remove(i);
             }
         }
     }
 
-    /// Get the slot names (for introspection). Includes 'parent as the
-    /// first entry — no wrapping needed.
+    /// Get the explicit slot names (not including the proto — that's
+    /// VM-internal, not a slot).
     pub fn slot_names(&self) -> Vec<u32> {
         match self {
             HeapObject::General { slot_names, .. } => slot_names.clone(),

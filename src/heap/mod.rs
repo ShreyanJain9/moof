@@ -160,8 +160,7 @@ impl Heap {
             send_cache: std::collections::HashMap::new(),
         };
 
-        // intern well-known symbols first — env construction needs sym_parent
-        // and sym_bindings.
+        // intern well-known symbols
         h.sym_car = h.intern("car");
         h.sym_cdr = h.intern("cdr");
         h.sym_call = h.intern("call:");
@@ -178,19 +177,22 @@ impl Heap {
         h.sym_message = h.intern("message");
         let bindings_sym = h.intern("bindings");
 
-        // allocate the bindings Table first (gets id 0 but that's fine — the
-        // root env is General with a `bindings` slot pointing here).
+        // allocate the root env's bindings Table first.
         let bindings_table = h.alloc_val(HeapObject::Table {
             seq: Vec::new(),
             map: IndexMap::new(),
         });
 
-        // root env: General { parent: NIL, bindings: <Table> }.
-        // parent is fixed up in register_type_protos once Object exists.
+        // root env: just a General. `parent` here is a real slot —
+        // the scope chain for variable lookup, which env_get walks.
+        // Not the VM proto — that's the `proto` field (fixed up to
+        // the Env prototype once the plugin registers it, or stays
+        // whatever we set here as the default Object proto later).
+        // `bindings` holds the actual name→value mappings.
         h.env = h.alloc(HeapObject::new_general(
-            h.sym_parent, Value::NIL,
-            vec![bindings_sym],
-            vec![bindings_table],
+            Value::NIL,                              // proto (set later)
+            vec![h.sym_parent, bindings_sym],        // real user-facing slots
+            vec![Value::NIL, bindings_table],        // parent scope (nil = root), bindings table
         ));
 
         h
@@ -232,24 +234,40 @@ impl Heap {
 
     // -- environment access --
     //
-    // The env is a General with a `bindings` slot holding an (IndexMap-backed)
-    // Table. Keys are symbol Values, values are the bound moof values. Every
-    // env_def mutates that Table in place — envs are the one explicitly
-    // mutable container in the system, so this is consistent with their
-    // purpose. No new variant, no special-case slot protocol: just a
-    // regular object whose bindings slot happens to be a Table.
+    // An env is a General with two user-facing slots:
+    //   `parent`   — the outer scope (another env, or nil at the root).
+    //                Scope lookup climbs this when a name isn't here.
+    //   `bindings` — a Table (IndexMap-backed) mapping symbol → value
+    //                for locals defined in this scope.
+    //
+    // `parent` is a real slot you can read from moof as `env.parent`. It
+    // is NOT the VM-internal proto (which governs message dispatch); scope
+    // chain and prototype chain are different concepts with different
+    // walk paths.
 
-    fn bindings_id(&self) -> Option<u32> {
+    fn env_bindings_id(&self, env_id: u32) -> Option<u32> {
         let bindings_sym = self.sym_reverse.get("bindings").copied()?;
-        self.get(self.env).slot_get(bindings_sym)?.as_any_object()
+        self.get(env_id).slot_get(bindings_sym)?.as_any_object()
+    }
+
+    fn env_parent(&self, env_id: u32) -> Value {
+        self.get(env_id).slot_get(self.sym_parent).unwrap_or(Value::NIL)
     }
 
     pub fn env_get(&self, sym: u32) -> Option<Value> {
-        let bindings_id = self.bindings_id()?;
-        if let HeapObject::Table { map, .. } = self.get(bindings_id) {
-            return map.get(&Value::symbol(sym)).copied();
+        // walk the scope chain via the `parent` slot — NOT the proto chain.
+        let mut cur = self.env;
+        loop {
+            if let Some(bid) = self.env_bindings_id(cur) {
+                if let HeapObject::Table { map, .. } = self.get(bid) {
+                    if let Some(v) = map.get(&Value::symbol(sym)).copied() {
+                        return Some(v);
+                    }
+                }
+            }
+            let Some(next) = self.env_parent(cur).as_any_object() else { return None; };
+            cur = next;
         }
-        None
     }
 
     /// Look up a type by name from the environment.
@@ -260,7 +278,8 @@ impl Heap {
     }
 
     pub fn env_def(&mut self, sym: u32, val: Value) {
-        if let Some(bid) = self.bindings_id() {
+        // define in the root env's bindings.
+        if let Some(bid) = self.env_bindings_id(self.env) {
             if let HeapObject::Table { map, .. } = self.get_mut(bid) {
                 map.insert(Value::symbol(sym), val);
             }
@@ -268,7 +287,7 @@ impl Heap {
     }
 
     pub fn env_remove(&mut self, sym: u32) {
-        if let Some(bid) = self.bindings_id() {
+        if let Some(bid) = self.env_bindings_id(self.env) {
             if let HeapObject::Table { map, .. } = self.get_mut(bid) {
                 map.shift_remove(&Value::symbol(sym));
             }
@@ -322,14 +341,12 @@ impl Heap {
 
     // -- convenience allocators --
 
-    pub fn make_object(&mut self, parent: Value) -> Value {
-        let sym = self.sym_parent;
-        self.alloc_val(HeapObject::new_empty(sym, parent))
+    pub fn make_object(&mut self, proto: Value) -> Value {
+        self.alloc_val(HeapObject::new_empty(proto))
     }
 
-    pub fn make_object_with_slots(&mut self, parent: Value, slot_names: Vec<u32>, slot_values: Vec<Value>) -> Value {
-        let sym = self.sym_parent;
-        self.alloc_val(HeapObject::new_general(sym, parent, slot_names, slot_values))
+    pub fn make_object_with_slots(&mut self, proto: Value, slot_names: Vec<u32>, slot_values: Vec<Value>) -> Value {
+        self.alloc_val(HeapObject::new_general(proto, slot_names, slot_values))
     }
 
     /// Create an Err value with a message string.
@@ -485,14 +502,13 @@ impl Heap {
         false
     }
 
-    /// Create a closure object: a General with PROTO_CLOSURE parent plus
+    /// Create a closure object: a General with PROTO_CLOSURE proto plus
     /// metadata slots (code_idx / arity / is_operative / is_pure) and
-    /// captures as regular named slots. The parent slot (invariant:
-    /// slot_names[0]) comes from new_general — so closure metadata starts
-    /// at slot INDEX 1. Captures follow at index 5. A `call:` handler
-    /// pointing to self is installed so dispatch finds it.
+    /// captures as regular named slots. Metadata occupies slot indices
+    /// 0..4; captures follow starting at CLOSURE_FIXED_SLOTS. A `call:`
+    /// handler pointing to self is installed so dispatch finds it.
     pub fn make_closure(&mut self, code_idx: usize, arity: u8, is_operative: bool, captures: &[(u32, Value)]) -> Value {
-        let parent = self.type_protos.get(PROTO_CLOSURE).copied()
+        let proto = self.type_protos.get(PROTO_CLOSURE).copied()
             .unwrap_or_else(|| self.type_protos[PROTO_OBJ]);
 
         let farref_proto = self.lookup_type("FarRef");
@@ -507,19 +523,18 @@ impl Heap {
         let is_op_sym = self.intern("is_operative");
         let is_pure_sym = self.intern("is_pure");
 
-        let mut extra_names: Vec<u32> = Vec::with_capacity(4 + captures.len());
-        let mut extra_values: Vec<Value> = Vec::with_capacity(4 + captures.len());
-        extra_names.push(code_idx_sym);  extra_values.push(Value::integer(code_idx as i64));
-        extra_names.push(arity_sym);     extra_values.push(Value::integer(arity as i64));
-        extra_names.push(is_op_sym);     extra_values.push(Value::boolean(is_operative));
-        extra_names.push(is_pure_sym);   extra_values.push(Value::boolean(is_pure));
+        let mut names: Vec<u32> = Vec::with_capacity(4 + captures.len());
+        let mut values: Vec<Value> = Vec::with_capacity(4 + captures.len());
+        names.push(code_idx_sym);  values.push(Value::integer(code_idx as i64));
+        names.push(arity_sym);     values.push(Value::integer(arity as i64));
+        names.push(is_op_sym);     values.push(Value::boolean(is_operative));
+        names.push(is_pure_sym);   values.push(Value::boolean(is_pure));
         for (sym, val) in captures {
-            extra_names.push(*sym);
-            extra_values.push(*val);
+            names.push(*sym);
+            values.push(*val);
         }
 
-        let sym = self.sym_parent;
-        let id = self.alloc(HeapObject::new_general(sym, parent, extra_names, extra_values));
+        let id = self.alloc(HeapObject::new_general(proto, names, values));
         let val = Value::nursery(id);
         let call_sym = self.sym_call;
         self.get_mut(id).handler_set(call_sym, val);
@@ -527,19 +542,16 @@ impl Heap {
     }
 
     /// Check if a value is a closure object. Returns (code_idx, is_operative)
-    /// if so. Detection is parent-based: closures delegate to PROTO_CLOSURE.
+    /// if so. Detection is proto-based: closures delegate to PROTO_CLOSURE.
     /// Slot access uses fixed INDEXES (not names) to stay robust against
     /// cross-vat symbol-id mismatch during migration.
     pub fn as_closure(&self, val: Value) -> Option<(usize, bool)> {
         let id = val.as_any_object()?;
-        let HeapObject::General { slot_values, slot_names, .. } = self.get(id) else {
+        let HeapObject::General { proto, slot_values, slot_names, .. } = self.get(id) else {
             return None;
         };
-        // closure detection: parent (slot 0) must be PROTO_CLOSURE.
         let closure_proto = self.type_protos.get(PROTO_CLOSURE).copied().unwrap_or(Value::NIL);
-        if slot_names.len() < Self::CLOSURE_FIXED_SLOTS
-            || slot_values[Self::SLOT_PARENT] != closure_proto
-        {
+        if slot_names.len() < Self::CLOSURE_FIXED_SLOTS || *proto != closure_proto {
             return None;
         }
         let code_idx = slot_values[Self::SLOT_CODE_IDX].as_integer()? as usize;
@@ -547,15 +559,13 @@ impl Heap {
         Some((code_idx, is_op))
     }
 
-    /// Fixed slot positions on every closure. parent is slot 0 by the
-    /// General invariant; the closure metadata follows; captures start
-    /// at CLOSURE_FIXED_SLOTS.
-    const SLOT_PARENT: usize = 0;
-    const SLOT_CODE_IDX: usize = 1;
-    const SLOT_ARITY: usize = 2;
-    const SLOT_IS_OPERATIVE: usize = 3;
-    const SLOT_IS_PURE: usize = 4;
-    const CLOSURE_FIXED_SLOTS: usize = 5;
+    /// Fixed slot positions on every closure. Metadata occupies 0..4;
+    /// captures start at CLOSURE_FIXED_SLOTS.
+    const SLOT_CODE_IDX: usize = 0;
+    const SLOT_ARITY: usize = 1;
+    const SLOT_IS_OPERATIVE: usize = 2;
+    const SLOT_IS_PURE: usize = 3;
+    const CLOSURE_FIXED_SLOTS: usize = 4;
 
     pub fn closure_captures(&self, val: Value) -> Vec<(u32, Value)> {
         let Some(id) = val.as_any_object() else { return Vec::new(); };
@@ -603,20 +613,15 @@ impl Heap {
 
     /// Get the prototype for any value (including primitives and optimized types).
     pub fn prototype_of(&self, val: Value) -> Value {
-        // for heap objects, check the variant first
         if let Some(id) = val.as_any_object() {
             match self.get(id) {
-                HeapObject::General { slot_values, .. } => {
-                    // parent is slot 0 by invariant
-                    return slot_values.first().copied().unwrap_or(Value::NIL);
-                }
+                HeapObject::General { proto, .. } => return *proto,
                 HeapObject::Pair(_, _) => return self.type_protos.get(PROTO_CONS).copied().unwrap_or(Value::NIL),
                 HeapObject::Text(_) => return self.type_protos.get(PROTO_STR).copied().unwrap_or(Value::NIL),
                 HeapObject::Buffer(_) => return self.type_protos.get(PROTO_BYTES).copied().unwrap_or(Value::NIL),
                 HeapObject::Table { .. } => return self.type_protos.get(PROTO_TABLE).copied().unwrap_or(Value::NIL),
             }
         }
-        // for primitives, use type_protos by tag
         let tag = val.type_tag() as usize;
         self.type_protos.get(tag).copied().unwrap_or(Value::NIL)
     }
@@ -642,10 +647,7 @@ impl Heap {
             if proto.is_nil() { break; }
             let Some(id) = proto.as_any_object() else { break; };
             let (handlers, next) = match self.get(id) {
-                HeapObject::General { handlers, slot_values, .. } => {
-                    let parent = slot_values.first().copied().unwrap_or(Value::NIL);
-                    (handlers, parent)
-                }
+                HeapObject::General { handlers, proto, .. } => (handlers, *proto),
                 _ => break,
             };
             for &(sel, _) in handlers {
@@ -771,24 +773,24 @@ mod tests {
     }
 
     #[test]
-    fn fixed_shape_slots() {
+    fn open_slots() {
         let mut h = Heap::new();
         let x = h.intern("x");
         let y = h.intern("y");
         let obj = h.make_object_with_slots(Value::NIL, vec![x, y], vec![Value::integer(3), Value::integer(4)]);
         let id = obj.as_any_object().unwrap();
 
-        // can read slots
         assert_eq!(h.get(id).slot_get(x), Some(Value::integer(3)));
         assert_eq!(h.get(id).slot_get(y), Some(Value::integer(4)));
 
-        // can write existing slots
+        // can overwrite existing slots
         assert!(h.get_mut(id).slot_set(x, Value::integer(99)));
         assert_eq!(h.get(id).slot_get(x), Some(Value::integer(99)));
 
-        // cannot add new slots
+        // slots are open — adding a new one grows the object
         let z = h.intern("z");
-        assert!(!h.get_mut(id).slot_set(z, Value::integer(0)));
+        assert!(h.get_mut(id).slot_set(z, Value::integer(0)));
+        assert_eq!(h.get(id).slot_get(z), Some(Value::integer(0)));
     }
 
     #[test]

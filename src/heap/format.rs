@@ -159,7 +159,7 @@ impl Heap {
                 }
                 format!("#[{}]  : Table ({} seq, {} map)", parts.join(" "), seq.len(), map.len())
             }
-            HeapObject::General { slot_names, slot_values, handlers } => {
+            HeapObject::General { slot_names, slot_values, handlers, .. } => {
                 if slot_names.is_empty() && handlers.is_empty() {
                     return format!("<object#{id}>");
                 }

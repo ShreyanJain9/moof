@@ -480,17 +480,12 @@ impl VM {
 
                     if clone_parent {
                         // clone: copy parent's slots as defaults, overlay with provided slots.
-                        // skip the parent's own parent slot (slot 0) — that's the delegation
-                        // pointer, not user data, and make_object_with_slots will prepend our
-                        // own parent slot anyway.
                         if let Some(pid) = parent.as_any_object() {
                             let parent_slot_names = heap.get(pid).slot_names();
-                            let sym_parent = heap.sym_parent;
                             let mut merged_names = Vec::new();
                             let mut merged_values = Vec::new();
 
                             for &pn in &parent_slot_names {
-                                if pn == sym_parent { continue; }
                                 let pv = heap.get(pid).slot_get(pn).unwrap_or(Value::NIL);
                                 merged_names.push(pn);
                                 merged_values.push(pv);
