@@ -9,9 +9,18 @@ use crate::object::HeapObject;
 use crate::value::Value;
 use super::Heap;
 
+/// Hard cap on format depth as a safety net; in practice cycle detection
+/// catches Env/self-ref loops earlier.
+const FORMAT_DEPTH_LIMIT: usize = 32;
+
 impl Heap {
     /// Format a value for display — unambiguous, round-trippable.
     pub fn format_value(&self, val: Value) -> String {
+        self.format_value_at(val, &mut Vec::new())
+    }
+
+    pub(crate) fn format_value_at(&self, val: Value, visiting: &mut Vec<u32>) -> String {
+        if visiting.len() >= FORMAT_DEPTH_LIMIT { return "...".into(); }
         if val.is_nil() { return "nil".into(); }
         if val.is_true() { return "true".into(); }
         if val.is_false() { return "false".into(); }
@@ -21,49 +30,67 @@ impl Heap {
             return format!("'{}", self.symbol_name(id));
         }
         if let Some(id) = val.as_any_object() {
-            return self.format_object(id);
+            // cycle detection: if we're already mid-format on this id
+            // somewhere up the stack, bail — Env containing its own
+            // binding is the normal case.
+            if visiting.contains(&id) {
+                return format!("<cycle#{id}>");
+            }
+            return self.format_object_at(id, visiting);
         }
         format!("?{:#018x}", val.to_bits())
     }
 
-    fn format_object(&self, id: u32) -> String {
-        // closures are Generals with __code_idx — detect + format specially.
+    fn format_object_at(&self, id: u32, visiting: &mut Vec<u32>) -> String {
+        // closures are Generals with a code_idx slot — detect + format specially.
         if let Some((_, is_op)) = self.as_closure(Value::nursery(id)) {
             let arity = self.closure_arity(Value::nursery(id)).unwrap_or(0);
             return if is_op { format!("<operative arity:{arity}>") }
                    else { format!("<fn arity:{arity}>") };
         }
-        match self.get(id) {
-            HeapObject::Pair(_, _) => self.format_list(id),
+        visiting.push(id);
+        let result = match self.get(id) {
+            HeapObject::Pair(_, _) => self.format_list_at(id, visiting),
             HeapObject::Text(s) => format!("\"{}\"", s.replace('"', "\\\"")),
             HeapObject::Buffer(b) => format!("<bytes:{}>", b.len()),
             HeapObject::Table { seq, map } => {
                 let mut parts = Vec::new();
-                for v in seq { parts.push(self.format_value(*v)); }
+                for v in seq { parts.push(self.format_value_at(*v, visiting)); }
                 for (k, v) in map {
-                    parts.push(format!("{} => {}", self.format_value(*k), self.format_value(*v)));
+                    parts.push(format!("{} => {}",
+                        self.format_value_at(*k, visiting),
+                        self.format_value_at(*v, visiting)));
                 }
                 format!("#[{}]", parts.join(" "))
             }
             HeapObject::General { slot_names, slot_values, .. } => {
                 if slot_names.is_empty() {
-                    return format!("<object#{id}>");
+                    format!("<object#{id}>")
+                } else {
+                    let slots: Vec<_> = slot_names.iter().zip(slot_values.iter())
+                        .map(|(n, v)| format!("{}: {}",
+                            self.symbol_name(*n),
+                            self.format_value_at(*v, visiting)))
+                        .collect();
+                    format!("{{ {} }}", slots.join(" "))
                 }
-                let slots: Vec<_> = slot_names.iter().zip(slot_values.iter())
-                    .map(|(n, v)| format!("{}: {}", self.symbol_name(*n), self.format_value(*v)))
-                    .collect();
-                format!("{{ {} }}", slots.join(" "))
             }
-        }
+        };
+        visiting.pop();
+        result
     }
 
-    fn format_list(&self, mut id: u32) -> String {
+    fn format_object(&self, id: u32) -> String {
+        self.format_object_at(id, &mut Vec::new())
+    }
+
+    fn format_list_at(&self, mut id: u32, visiting: &mut Vec<u32>) -> String {
         let mut items = Vec::new();
         let mut tail = Value::NIL;
         loop {
             match self.get(id) {
                 HeapObject::Pair(car, cdr) => {
-                    items.push(self.format_value(*car));
+                    items.push(self.format_value_at(*car, visiting));
                     if cdr.is_nil() {
                         break;
                     } else if let Some(next) = cdr.as_any_object() {
@@ -82,7 +109,7 @@ impl Heap {
         if tail.is_nil() {
             format!("({})", items.join(" "))
         } else {
-            format!("({} . {})", items.join(" "), self.format_value(tail))
+            format!("({} . {})", items.join(" "), self.format_value_at(tail, visiting))
         }
     }
 
@@ -112,7 +139,7 @@ impl Heap {
         }
         match self.get(id) {
             HeapObject::Pair(_, _) => {
-                let formatted = self.format_list(id);
+                let formatted = self.format_list_at(id, &mut Vec::new());
                 let len = self.list_len(id);
                 format!("{formatted}  : Cons ({len} elements)")
             }

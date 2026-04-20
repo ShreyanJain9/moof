@@ -72,7 +72,9 @@ impl HeapObject {
         }
     }
 
-    /// Look up a slot value by name (symbol ID).
+    /// Look up a slot value by name (symbol ID). Does NOT surface the
+    /// parent field as a slot — use Heap::slot_of for the public slot
+    /// protocol, which also handles the `parent` keyword uniformly.
     pub fn slot_get(&self, name: u32) -> Option<Value> {
         match self {
             HeapObject::General { slot_names, slot_values, .. } => {
@@ -84,9 +86,9 @@ impl HeapObject {
         }
     }
 
-    /// Set a slot value by name. Grows the object if the slot doesn't exist —
-    /// environments add bindings this way. Always succeeds (returns true for
-    /// legacy callers that checked the result).
+    /// Set a slot value by name. Grows the object if the slot doesn't exist.
+    /// Does NOT handle the `parent` keyword specially — use Heap::slot_put
+    /// for the public slot protocol.
     pub fn slot_set(&mut self, name: u32, val: Value) -> bool {
         match self {
             HeapObject::General { slot_names, slot_values, .. } => {
@@ -113,7 +115,8 @@ impl HeapObject {
         }
     }
 
-    /// Get the slot names (for introspection).
+    /// Raw explicit slots — doesn't include parent. Use Heap::slot_names
+    /// for the public-facing list that surfaces parent too.
     pub fn slot_names(&self) -> Vec<u32> {
         match self {
             HeapObject::General { slot_names, .. } => slot_names.clone(),

@@ -22,28 +22,18 @@ impl super::Plugin for CorePlugin {
             *parent = object_proto;
         }
 
-        // Object: slotAt:
+        // Object: slotAt: — unified slot protocol via Heap::slot_of.
+        // `parent` / `car` / `cdr` fall out of the single code path.
         native(heap, obj_id, "slotAt:", |heap, receiver, args| {
             let name = args.first().and_then(|v| v.as_symbol()).ok_or("slotAt: arg must be a symbol")?;
             if let Some(id) = receiver.as_any_object() {
-                // `parent` is a first-class slot on every object that has a
-                // parent field. No more __parent indirection — obj.parent
-                // just works.
-                if name == heap.sym_parent {
-                    let p = heap.get(id).parent();
-                    return Ok(if p.is_nil() { Value::NIL } else { p });
+                if let HeapObject::Pair(car, cdr) = heap.get(id) {
+                    let car_v = *car; let cdr_v = *cdr;
+                    if name == heap.sym_car { return Ok(car_v); }
+                    if name == heap.sym_cdr { return Ok(cdr_v); }
+                    return Ok(Value::NIL);
                 }
-                // for Pair, support car/cdr as virtual slots
-                match heap.get(id) {
-                    HeapObject::Pair(car, cdr) => {
-                        let car_v = *car; let cdr_v = *cdr;
-                        if name == heap.sym_car { return Ok(car_v); }
-                        if name == heap.sym_cdr { return Ok(cdr_v); }
-                        return Ok(Value::NIL);
-                    }
-                    _ => {}
-                }
-                Ok(heap.get(id).slot_get(name).unwrap_or(Value::NIL))
+                Ok(heap.slot_of(id, name).unwrap_or(Value::NIL))
             } else {
                 Ok(Value::NIL) // primitives have no slots
             }
@@ -102,15 +92,11 @@ impl super::Plugin for CorePlugin {
             Ok(heap.prototype_of(receiver))
         });
 
-        // Object: slotNames — works for ALL types. Always prepends `parent`
-        // for objects that have one, so the delegation link appears as a
-        // first-class slot alongside the rest.
+        // Object: slotNames — unified via Heap::slot_names_of, which already
+        // prepends `parent` when the object has one.
         native(heap, obj_id, "slotNames", |heap, receiver, _args| {
             if let Some(id) = receiver.as_any_object() {
-                let mut names = heap.get(id).slot_names();
-                if !heap.get(id).parent().is_nil() {
-                    names.insert(0, heap.sym_parent);
-                }
+                let names = heap.slot_names_of(id);
                 let syms: Vec<Value> = names.into_iter().map(Value::symbol).collect();
                 Ok(heap.list(&syms))
             } else {

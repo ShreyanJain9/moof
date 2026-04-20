@@ -206,6 +206,39 @@ impl Heap {
         &self.symbols[id as usize]
     }
 
+    /// Public slot protocol: get a slot by name, surfacing `parent` as a
+    /// first-class slot. This is what userland sees through slotAt:; the
+    /// raw HeapObject::slot_get ignores the parent field.
+    pub fn slot_of(&self, id: u32, name: u32) -> Option<Value> {
+        if name == self.sym_parent {
+            let p = self.get(id).parent();
+            if !p.is_nil() { return Some(p); }
+        }
+        self.get(id).slot_get(name)
+    }
+
+    /// Public slot protocol: set a slot by name. Setting `parent` reparents;
+    /// setting any other name writes into slot_values (growing if new).
+    pub fn slot_put(&mut self, id: u32, name: u32, val: Value) {
+        if name == self.sym_parent {
+            if let HeapObject::General { parent, .. } = self.get_mut(id) {
+                *parent = val;
+                return;
+            }
+        }
+        self.get_mut(id).slot_set(name, val);
+    }
+
+    /// Public slot protocol: all slot names, with `parent` first if the
+    /// object has a non-nil parent. Uniform with slot_of / slot_put.
+    pub fn slot_names_of(&self, id: u32) -> Vec<u32> {
+        let mut r = self.get(id).slot_names();
+        if !self.get(id).parent().is_nil() {
+            r.insert(0, self.sym_parent);
+        }
+        r
+    }
+
     /// Canonicalize a Table/HashMap key: intern String content as a symbol
     /// so two equal strings land in the same bucket. Other Values pass
     /// through (bit-hashing is correct for everything else).
