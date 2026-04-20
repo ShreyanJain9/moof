@@ -25,6 +25,30 @@ pub struct CompileResult {
     pub closure_descs: Vec<ClosureDesc>,
 }
 
+/// Shift every MakeClosure opcode's desc index by `offset`. Used when
+/// pulling a sub-compiler's descs up into a parent: the sub emitted indices
+/// relative to its own desc-list-base (0); in the parent they start at
+/// sub_descs_offset, so every MakeClosure in every pulled-up chunk needs
+/// that offset added. Walks past Send/TailCall trailing data correctly.
+fn patch_make_closure_ops(chunk: &mut Chunk, offset: u16) {
+    let mut pc = 0;
+    while pc + 3 < chunk.code.len() {
+        if crate::opcodes::Op::from_u8(chunk.code[pc]) == Some(crate::opcodes::Op::MakeClosure) {
+            let old = u16::from_be_bytes([chunk.code[pc + 2], chunk.code[pc + 3]]);
+            let new_idx = old + offset;
+            chunk.code[pc + 2] = (new_idx >> 8) as u8;
+            chunk.code[pc + 3] = new_idx as u8;
+        }
+        pc += 4;
+        if pc >= 4 {
+            let prev = crate::opcodes::Op::from_u8(chunk.code[pc - 4]);
+            if prev == Some(crate::opcodes::Op::Send) || prev == Some(crate::opcodes::Op::TailCall) {
+                pc += 4;
+            }
+        }
+    }
+}
+
 pub struct Compiler<'a> {
     heap: &'a Heap,
     chunk: Chunk,
@@ -315,27 +339,15 @@ impl<'a> Compiler<'a> {
 
                     let sub_descs_offset = self.closure_descs.len();
                     let n_sub_descs = sub_result.closure_descs.len();
-                    self.closure_descs.extend(sub_result.closure_descs);
-
+                    let mut sub_descs = sub_result.closure_descs;
                     let mut chunk = sub_result.chunk;
                     if n_sub_descs > 0 {
-                        let mut pc = 0;
-                        while pc + 3 < chunk.code.len() {
-                            if crate::opcodes::Op::from_u8(chunk.code[pc]) == Some(crate::opcodes::Op::MakeClosure) {
-                                let old = u16::from_be_bytes([chunk.code[pc + 2], chunk.code[pc + 3]]);
-                                let new_idx = old + sub_descs_offset as u16;
-                                chunk.code[pc + 2] = (new_idx >> 8) as u8;
-                                chunk.code[pc + 3] = new_idx as u8;
-                            }
-                            pc += 4;
-                            if pc >= 4 {
-                                let prev = crate::opcodes::Op::from_u8(chunk.code[pc - 4]);
-                                if prev == Some(crate::opcodes::Op::Send) || prev == Some(crate::opcodes::Op::TailCall) {
-                                    pc += 4;
-                                }
-                            }
+                        patch_make_closure_ops(&mut chunk, sub_descs_offset as u16);
+                        for d in sub_descs.iter_mut() {
+                            patch_make_closure_ops(&mut d.chunk, sub_descs_offset as u16);
                         }
                     }
+                    self.closure_descs.extend(sub_descs);
 
                     let desc = ClosureDesc {
                         chunk,
@@ -395,34 +407,24 @@ impl<'a> Compiler<'a> {
                     let capture_local_regs: Vec<u8> = sub.captures.iter().map(|(_, _, lr)| *lr).collect();
                     let sub_result = sub.finish();
 
-                    // pull up nested closure descs, patching the fn's chunk
+                    // pull up nested closure descs, patching MakeClosure
+                    // indices in EVERY chunk we're pulling up (not just the
+                    // current fn's chunk). each nested desc may itself contain
+                    // MakeClosure opcodes that were compiled relative to the
+                    // sub-compiler's desc_base=0; once descs are pulled into
+                    // the parent, the base shifts by sub_descs_offset, so
+                    // every MakeClosure needs that offset added.
                     let sub_descs_offset = self.closure_descs.len();
                     let n_sub_descs = sub_result.closure_descs.len();
-                    self.closure_descs.extend(sub_result.closure_descs);
-
-                    // patch MakeClosure indices inside the fn's chunk
-                    // they were compiled relative to sub_index 0, but in the
-                    // parent they start at sub_descs_offset
+                    let mut sub_descs = sub_result.closure_descs;
                     let mut chunk = sub_result.chunk;
                     if n_sub_descs > 0 {
-                        let mut pc = 0;
-                        while pc + 3 < chunk.code.len() {
-                            if crate::opcodes::Op::from_u8(chunk.code[pc]) == Some(crate::opcodes::Op::MakeClosure) {
-                                let old = u16::from_be_bytes([chunk.code[pc + 2], chunk.code[pc + 3]]);
-                                let new_idx = old + sub_descs_offset as u16;
-                                chunk.code[pc + 2] = (new_idx >> 8) as u8;
-                                chunk.code[pc + 3] = new_idx as u8;
-                            }
-                            pc += 4;
-                            // skip Send/TailCall trailing data
-                            if pc >= 4 {
-                                let prev = crate::opcodes::Op::from_u8(chunk.code[pc - 4]);
-                                if prev == Some(crate::opcodes::Op::Send) || prev == Some(crate::opcodes::Op::TailCall) {
-                                    pc += 4;
-                                }
-                            }
+                        patch_make_closure_ops(&mut chunk, sub_descs_offset as u16);
+                        for d in sub_descs.iter_mut() {
+                            patch_make_closure_ops(&mut d.chunk, sub_descs_offset as u16);
                         }
                     }
+                    self.closure_descs.extend(sub_descs);
 
                     let desc = ClosureDesc {
                         chunk,

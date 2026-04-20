@@ -690,7 +690,6 @@ impl Scheduler {
 
             for (i, cont) in conts.iter().enumerate() {
                 let vat = self.vat_mut(vat_id);
-                eprintln!("[drain] vat={vat_id} act={act_id} i={i} current_val={}", vat.heap.format_value(current_val));
                 match vat.vm.call_value(&mut vat.heap, *cont, &[current_val]) {
                     Ok(val) => {
                         let vat = self.vat_mut(vat_id);
