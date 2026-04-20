@@ -509,31 +509,36 @@ impl Heap {
         let mut names = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
-        // for heap general objects, start with own handlers
+        // start with the receiver's own handlers — General, Closure, and
+        // Environment all carry per-instance handler tables.
         if let Some(id) = val.as_any_object() {
-            if let HeapObject::General { handlers, .. } = self.get(id) {
-                for &(sel, _) in handlers {
-                    if seen.insert(sel) { names.push(sel); }
-                }
-            }
-        }
-
-        // walk the prototype chain
-        let mut proto = self.prototype_of(val);
-        for _ in 0..256 {
-            if proto.is_nil() { break; }
-            if let Some(id) = proto.as_any_object() {
-                if let HeapObject::General { handlers, parent, .. } = self.get(id) {
+            match self.get(id) {
+                HeapObject::General { handlers, .. }
+                | HeapObject::Closure { handlers, .. }
+                | HeapObject::Environment { handlers, .. } => {
                     for &(sel, _) in handlers {
                         if seen.insert(sel) { names.push(sel); }
                     }
-                    proto = *parent;
-                } else {
-                    break;
                 }
-            } else {
-                break;
+                _ => {}
             }
+        }
+
+        // walk the prototype chain — accept any variant that carries handlers.
+        let mut proto = self.prototype_of(val);
+        for _ in 0..256 {
+            if proto.is_nil() { break; }
+            let Some(id) = proto.as_any_object() else { break; };
+            let (handlers, next) = match self.get(id) {
+                HeapObject::General { handlers, parent, .. }
+                | HeapObject::Closure { handlers, parent, .. }
+                | HeapObject::Environment { handlers, parent, .. } => (handlers, *parent),
+                _ => break,
+            };
+            for &(sel, _) in handlers {
+                if seen.insert(sel) { names.push(sel); }
+            }
+            proto = next;
         }
         names
     }
