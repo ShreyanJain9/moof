@@ -456,11 +456,15 @@ impl Heap {
             !captures.iter().any(|(_, val)| self.prototype_of(*val) == farref_proto)
         };
 
-        // metadata slots first, then captures.
-        let code_idx_sym = self.intern("__code_idx");
-        let arity_sym = self.intern("__arity");
-        let is_op_sym = self.intern("__is_operative");
-        let is_pure_sym = self.intern("__is_pure");
+        // metadata slots first, then captures. slot names are NORMAL (no __
+        // prefix) — they show up in slotNames and via dot access, which is
+        // the point: a closure's metadata is just data on the object.
+        // predicate handlers like operative?/pure? on the Block prototype
+        // read these slots; the slot itself holds the raw data.
+        let code_idx_sym = self.intern("code_idx");
+        let arity_sym = self.intern("arity");
+        let is_op_sym = self.intern("is_operative");
+        let is_pure_sym = self.intern("is_pure");
 
         let mut slot_names: Vec<u32> = Vec::with_capacity(4 + captures.len());
         let mut slot_values: Vec<Value> = Vec::with_capacity(4 + captures.len());

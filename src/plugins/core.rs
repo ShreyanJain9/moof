@@ -26,6 +26,13 @@ impl super::Plugin for CorePlugin {
         native(heap, obj_id, "slotAt:", |heap, receiver, args| {
             let name = args.first().and_then(|v| v.as_symbol()).ok_or("slotAt: arg must be a symbol")?;
             if let Some(id) = receiver.as_any_object() {
+                // `parent` is a first-class slot on every object that has a
+                // parent field. No more __parent indirection — obj.parent
+                // just works.
+                if name == heap.sym_parent {
+                    let p = heap.get(id).parent();
+                    return Ok(if p.is_nil() { Value::NIL } else { p });
+                }
                 // for Pair, support car/cdr as virtual slots
                 match heap.get(id) {
                     HeapObject::Pair(car, cdr) => {
@@ -95,10 +102,15 @@ impl super::Plugin for CorePlugin {
             Ok(heap.prototype_of(receiver))
         });
 
-        // Object: slotNames — works for ALL types
+        // Object: slotNames — works for ALL types. Always prepends `parent`
+        // for objects that have one, so the delegation link appears as a
+        // first-class slot alongside the rest.
         native(heap, obj_id, "slotNames", |heap, receiver, _args| {
             if let Some(id) = receiver.as_any_object() {
-                let names = heap.get(id).slot_names();
+                let mut names = heap.get(id).slot_names();
+                if !heap.get(id).parent().is_nil() {
+                    names.insert(0, heap.sym_parent);
+                }
                 let syms: Vec<Value> = names.into_iter().map(Value::symbol).collect();
                 Ok(heap.list(&syms))
             } else {
