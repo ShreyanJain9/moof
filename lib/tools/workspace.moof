@@ -95,36 +95,33 @@
 ; the name→value binding table. state changes are Updates; the
 ; scheduler applies them between messages. no userland slot mutation.
 
-(defn Workspace (title)
-  [Vat serve:with:
-    (fn (ws-title)
-      { title:    ws-title
-        blocks:   nil
-        bindings: #[]
+(defserver Workspace (title)
+  { title:    title
+    blocks:   nil
+    bindings: #[]
 
-        [typeName] (quote Workspace)
+    [typeName] (quote Workspace)
 
-        [getTitle]       @title
-        [getBlocks]      @blocks
-        [getBindings]    @bindings
-        [blockCount]     (if (nil? @blocks) 0 [@blocks count])
-        [lookup: name]   [@bindings at: name]
+    [getTitle]       @title
+    [getBlocks]      @blocks
+    [getBindings]    @bindings
+    [blockCount]     (if (nil? @blocks) 0 [@blocks count])
+    [lookup: name]   [@bindings at: name]
 
-        [add: block]
-          (let ((next (if (nil? @blocks)
-                        (cons block nil)
-                        [@blocks append: (cons block nil)])))
-            (update { blocks: next } nil))
+    [add: block]
+      (let ((next (if (nil? @blocks)
+                    (cons block nil)
+                    [@blocks append: (cons block nil)])))
+        (update { blocks: next } nil))
 
-        [bind: name to: val]
-          (update { bindings: [@bindings at: name put: val] } nil)
+    [bind: name to: val]
+      (update { bindings: [@bindings at: name put: val] } nil)
 
-        [render: medium]
-          (str "═ " @title " ═\n\n"
-               (if (nil? @blocks) "  (empty)"
-                 [[@blocks map: |b| [b render: medium]] join: "\n\n"]))
+    [render: medium]
+      (str "═ " @title " ═\n\n"
+           (if (nil? @blocks) "  (empty)"
+             [[@blocks map: |b| [b render: medium]] join: "\n\n"]))
 
-        [describe]
-          (str "<Workspace " [@title describe] ">")
-      })
-    (list title)])
+    [describe]
+      (str "<Workspace " [@title describe] ">")
+  })

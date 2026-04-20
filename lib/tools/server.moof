@@ -1,55 +1,42 @@
-; server.moof — defserver: actors in the objectspace
+; server.moof — defserver: parameterized server vats
 ;
-; (defserver Name () { body })
-; (defserver Name (cap1 cap2) { body })
+; (defserver Name (param1 param2 ...) body)
+;   → defines Name as a fn taking (param1 param2 ...) that spawns a new
+;     server vat. body evaluates inside the child vat with params bound,
+;     and must return the server object (whose handlers become its message
+;     surface). `(Name arg1 arg2)` returns Act<FarRef>.
 ;
-; (Name { cap1: ref1 }) → Act<FarRef>
+; (defserver Name params body)       ; params is a single symbol → variadic
+;   → the symbol becomes bound to the full arg list inside the body.
 ;
-; body is a { } object literal. the constructor captures the body AST
-; (nested closure capture works) and evals it in a fresh vat.
+;   (defserver Atom (initial)
+;     { value: initial
+;       [get] @value
+;       [swap: new] (update { value: new } new) })
 ;
-; usage:
-;   (do (ref <- (Name {}))
-;       [ref someHandler])                 ; regular send works via FarRef DnU
+;   (do (a <- (Atom 0))
+;       (_ <- [a swap: 42])
+;       [a get])                    ; Act<42>
 ;
-; KNOWN LIMITATION: the `<-` eventual-send syntax ([recv <- sel args])
-; emits (%eventual-send recv sel args) which the compiler doesn't yet
-; know how to lower. use regular sends on FarRefs — they forward across
-; vats via doesNotUnderstand: and give you the same Act semantics.
-
-; extract-cap-vals: pull cap values from config into a list.
-(defn extract-cap-vals (config names)
-  (if (nil? names) nil
-    (cons [config slotAt: [names car]]
-          (extract-cap-vals config [names cdr]))))
+; no capability support yet — for services that need console/clock/etc.,
+; pass them explicitly as regular params.
 
 (def defserver (vau args $e
   (let ((name [args car])
         (rest [args cdr])
-        (raw-caps [rest car])
-        (has-cap-decl (or (nil? raw-caps) (cons? raw-caps)))
-        (cap-list (if has-cap-decl raw-caps nil))
-        (body-expr (if has-cap-decl [[rest cdr] car] raw-caps)))
-
-    (eval `(def ,name
-      ,(if (some? cap-list)
-        ; with capabilities
-        (fn (config)
-          ; pass cap names + values via serve:with:
-          ; body-expr captures naturally (nested capture fix)
-          (let ((cap-vals (extract-cap-vals config cap-list))
-                (serve-fn (fn (cap-names cap-vals)
-                  ; bind each cap name in the child vat's env
-                  (let ((bind (fn (go names vals)
-                          (if (nil? names) nil
-                            (do (eval `(def ,[names car] (quote ,[vals car])) Env)
-                                (go go [names cdr] [vals cdr]))))))
-                    (bind bind cap-names cap-vals))
-                  ; eval the body
-                  (eval body-expr Env))))
-            [Vat serve: serve-fn
-              with: (list cap-list cap-vals)]))
-        ; no capabilities — body-expr captures naturally
-        (fn (config)
-          [Vat serve: || (eval body-expr Env)])))
-      $e))))
+        (params [rest car])
+        (body [[rest cdr] car])
+        ; variadic when params is a symbol (not a cons/list, not nil)
+        (variadic (and (not (cons? params)) (not (nil? params)))))
+    ; variadic: (fn params body) binds params to the full arg list.
+    ; positional (list of syms): `(list ,@params)` reconstructs the arg
+    ; list to hand to serve:with:.
+    (if variadic
+      (eval `(def ,name
+        (fn ,params
+          [Vat serve:with: (fn ,params ,body) ,params]))
+        $e)
+      (eval `(def ,name
+        (fn ,params
+          [Vat serve:with: (fn ,params ,body) (list ,@params)]))
+        $e)))))

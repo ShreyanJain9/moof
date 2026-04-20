@@ -1,16 +1,15 @@
 ; reactive.moof — atoms and signals as real server vats
 ;
-; every Atom runs in its own vat. state lives behind the vat
-; boundary; you hold a FarRef and send it messages. every read
-; returns an Act; every write is an Update applied by the
-; scheduler between messages. no userland slot mutation.
+; every Atom and Signal runs in its own vat. state lives behind the vat
+; boundary; you hold a FarRef and send it messages. every read returns
+; an Act; every write is an Update applied by the scheduler between
+; messages. no userland slot mutation.
 ;
 ;   (do (count   <- (Atom 0))
-;       (doubled <- (Signal || [[count get] * 2] count))
-;       (_ <- [count subscribe: doubled])
+;       (doubled <- (wire-reactive (Signal || (do (n <- [count get]) [n * 2])
+;                                             count)))
 ;       (_ <- [count swap: 5])
-;       (v <- [doubled get])
-;       v)                     ; 10
+;       [doubled get])              ; Act<10>
 ;
 ; the test framework is act-aware, so single-expression tests like
 ;   (test "get" (do (a <- (Atom 10)) [a get]) 10)
@@ -21,111 +20,99 @@
 ; ══════════════════════════════════════════════════════════
 ;
 ; state and subscribers live in slots of the server object. swap:
-; returns an Update the scheduler applies; the scheduler's reply
-; is the new value. subscribers are notified via cross-vat sends
-; queued during the handler — they run in the recipient vats
-; later, after swap:'s Update has been applied.
+; returns an Act that first notifies every subscriber sequentially, then
+; resolves into an Update. the Act-before-Update pattern is how a handler
+; guarantees "my effects propagate before my reply" — without it, swap's
+; reply would race the cache-invalidation message.
 
-(defn Atom (initial)
-  [Vat serve:with:
-    (fn (init)
-      ; notify-all: chain notify messages sequentially so the Act returned
-      ; by swap only resolves after every subscriber has acknowledged. this
-      ; is the causal glue that lets swap guarantee "my effects propagate
-      ; before my reply." defined here INSIDE the spawn closure so it lives
-      ; in the Atom's child vat — BOOTSTRAP_FILES don't include reactive.moof.
-      (let ((notify-all (fn (notify-all subs new)
-                          (if (nil? subs) new
-                            [[[subs car] notify: new] then:
-                              |_| (notify-all notify-all [subs cdr] new)]))))
-        { value: init
-          subscribers: nil
+(defserver Atom (initial)
+  ; notify-all lives inside the spawn closure so it migrates into the
+  ; child vat (BOOTSTRAP_FILES doesn't include lib/flow). self-passing
+  ; recursion avoids relying on the name being globally resolvable.
+  (let ((notify-all (fn (notify-all subs new)
+                      (if (nil? subs) new
+                        [[[subs car] notify: new] then:
+                          |_| (notify-all notify-all [subs cdr] new)]))))
+    { value: initial
+      subscribers: nil
 
-          [typeName] (quote Atom)
+      [typeName] (quote Atom)
 
-          [get] @value
+      [get] @value
 
-          [swap: new]
-            [(notify-all notify-all @subscribers new) then:
-              |_| (update { value: new } new)]
+      [swap: new]
+        [(notify-all notify-all @subscribers new) then:
+          |_| (update { value: new } new)]
 
-          [update: f]
-            [self swap: (f @value)]
+      [update: f]
+        [self swap: (f @value)]
 
-          [subscribe: sub]
-            (update { subscribers: (cons sub @subscribers) } nil)
+      [subscribe: sub]
+        (update { subscribers: (cons sub @subscribers) } nil)
 
-          [unsubscribe: sub]
-            (update { subscribers: [@subscribers reject: |s| [s identical: sub]] }
-                    nil)
+      [unsubscribe: sub]
+        (update { subscribers: [@subscribers reject: |s| [s identical: sub]] }
+                nil)
 
-          [describe]
-            (str "<Atom " [@value describe] ">")
-          [show]
-            (str [self describe] "  : Atom")
-        }))
-    (list initial)])
+      [describe]
+        (str "<Atom " [@value describe] ">")
+      [show]
+        (str [self describe] "  : Atom")
+    }))
 
 ; ══════════════════════════════════════════════════════════
 ; Signal — derived, lazily re-evaluated
 ; ══════════════════════════════════════════════════════════
 ;
-; Signal runs in its own vat. computation is a closure captured
-; at construction; inputs are the FarRefs it reads from. get
-; pulls cached value if valid, otherwise re-computes. notify:
-; invalidates cache and cascades to downstream subscribers.
+; Signal runs in its own vat. computation is a closure captured at
+; construction; inputs are the FarRefs it reads from. get pulls the
+; cached value if valid, otherwise re-computes. notify: invalidates
+; cache and cascades to downstream subscribers.
 ;
-; cross-vat closure migration is required (the computation captures
-; its input FarRefs). this relies on the scheduler's copy_value_across
-; handling closures correctly.
+; the computation closure captures input FarRefs and migrates via the
+; scheduler's closure walker. get chains the (possibly async) computation
+; through then: so the handler returns either @cached directly or an
+; Act-of-Update — the scheduler handles both.
 
-(defn Signal args
+(defserver Signal args
+  ; args is the full arg list: (computation input1 input2 ...).
   (let ((computation [args car])
         (inputs [args cdr]))
-    [Vat serve:with:
-      (fn (comp inps)
-        { computation: comp
-          inputs: inps
-          cached: nil
-          valid: false
-          subscribers: nil
+    { computation: computation
+      inputs:      inputs
+      cached:      nil
+      valid:       false
+      subscribers: nil
 
-          [typeName] (quote Signal)
+      [typeName] (quote Signal)
 
-          ; get — return cached if valid, else run the (possibly async)
-          ; computation and update cache. the computation captures input
-          ; FarRefs, so reads like [a get] return Acts; users wrap the
-          ; computation body in `do` to thread them through. the handler
-          ; returns either @cached directly or an Act-of-Update; the
-          ; scheduler handles both.
-          [get]
-            (if @valid @cached
-              [(@computation) then:
-                |v| (update { cached: v valid: true } v)])
+      [get]
+        (if @valid @cached
+          [(@computation) then:
+            |v| (update { cached: v valid: true } v)])
 
-          [notify: _]
-            (let ((_ [@subscribers each: |s| [s notify: nil]]))
-              (update { valid: false } nil))
+      [notify: _]
+        (let ((_ [@subscribers each: |s| [s notify: nil]]))
+          (update { valid: false } nil))
 
-          [subscribe: sub]
-            (update { subscribers: (cons sub @subscribers) } nil)
+      [subscribe: sub]
+        (update { subscribers: (cons sub @subscribers) } nil)
 
-          [inputs] @inputs
+      [inputs] @inputs
 
-          [describe]
-            (str "<Signal " (if @valid (str "cached=" [@cached describe]) "stale") ">")
-          [show]  [self describe]
-      })
-      (list computation inputs)]))
+      [describe]
+        (str "<Signal " (if @valid (str "cached=" [@cached describe]) "stale") ">")
+      [show]  [self describe]
+    }))
 
 ; ══════════════════════════════════════════════════════════
 ; wire-up — subscribe the signal to each of its input sources
 ; ══════════════════════════════════════════════════════════
 ;
-; (wire-reactive sig) subscribes sig to every FarRef in its inputs.
-; inputs is a list of FarRefs (Atoms or Signals). [input subscribe: sig]
-; is a cross-vat send that returns an Act; we chain all of them and
-; resolve to sig.
+; (wire-reactive sig-act) subscribes sig to every FarRef in its inputs.
+; inputs is a list of FarRefs (Atoms or other Signals). [input subscribe: sig]
+; is a cross-vat send that returns an Act; we chain them all and resolve
+; to sig.
 
 (defn subscribe-each (sig inputs)
   (if (nil? inputs) sig
