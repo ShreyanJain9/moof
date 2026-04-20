@@ -108,7 +108,7 @@ impl Heap {
             if !marked[i] && !free_set.contains(&(i as u32)) {
                 // tombstone — overwrite so any stale access sees nothing.
                 // parent=NIL prevents chain walking into this slot.
-                self.objects[i] = HeapObject::new_empty(Value::NIL);
+                self.objects[i] = HeapObject::new_empty(self.sym_parent, Value::NIL);
                 self.free_list.push(i as u32);
                 newly_freed += 1;
             }
@@ -128,8 +128,9 @@ impl Heap {
     /// Walk children of object idx, marking + pushing to worklist.
     fn mark_children_of(&self, idx: usize, worklist: &mut Vec<u32>, marked: &mut [bool]) {
         match &self.objects[idx] {
-            HeapObject::General { parent, slot_values, handlers, .. } => {
-                mark_value_id(*parent, worklist, marked);
+            HeapObject::General { slot_values, handlers, .. } => {
+                // parent is slot_values[0] by invariant, so the simple
+                // slot_values iteration covers it too.
                 for &v in slot_values { mark_value_id(v, worklist, marked); }
                 for (_, v) in handlers { mark_value_id(*v, worklist, marked); }
             }

@@ -131,7 +131,8 @@ fn type_name_of(heap: &Heap, val: Value) -> String {
     // Fallback: variant-based type name
     if let Some(id) = val.as_any_object() {
         match heap.get(id) {
-            HeapObject::General { parent, .. } => {
+            HeapObject::General { .. } => {
+                let parent = heap.get(id).parent();
                 // try parent's typeName slot
                 if let Some(pid) = parent.as_any_object() {
                     if let Some(name_sym) = heap.find_symbol("__name") {

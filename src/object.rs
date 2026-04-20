@@ -2,6 +2,13 @@
 //
 // The VM has optimized internal representations for common shapes,
 // but semantically everything is an object that responds to messages.
+//
+// Invariant: a General's slot_values[0] is always the object's parent,
+// and slot_names[0] is always the interned symbol `parent`. That way
+// parent is a first-class slot — slot_get / slot_names / slot_set find
+// it naturally, and there's no "parent is a special field" branch
+// anywhere in the slot protocol. Construction is done via Heap methods
+// that know sym_parent and prepend the slot automatically.
 
 use indexmap::IndexMap;
 use serde::{Serialize, Deserialize};
@@ -9,17 +16,11 @@ use crate::value::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HeapObject {
-    /// General object: parent + named slots + handlers.
-    /// Slots are NOT fixed-shape — new slots can be added via slot_set.
-    /// (Used to be fixed; we relaxed that when folding Environment in. If
-    /// a use-site wants to reject adding new slots, it can check slot_get
-    /// first.)
-    /// Closures are Generals with code_idx / arity / is_operative / is_pure
-    /// slots plus their captures as regular slots.
+    /// General object: named slots + open handlers.
+    /// By convention slot_names[0] == sym_parent, slot_values[0] == parent.
     General {
-        parent: Value,
-        slot_names: Vec<u32>,           // symbol IDs
-        slot_values: Vec<Value>,        // values, same length as slot_names
+        slot_names: Vec<u32>,           // slot[0] is always `parent`
+        slot_values: Vec<Value>,        // slot_values[0] is the parent value
         handlers: Vec<(u32, Value)>,    // selector → handler value
     },
 
@@ -33,10 +34,9 @@ pub enum HeapObject {
     Buffer(Vec<u8>),
 
     /// Lua-style table: sequential part + keyed part.
-    /// `map` is IndexMap-backed → O(1) keyed lookup AND insertion-order
-    /// iteration (crucial for stable describe/show of sets + bags). String
-    /// keys are content-normalized at insert-time via canonicalize_key —
-    /// equal strings land in the same bucket.
+    /// `map` is IndexMap-backed — O(1) keyed lookup with insertion-order
+    /// iteration. String keys are canonicalized to interned symbols at
+    /// insert-time via Heap::canonicalize_key.
     Table {
         seq: Vec<Value>,
         map: IndexMap<Value, Value>,
@@ -44,51 +44,55 @@ pub enum HeapObject {
 }
 
 impl HeapObject {
-    pub fn new_general(parent: Value, slot_names: Vec<u32>, slot_values: Vec<Value>) -> Self {
-        debug_assert_eq!(slot_names.len(), slot_values.len());
+    /// Construct a General with explicit slot 0 = parent. Callers that
+    /// don't have sym_parent available should go through Heap::make_object
+    /// or Heap::make_object_with_slots instead.
+    pub fn new_general(parent_sym: u32, parent: Value, extra_names: Vec<u32>, extra_values: Vec<Value>) -> Self {
+        debug_assert_eq!(extra_names.len(), extra_values.len());
+        let mut slot_names = Vec::with_capacity(extra_names.len() + 1);
+        let mut slot_values = Vec::with_capacity(extra_values.len() + 1);
+        slot_names.push(parent_sym);
+        slot_values.push(parent);
+        slot_names.extend(extra_names);
+        slot_values.extend(extra_values);
+        HeapObject::General { slot_names, slot_values, handlers: Vec::new() }
+    }
+
+    pub fn new_empty(parent_sym: u32, parent: Value) -> Self {
         HeapObject::General {
-            parent,
-            slot_names,
-            slot_values,
+            slot_names: vec![parent_sym],
+            slot_values: vec![parent],
             handlers: Vec::new(),
         }
     }
 
-    pub fn new_empty(parent: Value) -> Self {
-        HeapObject::General {
-            parent,
-            slot_names: Vec::new(),
-            slot_values: Vec::new(),
-            handlers: Vec::new(),
-        }
-    }
-
-    /// Get the parent value (for delegation).
+    /// Get the parent value. By convention it's always slot_values[0] on
+    /// a General; optimized types don't have their own parent, they
+    /// delegate to their type prototype (resolved by prototype_of).
     pub fn parent(&self) -> Value {
         match self {
-            HeapObject::General { parent, .. } => *parent,
-            // optimized types delegate to their type prototype (resolved by dispatch)
+            HeapObject::General { slot_values, .. } => {
+                slot_values.first().copied().unwrap_or(Value::NIL)
+            }
             _ => Value::NIL,
         }
     }
 
-    /// Look up a slot value by name (symbol ID). Does NOT surface the
-    /// parent field as a slot — use Heap::slot_of for the public slot
-    /// protocol, which also handles the `parent` keyword uniformly.
+    /// Look up a slot value by name (symbol ID). Parent falls out of this
+    /// naturally because it's stored at slot_names[0] == sym_parent.
     pub fn slot_get(&self, name: u32) -> Option<Value> {
         match self {
             HeapObject::General { slot_names, slot_values, .. } => {
                 slot_names.iter().position(|n| *n == name)
                     .map(|i| slot_values[i])
             }
-            HeapObject::Pair(_car, _cdr) => None, // handled by dispatch via Cons proto
+            HeapObject::Pair(_, _) => None, // handled via Cons proto
             _ => None,
         }
     }
 
-    /// Set a slot value by name. Grows the object if the slot doesn't exist.
-    /// Does NOT handle the `parent` keyword specially — use Heap::slot_put
-    /// for the public slot protocol.
+    /// Set a slot value by name. Grows the object if the slot doesn't
+    /// exist. Writing `parent` reparents (finds slot_names[0]).
     pub fn slot_set(&mut self, name: u32, val: Value) -> bool {
         match self {
             HeapObject::General { slot_names, slot_values, .. } => {
@@ -104,19 +108,23 @@ impl HeapObject {
         }
     }
 
-    /// Remove a slot by name. No-op if the slot doesn't exist or the
-    /// object can't be shrunk. Used by env_remove during eval's save/restore.
+    /// Remove a slot by name. No-op for parent (slot 0) — removing it
+    /// would break the invariant. Used by env_remove during eval's
+    /// save/restore.
     pub fn slot_remove(&mut self, name: u32) {
         if let HeapObject::General { slot_names, slot_values, .. } = self {
+            // don't remove slot 0 — that's parent, and removing it would
+            // violate the invariant.
             if let Some(i) = slot_names.iter().position(|n| *n == name) {
+                if i == 0 { return; }
                 slot_names.remove(i);
                 slot_values.remove(i);
             }
         }
     }
 
-    /// Raw explicit slots — doesn't include parent. Use Heap::slot_names
-    /// for the public-facing list that surfaces parent too.
+    /// Get the slot names (for introspection). Includes 'parent as the
+    /// first entry — no wrapping needed.
     pub fn slot_names(&self) -> Vec<u32> {
         match self {
             HeapObject::General { slot_names, .. } => slot_names.clone(),
@@ -145,8 +153,7 @@ impl HeapObject {
                 }
             }
             _ => {
-                // optimized types can't have per-instance handlers
-                // (they use the type prototype's handlers via delegation)
+                // optimized types use their type prototype's handlers
             }
         }
     }

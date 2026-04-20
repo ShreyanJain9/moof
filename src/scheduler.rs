@@ -558,15 +558,15 @@ impl Scheduler {
                     let s = s.clone();
                     return self.vat_mut(to_vat).heap.alloc_string(&s);
                 }
-                crate::object::HeapObject::General { parent: _, slot_names, slot_values, .. } => {
-                    // copy General objects (including FarRefs) by cloning slots
-                    let names: Vec<String> = slot_names.iter()
+                crate::object::HeapObject::General { slot_names, slot_values, .. } => {
+                    // slot 0 is always `parent` by invariant — drop it here
+                    // and reconstruct via make_object_with_slots, which
+                    // prepends its own parent slot in the target heap.
+                    let names: Vec<String> = slot_names.iter().skip(1)
                         .map(|s| from_heap.symbol_name(*s).to_string())
                         .collect();
-                    let vals: Vec<Value> = slot_values.clone();
-                    // check if this is a FarRef (has __target_vat slot)
+                    let vals: Vec<Value> = slot_values.iter().skip(1).copied().collect();
                     let is_farref = names.iter().any(|n| n == "__target_vat");
-                    // re-intern names and copy values in target heap
                     let new_names: Vec<u32> = names.iter()
                         .map(|n| self.vat_mut(to_vat).heap.intern(n))
                         .collect();

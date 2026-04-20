@@ -17,13 +17,13 @@ impl super::Plugin for CorePlugin {
         heap.type_protos[PROTO_OBJ] = object_proto;
         let obj_id = object_proto.as_any_object().unwrap();
 
-        // fix up root environment's parent to Object (it was NIL at allocation time)
-        if let HeapObject::General { parent, .. } = heap.get_mut(heap.env) {
-            *parent = object_proto;
-        }
+        // fix up root environment's parent to Object (slot 0 was NIL at allocation time)
+        let env_id = heap.env;
+        let sym_parent = heap.sym_parent;
+        heap.get_mut(env_id).slot_set(sym_parent, object_proto);
 
-        // Object: slotAt: — unified slot protocol via Heap::slot_of.
-        // `parent` / `car` / `cdr` fall out of the single code path.
+        // Object: slotAt: — parent is just a slot (invariant: slot 0 is parent),
+        // so slot_get finds it naturally. car/cdr stay as virtual slots on Pair.
         native(heap, obj_id, "slotAt:", |heap, receiver, args| {
             let name = args.first().and_then(|v| v.as_symbol()).ok_or("slotAt: arg must be a symbol")?;
             if let Some(id) = receiver.as_any_object() {
@@ -33,7 +33,7 @@ impl super::Plugin for CorePlugin {
                     if name == heap.sym_cdr { return Ok(cdr_v); }
                     return Ok(Value::NIL);
                 }
-                Ok(heap.slot_of(id, name).unwrap_or(Value::NIL))
+                Ok(heap.get(id).slot_get(name).unwrap_or(Value::NIL))
             } else {
                 Ok(Value::NIL) // primitives have no slots
             }
@@ -52,22 +52,27 @@ impl super::Plugin for CorePlugin {
 
             // get the original object's slots + handlers
             let recv_id = receiver.as_any_object().ok_or("with: receiver must be an object")?;
-            let (orig_names, orig_vals, parent, orig_handlers) = match heap.get(recv_id) {
-                HeapObject::General { slot_names, slot_values, parent, handlers } => {
-                    (slot_names.clone(), slot_values.clone(), *parent, handlers.clone())
+            let (orig_names, orig_vals, orig_handlers) = match heap.get(recv_id) {
+                HeapObject::General { slot_names, slot_values, handlers } => {
+                    (slot_names.clone(), slot_values.clone(), handlers.clone())
                 }
                 _ => return Err("with: receiver must be a general object".into()),
             };
 
-            // get the override slots
-            let override_names_syms = heap.get(override_id).slot_names();
+            // get the override slots — skip the override's own parent slot
+            // (slot 0), since with: preserves the original's parent.
+            let sym_parent = heap.sym_parent;
+            let override_names_syms: Vec<u32> = heap.get(override_id).slot_names()
+                .into_iter().filter(|n| *n != sym_parent).collect();
             let override_vals: Vec<Value> = override_names_syms.iter()
                 .map(|n| heap.get(override_id).slot_get(*n).unwrap_or(Value::NIL))
                 .collect();
 
-            // build new slot arrays: original with overrides applied
-            let mut new_names = orig_names.clone();
-            let mut new_vals = orig_vals.clone();
+            // build new slot arrays: original with overrides applied. parent
+            // (slot 0) is preserved by copying orig_names/orig_vals wholesale;
+            // overrides just update existing positions or append.
+            let mut new_names = orig_names;
+            let mut new_vals = orig_vals;
             for (name, val) in override_names_syms.iter().zip(override_vals.iter()) {
                 if let Some(i) = new_names.iter().position(|n| *n == *name) {
                     new_vals[i] = *val;
@@ -77,9 +82,7 @@ impl super::Plugin for CorePlugin {
                 }
             }
 
-            // create new object with same parent and handlers
             let new_obj = heap.alloc_val(HeapObject::General {
-                parent,
                 slot_names: new_names,
                 slot_values: new_vals,
                 handlers: orig_handlers,
@@ -96,7 +99,7 @@ impl super::Plugin for CorePlugin {
         // prepends `parent` when the object has one.
         native(heap, obj_id, "slotNames", |heap, receiver, _args| {
             if let Some(id) = receiver.as_any_object() {
-                let names = heap.slot_names_of(id);
+                let names = heap.get(id).slot_names();
                 let syms: Vec<Value> = names.into_iter().map(Value::symbol).collect();
                 Ok(heap.list(&syms))
             } else {
