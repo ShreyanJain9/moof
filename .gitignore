@@ -1,5 +1,6 @@
 target/
 .moof/
+.letta/
 *.swp
 *.swo
 .DS_Store

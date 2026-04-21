@@ -12,9 +12,11 @@
 mod format;
 mod image;
 mod gc;
+mod pair;
 
 pub use image::HeapImage;
 pub use gc::GcStats;
+pub use pair::Pair;
 
 use crate::object::HeapObject;
 use crate::value::Value;
@@ -185,6 +187,14 @@ impl Heap {
         h.sym_at_put = h.intern("at:put:");
         h.sym_message = h.intern("message");
         let bindings_sym = h.intern("bindings");
+
+        // Register the core foreign types before anything else
+        // allocates through the foreign pipeline. Pair is the
+        // first — cons cells are foreign objects now. The sym IDs
+        // for `car` / `cdr` were interned above and we propagate
+        // them to the Pair vtable's slot cache.
+        h.register_foreign_type::<Pair>().expect("register Pair");
+        pair::PAIR_SYMS.store(pair::PairSyms { car: h.sym_car, cdr: h.sym_cdr });
 
         // allocate the root env's bindings Table first.
         let bindings_table = h.alloc_val(HeapObject::Table {
@@ -375,7 +385,24 @@ impl Heap {
     }
 
     pub fn cons(&mut self, car: Value, cdr: Value) -> Value {
-        self.alloc_val(HeapObject::Pair(car, cdr))
+        // Pairs are foreign objects: proto is Cons (user-visible
+        // prototype that carries list-protocol handlers), payload
+        // is `Pair { car, cdr }`. car/cdr appear as virtual slots.
+        let proto = self.type_protos.get(PROTO_CONS).copied().unwrap_or(Value::NIL);
+        self.alloc_foreign(proto, Pair { car, cdr })
+            .expect("Pair foreign type must be registered")
+    }
+
+    /// If `id` is a cons-pair General, return (car, cdr). This is
+    /// the replacement for the old `HeapObject::Pair(a, b)` match —
+    /// post-wave-5.1 pairs don't have a dedicated enum variant.
+    pub fn pair_of(&self, id: u32) -> Option<(Value, Value)> {
+        self.foreign_ref::<Pair>(Value::nursery(id)).map(|p| (p.car, p.cdr))
+    }
+
+    /// True iff `val` is an object whose foreign payload is a Pair.
+    pub fn is_pair(&self, val: Value) -> bool {
+        self.foreign_ref::<Pair>(val).is_some()
     }
 
     pub fn alloc_string(&mut self, s: &str) -> Value {
@@ -428,17 +455,11 @@ impl Heap {
     // -- object access helpers --
 
     pub fn car(&self, id: u32) -> Value {
-        match self.get(id) {
-            HeapObject::Pair(car, _) => *car,
-            _ => Value::NIL,
-        }
+        self.pair_of(id).map(|(a, _)| a).unwrap_or(Value::NIL)
     }
 
     pub fn cdr(&self, id: u32) -> Value {
-        match self.get(id) {
-            HeapObject::Pair(_, cdr) => *cdr,
-            _ => Value::NIL,
-        }
+        self.pair_of(id).map(|(_, d)| d).unwrap_or(Value::NIL)
     }
 
     pub fn get_string(&self, id: u32) -> Option<&str> {
@@ -468,12 +489,12 @@ impl Heap {
     pub fn list_to_vec(&self, mut list: Value) -> Vec<Value> {
         let mut result = Vec::new();
         while let Some(id) = list.as_any_object() {
-            match self.get(id) {
-                HeapObject::Pair(car, cdr) => {
-                    result.push(*car);
-                    list = *cdr;
+            match self.pair_of(id) {
+                Some((car, cdr)) => {
+                    result.push(car);
+                    list = cdr;
                 }
-                _ => break,
+                None => break,
             }
         }
         result
@@ -625,7 +646,6 @@ impl Heap {
         if let Some(id) = val.as_any_object() {
             match self.get(id) {
                 HeapObject::General { proto, .. } => return *proto,
-                HeapObject::Pair(_, _) => return self.type_protos.get(PROTO_CONS).copied().unwrap_or(Value::NIL),
                 HeapObject::Text(_) => return self.type_protos.get(PROTO_STR).copied().unwrap_or(Value::NIL),
                 HeapObject::Buffer(_) => return self.type_protos.get(PROTO_BYTES).copied().unwrap_or(Value::NIL),
                 HeapObject::Table { .. } => return self.type_protos.get(PROTO_TABLE).copied().unwrap_or(Value::NIL),
@@ -686,14 +706,14 @@ impl Heap {
                 return (positional, Some(sym));
             }
             if let Some(id) = current.as_any_object() {
-                match self.get(id) {
-                    HeapObject::Pair(car, cdr) => {
+                match self.pair_of(id) {
+                    Some((car, cdr)) => {
                         if let Some(sym) = car.as_symbol() {
                             positional.push(sym);
                         }
-                        current = *cdr;
+                        current = cdr;
                     }
-                    _ => break,
+                    None => break,
                 }
             } else {
                 break;

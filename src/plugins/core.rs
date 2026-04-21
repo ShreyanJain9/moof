@@ -24,17 +24,11 @@ impl super::Plugin for CorePlugin {
         heap.get_mut(env_id).set_proto(object_proto);
 
         // Object: slotAt: — real slots plus virtual slots contributed
-        // by foreign payloads (car/cdr, Vec3.x/y/z, etc. all flow
-        // through Heap::slot_of).
+        // by foreign payloads (Pair's car/cdr, Vec3's x/y/z, etc.
+        // all flow through Heap::slot_of).
         native(heap, obj_id, "slotAt:", |heap, receiver, args| {
             let name = args.first().and_then(|v| v.as_symbol()).ok_or("slotAt: arg must be a symbol")?;
             if let Some(id) = receiver.as_any_object() {
-                if let HeapObject::Pair(car, cdr) = heap.get(id) {
-                    let car_v = *car; let cdr_v = *cdr;
-                    if name == heap.sym_car { return Ok(car_v); }
-                    if name == heap.sym_cdr { return Ok(cdr_v); }
-                    return Ok(Value::NIL);
-                }
                 Ok(heap.slot_of(id, name).unwrap_or(Value::NIL))
             } else {
                 Ok(Value::NIL) // primitives have no slots
@@ -186,13 +180,13 @@ impl super::Plugin for CorePlugin {
                 else if receiver.is_float() { "Float" }
                 else if receiver.is_symbol() { "Symbol" }
                 else if let Some(id) = receiver.as_any_object() {
-                    // closures are Generals now — detect via __code_idx
                     if let Some((_, is_op)) = heap.as_closure(receiver) {
                         if is_op { "Operative" } else { "Fn" }
+                    } else if heap.is_pair(receiver) {
+                        "Cons"
                     } else {
                         match heap.get(id) {
                             HeapObject::General { .. } => "Object",
-                            HeapObject::Pair(_, _) => "Cons",
                             HeapObject::Text(_) => "String",
                             HeapObject::Buffer(_) => "Bytes",
                             HeapObject::Table { .. } => "Table",

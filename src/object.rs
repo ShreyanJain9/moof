@@ -20,7 +20,8 @@ pub enum HeapObject {
     /// General object: a prototype pointer (VM-internal, for dispatch)
     /// plus named slots, handlers, and an optional foreign payload
     /// (Ruby-style rust wrapping). Foreign payloads are immutable —
-    /// the registry API exposes &T only.
+    /// the registry API exposes &T only. Cons pairs live here too,
+    /// as a registered foreign type (`heap::Pair`).
     General {
         proto: Value,                   // VM-internal dispatch pointer (NOT a slot)
         slot_names: Vec<u32>,
@@ -28,9 +29,6 @@ pub enum HeapObject {
         handlers: Vec<(u32, Value)>,
         foreign: Option<ForeignData>,
     },
-
-    /// Optimized cons pair: proto is always the Cons prototype.
-    Pair(Value, Value),
 
     /// Optimized string.
     Text(String),
@@ -102,14 +100,15 @@ impl HeapObject {
         }
     }
 
-    /// Look up a slot value by name (symbol ID).
+    /// Look up a slot value by name (symbol ID). Note: this only
+    /// walks the real slots vec — foreign virtual slots (e.g. a
+    /// Pair's car/cdr) are handled by `Heap::slot_of`.
     pub fn slot_get(&self, name: u32) -> Option<Value> {
         match self {
             HeapObject::General { slot_names, slot_values, .. } => {
                 slot_names.iter().position(|n| *n == name)
                     .map(|i| slot_values[i])
             }
-            HeapObject::Pair(_, _) => None, // handled via Cons proto
             _ => None,
         }
     }

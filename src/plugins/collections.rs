@@ -30,9 +30,9 @@ impl Plugin for CollectionsPlugin {
             let mut count = 0i64;
             let mut cur = receiver;
             while let Some(id) = cur.as_any_object() {
-                match heap.get(id) {
-                    HeapObject::Pair(_, cdr) => { count += 1; cur = *cdr; }
-                    _ => break,
+                match heap.pair_of(id) {
+                    Some((_, cdr)) => { count += 1; cur = cdr; }
+                    None => break,
                 }
             }
             Ok(Value::integer(count))

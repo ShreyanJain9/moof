@@ -128,17 +128,16 @@ fn to_json(heap: &Heap, v: Value) -> Result<JV, String> {
         return Ok(JV::String(heap.symbol_name(sym).into()));
     }
     let id = v.as_any_object().ok_or("unknown value type")?;
+    if heap.is_pair(v) {
+        let items = heap.list_to_vec(v);
+        let mut arr: Vec<JV> = Vec::with_capacity(items.len());
+        for item in items {
+            arr.push(to_json(heap, item)?);
+        }
+        return Ok(JV::Array(arr));
+    }
     match heap.get(id) {
         HeapObject::Text(s) => Ok(JV::String(s.clone())),
-        HeapObject::Pair(_, _) => {
-            // cons list → JSON array
-            let items = heap.list_to_vec(v);
-            let mut arr: Vec<JV> = Vec::with_capacity(items.len());
-            for item in items {
-                arr.push(to_json(heap, item)?);
-            }
-            Ok(JV::Array(arr))
-        }
         HeapObject::Table { seq, map } => {
             // ambiguity: Table has both seq + map. prefer map-view if
             // map is non-empty; else treat as array.

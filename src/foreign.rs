@@ -76,6 +76,13 @@ pub struct ForeignVTable {
     pub virtual_slot: Option<fn(&dyn Any, sym: u32) -> Option<Value>>,
     pub virtual_slot_names: Option<fn(&dyn Any) -> Vec<u32>>,
 
+    /// Moof-side prototype name — the env binding (`"Cons"`, `"Vec3"`,
+    /// `"String"`, …) that carries this type's handlers. Cross-vat
+    /// copy uses this to re-link payloads to the right prototype in
+    /// the target vat's heap, since prototype values don't match
+    /// across independent heaps.
+    pub prototype_name: fn() -> &'static str,
+
     /// Rust TypeId for downcast fast-path checks.
     pub rust_type_id: fn() -> TypeId,
 }
@@ -94,6 +101,13 @@ pub trait ForeignType: Any + Clone + Send + Sync + 'static {
 
     /// Bump when the serialized layout changes incompatibly.
     fn schema_version() -> u32 { 1 }
+
+    /// Moof-side prototype name this type should be linked to (e.g.
+    /// `"Cons"` for `Pair`, `"Vec3"` for the vector type). Used by
+    /// cross-vat copy to relocate payloads to the equivalent proto
+    /// in the target vat's heap. Default `"Object"` means "no special
+    /// prototype" — the generic object proto is fine.
+    fn prototype_name() -> &'static str { "Object" }
 
     /// Enumerate child Values for GC tracing. Default = leaf.
     fn trace(&self, _visit: &mut dyn FnMut(Value)) {}
@@ -172,6 +186,7 @@ impl ForeignTypeRegistry {
             describe: describe_wrapper::<T>,
             virtual_slot: Some(virtual_slot_wrapper::<T>),
             virtual_slot_names: Some(virtual_slot_names_wrapper::<T>),
+            prototype_name: T::prototype_name,
             rust_type_id: || TypeId::of::<T>(),
         };
 

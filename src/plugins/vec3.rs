@@ -29,6 +29,7 @@ pub struct Vec3 {
 
 impl ForeignType for Vec3 {
     fn type_name() -> &'static str { "moof.Vec3" }
+    fn prototype_name() -> &'static str { "Vec3" }
     fn schema_version() -> u32 { 1 }
 
     fn serialize(&self) -> Vec<u8> {

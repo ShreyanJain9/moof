@@ -130,6 +130,7 @@ fn type_name_of(heap: &Heap, val: Value) -> String {
     }
     // Fallback: variant-based type name
     if let Some(id) = val.as_any_object() {
+        if heap.is_pair(val) { return "Cons".to_string(); }
         match heap.get(id) {
             HeapObject::General { .. } => {
                 let proto = heap.get(id).proto();
@@ -145,7 +146,6 @@ fn type_name_of(heap: &Heap, val: Value) -> String {
                 }
                 "Object".to_string()
             }
-            HeapObject::Pair(_, _) => "Cons".to_string(),
             HeapObject::Text(_) => "String".to_string(),
             HeapObject::Buffer(_) => "Bytes".to_string(),
             HeapObject::Table { .. } => "Table".to_string(),

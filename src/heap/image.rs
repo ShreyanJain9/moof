@@ -30,7 +30,6 @@ enum HeapObjectImage {
         handlers: Vec<(u32, Value)>,
         foreign: Option<ForeignImage>,
     },
-    Pair(Value, Value),
     Text(String),
     Buffer(Vec<u8>),
     Table {
@@ -128,7 +127,6 @@ impl Heap {
                     foreign: foreign_img,
                 }
             }
-            HeapObject::Pair(a, b) => HeapObjectImage::Pair(*a, *b),
             HeapObject::Text(s) => HeapObjectImage::Text(s.clone()),
             HeapObject::Buffer(b) => HeapObjectImage::Buffer(b.clone()),
             HeapObject::Table { seq, map } => HeapObjectImage::Table {
@@ -153,7 +151,6 @@ impl Heap {
                 };
                 HeapObject::General { proto, slot_names, slot_values, handlers, foreign: foreign_data }
             }
-            HeapObjectImage::Pair(a, b) => HeapObject::Pair(a, b),
             HeapObjectImage::Text(s) => HeapObject::Text(s),
             HeapObjectImage::Buffer(b) => HeapObject::Buffer(b),
             HeapObjectImage::Table { seq, map } => HeapObject::Table { seq, map },

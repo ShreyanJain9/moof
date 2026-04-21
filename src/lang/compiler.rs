@@ -171,15 +171,16 @@ impl<'a> Compiler<'a> {
         // must be a heap object — string literal or cons cell (a form)
         let id = expr.as_any_object().ok_or("compile: unexpected value")?;
 
-        match self.heap.get(id) {
-            HeapObject::Text(_) => {
-                self.emit_load_const(dst, expr);
-                return Ok(());
-            }
-            HeapObject::Pair(_, _) => {}
-            _ => {
-                self.emit_load_const(dst, expr);
-                return Ok(());
+        if !self.heap.is_pair(expr) {
+            match self.heap.get(id) {
+                HeapObject::Text(_) => {
+                    self.emit_load_const(dst, expr);
+                    return Ok(());
+                }
+                _ => {
+                    self.emit_load_const(dst, expr);
+                    return Ok(());
+                }
             }
         }
 
@@ -792,19 +793,15 @@ impl<'a> Compiler<'a> {
         }
 
         let id = form.as_any_object().ok_or("quasiquote: unexpected value")?;
-        match self.heap.get(id) {
-            crate::object::HeapObject::Text(_) | crate::object::HeapObject::Buffer(_)
-            | crate::object::HeapObject::Table { .. } => {
+        let (car, cdr) = match self.heap.pair_of(id) {
+            Some(pair) => pair,
+            None => {
+                // non-pair literals: just load as a constant.
                 self.emit_load_const(dst, form);
                 return Ok(());
             }
-            crate::object::HeapObject::General { .. } => {
-                self.emit_load_const(dst, form);
-                return Ok(());
-            }
-            crate::object::HeapObject::Pair(car, cdr) => {
-                let car = *car;
-                let cdr = *cdr;
+        };
+        {
                 // check for (unquote expr) — evaluate expr normally
                 if let Some(sym) = car.as_symbol() {
                     if self.heap.symbol_name(sym) == "unquote" {
@@ -823,9 +820,7 @@ impl<'a> Compiler<'a> {
                 }
                 // check if car is (unquote-splicing expr) — splice into list
                 if let Some(car_id) = car.as_any_object() {
-                    if let crate::object::HeapObject::Pair(splice_head, splice_rest) = self.heap.get(car_id) {
-                        let splice_head = *splice_head;
-                        let splice_rest = *splice_rest;
+                    if let Some((splice_head, splice_rest)) = self.heap.pair_of(car_id) {
                         if let Some(sym) = splice_head.as_symbol() {
                             if self.heap.symbol_name(sym) == "unquote-splicing" {
                                 let arg_id = splice_rest.as_any_object()
@@ -857,7 +852,6 @@ impl<'a> Compiler<'a> {
                 self.compile_quasiquote(cdr, cdr_reg)?;
                 self.chunk.emit(Op::Cons, dst, car_reg, cdr_reg);
                 Ok(())
-            }
         }
     }
 
@@ -888,9 +882,7 @@ impl<'a> Compiler<'a> {
         }
         // heap value — descend into cons cells; ignore strings/tables/etc.
         if let Some(id) = val.as_any_object() {
-            if let HeapObject::Pair(car, cdr) = self.heap.get(id) {
-                let car = *car;
-                let cdr = *cdr;
+            if let Some((car, cdr)) = self.heap.pair_of(id) {
                 self.force_capture_in_ast(car);
                 self.force_capture_in_ast(cdr);
             }
@@ -1013,7 +1005,7 @@ impl<'a> Compiler<'a> {
     fn extract_quoted(&self, val: Value) -> Result<Value, String> {
         // val should be (quote x) — extract x
         if let Some(id) = val.as_any_object() {
-            if let HeapObject::Pair(car, cdr) = self.heap.get(id) {
+            if let Some((car, cdr)) = self.heap.pair_of(id) {
                 if let Some(sym) = car.as_symbol() {
                     if self.heap.symbol_name(sym) == "quote" {
                         if let Some(cdr_id) = cdr.as_any_object() {

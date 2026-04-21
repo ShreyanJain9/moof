@@ -48,9 +48,16 @@ impl Heap {
             return if is_op { format!("<operative arity:{arity}>") }
                    else { format!("<fn arity:{arity}>") };
         }
+        // pairs: render as lists (takes priority over the generic
+        // foreign-describe path, which would just print bit-values).
+        if self.is_pair(Value::nursery(id)) {
+            visiting.push(id);
+            let result = self.format_list_at(id, visiting);
+            visiting.pop();
+            return result;
+        }
         visiting.push(id);
         let result = match self.get(id) {
-            HeapObject::Pair(_, _) => self.format_list_at(id, visiting),
             HeapObject::Text(s) => format!("\"{}\"", s.replace('"', "\\\"")),
             HeapObject::Buffer(b) => format!("<bytes:{}>", b.len()),
             HeapObject::Table { seq, map } => {
@@ -64,8 +71,6 @@ impl Heap {
                 format!("#[{}]", parts.join(" "))
             }
             HeapObject::General { slot_names, slot_values, foreign, .. } => {
-                // foreign payload takes precedence — its describe() is
-                // the type author's intended presentation.
                 if let Some(fd) = foreign.as_ref()
                     .and_then(|fd| self.foreign_registry().vtable(fd.type_id).map(|vt| (fd, vt)))
                 {
@@ -94,22 +99,22 @@ impl Heap {
         let mut items = Vec::new();
         let mut tail = Value::NIL;
         loop {
-            match self.get(id) {
-                HeapObject::Pair(car, cdr) => {
-                    items.push(self.format_value_at(*car, visiting));
+            match self.pair_of(id) {
+                Some((car, cdr)) => {
+                    items.push(self.format_value_at(car, visiting));
                     if cdr.is_nil() {
                         break;
                     } else if let Some(next) = cdr.as_any_object() {
-                        if matches!(self.get(next), HeapObject::Pair(_, _)) {
+                        if self.is_pair(Value::nursery(next)) {
                             id = next;
                             continue;
                         }
                     }
                     // dotted pair
-                    tail = *cdr;
+                    tail = cdr;
                     break;
                 }
-                _ => break,
+                None => break,
             }
         }
         if tail.is_nil() {
@@ -143,12 +148,12 @@ impl Heap {
             return if is_op { format!("<operative arity:{arity}>") }
                    else { format!("<fn arity:{arity}>") };
         }
+        if self.is_pair(Value::nursery(id)) {
+            let formatted = self.format_list_at(id, &mut Vec::new());
+            let len = self.list_len(id);
+            return format!("{formatted}  : Cons ({len} elements)");
+        }
         match self.get(id) {
-            HeapObject::Pair(_, _) => {
-                let formatted = self.format_list_at(id, &mut Vec::new());
-                let len = self.list_len(id);
-                format!("{formatted}  : Cons ({len} elements)")
-            }
             HeapObject::Text(s) => {
                 if s.len() > 60 {
                     format!("\"{}...\"  : String ({} chars)", &s[..57], s.len())
@@ -206,18 +211,18 @@ impl Heap {
     fn list_len(&self, mut id: u32) -> usize {
         let mut count = 0;
         loop {
-            match self.get(id) {
-                HeapObject::Pair(_, cdr) => {
+            match self.pair_of(id) {
+                Some((_, cdr)) => {
                     count += 1;
                     if let Some(next) = cdr.as_any_object() {
-                        if matches!(self.get(next), HeapObject::Pair(_, _)) {
+                        if self.is_pair(Value::nursery(next)) {
                             id = next;
                             continue;
                         }
                     }
                     break;
                 }
-                _ => break,
+                None => break,
             }
         }
         count

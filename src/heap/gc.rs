@@ -139,10 +139,6 @@ impl Heap {
                     }
                 }
             }
-            HeapObject::Pair(car, cdr) => {
-                mark_value_id(*car, worklist, marked);
-                mark_value_id(*cdr, worklist, marked);
-            }
             HeapObject::Text(_) | HeapObject::Buffer(_) => {
                 // leaf — no outgoing refs
             }
