@@ -22,6 +22,7 @@ pub mod block;
 pub mod capabilities;
 pub mod dynload;
 pub mod json;
+pub mod vec3;
 
 use crate::heap::Heap;
 use crate::value::Value;
@@ -111,6 +112,7 @@ pub fn builtin_type_plugin(name: &str) -> Option<Box<dyn Plugin>> {
         "block" => Some(Box::new(block::BlockPlugin)),
         "effects" => Some(Box::new(effects::EffectsPlugin)),
         "json" => Some(Box::new(json::JsonPlugin)),
+        "vec3" => Some(Box::new(vec3::Vec3Plugin)),
         _ => None,
     }
 }

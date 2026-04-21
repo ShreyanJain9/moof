@@ -23,8 +23,9 @@ impl super::Plugin for CorePlugin {
         let env_id = heap.env;
         heap.get_mut(env_id).set_proto(object_proto);
 
-        // Object: slotAt: — slot_get looks up user-facing slots by name.
-        // car/cdr stay as virtual slots on Pair.
+        // Object: slotAt: — real slots plus virtual slots contributed
+        // by foreign payloads (car/cdr, Vec3.x/y/z, etc. all flow
+        // through Heap::slot_of).
         native(heap, obj_id, "slotAt:", |heap, receiver, args| {
             let name = args.first().and_then(|v| v.as_symbol()).ok_or("slotAt: arg must be a symbol")?;
             if let Some(id) = receiver.as_any_object() {
@@ -34,7 +35,7 @@ impl super::Plugin for CorePlugin {
                     if name == heap.sym_cdr { return Ok(cdr_v); }
                     return Ok(Value::NIL);
                 }
-                Ok(heap.get(id).slot_get(name).unwrap_or(Value::NIL))
+                Ok(heap.slot_of(id, name).unwrap_or(Value::NIL))
             } else {
                 Ok(Value::NIL) // primitives have no slots
             }
@@ -53,9 +54,9 @@ impl super::Plugin for CorePlugin {
 
             // get the original object's slots + handlers
             let recv_id = receiver.as_any_object().ok_or("with: receiver must be an object")?;
-            let (orig_proto, orig_names, orig_vals, orig_handlers) = match heap.get(recv_id) {
-                HeapObject::General { proto, slot_names, slot_values, handlers } => {
-                    (*proto, slot_names.clone(), slot_values.clone(), handlers.clone())
+            let (orig_proto, orig_names, orig_vals, orig_handlers, orig_foreign) = match heap.get(recv_id) {
+                HeapObject::General { proto, slot_names, slot_values, handlers, foreign } => {
+                    (*proto, slot_names.clone(), slot_values.clone(), handlers.clone(), foreign.clone())
                 }
                 _ => return Err("with: receiver must be a general object".into()),
             };
@@ -81,6 +82,7 @@ impl super::Plugin for CorePlugin {
                 slot_names: new_names,
                 slot_values: new_vals,
                 handlers: orig_handlers,
+                foreign: orig_foreign,
             });
             Ok(new_obj)
         });
@@ -90,11 +92,10 @@ impl super::Plugin for CorePlugin {
             Ok(heap.prototype_of(receiver))
         });
 
-        // Object: slotNames — unified via Heap::slot_names_of, which already
-        // prepends `parent` when the object has one.
+        // Object: slotNames — real slots plus foreign virtual-slot names.
         native(heap, obj_id, "slotNames", |heap, receiver, _args| {
             if let Some(id) = receiver.as_any_object() {
-                let names = heap.get(id).slot_names();
+                let names = heap.slot_names_of(id);
                 let syms: Vec<Value> = names.into_iter().map(Value::symbol).collect();
                 Ok(heap.list(&syms))
             } else {

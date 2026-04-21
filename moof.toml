@@ -17,6 +17,7 @@ collections = "builtin:collections"
 effects = "builtin:effects"
 block = "builtin:block"
 json = "builtin:json"
+vec3 = "builtin:vec3"
 
 [capabilities]
 # each capability gets its own vat. accessed via FarRef → Act.

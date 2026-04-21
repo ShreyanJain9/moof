@@ -128,10 +128,16 @@ impl Heap {
     /// Walk children of object idx, marking + pushing to worklist.
     fn mark_children_of(&self, idx: usize, worklist: &mut Vec<u32>, marked: &mut [bool]) {
         match &self.objects[idx] {
-            HeapObject::General { proto, slot_values, handlers, .. } => {
+            HeapObject::General { proto, slot_values, handlers, foreign, .. } => {
                 mark_value_id(*proto, worklist, marked);
                 for &v in slot_values { mark_value_id(v, worklist, marked); }
                 for (_, v) in handlers { mark_value_id(*v, worklist, marked); }
+                // foreign payload may hold Values — trace via its vtable.
+                if let Some(fd) = foreign {
+                    if let Some(vt) = self.foreign_registry().vtable(fd.type_id) {
+                        (vt.trace)(&*fd.payload, &mut |v| mark_value_id(v, worklist, marked));
+                    }
+                }
             }
             HeapObject::Pair(car, cdr) => {
                 mark_value_id(*car, worklist, marked);

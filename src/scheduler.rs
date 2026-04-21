@@ -558,11 +558,45 @@ impl Scheduler {
                     let s = s.clone();
                     return self.vat_mut(to_vat).heap.alloc_string(&s);
                 }
-                crate::object::HeapObject::General { slot_names, slot_values, .. } => {
+                crate::object::HeapObject::General { slot_names, slot_values, foreign, .. } => {
                     let names: Vec<String> = slot_names.iter()
                         .map(|s| from_heap.symbol_name(*s).to_string())
                         .collect();
                     let vals: Vec<Value> = slot_values.iter().copied().collect();
+                    let foreign = foreign.clone();  // Arc + id, cheap
+
+                    // Translate foreign type id by name: source vat's
+                    // registry entry carries a ForeignTypeName; look it
+                    // up in the target vat's registry. If missing or
+                    // schema-mismatched, the copy fails — vat registries
+                    // are independent per design.
+                    let foreign_translated = match foreign {
+                        Some(fd) => {
+                            let src_vt = from_heap.foreign_registry().vtable(fd.type_id)
+                                .expect("source foreign type_id has no vtable");
+                            let src_name = src_vt.id.clone();
+                            let clone_across_fn = src_vt.clone_across;
+                            // deep-clone the payload, remapping any embedded Values.
+                            let new_payload: std::sync::Arc<dyn std::any::Any + Send + Sync> =
+                                clone_across_fn(&*fd.payload, &mut |v| {
+                                    self.copy_value_across(v, _from_vat, to_vat)
+                                });
+                            let target_id = self.vat(to_vat).heap.foreign_registry()
+                                .resolve(&src_name);
+                            match target_id {
+                                Ok(tid) => Some(crate::foreign::ForeignData {
+                                    type_id: tid,
+                                    payload: new_payload,
+                                }),
+                                Err(e) => {
+                                    eprintln!("  ~ cross-vat foreign copy failed: {e}");
+                                    return Value::NIL;
+                                }
+                            }
+                        }
+                        None => None,
+                    };
+
                     let is_farref = names.iter().any(|n| n == "__target_vat");
                     let new_names: Vec<u32> = names.iter()
                         .map(|n| self.vat_mut(to_vat).heap.intern(n))
@@ -575,9 +609,15 @@ impl Scheduler {
                     } else {
                         self.vat(to_vat).heap.type_protos[crate::heap::PROTO_OBJ]
                     };
-                    return self.vat_mut(to_vat).heap.make_object_with_slots(
-                        proto, new_names, new_vals,
-                    );
+                    let to_heap = &mut self.vat_mut(to_vat).heap;
+                    let new_val = to_heap.alloc_val(crate::object::HeapObject::General {
+                        proto,
+                        slot_names: new_names,
+                        slot_values: new_vals,
+                        handlers: Vec::new(),
+                        foreign: foreign_translated,
+                    });
+                    return new_val;
                 }
                 crate::object::HeapObject::Pair(car, cdr) => {
                     let car = *car;

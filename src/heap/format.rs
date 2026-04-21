@@ -63,8 +63,14 @@ impl Heap {
                 }
                 format!("#[{}]", parts.join(" "))
             }
-            HeapObject::General { slot_names, slot_values, .. } => {
-                if slot_names.is_empty() {
+            HeapObject::General { slot_names, slot_values, foreign, .. } => {
+                // foreign payload takes precedence — its describe() is
+                // the type author's intended presentation.
+                if let Some(fd) = foreign.as_ref()
+                    .and_then(|fd| self.foreign_registry().vtable(fd.type_id).map(|vt| (fd, vt)))
+                {
+                    (fd.1.describe)(&*fd.0.payload)
+                } else if slot_names.is_empty() {
                     format!("<object#{id}>")
                 } else {
                     let slots: Vec<_> = slot_names.iter().zip(slot_values.iter())

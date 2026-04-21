@@ -244,12 +244,7 @@ pub fn run() {
     let store_path = &manifest.image.path;
     if let Ok(store) = Store::open(Path::new(store_path)) {
         let vat = sched.vat(repl_vat_id);
-        match store.save_all(
-            vat.heap.objects_ref(),
-            vat.heap.symbols_ref(),
-            vat.heap.env,
-            vat.vm.closure_descs_ref(),
-        ) {
+        match store.save_all(&vat.heap, vat.vm.closure_descs_ref()) {
             Ok(()) => eprintln!("  image saved ({} objects)", vat.heap.object_count()),
             Err(e) => eprintln!("  ~ save failed: {e}"),
         }

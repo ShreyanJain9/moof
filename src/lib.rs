@@ -17,6 +17,7 @@
 
 pub mod value;
 pub mod object;
+pub mod foreign;
 pub mod heap;
 pub mod dispatch;
 pub mod opcodes;

@@ -18,7 +18,9 @@ pub use gc::GcStats;
 
 use crate::object::HeapObject;
 use crate::value::Value;
+use crate::foreign::{ForeignData, ForeignType, ForeignTypeId, ForeignTypeRegistry};
 use indexmap::IndexMap;
+use std::sync::Arc;
 
 // type prototype indices — named constants instead of magic numbers
 pub const PROTO_NIL: usize = 0;
@@ -128,6 +130,12 @@ pub struct Heap {
     /// checks this first — a hit skips the chain walk entirely.
     /// flushed on handler_set via moof-level [obj handle:with:].
     pub send_cache: std::collections::HashMap<(u32, u32), Value>,
+
+    /// Foreign type registry — Ruby-style rust-value wrapping.
+    /// Per-heap for vat isolation: cross-vat copies translate
+    /// through the registered `ForeignTypeName`. Immutable by
+    /// construction: `foreign_ref` but no `foreign_mut`.
+    foreign_registry: ForeignTypeRegistry,
 }
 
 pub type NativeFn = Box<dyn Fn(&mut Heap, Value, &[Value]) -> Result<Value, String>>;
@@ -158,6 +166,7 @@ impl Heap {
             natives: Vec::new(),
             native_idx: std::collections::HashMap::new(),
             send_cache: std::collections::HashMap::new(),
+            foreign_registry: ForeignTypeRegistry::new(),
         };
 
         // intern well-known symbols
@@ -704,6 +713,110 @@ impl Heap {
     pub fn objects_ref(&self) -> &[HeapObject] { &self.objects }
     pub fn symbols_ref(&self) -> &[String] { &self.symbols }
 
+    // ============================================================
+    // Foreign type registry — Ruby-style rust value wrapping.
+    // ============================================================
+
+    pub fn foreign_registry(&self) -> &ForeignTypeRegistry { &self.foreign_registry }
+
+    /// User-facing slot read: consults both the real slots vec AND
+    /// the foreign payload's virtual-slot hook (if any). Pair's
+    /// car/cdr, Vec3's x/y/z, etc. flow through this.
+    pub fn slot_of(&self, id: u32, name: u32) -> Option<Value> {
+        let obj = self.get(id);
+        if let Some(v) = obj.slot_get(name) { return Some(v); }
+        if let Some(fd) = obj.foreign() {
+            if let Some(vt) = self.foreign_registry.vtable(fd.type_id) {
+                if let Some(vfn) = vt.virtual_slot {
+                    return vfn(&*fd.payload, name);
+                }
+            }
+        }
+        None
+    }
+
+    /// All slot names on this object — real slots + any virtual
+    /// slots contributed by its foreign payload.
+    pub fn slot_names_of(&self, id: u32) -> Vec<u32> {
+        let obj = self.get(id);
+        let mut names = obj.slot_names();
+        if let Some(fd) = obj.foreign() {
+            if let Some(vt) = self.foreign_registry.vtable(fd.type_id) {
+                if let Some(vfn) = vt.virtual_slot_names {
+                    names.extend(vfn(&*fd.payload));
+                }
+            }
+        }
+        names
+    }
+
+    /// Register a `ForeignType` impl. Returns the session-local
+    /// type id. Idempotent — re-registering the same type name
+    /// with a matching schema hash is a no-op; mismatch errors.
+    pub fn register_foreign_type<T: ForeignType>(&mut self) -> Result<ForeignTypeId, String> {
+        self.foreign_registry.register::<T>()
+    }
+
+    /// Allocate a General with a foreign payload attached. Proto
+    /// determines message dispatch; the payload is immutable.
+    pub fn alloc_foreign<T: ForeignType>(&mut self, proto: Value, payload: T) -> Result<Value, String> {
+        let type_id = self.foreign_registry.lookup(T::type_name())
+            .ok_or_else(|| format!("foreign type '{}' not registered", T::type_name()))?;
+        let fd = ForeignData {
+            type_id,
+            payload: Arc::new(payload),
+        };
+        Ok(self.alloc_val(HeapObject::new_foreign(proto, fd)))
+    }
+
+    /// Borrow the foreign payload of `val` as `&T`, if any. Returns
+    /// None if `val` isn't an object, has no foreign payload, or
+    /// holds a different type. This is the ONLY access path —
+    /// there is no `foreign_mut`.
+    pub fn foreign_ref<T: ForeignType>(&self, val: Value) -> Option<&T> {
+        let id = val.as_any_object()?;
+        let fd = self.get(id).foreign()?;
+        fd.payload.downcast_ref::<T>()
+    }
+
+    /// Clone the foreign payload out if it matches `T`. Convenient
+    /// when a handler needs owned data to pair with `&mut Heap`.
+    pub fn foreign_clone<T: ForeignType>(&self, val: Value) -> Option<T> {
+        self.foreign_ref::<T>(val).cloned()
+    }
+
+    // ============================================================
+    // Image restore — used by load_image path to rehydrate state
+    // after construction. new() already ran, so the registry and
+    // root env exist; this replaces the object arena + symbol
+    // table + env pointer wholesale.
+    // ============================================================
+
+    pub fn restore_objects(&mut self, objects: Vec<HeapObject>, symbols: Vec<String>, env_id: u32) {
+        self.objects = objects;
+        self.symbols = symbols;
+        self.env = env_id;
+        self.sym_reverse.clear();
+        for (i, name) in self.symbols.iter().enumerate() {
+            self.sym_reverse.insert(name.clone(), i as u32);
+        }
+        // re-resolve well-known symbols
+        self.sym_car = self.sym_reverse.get("car").copied().unwrap_or(0);
+        self.sym_cdr = self.sym_reverse.get("cdr").copied().unwrap_or(0);
+        self.sym_call = self.sym_reverse.get("call:").copied().unwrap_or(0);
+        self.sym_slot_at = self.sym_reverse.get("slotAt:").copied().unwrap_or(0);
+        self.sym_slot_at_put = self.sym_reverse.get("slotAt:put:").copied().unwrap_or(0);
+        self.sym_slot_names = self.sym_reverse.get("slotNames").copied().unwrap_or(0);
+        self.sym_handler_names = self.sym_reverse.get("handlerNames").copied().unwrap_or(0);
+        self.sym_parent = self.sym_reverse.get("parent").copied().unwrap_or(0);
+        self.sym_describe = self.sym_reverse.get("describe").copied().unwrap_or(0);
+        self.sym_dnu = self.sym_reverse.get("doesNotUnderstand:").copied().unwrap_or(0);
+        self.sym_length = self.sym_reverse.get("length").copied().unwrap_or(0);
+        self.sym_at = self.sym_reverse.get("at:").copied().unwrap_or(0);
+        self.sym_at_put = self.sym_reverse.get("at:put:").copied().unwrap_or(0);
+        self.sym_message = self.sym_reverse.get("message").copied().unwrap_or_else(|| self.intern("message"));
+    }
+
     /// Restore a heap from saved data.
     pub fn restore(
         objects: Vec<HeapObject>,
@@ -770,6 +883,51 @@ mod tests {
         assert_eq!(vec.len(), 3);
         assert_eq!(vec[0].as_integer(), Some(1));
         assert_eq!(vec[2].as_integer(), Some(3));
+    }
+
+    #[test]
+    fn foreign_type_roundtrip() {
+        use crate::foreign::ForeignType;
+
+        #[derive(Clone, PartialEq, Debug)]
+        struct Point2D { x: i64, y: i64 }
+
+        impl ForeignType for Point2D {
+            fn type_name() -> &'static str { "test.Point2D" }
+            fn serialize(&self) -> Vec<u8> {
+                let mut b = Vec::with_capacity(16);
+                b.extend_from_slice(&self.x.to_le_bytes());
+                b.extend_from_slice(&self.y.to_le_bytes());
+                b
+            }
+            fn deserialize(bytes: &[u8]) -> Result<Self, String> {
+                let mut x_bytes = [0u8; 8]; x_bytes.copy_from_slice(&bytes[0..8]);
+                let mut y_bytes = [0u8; 8]; y_bytes.copy_from_slice(&bytes[8..16]);
+                Ok(Point2D { x: i64::from_le_bytes(x_bytes), y: i64::from_le_bytes(y_bytes) })
+            }
+            fn equal(&self, other: &Self) -> bool { self == other }
+            fn describe(&self) -> String { format!("Point2D({},{})", self.x, self.y) }
+        }
+
+        let mut h = Heap::new();
+        h.register_foreign_type::<Point2D>().unwrap();
+
+        let proto = h.type_protos[PROTO_OBJ];
+        let v = h.alloc_foreign(proto, Point2D { x: 3, y: 4 }).unwrap();
+
+        // borrow out as &Point2D
+        let borrowed = h.foreign_ref::<Point2D>(v).unwrap();
+        assert_eq!(borrowed, &Point2D { x: 3, y: 4 });
+
+        // serialize one object and deserialize it back
+        let obj = h.get(v.as_any_object().unwrap()).clone();
+        let bytes = h.serialize_object(&obj).unwrap();
+        let back = h.deserialize_object(&bytes).unwrap();
+
+        // reconstructed object's foreign payload should roundtrip.
+        let fd = back.foreign().unwrap();
+        let p = fd.payload.downcast_ref::<Point2D>().unwrap();
+        assert_eq!(p, &Point2D { x: 3, y: 4 });
     }
 
     #[test]

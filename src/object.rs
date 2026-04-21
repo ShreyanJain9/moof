@@ -12,19 +12,21 @@
 // defined by the type, not by the VM.
 
 use indexmap::IndexMap;
-use serde::{Serialize, Deserialize};
 use crate::value::Value;
+use crate::foreign::ForeignData;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum HeapObject {
     /// General object: a prototype pointer (VM-internal, for dispatch)
-    /// plus named slots and handlers. Slots are user-facing data; the
-    /// proto is not.
+    /// plus named slots, handlers, and an optional foreign payload
+    /// (Ruby-style rust wrapping). Foreign payloads are immutable —
+    /// the registry API exposes &T only.
     General {
         proto: Value,                   // VM-internal dispatch pointer (NOT a slot)
         slot_names: Vec<u32>,
         slot_values: Vec<Value>,
         handlers: Vec<(u32, Value)>,
+        foreign: Option<ForeignData>,
     },
 
     /// Optimized cons pair: proto is always the Cons prototype.
@@ -54,6 +56,7 @@ impl HeapObject {
             slot_names,
             slot_values,
             handlers: Vec::new(),
+            foreign: None,
         }
     }
 
@@ -63,6 +66,24 @@ impl HeapObject {
             slot_names: Vec::new(),
             slot_values: Vec::new(),
             handlers: Vec::new(),
+            foreign: None,
+        }
+    }
+
+    pub fn new_foreign(proto: Value, foreign: ForeignData) -> Self {
+        HeapObject::General {
+            proto,
+            slot_names: Vec::new(),
+            slot_values: Vec::new(),
+            handlers: Vec::new(),
+            foreign: Some(foreign),
+        }
+    }
+
+    pub fn foreign(&self) -> Option<&ForeignData> {
+        match self {
+            HeapObject::General { foreign, .. } => foreign.as_ref(),
+            _ => None,
         }
     }
 

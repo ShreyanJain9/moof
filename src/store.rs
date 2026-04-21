@@ -14,6 +14,7 @@ use std::path::Path;
 use heed::types::*;
 use heed::{Database, Env, EnvOpenOptions};
 use crate::object::HeapObject;
+use crate::heap::Heap;
 
 pub struct Store {
     env: Env,
@@ -40,12 +41,12 @@ impl Store {
         Ok(Store { env, objects, meta })
     }
 
-    /// Save all nursery objects + metadata to LMDB.
+    /// Save all nursery objects + metadata to LMDB. Object bytes
+    /// go through `Heap::serialize_object` so foreign payloads
+    /// round-trip via the registered vtable.
     pub fn save_all(
         &self,
-        objects: &[HeapObject],
-        symbols: &[String],
-        env_id: u32,
+        heap: &Heap,
         closure_chunks: &[crate::lang::compiler::ClosureDesc],
     ) -> Result<(), String> {
         let mut wtxn = self.env.write_txn().map_err(|e| format!("txn: {e}"))?;
@@ -55,19 +56,19 @@ impl Store {
         self.meta.clear(&mut wtxn).map_err(|e| format!("clear meta: {e}"))?;
 
         // write objects
-        for (i, obj) in objects.iter().enumerate() {
-            let bytes = bincode::serialize(obj).map_err(|e| format!("serialize obj: {e}"))?;
+        for (i, obj) in heap.objects_ref().iter().enumerate() {
+            let bytes = heap.serialize_object(obj)?;
             self.objects.put(&mut wtxn, &(i as u32), &bytes)
                 .map_err(|e| format!("put obj: {e}"))?;
         }
 
         // write symbols
-        let sym_bytes = bincode::serialize(symbols).map_err(|e| format!("serialize syms: {e}"))?;
+        let sym_bytes = bincode::serialize(heap.symbols_ref()).map_err(|e| format!("serialize syms: {e}"))?;
         self.meta.put(&mut wtxn, "symbols", &sym_bytes)
             .map_err(|e| format!("put syms: {e}"))?;
 
         // write env_id
-        let env_bytes = bincode::serialize(&env_id).map_err(|e| format!("serialize env: {e}"))?;
+        let env_bytes = bincode::serialize(&heap.env).map_err(|e| format!("serialize env: {e}"))?;
         self.meta.put(&mut wtxn, "env_id", &env_bytes)
             .map_err(|e| format!("put env: {e}"))?;
 
@@ -95,8 +96,10 @@ impl Store {
         Ok(())
     }
 
-    /// Load everything from LMDB. Returns None if empty.
-    pub fn load_all(&self) -> Option<LoadedImage> {
+    /// Load everything from LMDB. Returns None if empty. `heap`
+    /// provides the foreign-type registry used to rehydrate
+    /// persisted foreign payloads.
+    pub fn load_all(&self, heap: &Heap) -> Option<LoadedImage> {
         let rtxn = self.env.read_txn().ok()?;
 
         // read symbols first (needed for everything else)
@@ -108,7 +111,7 @@ impl Store {
         let iter = self.objects.iter(&rtxn).ok()?;
         for item in iter {
             let (_, bytes) = item.ok()?;
-            let obj: HeapObject = bincode::deserialize(bytes).ok()?;
+            let obj: HeapObject = heap.deserialize_object(bytes).ok()?;
             objects.push(obj);
         }
         if objects.is_empty() { return None; }
