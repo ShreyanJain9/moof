@@ -203,8 +203,8 @@ pub fn run() {
                             let displayed = match vat.vm.send_message(&mut vat.heap, val, show_sym, &[]) {
                                 Ok(show_val) => {
                                     if let Some(id) = show_val.as_any_object() {
-                                        if let moof::object::HeapObject::Text(s) = vat.heap.get(id) {
-                                            s.clone()
+                                        if let Some(s) = vat.heap.get_string(id) {
+                                            s.to_string()
                                         } else { vat.heap.display_value(val) }
                                     } else { vat.heap.display_value(val) }
                                 }

@@ -32,11 +32,8 @@ impl Plugin for JsonPlugin {
         // parse: str → moof-value (on success) or Err (on parse error)
         native(heap, json_obj_id, "parse:", |heap, _recv, args| {
             let v = args.first().copied().unwrap_or(Value::NIL);
-            let s = match v.as_any_object() {
-                Some(id) => match heap.get(id) {
-                    HeapObject::Text(s) => s.clone(),
-                    _ => return Err("json parse:: arg must be a String".into()),
-                },
+            let s = match v.as_any_object().and_then(|id| heap.get_string(id)) {
+                Some(s) => s.to_string(),
                 None => return Err("json parse:: arg must be a String".into()),
             };
             match serde_json::from_str::<JV>(&s) {
@@ -105,7 +102,7 @@ fn from_json(heap: &mut Heap, jv: &JV) -> Value {
                 let val = from_json(heap, v);
                 map.insert(key, val);
             }
-            heap.alloc_val(HeapObject::Table { seq: Vec::new(), map })
+            heap.alloc_table(Vec::new(), map)
         }
     }
 }
@@ -136,40 +133,36 @@ fn to_json(heap: &Heap, v: Value) -> Result<JV, String> {
         }
         return Ok(JV::Array(arr));
     }
-    match heap.get(id) {
-        HeapObject::Text(s) => Ok(JV::String(s.clone())),
-        HeapObject::Table { seq, map } => {
-            // ambiguity: Table has both seq + map. prefer map-view if
-            // map is non-empty; else treat as array.
-            if !map.is_empty() {
-                let mut obj = serde_json::Map::new();
-                for (k, val) in map {
-                    let key_str = match k.as_any_object() {
-                        Some(id) => match heap.get(id) {
-                            HeapObject::Text(s) => s.clone(),
-                            _ => format!("{}", heap.format_value(*k)),
-                        },
-                        None => heap.format_value(*k),
-                    };
-                    obj.insert(key_str, to_json(heap, *val)?);
-                }
-                Ok(JV::Object(obj))
-            } else {
-                let mut arr: Vec<JV> = Vec::with_capacity(seq.len());
-                for item in seq {
-                    arr.push(to_json(heap, *item)?);
-                }
-                Ok(JV::Array(arr))
-            }
-        }
-        HeapObject::General { slot_names, slot_values, .. } => {
-            // treat as a plain record: serialize slot_name → slot_value
-            let mut obj = serde_json::Map::new();
-            for (n, v) in slot_names.iter().zip(slot_values.iter()) {
-                obj.insert(heap.symbol_name(*n).to_string(), to_json(heap, *v)?);
-            }
-            Ok(JV::Object(obj))
-        }
-        HeapObject::Buffer(_) => Err("cannot serialize bytes (use base64 first)".into()),
+    if let Some(s) = heap.get_string(id) {
+        return Ok(JV::String(s.to_string()));
     }
+    if heap.is_bytes(v) {
+        return Err("cannot serialize bytes (use base64 first)".into());
+    }
+    if let Some(t) = heap.get_table(id) {
+        if !t.map.is_empty() {
+            let mut obj = serde_json::Map::new();
+            for (k, val) in &t.map {
+                let key_str = match k.as_any_object().and_then(|id| heap.get_string(id)) {
+                    Some(s) => s.to_string(),
+                    None => heap.format_value(*k),
+                };
+                obj.insert(key_str, to_json(heap, *val)?);
+            }
+            return Ok(JV::Object(obj));
+        } else {
+            let mut arr: Vec<JV> = Vec::with_capacity(t.seq.len());
+            for item in &t.seq {
+                arr.push(to_json(heap, *item)?);
+            }
+            return Ok(JV::Array(arr));
+        }
+    }
+    // General with no foreign payload: treat as a plain record
+    let HeapObject::General { slot_names, slot_values, .. } = heap.get(id);
+    let mut obj = serde_json::Map::new();
+    for (n, v) in slot_names.iter().zip(slot_values.iter()) {
+        obj.insert(heap.symbol_name(*n).to_string(), to_json(heap, *v)?);
+    }
+    Ok(JV::Object(obj))
 }

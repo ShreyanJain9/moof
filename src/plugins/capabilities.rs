@@ -7,7 +7,6 @@
 // capability passes its own vat.heap. isolation is preserved.
 
 use crate::vat::Vat;
-use crate::object::HeapObject;
 use crate::value::Value;
 use super::{CapabilityPlugin, native};
 
@@ -15,8 +14,8 @@ use super::{CapabilityPlugin, native};
 fn string_arg(heap: &crate::heap::Heap, args: &[Value], label: &str) -> Result<String, String> {
     let v = args.first().copied().unwrap_or(Value::NIL);
     if let Some(id) = v.as_any_object() {
-        if let HeapObject::Text(s) = heap.get(id) {
-            return Ok(s.clone());
+        if let Some(s) = heap.get_string(id) {
+            return Ok(s.to_string());
         }
     }
     Err(format!("{label} must be a String"))
@@ -38,7 +37,7 @@ impl CapabilityPlugin for ConsoleCapability {
         native(heap, obj_id, "println:", |heap, _recv, args| {
             let val = args.first().copied().unwrap_or(Value::NIL);
             let s = if let Some(id) = val.as_any_object() {
-                if let HeapObject::Text(s) = heap.get(id) { s.clone() }
+                if let Some(s) = heap.get_string(id) { s.to_string() }
                 else { heap.format_value(val) }
             } else { heap.format_value(val) };
             println!("{s}");
@@ -48,7 +47,7 @@ impl CapabilityPlugin for ConsoleCapability {
         native(heap, obj_id, "print:", |heap, _recv, args| {
             let val = args.first().copied().unwrap_or(Value::NIL);
             let s = if let Some(id) = val.as_any_object() {
-                if let HeapObject::Text(s) = heap.get(id) { s.clone() }
+                if let Some(s) = heap.get_string(id) { s.to_string() }
                 else { heap.format_value(val) }
             } else { heap.format_value(val) };
             print!("{s}");

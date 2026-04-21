@@ -4,7 +4,6 @@
 // Handles special forms: def, quote, send, if, fn, %dot, %block, %object-literal.
 
 use crate::heap::Heap;
-use crate::object::HeapObject;
 use crate::opcodes::{Chunk, Op};
 use crate::value::Value;
 
@@ -172,16 +171,9 @@ impl<'a> Compiler<'a> {
         let id = expr.as_any_object().ok_or("compile: unexpected value")?;
 
         if !self.heap.is_pair(expr) {
-            match self.heap.get(id) {
-                HeapObject::Text(_) => {
-                    self.emit_load_const(dst, expr);
-                    return Ok(());
-                }
-                _ => {
-                    self.emit_load_const(dst, expr);
-                    return Ok(());
-                }
-            }
+            // string / table / bytes / opaque General — just load as constant
+            self.emit_load_const(dst, expr);
+            return Ok(());
         }
 
         // it's a list form — check the head

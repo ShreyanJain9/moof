@@ -13,10 +13,16 @@ mod format;
 mod image;
 mod gc;
 mod pair;
+mod text;
+mod bytes;
+mod table;
 
 pub use image::HeapImage;
 pub use gc::GcStats;
 pub use pair::Pair;
+pub use text::Text;
+pub use bytes::Bytes;
+pub use table::Table;
 
 use crate::object::HeapObject;
 use crate::value::Value;
@@ -194,13 +200,13 @@ impl Heap {
         // for `car` / `cdr` were interned above and we propagate
         // them to the Pair vtable's slot cache.
         h.register_foreign_type::<Pair>().expect("register Pair");
+        h.register_foreign_type::<Text>().expect("register Text");
+        h.register_foreign_type::<Bytes>().expect("register Bytes");
+        h.register_foreign_type::<Table>().expect("register Table");
         pair::PAIR_SYMS.store(pair::PairSyms { car: h.sym_car, cdr: h.sym_cdr });
 
         // allocate the root env's bindings Table first.
-        let bindings_table = h.alloc_val(HeapObject::Table {
-            seq: Vec::new(),
-            map: IndexMap::new(),
-        });
+        let bindings_table = h.alloc_table(Vec::new(), IndexMap::new());
 
         // root env: just a General. `parent` here is a real slot —
         // the scope chain for variable lookup, which env_get walks.
@@ -237,11 +243,9 @@ impl Heap {
     /// so two equal strings land in the same bucket. Other Values pass
     /// through (bit-hashing is correct for everything else).
     pub fn canonicalize_key(&mut self, key: Value) -> Value {
-        if let Some(id) = key.as_any_object() {
-            if let HeapObject::Text(s) = self.get(id) {
-                let s = s.clone();
-                return Value::symbol(self.intern(&s));
-            }
+        if let Some(s) = key.as_any_object().and_then(|id| self.get_string(id)) {
+            let s = s.to_string();
+            return Value::symbol(self.intern(&s));
         }
         key
     }
@@ -278,8 +282,8 @@ impl Heap {
         let mut cur = self.env;
         loop {
             if let Some(bid) = self.env_bindings_id(cur) {
-                if let HeapObject::Table { map, .. } = self.get(bid) {
-                    if let Some(v) = map.get(&Value::symbol(sym)).copied() {
+                if let Some(t) = self.foreign_ref::<Table>(Value::nursery(bid)) {
+                    if let Some(v) = t.map.get(&Value::symbol(sym)).copied() {
                         return Some(v);
                     }
                 }
@@ -296,19 +300,45 @@ impl Heap {
             .unwrap_or(Value::NIL)
     }
 
+    /// Get a mutable borrow of the foreign payload at `id`, if it's
+    /// the sole owner of the Arc. This is a *crate-internal* escape
+    /// hatch used only for env bindings (a Table that legitimately
+    /// grows as bindings accumulate). User-facing moof code cannot
+    /// reach this — ForeignType stays immutable from moof's side.
+    ///
+    /// Falls back to clone-and-replace when the Arc is shared
+    /// (unusual for env bindings but handled safely).
+    pub(crate) fn foreign_payload_mut<T>(&mut self, val: Value) -> Option<&mut T>
+    where T: ForeignType + 'static
+    {
+        let id = val.as_any_object()?;
+        let obj = self.get_mut(id);
+        let fd = match obj {
+            HeapObject::General { foreign: Some(fd), .. } => fd,
+            _ => return None,
+        };
+        // If shared, clone out and replace so we get unique ownership.
+        if std::sync::Arc::strong_count(&fd.payload) > 1 {
+            let cloned: T = fd.payload.downcast_ref::<T>()?.clone();
+            fd.payload = std::sync::Arc::new(cloned);
+        }
+        let arc = &mut fd.payload;
+        std::sync::Arc::get_mut(arc)?.downcast_mut::<T>()
+    }
+
     pub fn env_def(&mut self, sym: u32, val: Value) {
         // define in the root env's bindings.
         if let Some(bid) = self.env_bindings_id(self.env) {
-            if let HeapObject::Table { map, .. } = self.get_mut(bid) {
-                map.insert(Value::symbol(sym), val);
+            if let Some(t) = self.foreign_payload_mut::<Table>(Value::nursery(bid)) {
+                t.map.insert(Value::symbol(sym), val);
             }
         }
     }
 
     pub fn env_remove(&mut self, sym: u32) {
         if let Some(bid) = self.env_bindings_id(self.env) {
-            if let HeapObject::Table { map, .. } = self.get_mut(bid) {
-                map.shift_remove(&Value::symbol(sym));
+            if let Some(t) = self.foreign_payload_mut::<Table>(Value::nursery(bid)) {
+                t.map.shift_remove(&Value::symbol(sym));
             }
         }
     }
@@ -406,15 +436,27 @@ impl Heap {
     }
 
     pub fn alloc_string(&mut self, s: &str) -> Value {
-        self.alloc_val(HeapObject::Text(s.to_string()))
+        let proto = self.type_protos.get(PROTO_STR).copied().unwrap_or(Value::NIL);
+        self.alloc_foreign(proto, Text(s.to_string()))
+            .expect("Text foreign type must be registered")
     }
 
     pub fn alloc_bytes(&mut self, data: Vec<u8>) -> Value {
-        self.alloc_val(HeapObject::Buffer(data))
+        let proto = self.type_protos.get(PROTO_BYTES).copied().unwrap_or(Value::NIL);
+        self.alloc_foreign(proto, Bytes(data))
+            .expect("Bytes foreign type must be registered")
     }
 
     pub fn alloc_table_seq(&mut self, items: Vec<Value>) -> Value {
-        self.alloc_val(HeapObject::Table { seq: items, map: indexmap::IndexMap::new() })
+        let proto = self.type_protos.get(PROTO_TABLE).copied().unwrap_or(Value::NIL);
+        self.alloc_foreign(proto, Table { seq: items, map: indexmap::IndexMap::new() })
+            .expect("Table foreign type must be registered")
+    }
+
+    pub fn alloc_table(&mut self, seq: Vec<Value>, map: indexmap::IndexMap<Value, Value>) -> Value {
+        let proto = self.type_protos.get(PROTO_TABLE).copied().unwrap_or(Value::NIL);
+        self.alloc_foreign(proto, Table { seq, map })
+            .expect("Table foreign type must be registered")
     }
 
     /// Create an Act for a cross-vat send (pending, with target info).
@@ -463,18 +505,20 @@ impl Heap {
     }
 
     pub fn get_string(&self, id: u32) -> Option<&str> {
-        match self.get(id) {
-            HeapObject::Text(s) => Some(s),
-            _ => None,
-        }
+        self.foreign_ref::<Text>(Value::nursery(id)).map(|t| t.0.as_str())
     }
 
     pub fn get_bytes(&self, id: u32) -> Option<&[u8]> {
-        match self.get(id) {
-            HeapObject::Buffer(b) => Some(b),
-            _ => None,
-        }
+        self.foreign_ref::<Bytes>(Value::nursery(id)).map(|b| b.0.as_slice())
     }
+
+    pub fn get_table(&self, id: u32) -> Option<&Table> {
+        self.foreign_ref::<Table>(Value::nursery(id))
+    }
+
+    pub fn is_text(&self, val: Value) -> bool { self.foreign_ref::<Text>(val).is_some() }
+    pub fn is_bytes(&self, val: Value) -> bool { self.foreign_ref::<Bytes>(val).is_some() }
+    pub fn is_table(&self, val: Value) -> bool { self.foreign_ref::<Table>(val).is_some() }
 
     /// Build a moof list from a slice of values: (a b c) as nested cons cells.
     pub fn list(&mut self, items: &[Value]) -> Value {
@@ -522,12 +566,11 @@ impl Heap {
     /// Value equality (like Ruby's eql?). Compares content for strings.
     pub fn values_equal(&self, a: Value, b: Value) -> bool {
         if a == b { return true; } // identity match (covers ints, symbols, bools, nil, same obj)
-        // content equality for strings
-        if let (Some(aid), Some(bid)) = (a.as_any_object(), b.as_any_object()) {
-            match (self.get(aid), self.get(bid)) {
-                (HeapObject::Text(sa), HeapObject::Text(sb)) => return sa == sb,
-                _ => {}
-            }
+        if let (Some(sa), Some(sb)) = (
+            a.as_any_object().and_then(|id| self.get_string(id)),
+            b.as_any_object().and_then(|id| self.get_string(id)),
+        ) {
+            return sa == sb;
         }
         false
     }
@@ -644,11 +687,8 @@ impl Heap {
     /// Get the prototype for any value (including primitives and optimized types).
     pub fn prototype_of(&self, val: Value) -> Value {
         if let Some(id) = val.as_any_object() {
-            match self.get(id) {
-                HeapObject::General { proto, .. } => return *proto,
-                HeapObject::Text(_) => return self.type_protos.get(PROTO_STR).copied().unwrap_or(Value::NIL),
-                HeapObject::Buffer(_) => return self.type_protos.get(PROTO_BYTES).copied().unwrap_or(Value::NIL),
-                HeapObject::Table { .. } => return self.type_protos.get(PROTO_TABLE).copied().unwrap_or(Value::NIL),
+            if let HeapObject::General { proto, .. } = self.get(id) {
+                return *proto;
             }
         }
         let tag = val.type_tag() as usize;

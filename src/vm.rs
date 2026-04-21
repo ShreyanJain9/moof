@@ -560,7 +560,7 @@ impl VM {
                     for (k, v) in pairs {
                         map.insert(heap.canonicalize_key(k), v);
                     }
-                    f.regs[a as usize] = heap.alloc_val(crate::object::HeapObject::Table { seq, map });
+                    f.regs[a as usize] = heap.alloc_table(seq, map);
                 }
 
                 Op::MakeClosure => {

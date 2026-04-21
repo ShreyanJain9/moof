@@ -553,11 +553,15 @@ impl Scheduler {
                 return Value::NIL;
             }
             let from_heap = &self.vat(_from_vat).heap;
+            // Text is a foreign type now, but it's by far the most common
+            // cross-vat payload (println: args, error messages, source
+            // for spawn). Handle it directly for speed — skips the full
+            // foreign-registry round-trip since we have a native path.
+            if let Some(s) = from_heap.get_string(obj_id) {
+                let s = s.to_string();
+                return self.vat_mut(to_vat).heap.alloc_string(&s);
+            }
             match from_heap.get(obj_id) {
-                crate::object::HeapObject::Text(s) => {
-                    let s = s.clone();
-                    return self.vat_mut(to_vat).heap.alloc_string(&s);
-                }
                 crate::object::HeapObject::General { slot_names, slot_values, foreign, .. } => {
                     let names: Vec<String> = slot_names.iter()
                         .map(|s| from_heap.symbol_name(*s).to_string())
@@ -628,27 +632,6 @@ impl Scheduler {
                         foreign: foreign_data,
                     });
                     return new_val;
-                }
-                crate::object::HeapObject::Table { seq, map } => {
-                    let seq = seq.clone();
-                    let map = map.clone();
-                    let new_seq: Vec<Value> = seq.iter()
-                        .map(|v| self.copy_value_across(*v, _from_vat, to_vat))
-                        .collect();
-                    let new_map: indexmap::IndexMap<Value, Value> = map.iter()
-                        .map(|(k, v)| {
-                            let nk = self.copy_value_across(*k, _from_vat, to_vat);
-                            let nv = self.copy_value_across(*v, _from_vat, to_vat);
-                            (nk, nv)
-                        })
-                        .collect();
-                    return self.vat_mut(to_vat).heap.alloc_val(
-                        crate::object::HeapObject::Table { seq: new_seq, map: new_map }
-                    );
-                }
-                _ => {
-                    eprintln!("  ~ warning: cannot copy heap object across vats (yet)");
-                    return Value::NIL;
                 }
             }
         }

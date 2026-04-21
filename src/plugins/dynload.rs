@@ -20,7 +20,6 @@ use std::path::{Path, PathBuf};
 use crate::heap::Heap;
 use crate::value::Value;
 use crate::vat::Vat;
-use crate::object::HeapObject;
 use super::CapabilityPlugin;
 
 // ═══════════════════════════════════════════════════════════
@@ -98,7 +97,7 @@ pub unsafe extern "C" fn moof_as_string(ctx: *mut MoofCallCtx, val: u64) -> *con
     let heap = unsafe { &*(*ctx).heap };
     let v = Value::from_bits(val);
     if let Some(id) = v.as_any_object() {
-        if let HeapObject::Text(s) = heap.get(id) {
+        if let Some(s) = heap.get_string(id) {
             return s.as_ptr() as *const c_char;
         }
     }

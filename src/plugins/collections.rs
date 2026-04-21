@@ -1,6 +1,5 @@
 use crate::plugins::native;
 use crate::heap::*;
-use crate::object::HeapObject;
 use crate::value::Value;
 
 use super::Plugin;
@@ -149,57 +148,47 @@ impl Plugin for CollectionsPlugin {
         native(heap, str_id, "indexOf:", |heap, receiver, args| {
             let id = receiver.as_any_object().ok_or("indexOf: not a string")?;
             let sub_id = args.first().and_then(|v| v.as_any_object()).ok_or("indexOf: arg not a string")?;
-            match (heap.get(id), heap.get(sub_id)) {
-                (HeapObject::Text(s), HeapObject::Text(sub)) => {
-                    match s.find(sub.as_str()) {
-                        Some(pos) => Ok(Value::integer(pos as i64)),
-                        None => Ok(Value::NIL),
-                    }
-                }
-                _ => Err("indexOf: not strings".into()),
+            let s = heap.get_string(id).ok_or("indexOf: not strings")?;
+            let sub = heap.get_string(sub_id).ok_or("indexOf: not strings")?;
+            match s.find(sub) {
+                Some(pos) => Ok(Value::integer(pos as i64)),
+                None => Ok(Value::NIL),
             }
         });
         native(heap, str_id, "replace:with:", |heap, receiver, args| {
             let id = receiver.as_any_object().ok_or("replace:with: not a string")?;
             let old_id = args.get(0).and_then(|v| v.as_any_object()).ok_or("replace:with: first arg not a string")?;
             let new_id = args.get(1).and_then(|v| v.as_any_object()).ok_or("replace:with: second arg not a string")?;
-            match (heap.get(id), heap.get(old_id), heap.get(new_id)) {
-                (HeapObject::Text(s), HeapObject::Text(old), HeapObject::Text(new)) => {
-                    let result = s.replacen(old.as_str(), new.as_str(), 1);
-                    Ok(heap.alloc_string(&result))
-                }
-                _ => Err("replace:with: not strings".into()),
-            }
+            let s = heap.get_string(id).ok_or("replace:with: not strings")?;
+            let old = heap.get_string(old_id).ok_or("replace:with: not strings")?;
+            let new = heap.get_string(new_id).ok_or("replace:with: not strings")?;
+            let result = s.replacen(old, new, 1);
+            Ok(heap.alloc_string(&result))
         });
         native(heap, str_id, "replaceAll:with:", |heap, receiver, args| {
             let id = receiver.as_any_object().ok_or("replaceAll:with: not a string")?;
             let old_id = args.get(0).and_then(|v| v.as_any_object()).ok_or("replaceAll:with: first arg not a string")?;
             let new_id = args.get(1).and_then(|v| v.as_any_object()).ok_or("replaceAll:with: second arg not a string")?;
-            match (heap.get(id), heap.get(old_id), heap.get(new_id)) {
-                (HeapObject::Text(s), HeapObject::Text(old), HeapObject::Text(new)) => {
-                    let result = s.replace(old.as_str(), new.as_str());
-                    Ok(heap.alloc_string(&result))
-                }
-                _ => Err("replaceAll:with: not strings".into()),
-            }
+            let s = heap.get_string(id).ok_or("replaceAll:with: not strings")?;
+            let old = heap.get_string(old_id).ok_or("replaceAll:with: not strings")?;
+            let new = heap.get_string(new_id).ok_or("replaceAll:with: not strings")?;
+            let result = s.replace(old, new);
+            Ok(heap.alloc_string(&result))
         });
         native(heap, str_id, "toFloat", |heap, receiver, _args| {
             let id = receiver.as_any_object().ok_or("toFloat: not a string")?;
-            match heap.get(id) {
-                HeapObject::Text(s) => match s.parse::<f64>() {
-                    Ok(n) => Ok(Value::float(n)),
-                    Err(_) => Err(format!("toFloat: cannot parse '{s}'")),
-                },
-                _ => Err("toFloat: not a string".into()),
+            let s = heap.get_string(id).ok_or("toFloat: not a string")?;
+            match s.parse::<f64>() {
+                Ok(n) => Ok(Value::float(n)),
+                Err(_) => Err(format!("toFloat: cannot parse '{s}'")),
             }
         });
         native(heap, str_id, "<", |heap, receiver, args| {
             let a_id = receiver.as_any_object().ok_or("< : not a string")?;
             let b_id = args.first().and_then(|v| v.as_any_object()).ok_or("< : arg not a string")?;
-            match (heap.get(a_id), heap.get(b_id)) {
-                (HeapObject::Text(a), HeapObject::Text(b)) => Ok(Value::boolean(a < b)),
-                _ => Err("< : not strings".into()),
-            }
+            let a = heap.get_string(a_id).ok_or("< : not strings")?;
+            let b = heap.get_string(b_id).ok_or("< : not strings")?;
+            Ok(Value::boolean(a < b))
         });
 
         // -- Table prototype --
@@ -211,17 +200,13 @@ impl Plugin for CollectionsPlugin {
             let id = receiver.as_any_object().ok_or("at: not a table")?;
             let raw_key = args.first().copied().unwrap_or(Value::NIL);
             let key = heap.canonicalize_key(raw_key);
-            match heap.get(id) {
-                HeapObject::Table { seq, map } => {
-                    if let Some(idx) = key.as_integer() {
-                        if idx >= 0 && (idx as usize) < seq.len() {
-                            return Ok(seq[idx as usize]);
-                        }
-                    }
-                    Ok(map.get(&key).copied().unwrap_or(Value::NIL))
+            let t = heap.get_table(id).ok_or("at: not a Table")?;
+            if let Some(idx) = key.as_integer() {
+                if idx >= 0 && (idx as usize) < t.seq.len() {
+                    return Ok(t.seq[idx as usize]);
                 }
-                _ => Err("at: not a Table".into()),
             }
+            Ok(t.map.get(&key).copied().unwrap_or(Value::NIL))
         });
         // at:put: — returns a NEW table (non-destructive)
         native(heap, table_id, "at:put:", |heap, receiver, args| {
@@ -229,55 +214,46 @@ impl Plugin for CollectionsPlugin {
             let raw_key = args.first().copied().unwrap_or(Value::NIL);
             let key = heap.canonicalize_key(raw_key);
             let val = args.get(1).copied().unwrap_or(Value::NIL);
-            match heap.get(id) {
-                HeapObject::Table { seq, map } => {
-                    let mut new_seq = seq.clone();
-                    let mut new_map = map.clone();
-                    if let Some(idx) = key.as_integer() {
-                        if idx >= 0 && (idx as usize) < new_seq.len() {
-                            new_seq[idx as usize] = val;
-                            return Ok(heap.alloc_val(HeapObject::Table { seq: new_seq, map: new_map }));
-                        }
-                    }
-                    new_map.insert(key, val);
-                    Ok(heap.alloc_val(HeapObject::Table { seq: new_seq, map: new_map }))
+            let t = heap.get_table(id).ok_or("at:put: not a Table")?;
+            let mut new_seq = t.seq.clone();
+            let mut new_map = t.map.clone();
+            if let Some(idx) = key.as_integer() {
+                if idx >= 0 && (idx as usize) < new_seq.len() {
+                    new_seq[idx as usize] = val;
+                    return Ok(heap.alloc_table(new_seq, new_map));
                 }
-                _ => Err("at:put: not a Table".into()),
             }
+            new_map.insert(key, val);
+            Ok(heap.alloc_table(new_seq, new_map))
         });
         // push: — returns a NEW table with element appended (non-destructive)
         native(heap, table_id, "push:", |heap, receiver, args| {
             let id = receiver.as_any_object().ok_or("push: not a table")?;
             let val = args.first().copied().unwrap_or(Value::NIL);
-            match heap.get(id) {
-                HeapObject::Table { seq, map } => {
-                    let mut new_seq = seq.clone();
-                    new_seq.push(val);
-                    Ok(heap.alloc_val(HeapObject::Table { seq: new_seq, map: map.clone() }))
-                }
-                _ => Err("push: not a Table".into()),
-            }
+            let t = heap.get_table(id).ok_or("push: not a Table")?;
+            let mut new_seq = t.seq.clone();
+            let new_map = t.map.clone();
+            new_seq.push(val);
+            Ok(heap.alloc_table(new_seq, new_map))
         });
         native(heap, table_id, "length", |heap, receiver, _args| {
             let id = receiver.as_any_object().ok_or("length: not a table")?;
-            match heap.get(id) {
-                HeapObject::Table { seq, .. } => Ok(Value::integer(seq.len() as i64)),
-                _ => Err("length: not a Table".into()),
-            }
+            let t = heap.get_table(id).ok_or("length: not a Table")?;
+            Ok(Value::integer(t.seq.len() as i64))
         });
         native(heap, table_id, "keys", |heap, receiver, _args| {
             let id = receiver.as_any_object().ok_or("keys: not a table")?;
-            let keys: Vec<Value> = match heap.get(id) {
-                HeapObject::Table { map, .. } => map.keys().copied().collect(),
-                _ => return Err("keys: not a Table".into()),
+            let keys: Vec<Value> = {
+                let t = heap.get_table(id).ok_or("keys: not a Table")?;
+                t.map.keys().copied().collect()
             };
             Ok(heap.list(&keys))
         });
         native(heap, table_id, "values", |heap, receiver, _args| {
             let id = receiver.as_any_object().ok_or("values: not a table")?;
-            let vals: Vec<Value> = match heap.get(id) {
-                HeapObject::Table { map, .. } => map.values().copied().collect(),
-                _ => return Err("values: not a Table".into()),
+            let vals: Vec<Value> = {
+                let t = heap.get_table(id).ok_or("values: not a Table")?;
+                t.map.values().copied().collect()
             };
             Ok(heap.list(&vals))
         });
@@ -289,29 +265,26 @@ impl Plugin for CollectionsPlugin {
             let id = receiver.as_any_object().ok_or("contains: not a table")?;
             let raw_key = args.first().copied().unwrap_or(Value::NIL);
             let key = heap.canonicalize_key(raw_key);
-            match heap.get(id) {
-                HeapObject::Table { seq, map } => {
-                    for v in seq {
-                        if heap.values_equal(*v, raw_key) { return Ok(Value::TRUE); }
-                    }
-                    Ok(Value::boolean(map.contains_key(&key)))
-                }
-                _ => Err("contains: not a Table".into()),
+            // Snapshot seq values to avoid borrow conflict with values_equal.
+            let (seq_vals, contains_in_map): (Vec<Value>, bool) = {
+                let t = heap.get_table(id).ok_or("contains: not a Table")?;
+                (t.seq.clone(), t.map.contains_key(&key))
+            };
+            for v in &seq_vals {
+                if heap.values_equal(*v, raw_key) { return Ok(Value::TRUE); }
             }
+            Ok(Value::boolean(contains_in_map))
         });
         // remove: — returns a NEW table with key removed (non-destructive)
         native(heap, table_id, "remove:", |heap, receiver, args| {
             let id = receiver.as_any_object().ok_or("remove: not a table")?;
             let raw_key = args.first().copied().unwrap_or(Value::NIL);
             let key = heap.canonicalize_key(raw_key);
-            match heap.get(id) {
-                HeapObject::Table { seq, map } => {
-                    let mut new_map = map.clone();
-                    new_map.shift_remove(&key);
-                    Ok(heap.alloc_val(HeapObject::Table { seq: seq.clone(), map: new_map }))
-                }
-                _ => Err("remove: not a Table".into()),
-            }
+            let t = heap.get_table(id).ok_or("remove: not a Table")?;
+            let new_seq = t.seq.clone();
+            let mut new_map = t.map.clone();
+            new_map.shift_remove(&key);
+            Ok(heap.alloc_table(new_seq, new_map))
         });
 
         // -- register globals --

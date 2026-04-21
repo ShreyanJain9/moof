@@ -3,7 +3,6 @@
 
 use crate::plugins::native;
 use crate::heap::*;
-use crate::object::HeapObject;
 use crate::value::Value;
 
 pub fn register(heap: &mut Heap) {
@@ -69,8 +68,8 @@ fn spawn_request(heap: &mut Heap, args: &[Value], with_args: bool, serve: bool) 
     } else if heap.as_closure(first).is_some() {
         SpawnPayload::Closure(first)
     } else {
-        match first.as_any_object().map(|id| heap.get(id)) {
-            Some(HeapObject::Text(s)) => SpawnPayload::Source(s.clone()),
+        match first.as_any_object().and_then(|id| heap.get_string(id)) {
+            Some(s) => SpawnPayload::Source(s.to_string()),
             _ => return Err("spawn: argument must be a block or source string".into()),
         }
     };

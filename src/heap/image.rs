@@ -11,7 +11,6 @@
 // are pre-serialized to bytes via the vtable. Load reverses this
 // through the registry.
 
-use indexmap::IndexMap;
 use serde::{Serialize, Deserialize};
 use crate::object::HeapObject;
 use crate::foreign::{ForeignData, ForeignTypeName};
@@ -29,12 +28,6 @@ enum HeapObjectImage {
         slot_values: Vec<Value>,
         handlers: Vec<(u32, Value)>,
         foreign: Option<ForeignImage>,
-    },
-    Text(String),
-    Buffer(Vec<u8>),
-    Table {
-        seq: Vec<Value>,
-        map: IndexMap<Value, Value>,
     },
 }
 
@@ -127,12 +120,6 @@ impl Heap {
                     foreign: foreign_img,
                 }
             }
-            HeapObject::Text(s) => HeapObjectImage::Text(s.clone()),
-            HeapObject::Buffer(b) => HeapObjectImage::Buffer(b.clone()),
-            HeapObject::Table { seq, map } => HeapObjectImage::Table {
-                seq: seq.clone(),
-                map: map.clone(),
-            },
         })
     }
 
@@ -151,9 +138,6 @@ impl Heap {
                 };
                 HeapObject::General { proto, slot_names, slot_values, handlers, foreign: foreign_data }
             }
-            HeapObjectImage::Text(s) => HeapObject::Text(s),
-            HeapObjectImage::Buffer(b) => HeapObject::Buffer(b),
-            HeapObjectImage::Table { seq, map } => HeapObject::Table { seq, map },
         })
     }
 }

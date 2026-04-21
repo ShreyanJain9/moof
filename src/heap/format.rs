@@ -57,19 +57,31 @@ impl Heap {
             return result;
         }
         visiting.push(id);
-        let result = match self.get(id) {
-            HeapObject::Text(s) => format!("\"{}\"", s.replace('"', "\\\"")),
-            HeapObject::Buffer(b) => format!("<bytes:{}>", b.len()),
-            HeapObject::Table { seq, map } => {
-                let mut parts = Vec::new();
-                for v in seq { parts.push(self.format_value_at(*v, visiting)); }
-                for (k, v) in map {
-                    parts.push(format!("{} => {}",
-                        self.format_value_at(*k, visiting),
-                        self.format_value_at(*v, visiting)));
-                }
-                format!("#[{}]", parts.join(" "))
+        // Rich formatters for built-in foreign types — handled before
+        // falling through to the generic describe.
+        if let Some(s) = self.get_string(id) {
+            let result = format!("\"{}\"", s.replace('"', "\\\""));
+            visiting.pop();
+            return result;
+        }
+        if let Some(b) = self.get_bytes(id) {
+            let result = format!("<bytes:{}>", b.len());
+            visiting.pop();
+            return result;
+        }
+        if let Some(t) = self.get_table(id) {
+            let mut parts = Vec::new();
+            for v in &t.seq { parts.push(self.format_value_at(*v, visiting)); }
+            for (k, v) in &t.map {
+                parts.push(format!("{} => {}",
+                    self.format_value_at(*k, visiting),
+                    self.format_value_at(*v, visiting)));
             }
+            let result = format!("#[{}]", parts.join(" "));
+            visiting.pop();
+            return result;
+        }
+        let result = match self.get(id) {
             HeapObject::General { slot_names, slot_values, foreign, .. } => {
                 if let Some(fd) = foreign.as_ref()
                     .and_then(|fd| self.foreign_registry().vtable(fd.type_id).map(|vt| (fd, vt)))
@@ -153,23 +165,25 @@ impl Heap {
             let len = self.list_len(id);
             return format!("{formatted}  : Cons ({len} elements)");
         }
+        if let Some(s) = self.get_string(id) {
+            return if s.len() > 60 {
+                format!("\"{}...\"  : String ({} chars)", &s[..57], s.len())
+            } else {
+                format!("\"{s}\"  : String")
+            };
+        }
+        if let Some(b) = self.get_bytes(id) {
+            return format!("<{} bytes>  : Bytes", b.len());
+        }
+        if let Some(t) = self.get_table(id) {
+            let mut parts = Vec::new();
+            for v in &t.seq { parts.push(self.format_value(*v)); }
+            for (k, v) in &t.map {
+                parts.push(format!("{} => {}", self.format_value(*k), self.format_value(*v)));
+            }
+            return format!("#[{}]  : Table ({} seq, {} map)", parts.join(" "), t.seq.len(), t.map.len());
+        }
         match self.get(id) {
-            HeapObject::Text(s) => {
-                if s.len() > 60 {
-                    format!("\"{}...\"  : String ({} chars)", &s[..57], s.len())
-                } else {
-                    format!("\"{s}\"  : String")
-                }
-            }
-            HeapObject::Buffer(b) => format!("<{} bytes>  : Bytes", b.len()),
-            HeapObject::Table { seq, map } => {
-                let mut parts = Vec::new();
-                for v in seq { parts.push(self.format_value(*v)); }
-                for (k, v) in map {
-                    parts.push(format!("{} => {}", self.format_value(*k), self.format_value(*v)));
-                }
-                format!("#[{}]  : Table ({} seq, {} map)", parts.join(" "), seq.len(), map.len())
-            }
             HeapObject::General { slot_names, slot_values, handlers, .. } => {
                 if slot_names.is_empty() && handlers.is_empty() {
                     return format!("<object#{id}>");

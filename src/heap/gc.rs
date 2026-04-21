@@ -127,27 +127,13 @@ impl Heap {
 
     /// Walk children of object idx, marking + pushing to worklist.
     fn mark_children_of(&self, idx: usize, worklist: &mut Vec<u32>, marked: &mut [bool]) {
-        match &self.objects[idx] {
-            HeapObject::General { proto, slot_values, handlers, foreign, .. } => {
-                mark_value_id(*proto, worklist, marked);
-                for &v in slot_values { mark_value_id(v, worklist, marked); }
-                for (_, v) in handlers { mark_value_id(*v, worklist, marked); }
-                // foreign payload may hold Values — trace via its vtable.
-                if let Some(fd) = foreign {
-                    if let Some(vt) = self.foreign_registry().vtable(fd.type_id) {
-                        (vt.trace)(&*fd.payload, &mut |v| mark_value_id(v, worklist, marked));
-                    }
-                }
-            }
-            HeapObject::Text(_) | HeapObject::Buffer(_) => {
-                // leaf — no outgoing refs
-            }
-            HeapObject::Table { seq, map } => {
-                for &v in seq { mark_value_id(v, worklist, marked); }
-                for (k, v) in map {
-                    mark_value_id(*k, worklist, marked);
-                    mark_value_id(*v, worklist, marked);
-                }
+        let HeapObject::General { proto, slot_values, handlers, foreign, .. } = &self.objects[idx];
+        mark_value_id(*proto, worklist, marked);
+        for &v in slot_values { mark_value_id(v, worklist, marked); }
+        for (_, v) in handlers { mark_value_id(*v, worklist, marked); }
+        if let Some(fd) = foreign {
+            if let Some(vt) = self.foreign_registry().vtable(fd.type_id) {
+                (vt.trace)(&*fd.payload, &mut |v| mark_value_id(v, worklist, marked));
             }
         }
     }

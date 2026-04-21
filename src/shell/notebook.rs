@@ -7,7 +7,6 @@
 // GUI thread — we copy everything needed up front.
 
 use moof::heap::Heap;
-use moof::object::HeapObject;
 use moof::value::Value;
 use eframe::egui;
 
@@ -131,25 +130,20 @@ fn type_name_of(heap: &Heap, val: Value) -> String {
     // Fallback: variant-based type name
     if let Some(id) = val.as_any_object() {
         if heap.is_pair(val) { return "Cons".to_string(); }
-        match heap.get(id) {
-            HeapObject::General { .. } => {
-                let proto = heap.get(id).proto();
-                // try proto's typeName slot
-                if let Some(pid) = proto.as_any_object() {
-                    if let Some(name_sym) = heap.find_symbol("__name") {
-                        if let Some(n) = heap.get(pid).slot_get(name_sym) {
-                            if let Some(s) = n.as_symbol() {
-                                return heap.symbol_name(s).to_string();
-                            }
-                        }
+        if heap.is_text(val) { return "String".to_string(); }
+        if heap.is_bytes(val) { return "Bytes".to_string(); }
+        if heap.is_table(val) { return "Table".to_string(); }
+        let proto = heap.get(id).proto();
+        if let Some(pid) = proto.as_any_object() {
+            if let Some(name_sym) = heap.find_symbol("__name") {
+                if let Some(n) = heap.get(pid).slot_get(name_sym) {
+                    if let Some(s) = n.as_symbol() {
+                        return heap.symbol_name(s).to_string();
                     }
                 }
-                "Object".to_string()
             }
-            HeapObject::Text(_) => "String".to_string(),
-            HeapObject::Buffer(_) => "Bytes".to_string(),
-            HeapObject::Table { .. } => "Table".to_string(),
         }
+        "Object".to_string()
     } else {
         "primitive".to_string()
     }
@@ -168,10 +162,7 @@ fn slot_integer(heap: &Heap, id: u32, name: &str) -> Option<i64> {
 
 fn string_of(heap: &Heap, val: Value) -> Option<String> {
     let id = val.as_any_object()?;
-    match heap.get(id) {
-        HeapObject::Text(s) => Some(s.clone()),
-        _ => None,
-    }
+    heap.get_string(id).map(|s| s.to_string())
 }
 
 // ═══════════════════════════════════════════════════════════

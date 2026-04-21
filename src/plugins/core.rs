@@ -179,19 +179,14 @@ impl super::Plugin for CorePlugin {
                 else if receiver.is_integer() { "Integer" }
                 else if receiver.is_float() { "Float" }
                 else if receiver.is_symbol() { "Symbol" }
-                else if let Some(id) = receiver.as_any_object() {
+                else if receiver.as_any_object().is_some() {
                     if let Some((_, is_op)) = heap.as_closure(receiver) {
                         if is_op { "Operative" } else { "Fn" }
-                    } else if heap.is_pair(receiver) {
-                        "Cons"
-                    } else {
-                        match heap.get(id) {
-                            HeapObject::General { .. } => "Object",
-                            HeapObject::Text(_) => "String",
-                            HeapObject::Buffer(_) => "Bytes",
-                            HeapObject::Table { .. } => "Table",
-                        }
-                    }
+                    } else if heap.is_pair(receiver) { "Cons" }
+                    else if heap.is_text(receiver) { "String" }
+                    else if heap.is_bytes(receiver) { "Bytes" }
+                    else if heap.is_table(receiver) { "Table" }
+                    else { "Object" }
                 } else { "Unknown" };
             Ok(Value::symbol(heap.intern(name)))
         });
