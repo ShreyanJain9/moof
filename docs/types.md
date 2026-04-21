@@ -1,5 +1,8 @@
 # types
 
+> **Note:** Some forms referenced below may be deprecated. See [core-contract-matrix.md](core-contract-matrix.md)
+> for current feature status (e.g., `while` and `try`/`catch` are deprecated).
+
 every value in moof is an object. primitive values (integers,
 floats, booleans, nil, symbols) are NaN-boxed immediates — 8
 bytes, no heap allocation. but they delegate to their type
@@ -473,7 +476,7 @@ range.step               => Integer
 ### methods
 
 ```
-[r each: block]          => iterate (moof, uses while loop)
+[r each: block]          => iterate (moof, uses recursion)
 [r includes: val]        => Boolean
 [r size]                 => Integer
 [r min]   [r max]        => Integer
@@ -496,8 +499,11 @@ all 40+ Iterable methods are available.
 
 ## Error
 
-structured error values. created by `try`/`catch` when an
-error occurs, or by `(error "msg")`.
+structured error values. created by failure paths in the runtime
+(e.g., handler not found, division by zero).
+
+> **Note:** The `try`/`catch` and `error` forms are deprecated.
+> See [errors.md](errors.md) and [core-contract-matrix.md](core-contract-matrix.md).
 
 ```
 [err message]            => String (the error message)

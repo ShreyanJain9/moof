@@ -1,44 +1,52 @@
 # error handling
 
-moof has structured error handling via `try`/`catch` and `error`.
+> **Wave 6 Status Note (Apr 2026):** The `try`/`catch` and `error` forms
+> documented below are **deprecated** and no longer emitted by the compiler.
+> The VM's `TryCatch` and `Throw` opcodes are explicitly rejected at runtime.
+> See [core-contract-matrix.md](core-contract-matrix.md) for current feature status.
 
-## signaling errors
+## current error model
+
+moof uses **Result/Err value-flow** for error handling. Failures produce
+`Err` values that propagate monadically through the computation pipeline.
+
+The `try`/`catch` special forms and `error` form described below were part
+of an earlier try/catch-based model that has been removed from the runtime.
+
+---
+
+## legacy documentation (deprecated)
+
+The following describes the removed try/catch model, kept for historical reference.
+
+### signaling errors (deprecated)
 
 ```moof
 (error "something went wrong")
 ```
 
-signals an error. if uncaught, the error message is printed and
+~signals an error. if uncaught, the error message is printed and~
 evaluation of the current expression stops. the REPL continues.
 
-## catching errors
+**Status:** The `error` form is no longer emitted by the compiler.
+The `Throw` opcode is rejected by the VM.
+
+### catching errors (deprecated)
 
 ```moof
 (try body catch: |err| handler)
 ```
 
-evaluates `body`. if it signals an error (handler not found,
+~evaluates `body`. if it signals an error (handler not found,~
 division by zero, explicit `(error ...)`), creates an Error
 object and calls the handler block with it.
 
-returns the body's result on success, or the handler's result
-on error.
+**Status:** The `try` form is no longer emitted by the compiler.
+The `TryCatch` opcode is rejected by the VM.
 
-```moof
-(try [1 / 0] catch: |e| [e message])
-; => "division by zero"
+### the Error object
 
-(try (error "boom") catch: |e| (str "caught: " [e message]))
-; => "caught: boom"
-
-(try [42 + 1] catch: |e| "nope")
-; => 43  (no error, body result returned)
-```
-
-## the Error object
-
-when `try` catches an error, it creates an Error object with
-a `message` slot containing the error string.
+Error objects still exist for values produced by other failure paths:
 
 ```
 [err message]    => String (the error message)
@@ -49,9 +57,9 @@ a `message` slot containing the error string.
 Error objects delegate to the Error prototype. you can add
 handlers to Error to enrich error objects globally.
 
-## rescue: (lightweight suppression)
+### rescue: (lightweight suppression)
 
-for blocks, `rescue:` provides a one-line error suppression:
+The `rescue:` handler on blocks provides fallback behavior:
 
 ```moof
 [|| [1 / 0] rescue: -1]        => -1
@@ -62,7 +70,7 @@ for blocks, `rescue:` provides a one-line error suppression:
 (treating self as a block), catches any error, and returns the
 default value.
 
-## doesNotUnderstand:
+### doesNotUnderstand:
 
 when a message send fails (no handler found), the VM tries
 sending `doesNotUnderstand:` to the receiver before signaling
@@ -80,26 +88,21 @@ this enables: proxies, delegation, DSLs, method-missing-style
 metaprogramming. the default behavior (if no DNU handler) is
 to signal the error normally.
 
-## how it works internally
-
-- `try` is a compiler special form that compiles `body` as a
-  zero-arg closure and `handler` as a one-arg closure
-- the `TryCatch` opcode calls the body closure; on Rust-level
-  `Err`, it creates an Error object and calls the handler
-- `error` is a compiler special form that emits the `Throw`
-  opcode, which returns `Err(msg)` from the VM
-- `rescue:` is a moof method on Object (lib/error.moof) that
-  wraps `try`/`catch`
-
 ## error types
 
-currently, all errors are strings. the Error object's `message`
+currently, errors are strings. the Error object's `message`
 slot contains the error string regardless of the error source:
 
 - handler not found: `"42 does not understand 'foo'"`
 - division by zero: `"division by zero"`
 - type mismatch: `"+ : arg not numeric"`
-- explicit error: whatever string you pass to `(error ...)`
 
 future: structured error types with selector, receiver, stack
 trace.
+
+---
+
+## see also
+
+- [core-contract-matrix.md](core-contract-matrix.md) — opcode and feature status
+- [language.md](language.md) — language syntax reference

@@ -10,6 +10,32 @@ every effectful operation is a cross-vat send. every cross-vat
 send returns an **Act** — the type of effectful computation.
 pure code never sees one.
 
+## implementation status (apr 2026)
+
+this doc mixes current behavior and target architecture. wave 6
+uses this section as the reality anchor.
+
+currently implemented:
+
+- vat/scheduler runtime path (`src/vat.rs`, `src/scheduler.rs`)
+- cross-vat messaging, outbox draining, act resolution chain
+- capability vats via builtin plugins (console/clock/file/random)
+- Act/Update integration in scheduler return-value processing
+
+currently deprecated/removed:
+
+- vm exception opcodes (`TryCatch`, `Throw`) are not valid runtime
+  behavior in current execution paths
+
+still aspirational in this document:
+
+- full purity proof + automatic content-addressed optimization
+- finalized Act combinator/algebra surface and static guarantees
+- full "everything is capability-vat only" closure of remaining edge paths
+
+for active/deprecated feature truth, see
+[`core-contract-matrix.md`](core-contract-matrix.md).
+
 ## pure vs effectful: the total split
 
 ```
@@ -121,8 +147,9 @@ use `let` for pure bindings inside a do-block (same as haskell):
     [console println: y])
 ```
 
-`<-` waits for an Act. `let` is immediate pure binding. `:=` is
-local rebinding within the vat — also pure/local.
+`<-` waits for an Act. `let` is immediate pure binding.
+state transitions should remain explicit and modelled through
+server/update patterns when effects are involved.
 
 ### compound Acts
 
@@ -329,8 +356,9 @@ principle of least authority.
 
 ## remaining design work
 
-**mutation + reactivity**: `:=` and `at:put:` are local to the vat.
-Observable protocol notifies watchers. reactive system is within-vat.
+**mutation + reactivity**: local state transitions should stay
+within-vat and explicit. Observable-style protocols notify watchers.
+reactive system is within-vat.
 notebook model: cells = env bindings, dependencies tracked via
 Observable, recomputation is pure, only rendering crosses a boundary.
 needs more fleshing out.

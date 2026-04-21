@@ -1,5 +1,7 @@
 # protocols
 
+> **Note:** For current feature status, see [core-contract-matrix.md](core-contract-matrix.md).
+
 protocols are the type system of the objectspace. a protocol
 says "if you can do X, i'll give you Y for free." implement one
 handler, get dozens.

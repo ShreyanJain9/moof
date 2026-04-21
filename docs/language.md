@@ -1,5 +1,11 @@
 # the moof language
 
+> **Wave 6 Status Note (Apr 2026):** This document describes the language syntax.
+> Some forms documented below are deprecated or removed from the runtime.
+> See [core-contract-matrix.md](core-contract-matrix.md) for current feature status.
+> Notably: `while`, `:=`, and `try`/`catch`/`throw` are no longer emitted by the compiler
+> and are rejected by the VM.
+
 ## the computational model
 
 moof has one operation: **send.** everything — arithmetic, slot
@@ -126,12 +132,17 @@ local bindings. the bindings are visible in the body.
 
 ### while
 
+> **DEPRECATED:** The `while` special form is no longer emitted by the compiler.
+> Use recursion or `times:` on Integer for iteration instead.
+
 ```moof
 (while condition body...)
 ```
 
 loop. evaluates body repeatedly while condition is truthy.
 returns nil.
+
+**Status:** Removed from runtime. Kept here for historical reference.
 
 ### do
 
@@ -143,11 +154,16 @@ sequence. evaluates each expression, returns the last.
 
 ### :=
 
+> **DEPRECATED:** The `:=` mutation form is no longer supported by the compiler.
+> Slots are mutable via `slotAt:put:`, but local variable mutation is removed.
+
 ```moof
 (:= x [x + 1])
 ```
 
 mutation. rebinds a local variable to a new value.
+
+**Status:** Removed from runtime. Kept here for historical reference.
 
 ### quote / quasiquote
 
@@ -198,28 +214,19 @@ vau gives user code compiler-level power. `and`, `or`, `when`,
 `unless`, `defn`, `defmethod`, `match` are all vau operatives
 defined in `lib/bootstrap.moof`.
 
-### try
+### try / error
+
+> **DEPRECATED:** The `try`/`catch` and `error` forms are no longer emitted by the compiler.
+> The VM's `TryCatch` and `Throw` opcodes are explicitly rejected at runtime.
+> The current error model uses Result/Err values with monadic propagation.
+> See [errors.md](errors.md) and [core-contract-matrix.md](core-contract-matrix.md) for details.
 
 ```moof
 (try body catch: |error| handler)
-```
-
-evaluates body. if it signals an error, creates an Error object
-and calls the handler block with it. returns the body's result
-on success, or the handler's result on error.
-
-```moof
-(try [1 / 0] catch: |e| [e message])
-; => "division by zero"
-```
-
-### error
-
-```moof
 (error "something went wrong")
 ```
 
-signals an error. caught by the nearest `try`.
+**Status:** Removed from runtime. Kept here for historical reference.
 
 ## bootstrap operatives
 

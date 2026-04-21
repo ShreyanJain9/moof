@@ -1030,3 +1030,42 @@ impl<'a> Compiler<'a> {
 
 // NOTE: register_type_protos has been moved to src/runtime.rs
 // The compiler is now purely AST → bytecode. Runtime init is separate.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::heap::Heap;
+
+    /// Test that the compiler does not emit TryCatch or Throw opcodes.
+    /// These are deprecated and rejected by the VM at runtime.
+    #[test]
+    fn compiler_no_trycatch_or_throw_opcodes() {
+        let mut heap = Heap::new();
+        // Compile a simple expression: (fn (x) [x + 1])
+        let sym_fn = heap.intern("fn");
+        let sym_x = heap.intern("x");
+        let sym_plus = heap.intern("+");
+        let params = heap.cons(Value::symbol(sym_x), Value::NIL);
+        let body_send = heap.list(&[
+            Value::symbol(sym_x),
+            Value::symbol(sym_plus),
+            Value::integer(1),
+        ]);
+        let expr = heap.list(&[
+            Value::symbol(sym_fn),
+            params,
+            body_send,
+        ]);
+
+        let result = Compiler::compile_toplevel(&heap, expr).expect("compile should succeed");
+        let chunk = &result.chunk;
+
+        // Check that no TryCatch or Throw opcodes appear in the bytecode
+        for i in (0..chunk.code.len()).step_by(4) {
+            if i + 3 >= chunk.code.len() { break; }
+            let op = chunk.code[i];
+            assert_ne!(op, Op::TryCatch as u8, "compiler must not emit TryCatch");
+            assert_ne!(op, Op::Throw as u8, "compiler must not emit Throw");
+        }
+    }
+}

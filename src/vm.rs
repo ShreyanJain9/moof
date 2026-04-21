@@ -227,6 +227,11 @@ impl VM {
                 }
 
                 Op::Send => {
+                    // CONTRACT: The compiler packs up to 3 direct args in registers following
+                    // the Send instruction (nargs byte + 3 arg register bytes). The VM reads
+                    // these via f.code[f.pc + i]. For sends with >3 args, the compiler must
+                    // construct an explicit argument list and use a different calling convention.
+                    // This limit is documented in core-contract-matrix.md.
                     let dst = a;
                     let recv = f.regs[b as usize];
                     let sel_idx = c as usize;
@@ -709,7 +714,10 @@ impl VM {
                     }
                 }
 
-                // TryCatch and Throw removed — errors are Result values.
+                // DEPRECATED: TryCatch and Throw opcodes are retained in the opcode enum for
+                // bytecode compatibility auditing only. The compiler does NOT emit these.
+                // The VM unconditionally rejects them at runtime with an error.
+                // See docs/core-contract-matrix.md for status.
                 Op::TryCatch | Op::Throw => {
                     return Err("try/catch/error removed — use Result values".into());
                 }
@@ -719,7 +727,7 @@ impl VM {
         }
     }
 
-    /// Recursive dispatch (used by TryCatch, Call opcode, and DNU).
+    /// Recursive dispatch helper (used by Call opcode compatibility and DNU).
     /// For most sends, the frame-based run() loop handles dispatch directly.
     fn dispatch_send(&mut self, heap: &mut Heap, receiver: Value, selector: u32, args: &[Value]) -> Result<Value, String> {
         // if receiver is an Err, short-circuit UNLESS the Err prototype
@@ -900,5 +908,27 @@ mod tests {
 
         let result = eval_chunk(&mut heap, &chunk).unwrap();
         assert_eq!(result.as_integer(), Some(42));
+    }
+
+    #[test]
+    fn rejects_trycatch_opcode() {
+        let mut heap = Heap::new();
+        let mut chunk = Chunk::new("test", 0, 0);
+        chunk.num_regs = 1;
+        chunk.emit(Op::TryCatch, 0, 0, 0);
+
+        let err = eval_chunk(&mut heap, &chunk).unwrap_err();
+        assert!(err.contains("try/catch/error removed"));
+    }
+
+    #[test]
+    fn rejects_throw_opcode() {
+        let mut heap = Heap::new();
+        let mut chunk = Chunk::new("test", 0, 0);
+        chunk.num_regs = 1;
+        chunk.emit(Op::Throw, 0, 0, 0);
+
+        let err = eval_chunk(&mut heap, &chunk).unwrap_err();
+        assert!(err.contains("try/catch/error removed"));
     }
 }

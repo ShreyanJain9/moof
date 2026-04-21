@@ -39,8 +39,10 @@ pub enum Op {
     GetGlobal    = 0x60, // dst, name_hi, name_lo  (name is symbol constant index)
     DefGlobal    = 0x61, // name_hi, name_lo, src  (bind name to register value)
     Eval         = 0x70, // dst, src, _  — compile and execute src as AST, result in dst
-    TryCatch     = 0x80, // dst, body_reg, handler_reg — call body, on error call handler with Error obj
-    Throw        = 0x81, // src, _, _ — signal error with value in src as message
+    // Deprecated/removed in current runtime semantics.
+    // Kept for bytecode compatibility auditing only; VM rejects them.
+    TryCatch     = 0x80,
+    Throw        = 0x81,
 }
 
 impl Op {
