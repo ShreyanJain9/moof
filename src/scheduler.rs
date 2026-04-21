@@ -72,6 +72,10 @@ pub struct Scheduler {
     _plugin_handles: Vec<Box<dyn CapabilityPlugin>>,
     /// Dynamically loaded plugins (for persistence/reload).
     pub loaded_plugins: Vec<LoadedPlugin>,
+    /// Dylib-loaded type plugins — must stay resident for the
+    /// process lifetime so fn-pointers in the foreign-type vtable
+    /// remain valid.
+    _type_plugin_dylibs: Vec<crate::plugins::dynload::DynTypePlugin>,
 }
 
 impl Scheduler {
@@ -82,6 +86,7 @@ impl Scheduler {
             next_vat_id: 0,
             _plugin_handles: Vec::new(),
             loaded_plugins: Vec::new(),
+            _type_plugin_dylibs: Vec::new(),
         }
     }
 
@@ -100,7 +105,11 @@ impl Scheduler {
         let id = self.next_vat_id;
         self.next_vat_id += 1;
         let mut vat = Vat::new_bare(id);
-        crate::plugins::register_from_manifest(&mut vat.heap, &manifest.types);
+        crate::plugins::register_from_manifest(
+            &mut vat.heap,
+            &manifest.types,
+            &mut self._type_plugin_dylibs,
+        );
         self.vats.push(vat);
         id
     }

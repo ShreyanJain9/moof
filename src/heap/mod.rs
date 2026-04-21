@@ -302,32 +302,37 @@ impl Heap {
 
     /// Get a mutable borrow of the foreign payload at `id`, if it's
     /// the sole owner of the Arc. This is a *crate-internal* escape
-    /// hatch used only for env bindings (a Table that legitimately
-    /// grows as bindings accumulate). User-facing moof code cannot
-    /// reach this — ForeignType stays immutable from moof's side.
+    /// hatch — user-facing moof code cannot reach it, so ForeignType
+    /// stays immutable from moof's side.
     ///
-    /// Falls back to clone-and-replace when the Arc is shared
-    /// (unusual for env bindings but handled safely).
+    /// Identity is verified by name (stable across dylibs), not
+    /// `TypeId` (per-dylib). See `foreign_ref` for rationale.
     pub(crate) fn foreign_payload_mut<T>(&mut self, val: Value) -> Option<&mut T>
     where T: ForeignType + 'static
     {
         let id = val.as_any_object()?;
+        let expected = self.foreign_registry.lookup(T::type_name())?;
         let obj = self.get_mut(id);
         let fd = match obj {
             HeapObject::General { foreign: Some(fd), .. } => fd,
             _ => return None,
         };
-        // If shared, clone out and replace so we get unique ownership.
-        if std::sync::Arc::strong_count(&fd.payload) > 1 {
-            let cloned: T = fd.payload.downcast_ref::<T>()?.clone();
-            fd.payload = std::sync::Arc::new(cloned);
+        if fd.type_id != expected { return None; }
+        if Arc::strong_count(&fd.payload) > 1 {
+            let cloned: T = unsafe {
+                let raw = Arc::as_ptr(&fd.payload) as *const T;
+                (*raw).clone()
+            };
+            fd.payload = Arc::new(cloned);
         }
-        let arc = &mut fd.payload;
-        std::sync::Arc::get_mut(arc)?.downcast_mut::<T>()
+        let any_mut = Arc::get_mut(&mut fd.payload)?;
+        // SAFETY: name identity verified above; payload is a T.
+        let ptr: *mut T =
+            any_mut as *mut (dyn std::any::Any + Send + Sync) as *mut () as *mut T;
+        Some(unsafe { &mut *ptr })
     }
 
     pub fn env_def(&mut self, sym: u32, val: Value) {
-        // define in the root env's bindings.
         if let Some(bid) = self.env_bindings_id(self.env) {
             if let Some(t) = self.foreign_payload_mut::<Table>(Value::nursery(bid)) {
                 t.map.insert(Value::symbol(sym), val);
@@ -833,10 +838,26 @@ impl Heap {
     /// None if `val` isn't an object, has no foreign payload, or
     /// holds a different type. This is the ONLY access path —
     /// there is no `foreign_mut`.
+    ///
+    /// Identity is verified by NAME, not Rust `TypeId`. Rust's TypeId
+    /// is not stable across independently-compiled dylibs (each
+    /// dylib has its own TypeId for the same type), so dylib-loaded
+    /// plugins wouldn't be able to borrow payloads they themselves
+    /// allocated. The registry's `ForeignTypeName` (derived from
+    /// `T::type_name()`, author-supplied string) IS stable, so we
+    /// verify by that and then bypass the `dyn Any` downcast with
+    /// a pointer cast. Safe because the name→type_id registration
+    /// invariant guarantees the payload's concrete type.
     pub fn foreign_ref<T: ForeignType>(&self, val: Value) -> Option<&T> {
         let id = val.as_any_object()?;
         let fd = self.get(id).foreign()?;
-        fd.payload.downcast_ref::<T>()
+        let expected = self.foreign_registry.lookup(T::type_name())?;
+        if fd.type_id != expected { return None; }
+        // SAFETY: name-based identity check confirms the payload is a T.
+        // The Arc's `dyn Any + Send + Sync` is a fat pointer whose data
+        // component points at a valid T (set by `alloc_foreign::<T>`).
+        let raw = Arc::as_ptr(&fd.payload) as *const T;
+        Some(unsafe { &*raw })
     }
 
     /// Clone the foreign payload out if it matches `T`. Convenient

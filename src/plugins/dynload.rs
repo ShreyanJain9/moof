@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use crate::heap::Heap;
 use crate::value::Value;
 use crate::vat::Vat;
-use super::CapabilityPlugin;
+use super::{CapabilityPlugin, Plugin};
 
 // ═══════════════════════════════════════════════════════════
 // C ABI types and callbacks
@@ -191,4 +191,50 @@ impl CapabilityPlugin for DynCapabilityPlugin {
             }
         }
     }
+}
+
+// ═══════════════════════════════════════════════════════════
+// Type-plugin dynamic loading (wave 5.4)
+//
+// A type plugin registers ForeignTypes + their prototypes on
+// every vat's heap. The ABI is Rust-only for now: a cdylib that
+// links against moof (as a path/git dep) and exports
+//
+//     #[no_mangle]
+//     pub fn moof_create_type_plugin() -> Box<dyn moof::Plugin>
+//
+// The manifest loader reaches for this symbol when a `[types]`
+// entry points at a .dylib/.so path instead of a `builtin:X`
+// identifier.
+// ═══════════════════════════════════════════════════════════
+
+type RustCreateTypeFn = fn() -> Box<dyn Plugin>;
+
+pub struct DynTypePlugin {
+    type_name: String,
+    _lib: libloading::Library,
+    inner: Box<dyn Plugin>,
+}
+
+impl DynTypePlugin {
+    pub fn load(path: &Path) -> Result<Self, String> {
+        let lib = unsafe { libloading::Library::new(path) }
+            .map_err(|e| format!("failed to load type plugin: {e}"))?;
+
+        let create_fn = unsafe { lib.get::<RustCreateTypeFn>(b"moof_create_type_plugin") }
+            .map_err(|e| format!("type plugin missing moof_create_type_plugin: {e}"))?;
+        let plugin = create_fn();
+        let name = plugin.name().to_string();
+
+        Ok(DynTypePlugin {
+            type_name: name,
+            _lib: lib,
+            inner: plugin,
+        })
+    }
+}
+
+impl Plugin for DynTypePlugin {
+    fn name(&self) -> &str { &self.type_name }
+    fn register(&self, heap: &mut Heap) { self.inner.register(heap) }
 }

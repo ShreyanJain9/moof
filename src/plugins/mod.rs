@@ -129,7 +129,15 @@ pub fn builtin_capability(name: &str) -> Option<Box<dyn CapabilityPlugin>> {
 }
 
 /// Register type plugins on a heap based on manifest [types].
-pub fn register_from_manifest(heap: &mut Heap, types: &std::collections::HashMap<String, String>) {
+/// Entries are `builtin:NAME` (compiled in) or a path to a cdylib
+/// that exports `moof_create_type_plugin`. Dylibs are held by the
+/// scheduler's `loaded_type_plugins` vec so they stay resident for
+/// the process lifetime (unload-while-in-use = UB).
+pub fn register_from_manifest(
+    heap: &mut Heap,
+    types: &std::collections::HashMap<String, String>,
+    dylib_keepalives: &mut Vec<dynload::DynTypePlugin>,
+) {
     // ensure "core" loads first, then alphabetical
     let mut names: Vec<&String> = types.keys().collect();
     names.sort_by(|a, b| {
@@ -146,7 +154,14 @@ pub fn register_from_manifest(heap: &mut Heap, types: &std::collections::HashMap
                 eprintln!("  ~ unknown builtin type: {builtin_name}");
             }
         } else {
-            eprintln!("  ~ external type plugins not yet supported: {spec}");
+            match dynload::DynTypePlugin::load(std::path::Path::new(spec)) {
+                Ok(plugin) => {
+                    eprintln!("  loaded type plugin '{}' from {spec}", plugin.name());
+                    plugin.register(heap);
+                    dylib_keepalives.push(plugin);
+                }
+                Err(e) => eprintln!("  ~ type plugin '{name}' failed to load: {e}"),
+            }
         }
     }
 }

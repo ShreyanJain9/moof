@@ -19,6 +19,11 @@ block = "builtin:block"
 json = "builtin:json"
 vec3 = "builtin:vec3"
 
+# external dylib type plugin example (build via:
+# cd examples/type-plugin && cargo build --release
+# then uncomment below to exercise it):
+# color = "examples/type-plugin/target/release/libmoof_color_plugin.dylib"
+
 [capabilities]
 # each capability gets its own vat. accessed via FarRef → Act.
 console = "builtin:console"

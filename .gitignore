@@ -1,6 +1,8 @@
 target/
 .moof/
 .letta/
+examples/*/target/
+examples/*/Cargo.lock
 *.swp
 *.swo
 .DS_Store
