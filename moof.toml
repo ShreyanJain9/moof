@@ -74,6 +74,9 @@ files = [
   "lib/tools/query.moof",
   "lib/tools/workspace.moof",
   "lib/tools/test.moof",
+
+  # system — vat-0 substrate (skeleton today; grows per docs/system.md)
+  "lib/system/system.moof",
 ]
 
 [grants]

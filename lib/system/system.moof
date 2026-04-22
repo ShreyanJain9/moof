@@ -1,0 +1,45 @@
+; system.moof — vat 0 substrate (phase 0 skeleton).
+;
+; this file lays out the *shape* of the future vat-0 init system
+; from docs/system.md. today: protocols + prototypes, no live
+; registry. rust-side boot (crates/moof-cli/src/boot.rs) still
+; does the orchestration.
+;
+; phase 1 promotes System to a proper defserver that owns the
+; capability registry and supervises services, at which point
+; the rust boot logic becomes "rehydrate the image; send
+; [System boot: manifest]".
+;
+; phase 4 puts running-state into the image so reboot-is-
+; continuity.
+;
+; what lives here now:
+;   - Service:  the shape of a service declaration
+;   - System:   the shape of the vat-0 singleton
+;
+; no handlers beyond describe/typeName — the guts land with
+; phase 1.
+
+(def Service {
+  name:        nil
+  description: ""
+  spawner:     nil                   ; closure || returning a vat-ref
+  restart:     'on-failure           ; 'always | 'on-failure | 'never
+  depends:     nil                   ; list of service names
+  health:      nil                   ; closure |vat-ref| returning bool
+  [typeName]   'Service
+  [describe]
+    (str "<Service " [@name describe] ">")
+})
+
+(conform Service Showable)
+
+(def System {
+  capabilities: #[]                  ; name → FarRef
+  services:     nil                  ; list of Service declarations
+  [typeName]    'System
+  [describe]
+    (str "<System phase 0: shape only; see docs/system.md>")
+})
+
+(conform System Showable)

@@ -1,9 +1,17 @@
+// The REPL: one interface among several, not a privileged layer.
+//
+// Boot orchestration lives in `crate::boot`. The REPL does one thing:
+// gives the user an interactive moof prompt. A --script runner is a
+// sibling that lives in `crate::shell::script`. Any other interface
+// (a network socket, a tui, a morph-backed editor) should be a
+// sibling too — never a privileged fork of this module.
+
+use moof::boot::BootedSystem;
 use moof::manifest::Manifest;
-use moof::scheduler::Scheduler;
 use moof::store::Store;
 use std::path::Path;
 
-/// Count unbalanced brackets/parens/braces.
+/// Count unbalanced brackets/parens/braces for multi-line input.
 fn bracket_depth(s: &str) -> i32 {
     let mut depth = 0i32;
     let mut in_string = false;
@@ -28,80 +36,19 @@ fn bracket_depth(s: &str) -> i32 {
 
 const MANIFEST_PATH: &str = "moof.toml";
 
+/// Run the REPL. Boots the system using the manifest, spawns a vat
+/// for the user to type into, grants it the [grants] repl caps,
+/// then loops on readline. On exit, saves the image.
 pub fn run() {
     println!();
     println!("  .  *  .        m o o f        .  *  .");
     println!("       ~ a living objectspace ~");
     println!("    clarus the dogcow lives again");
 
-    // load manifest (or use defaults)
-    let manifest = match Path::new(MANIFEST_PATH).exists() {
-        true => match Manifest::load(Path::new(MANIFEST_PATH)) {
-            Ok(m) => { eprintln!("  manifest: {MANIFEST_PATH}"); m }
-            Err(e) => { eprintln!("  ~ manifest error: {e}, using defaults"); Manifest::default() }
-        },
-        false => { eprintln!("  no manifest, using defaults"); Manifest::default() }
-    };
-
-    let mut sched = Scheduler::new(100_000);
-
-    // Resolve the manifest's [types] entries once — both built-ins
-    // and dylibs become Box<dyn Plugin>. The scheduler will register
-    // them on every new vat (including cross-vat spawns), so the
-    // spawn scheduler doesn't need to know where specific plugins
-    // come from.
-    let type_plugins = moof::plugins::resolve_type_plugins(&manifest.types);
-
-    // Likewise pre-read the bootstrap source files so spawned vats
-    // can eval them without filesystem access.
-    let bootstrap_sources: Vec<String> = manifest.sources.files.iter()
-        .filter_map(|p| std::fs::read_to_string(p).ok())
-        .collect();
-
-    sched.install_type_plugins(type_plugins);
-    sched.set_bootstrap_sources(bootstrap_sources);
-
-    // vat 0: init vat (bare, no plugins — doesn't run user code)
-    let _init_vat_id = sched.spawn_bare_vat();
-
-    // spawn capability vats from manifest — every capability is a
-    // dylib, whether builtin: shorthand or explicit path.
-    let mut cap_refs: Vec<(String, u32, u32)> = Vec::new();
-    for (name, spec) in &manifest.capabilities {
-        match moof::plugins::resolve_capability(spec) {
-            Ok(cap) => {
-                let (vat_id, obj_id) = sched.spawn_capability(cap.as_ref());
-                cap_refs.push((name.clone(), vat_id, obj_id));
-                eprintln!("  loaded capability '{}' from {spec}", cap.name());
-            }
-            Err(e) => eprintln!("  ~ capability '{name}' failed: {e}"),
-        }
-    }
-
-    // REPL vat — plugins + bootstrap applied by Scheduler::spawn_vat
-    // using the installed type_plugins + bootstrap_sources above.
-    let repl_vat_id = sched.spawn_vat();
-
-    // eprintln load messages (bootstrap source eval results go
-    // through the generic spawn path; we just record that they ran).
-    for source_path in &manifest.sources.files {
-        if Path::new(source_path).exists() {
-            eprintln!("  loaded {source_path}");
-        } else {
-            eprintln!("  ~ source not found: {source_path}");
-        }
-    }
-
-    // grant capabilities to REPL based on manifest [grants]
-    let repl_grants = manifest.grants.get("repl")
-        .cloned().unwrap_or_default();
-    for (name, vat_id, obj_id) in &cap_refs {
-        if repl_grants.contains(name) {
-            let farref = sched.create_farref(repl_vat_id, *vat_id, *obj_id);
-            let sym = sched.vat_mut(repl_vat_id).heap.intern(name);
-            sched.vat_mut(repl_vat_id).heap.env_def(sym, farref);
-        }
-    }
+    let manifest = load_manifest();
+    let mut sys = BootedSystem::boot(manifest);
+    let grants = sys.manifest.grants.get("repl").cloned().unwrap_or_default();
+    let repl_vat_id = sys.spawn_with_caps(&grants);
 
     println!();
 
@@ -121,36 +68,12 @@ pub fn run() {
         let trimmed = line.trim();
         if trimmed.is_empty() { continue; }
 
-        // REPL commands
-        if trimmed == "(plugins)" {
-            if sched.loaded_plugins.is_empty() && cap_refs.is_empty() {
-                println!("  no capabilities loaded");
-            } else {
-                for (name, vat_id, _) in &cap_refs {
-                    println!("  {name} (vat {vat_id})");
-                }
-            }
-            continue;
-        }
-        if trimmed.starts_with("(reload ") && trimmed.ends_with(')') {
-            let path_str = trimmed.strip_prefix("(reload ").unwrap()
-                .strip_suffix(')').unwrap().trim().trim_matches('"');
-            if let Ok(source) = std::fs::read_to_string(path_str) {
-                let vat = sched.vat_mut(repl_vat_id);
-                match vat.eval_source(&source) {
-                    Ok(_) => eprintln!("  reloaded {path_str}"),
-                    Err(e) => eprintln!("  ~ error in {path_str}: {e}"),
-                }
-            } else {
-                eprintln!("  ~ file not found: {path_str}");
-            }
-            continue;
-        }
+        if handle_repl_command(trimmed, &mut sys, repl_vat_id) { continue; }
+
         // accumulate multi-line input
         let mut input = trimmed.to_string();
         loop {
-            let depth = bracket_depth(&input);
-            if depth <= 0 { break; }
+            if bracket_depth(&input) <= 0 { break; }
             let cont = match rl.readline("  ... ") {
                 Ok(l) => l,
                 Err(_) => break,
@@ -160,77 +83,117 @@ pub fn run() {
             input.push_str(&cont);
         }
 
-        // eval
-        let tokens = match moof::lang::lexer::tokenize(&input) {
-            Ok(t) => t,
-            Err(e) => { eprintln!("  ~ lex: {e}"); continue; }
-        };
-
-        let vat = sched.vat_mut(repl_vat_id);
-        let mut parser = moof::lang::parser::Parser::new(&tokens, &mut vat.heap);
-        let exprs = match parser.parse_all() {
-            Ok(e) => e,
-            Err(e) => { eprintln!("  ~ parse: {e}"); continue; }
-        };
-
-        for expr in &exprs {
-            let vat = sched.vat_mut(repl_vat_id);
-            match moof::lang::compiler::Compiler::compile_toplevel(&vat.heap, *expr) {
-                Ok(result) => {
-                    match vat.vm.eval_result(&mut vat.heap, result) {
-                        Ok(val) => {
-                            sched.drain();
-                            let vat = sched.vat_mut(repl_vat_id);
-                            let show_sym = vat.heap.intern("show");
-                            let displayed = match vat.vm.send_message(&mut vat.heap, val, show_sym, &[]) {
-                                Ok(show_val) => {
-                                    if let Some(id) = show_val.as_any_object() {
-                                        if let Some(s) = vat.heap.get_string(id) {
-                                            s.to_string()
-                                        } else { vat.heap.display_value(val) }
-                                    } else { vat.heap.display_value(val) }
-                                }
-                                Err(_) => vat.heap.display_value(val),
-                            };
-                            println!("  {displayed}");
-                        }
-                        Err(e) => eprintln!("  ~ {e}"),
-                    }
-                }
-                Err(e) => eprintln!("  ~ compile: {e}"),
-            }
-        }
-
-        // safepoint: frames are empty after the expression finishes.
-        // if moof code requested a GC via [Vat requestGc], run it now.
-        let vat = sched.vat_mut(repl_vat_id);
-        if vat.heap.gc_requested {
-            // collect VM roots — closure_descs constants are Values
-            // embedded in bytecode chunks that live outside the heap.
-            // missing these causes string literals and other constant
-            // values to be tombstoned on GC, and subsequent uses
-            // panic with mysterious "<object#N> does not understand"
-            // errors.
-            let extra: Vec<moof::Value> = vat.vm.closure_descs_ref().iter()
-                .flat_map(|d| d.chunk.constants.iter()
-                    .map(|b| moof::Value::from_bits(*b)))
-                .collect();
-            vat.heap.gc_requested = false;
-            let stats = vat.heap.gc(&extra);
-            eprintln!("  ~ gc: freed {} slots ({} live / {} total)",
-                stats.freed, stats.live, stats.before);
-        }
+        eval_and_print(&mut sys, repl_vat_id, &input);
+        safepoint_gc(&mut sys, repl_vat_id);
     }
 
-    // save image
-    let store_path = &manifest.image.path;
+    // save image at exit
+    save_on_exit(&sys, repl_vat_id);
+    println!("\n  the circle closes. moof.\n");
+}
+
+/// Load the manifest, falling back to defaults if it's missing.
+fn load_manifest() -> Manifest {
+    match Path::new(MANIFEST_PATH).exists() {
+        true => match Manifest::load(Path::new(MANIFEST_PATH)) {
+            Ok(m) => { eprintln!("  manifest: {MANIFEST_PATH}"); m }
+            Err(e) => { eprintln!("  ~ manifest error: {e}, using defaults"); Manifest::default() }
+        },
+        false => { eprintln!("  no manifest, using defaults"); Manifest::default() }
+    }
+}
+
+/// Handle REPL meta-commands like `(plugins)` and `(reload ...)`.
+/// Returns true if the line was a command (skip normal eval).
+fn handle_repl_command(trimmed: &str, sys: &mut BootedSystem, repl_vat_id: u32) -> bool {
+    if trimmed == "(plugins)" {
+        if sys.scheduler.loaded_plugins.is_empty() && sys.cap_refs.is_empty() {
+            println!("  no capabilities loaded");
+        } else {
+            for cap in &sys.cap_refs {
+                println!("  {} (vat {})", cap.name, cap.vat_id);
+            }
+        }
+        return true;
+    }
+    if trimmed.starts_with("(reload ") && trimmed.ends_with(')') {
+        let path_str = trimmed.strip_prefix("(reload ").unwrap()
+            .strip_suffix(')').unwrap().trim().trim_matches('"');
+        match std::fs::read_to_string(path_str) {
+            Ok(source) => {
+                match sys.eval(repl_vat_id, &source) {
+                    Ok(_) => eprintln!("  reloaded {path_str}"),
+                    Err(e) => eprintln!("  ~ error in {path_str}: {e}"),
+                }
+            }
+            Err(_) => eprintln!("  ~ file not found: {path_str}"),
+        }
+        return true;
+    }
+    false
+}
+
+/// Parse, compile, evaluate, and print. Uses `show` to render the
+/// result when available; falls back to the heap's display form.
+fn eval_and_print(sys: &mut BootedSystem, repl_vat_id: u32, input: &str) {
+    let vat = sys.scheduler.vat_mut(repl_vat_id);
+
+    let tokens = match moof_lang::lang::lexer::tokenize(input) {
+        Ok(t) => t,
+        Err(e) => { eprintln!("  ~ lex: {e}"); return; }
+    };
+    let mut parser = moof_lang::lang::parser::Parser::new(&tokens, &mut vat.heap);
+    let exprs = match parser.parse_all() {
+        Ok(e) => e,
+        Err(e) => { eprintln!("  ~ parse: {e}"); return; }
+    };
+
+    for expr in &exprs {
+        let vat = sys.scheduler.vat_mut(repl_vat_id);
+        match moof_lang::lang::compiler::Compiler::compile_toplevel(&vat.heap, *expr) {
+            Ok(result) => match vat.vm.eval_result(&mut vat.heap, result) {
+                Ok(val) => {
+                    sys.drain();
+                    let vat = sys.scheduler.vat_mut(repl_vat_id);
+                    let show_sym = vat.heap.intern("show");
+                    let displayed = match vat.vm.send_message(&mut vat.heap, val, show_sym, &[]) {
+                        Ok(show_val) => match show_val.as_any_object().and_then(|id| vat.heap.get_string(id)) {
+                            Some(s) => s.to_string(),
+                            None => vat.heap.display_value(val),
+                        },
+                        Err(_) => vat.heap.display_value(val),
+                    };
+                    println!("  {displayed}");
+                }
+                Err(e) => eprintln!("  ~ {e}"),
+            },
+            Err(e) => eprintln!("  ~ compile: {e}"),
+        }
+    }
+}
+
+/// After an expression finishes, if moof code requested a GC,
+/// collect now with VM roots + closure-desc constants included.
+fn safepoint_gc(sys: &mut BootedSystem, repl_vat_id: u32) {
+    let vat = sys.scheduler.vat_mut(repl_vat_id);
+    if !vat.heap.gc_requested { return; }
+
+    let extra: Vec<moof_core::Value> = vat.vm.closure_descs_ref().iter()
+        .flat_map(|d| d.chunk.constants.iter().map(|b| moof_core::Value::from_bits(*b)))
+        .collect();
+    vat.heap.gc_requested = false;
+    let stats = vat.heap.gc(&extra);
+    eprintln!("  ~ gc: freed {} slots ({} live / {} total)",
+        stats.freed, stats.live, stats.before);
+}
+
+fn save_on_exit(sys: &BootedSystem, repl_vat_id: u32) {
+    let store_path = &sys.manifest.image.path;
     if let Ok(store) = Store::open(Path::new(store_path)) {
-        let vat = sched.vat(repl_vat_id);
+        let vat = sys.scheduler.vat(repl_vat_id);
         match store.save_all(&vat.heap, vat.vm.closure_descs_ref()) {
             Ok(()) => eprintln!("  image saved ({} objects)", vat.heap.object_count()),
             Err(e) => eprintln!("  ~ save failed: {e}"),
         }
     }
-
-    println!("\n  the circle closes. moof.\n");
 }
