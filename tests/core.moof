@@ -50,6 +50,33 @@
   (test "do option" (do (x <- (Some 10)) (y <- (Some 20)) [x + y]) 30)
   (test "do option none" (do (x <- (Some 10)) (y <- None) [x + y]) None)
 
+  ; list comprehensions via do + yield — flatMap semantics on Cons
+  (test "do list yield"
+    (do (x <- (list 1 2 3)) (yield [x + 1]))
+    (list 2 3 4))
+  (test "do list cross"
+    (do (x <- (list 1 2)) (y <- (list 10 20)) (yield [x + y]))
+    (list 11 21 12 22))
+
+  ; flat (let) inside do — pure binding, no nesting
+  (test "do flat let"
+    (do (x <- (Some 10)) (let y 20) (yield [x + y]))
+    (Some 30))
+
+  ; non-monadic do — classic sequence (begin semantics, no binds)
+  (test "do sequence" (do 1 2 3) 3)
+  (test "do sequence side-effects"
+    (do (def __scratch 0)
+        (def __scratch [__scratch + 1])
+        (def __scratch [__scratch + 1])
+        __scratch)
+    2)
+
+  ; yield lifts via the ambient monad's pure:
+  (test "pure Option"  [Option pure: 5]  (Some 5))
+  (test "pure Result"  [Result pure: 5]  { Ok value: 5 })
+  (test "pure Cons"    [Cons pure: 5]    (list 5))
+
   (test "update delta" [(update { count: 5 } 42) delta] { count: 5 })
   (test "update reply" [(update { count: 5 } 42) reply] 42)
 
@@ -308,7 +335,7 @@
 
   ; Protocol inspector — queryable protocol surface
   (test "protocol has requires aspect"
-    (member? (quote requires) [[Chainable inspect] aspectNames]) true)
+    (member? (quote requires) [[Thenable inspect] aspectNames]) true)
 
   ; default aspect falls through to describe
   (test "unknown aspect nil"   [[42 inspect] render: (quote nope)]      nil)

@@ -27,7 +27,11 @@
 (defmethod Object some? () true)
 (defmethod Object tap: (block) (do (block self) self))
 (defmethod Object pipe: (f) (f self))
-(defmethod Object then: (f) (f self))
+; NOTE: Object#then: deliberately absent. `then:` is monadic bind —
+; defined only on Thenable types (Cons, Option, Result, Act). sending
+; then: to a non-thenable is doesNotUnderstand, which is the right
+; honest failure — do-notation requires a real monad, not silent
+; identity on bare values.
 ; (val is: Type) — true if val IS Type or Type is in val's prototype chain
 (defmethod Object is: (type)
   (if (eq self type) true

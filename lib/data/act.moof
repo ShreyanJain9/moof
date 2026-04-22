@@ -1,150 +1,208 @@
-; act.moof — monadic foundations
+; act.moof — the Thenable protocol, do-notation, and its instances
 ;
-; the unified chaining model: then: is the one operation.
-; every value responds to then:. Acts auto-flatten. Results
-; auto-wrap. pure values pass through. do-notation desugars
-; to then: chains.
-
-; ═══════════════════════════════════════════════════════════
-; layer 0: identity defaults on Object
-; ═══════════════════════════════════════════════════════════
+; `then:` is monadic bind. every Thenable type impls it with proper
+; flatMap semantics: the function receives the unwrapped value and
+; must return the same monad type. failure cases short-circuit
+; (None, Err, failed Act pass through without invoking f).
 ;
-; every value is trivially chainable. [5 then: |x| [x + 1]]
-; just applies f to self. Acts, Results, Cons override with
-; real behavior.
-
-(defmethod Object then: (f) (f self))
-(defmethod Object map: (f) (f self))
+; class-side `pure:` lifts a bare value into the monad — used by
+; do-notation's `yield` to give list-comprehension feel.
+;
+; layering:
+;   layer 1  — Result types (Ok, Err): native then:, add pure: on
+;              class-side, conform to Thenable
+;   layer 2  — Option (Some, None): impls in option.moof, add pure:
+;              here, conform
+;   layer 3  — Cons: flatMap + pure on class
+;   layer 4  — Act: native then:, class-side pure: constructs a
+;              pre-resolved Act
+;   layer 5  — Update: carries deltas, conforms for uniformity
+;   layer 6  — do-notation vau: rewrites <- / let / yield / bare
+;              into nested then: chains
 
 ; ═══════════════════════════════════════════════════════════
 ; layer 1: Result types (Ok, Err)
 ; ═══════════════════════════════════════════════════════════
-;
-; Ok and Err are native types (effects plugin) with describe,
-; show, ok? native. then:/map:/recover: are overridden here
-; in moof for synchronous execution (no scheduler roundtrip).
 
-; Ok: then: applies f synchronously (not via ready_acts)
+; Ok: then: applies f synchronously (native, but re-declared here
+; for doc-locality). f's return becomes the chain's value.
 (defmethod Ok then: (f) (f @value))
 (defmethod Ok map: (f) { Ok value: (f @value) })
 (defmethod Ok recover: (f) self)
 
-; Err: short-circuit (already native, but ensure consistency)
+; Err: short-circuits — then: and map: return self.
 (defmethod Err then: (f) self)
 (defmethod Err map: (f) self)
 (defmethod Err recover: (f) (f @message))
 
-; ═══════════════════════════════════════════════════════════
-; layer 2: Chainable protocol (was Flatmappable)
-; ═══════════════════════════════════════════════════════════
+; class-side pure: lift a bare value into the Result monad.
+(defmethod Result pure: (x) { Ok value: x })
 
-(defprotocol Chainable
-  "Monadic chaining. Implement then: to get do-notation and
-   composition. then: is the universal bind: unwrap self,
-   apply f, return the result. auto-flattening is handled by
-   the runtime (for Acts) or by convention (for Results).
-
-   (do (x <- expr) [process x]) desugars to
-   [expr then: |x| [process x]].
-
-   Works for Acts (effect chains), Results (error chains),
-   Lists (comprehensions), and plain values (identity)."
-
-  (require (then: f)
-    "Chain: unwrap self, apply f, return result.
-     If f returns the same monadic type, it's flattened.
-     This is haskell's >>= (bind) and JavaScript's .then().")
-
-  (provide (map: f)
-    [self then: |x| (f x)])
-
-  (provide (recover: f)
-    self)
-
-  (provide (ok?)
-    true))
-
-; Ok and Err are native — conform them to get any protocol-provided methods
-(conform Ok Chainable)
-(conform Err Chainable)
+; (Option's pure: + Thenable conformance live in option.moof,
+;  which defines Option/Some/None and loads AFTER this file.)
 
 ; ═══════════════════════════════════════════════════════════
-; layer 3: Cons as Chainable (list comprehensions)
+; layer 3: Cons as Thenable (list monad / list comprehensions)
 ; ═══════════════════════════════════════════════════════════
 
-; then: on Cons is concatMap (flatMap). f must return a list.
+; then: on Cons is concatMap (flatMap). f must return a list;
+; yield at the do-trailing position ensures this automatically.
 (defmethod Cons then: (f)
   [[self map: f] fold: nil with: |acc lst| [acc append: lst]])
 
-(conform Cons Chainable)
+; pure: wraps a single value in a one-element list.
+(defmethod Cons pure: (x) (cons x nil))
 
 ; ═══════════════════════════════════════════════════════════
-; layer 4: monadic do-notation (vau operative)
+; layer 4: Act (effect type)
 ; ═══════════════════════════════════════════════════════════
 ;
-; (do expr1 expr2 expr3)         → sequencing via then:
-; (do (x <- expr) rest...)       → binding via then:
-; (do (let ((y val))) rest...)   → pure binding, scoped to rest
-;
-; desugars entirely to then: sends.
-; works for ANY Chainable: Acts, Results, Lists, pure values.
+; Act#then: is native (plugin-effects). pure: is constructed
+; directly — a General with state=resolved, result=x, empty
+; chain — which is a bit-compatible resolved Act.
 
-(defn arrow-bind? (form)
+(defmethod Act pure: (x)
+  { Act __state: 'resolved __result: x __chain: nil })
+
+; ═══════════════════════════════════════════════════════════
+; layer 5: the Thenable protocol
+; ═══════════════════════════════════════════════════════════
+
+(defprotocol Thenable
+  "Monadic bind. Implement then: (instance) and pure: (class-side)
+   to get do-notation and composition.
+
+   Instance contract:
+     (then: f) — if self is the success case, call f with the
+                 unwrapped value and return f's result. if self
+                 is the failure case, return self unchanged.
+                 f MUST return the same monad type; the chain's
+                 final value is whatever the last f produced.
+
+   Class-side contract:
+     (pure: x) — wrap the bare value x in this monad's identity
+                 form: Ok for Result, Some for Option, single-
+                 element list for Cons, resolved Act for Act.
+                 used by do-notation's `yield` to lift bare
+                 values into the ambient monad.
+
+   do-notation desugars (x <- expr) to [expr then: |x| ...], so
+   any type that impls Thenable composes in do-blocks uniformly."
+
+  (require (then: f)
+    "Bind: unwrap self, apply f, return f's result. Failure
+     short-circuits. f must return the same monad type.")
+
+  (provide (map: f)
+    [self then: |x| [[self parent] pure: (f x)]])
+
+  (provide (recover: f) self)
+
+  (provide (ok?) true))
+
+; conform native / already-defined types. (Some/None conform in
+; option.moof after they're defined.)
+(conform Ok Thenable)
+(conform Err Thenable)
+(conform Cons Thenable)
+(conform Act Thenable)
+(conform Update Thenable)
+
+; ═══════════════════════════════════════════════════════════
+; layer 6: do-notation
+; ═══════════════════════════════════════════════════════════
+;
+; do has two modes, chosen by whether the body contains any `<-`:
+;
+;   SEQUENCE mode — no arrow-binds:
+;     (do e1 e2 e3)  → e1, e2, e3 evaluated in order; result is e3.
+;
+;   MONADIC mode — at least one (x <- expr):
+;     (do body...) supports four line types:
+;       (x <- expr)    — bind; x = unwrap(expr), rest runs with x
+;       (let x expr)   — flat static binding, no monad (scoped to rest)
+;       (yield expr)   — lift bare expr into the ambient monad via
+;                        [first-bind parent pure: expr]
+;       bare expr      — as a non-trailing line, sequenced (must be
+;                        a thenable for the chain to continue).
+;                        as the trailing line, is the value of the
+;                        do-block (user's responsibility to match
+;                        the ambient monad type, or use yield).
+;
+; The ambient monad is inferred from the FIRST `<-` bind's source
+; and cached in a gensym so `yield` can pure-lift into it without
+; re-evaluating the source.
+
+(defn %do-arrow-bind? (form)
   (if (not (cons? form)) false
     (if (nil? [form cdr]) false
       [[[form cdr] car] identical: '<-])))
 
-(defn let-form? (form)
+(defn %do-let-form? (form)
   (if (not (cons? form)) false
     [[form car] identical: 'let]))
 
-; do-transform: convert a do body into a single source form that, when
-; compiled once, chains every binding through then: with proper lexical
-; scoping. emitting source (not calling eval mid-chain) lets the compiler
-; handle closure capture — no env threading, no late-binding surprises.
-;
-;   (do (a <- e1) (b <- e2) body)
-; becomes
-;   [e1 then: |a| [e2 then: |b| body]]
-;
-; plain expressions (non-arrow-bind) sequence via |_|. a trailing (let ...)
-; wraps the rest in a let scope, preserving the useful pattern.
-(defn do-transform (forms)
+(defn %do-yield-form? (form)
+  (if (not (cons? form)) false
+    [[form car] identical: 'yield]))
+
+(defn %do-any-bind? (forms)
+  (if (nil? forms) false
+    (if (%do-arrow-bind? [forms car]) true
+      (%do-any-bind? [forms cdr]))))
+
+(defn %do-first-bind-expr (forms)
+  (if (%do-arrow-bind? [forms car])
+    [[[[forms car] cdr] cdr] car]
+    (%do-first-bind-expr [forms cdr])))
+
+; sequence-fold: (do e1 e2 e3) → ((fn (_) ((fn (_) e3) e2)) e1)
+(defn %do-sequence (forms)
+  (if (nil? forms) nil
+    (if (nil? [forms cdr]) [forms car]
+      `((fn (_) ,(%do-sequence [forms cdr])) ,[forms car]))))
+
+; monadic-body: walk forms, threading the ambient gensym.
+; `first-unused?` tracks whether we still need to consume the
+; first bind via the cached gensym (to avoid re-eval).
+(defn %do-monadic-body (forms gs first-unused)
   (if (nil? forms) nil
     (if (nil? [forms cdr])
-      [forms car]
+      ; trailing form
+      (if (%do-yield-form? [forms car])
+        `[[,gs parent] pure: ,[[[forms car] cdr] car]]
+        [forms car])
+      ; non-trailing
       (let ((head [forms car])
             (rest [forms cdr]))
-        (if (arrow-bind? head)
+        (if (%do-arrow-bind? head)
           (let ((name [head car])
-                (expr [[[head cdr] cdr] car]))
-            `[,expr then: (fn (,name) ,(do-transform rest))])
-          (if (let-form? head)
-            `(let ,[[head cdr] car] ,(do-transform rest))
-            `[,head then: (fn (_) ,(do-transform rest))]))))))
+                (expr [[[head cdr] cdr] car])
+                (source (if first-unused gs expr)))
+            `[,source then: (fn (,name)
+                ,(%do-monadic-body rest gs false))])
+          (if (%do-let-form? head)
+            ; (let NAME EXPR) — flat binding, scoped to rest
+            (let ((name [[head cdr] car])
+                  (val [[[head cdr] cdr] car]))
+              `(let ((,name ,val)) ,(%do-monadic-body rest gs first-unused)))
+            (if (%do-yield-form? head)
+              ; non-trailing yield — pure-lift, then sequence
+              `[[[,gs parent] pure: ,[[head cdr] car]] then: (fn (_)
+                  ,(%do-monadic-body rest gs first-unused))]
+              ; bare effect expression — sequence via then:
+              `[,head then: (fn (_) ,(%do-monadic-body rest gs first-unused))])))))))
 
-; Force `do` into the rebound set so the compiler falls back to the vau
-; instead of using its built-in fast-path for sequencing.
+(defn %do-transform (forms)
+  (if (nil? forms) nil
+    (if (%do-any-bind? forms)
+      (let ((first-expr (%do-first-bind-expr forms)))
+        `(let ((__do-ambient ,first-expr))
+           ,(%do-monadic-body forms '__do-ambient true)))
+      (%do-sequence forms))))
+
+; Force `do` into the rebound set so the compiler falls back to the
+; vau instead of its compile-time sequence fast-path.
 (def do nil)
 (def do (vau body $e
-  (eval (do-transform body) $e)))
-
-; ═══════════════════════════════════════════════════════════
-; layer 5: Act (effect type)
-; ═══════════════════════════════════════════════════════════
-;
-; Act is the one effectful type. then: is defined natively in
-; rust (runtime.rs). flatMap: and map: are aliases for then:.
-; here we just conform Act to Chainable.
-
-(conform Act Chainable)
-
-; ═══════════════════════════════════════════════════════════
-; layer 6: Update (state transition type)
-; ═══════════════════════════════════════════════════════════
-;
-; Update carries a delta (slots to change) and a reply (value
-; to send back). then: is defined natively — applies f to the
-; reply, merges deltas if f returns another Update.
-
-(conform Update Chainable)
+  (eval (%do-transform body) $e)))

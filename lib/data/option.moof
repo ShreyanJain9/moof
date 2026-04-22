@@ -43,5 +43,10 @@
 ; exhaustiveness checking in future pattern-matcher work.
 (defmethod Option variants () (list Some None))
 
-(conform Some Chainable)
-(conform None Chainable)
+; Thenable class-side: [Option pure: x] → (Some x). Lives here
+; rather than in act.moof because act.moof loads first and Option
+; isn't defined until this file.
+(defmethod Option pure: (x) { Some value: x })
+
+(conform Some Thenable)
+(conform None Thenable)

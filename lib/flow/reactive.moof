@@ -40,8 +40,10 @@
     ; [_notify-chain subs new] — chain notify sends sequentially, so the
     ; returned Act resolves only after every subscriber has acknowledged.
     ; same-vat self-send, so recursion is just dispatch, no globals needed.
+    ; base case must return an Act (pure-lift new) so [swap:]'s then:
+    ; chain always sees a Thenable receiver, empty-subscribers or not.
     [_notify-chain subs new]
-      (if (nil? subs) new
+      (if (nil? subs) [Act pure: new]
         [[[subs car] notify: new] then:
           |_| [self _notify-chain [subs cdr] new]])
 
@@ -123,7 +125,7 @@
 ; to sig.
 
 (defn subscribe-each (sig inputs)
-  (if (nil? inputs) sig
+  (if (nil? inputs) [Act pure: sig]
     (do (_ <- [[inputs car] subscribe: sig])
         (subscribe-each sig [inputs cdr]))))
 
@@ -131,4 +133,4 @@
   (do (sig <- sig-act)
       (ins <- [sig inputs])
       (_ <- (subscribe-each sig ins))
-      sig))
+      (yield sig)))
