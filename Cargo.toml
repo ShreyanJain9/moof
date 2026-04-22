@@ -1,20 +1,16 @@
-[package]
-name = "moof"
+[workspace]
+resolver = "2"
+members = [
+    "crates/moof-cli",
+]
+# Example plugins are separate workspaces (they depend on the published
+# versions of moof-core etc) and intentionally not workspace members.
+exclude = [
+    "examples/rust-plugin",
+    "examples/type-plugin",
+]
+
+[workspace.package]
 version = "2.0.0-alpha.1"
 edition = "2024"
 license = "MIT"
-description = "a persistent, concurrent objectspace"
-
-[lib]
-crate-type = ["lib", "cdylib"]
-
-[dependencies]
-rustyline = "15"
-serde = { version = "1", features = ["derive"] }
-bincode = "1"
-heed = "0.22"
-libloading = "0.8"
-serde_json = "1"
-toml = "0.8"
-eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
-indexmap = { version = "2", features = ["serde"] }
