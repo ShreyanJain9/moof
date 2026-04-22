@@ -35,9 +35,8 @@
   [has: x]       [@items contains: x]
 
   [toList]       [@items keys]
-  [size]         [[@items keys] count]
-  [count]        [self size]
-  [empty?]       (eq [self size] 0)
+  [count]        [[@items keys] count]
+  [empty?]       (eq [self count] 0)
 
   ; ── Iterable + Buildable hooks ──────────────────────
   [fold:with: init f]  [[@items keys] fold: init with: f]
@@ -78,10 +77,10 @@
 ; preserve Set-ness.
 (conform Set Iterable)
 
-; structural equality: same size and every member of self is in other.
+; structural equality: same count and every member of self is in other.
 (defequal Set
   (if (not [other is: Set]) false
-    (if (not (eq [self size] [other size])) false
+    (if (not (eq [self count] [other count])) false
       [[self toList] all: |x| [other includes: x]])))
 
 ; ── type-preserving map / select / reject via Builder ──

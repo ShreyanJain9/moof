@@ -77,6 +77,16 @@
   (test "pure Result"  [Result pure: 5]  { Ok value: 5 })
   (test "pure Cons"    [Cons pure: 5]    (list 5))
 
+  ; canonical cardinality: `count` works across all collections.
+  ; `length` stays as an alias for idiomatic string/list code.
+  (test "count cons"    [(list 1 2 3) count]   3)
+  (test "count range"   [[1 to: 5] count]      5)
+  (test "count table"   [#[1 2 3 4] count]     4)
+  (test "count set"     [(Set 1 2 3) count]    3)
+  (test "count string"  ["abc" count]          3)
+  (test "length alias cons"   [(list 1 2 3) length] 3)
+  (test "length alias string" ["abc" length]        3)
+
   ; without yield, do permits mixing monad types — each bind uses
   ; its own then:. only yield would force an ambient type (via the
   ; first bind's parent.pure:), which is why mixing + yield is
@@ -143,16 +153,16 @@
   (test "Cons map still returns Cons" [[(list 1 2 3) map: |x| [x * 2]] typeName] (quote Cons))
 
   ; ── wave 1.5: Set ────────────────────────────────────
-  (test "Set dedup"           [(Set 1 2 3 2 1) size]                3)
+  (test "Set dedup"           [(Set 1 2 3 2 1) count]                3)
   (test "Set typeName"        [(Set 1 2 3) typeName]                (quote Set))
   (test "Set includes"        [(Set 1 2 3) includes: 2]             true)
   (test "Set excludes"        [(Set 1 2 3) includes: 4]             false)
-  (test "Set add new"         [[(Set 1 2) add: 3] size]             3)
-  (test "Set add dup"         [[(Set 1 2 3) add: 2] size]           3)
-  (test "Set remove"          [[(Set 1 2 3) remove: 2] size]        2)
-  (test "Set union size"      [[(Set 1 2) union: (Set 2 3)] size]   3)
-  (test "Set intersection"    [[(Set 1 2 3) intersection: (Set 3 4 5)] size]   1)
-  (test "Set difference"      [[(Set 1 2 3) difference: (Set 3 4 5)] size]    2)
+  (test "Set add new"         [[(Set 1 2) add: 3] count]             3)
+  (test "Set add dup"         [[(Set 1 2 3) add: 2] count]           3)
+  (test "Set remove"          [[(Set 1 2 3) remove: 2] count]        2)
+  (test "Set union count"      [[(Set 1 2) union: (Set 2 3)] count]   3)
+  (test "Set intersection"    [[(Set 1 2 3) intersection: (Set 3 4 5)] count]   1)
+  (test "Set difference"      [[(Set 1 2 3) difference: (Set 3 4 5)] count]    2)
   (test "Set subset?"         [(Set 1 2) subset?: (Set 1 2 3)]      true)
   (test "Set not subset?"     [(Set 1 4) subset?: (Set 1 2 3)]      false)
   (test "Set disjoint?"       [(Set 1 2) disjoint?: (Set 3 4)]      true)
@@ -164,8 +174,8 @@
   (test "Set select preserves type" [[(Set 1 2 3 4) select: |x| [x > 2]] typeName] (quote Set))
 
   ; toSet constructors
-  (test "Cons toSet"          [[(list 1 2 3 2 1) toSet] size]       3)
-  (test "Table toSet"         [[#[1 2 3 2 1] toSet] size]           3)
+  (test "Cons toSet"          [[(list 1 2 3 2 1) toSet] count]       3)
+  (test "Table toSet"         [[#[1 2 3 2 1] toSet] count]           3)
 
   ; structural equality
   (test "Set equal same"      [(Set 1 2 3) equal: (Set 3 2 1)]      true)
@@ -276,7 +286,7 @@
 
   ; into:via: — target container type explicitly
   (test "into: Table via map" [(list 1 2 3) into: #[] via: (map-xf |x| [x * 10])] #[10 20 30])
-  (test "into: Set via map"   [[(list 1 1 2 2 3) into: (Set) via: (map-xf |x| [x * 2])] size] 3)
+  (test "into: Set via map"   [[(list 1 1 2 2 3) into: (Set) via: (map-xf |x| [x * 2])] count] 3)
 
   ; transduce:init:with: — full manual: user provides init and rf
   (test "transduce sum"
@@ -494,8 +504,8 @@
 
   (test "bag typeName"   [(Bag "x") typeName]          (quote Bag))
   (test "bag counts"     [(Bag "a" "a" "b") count: "a"] 2)
-  (test "bag size"       [(Bag "a" "a" "b") size]       3)
-  (test "bag uniqueCount" [(Bag "a" "a" "b") uniqueCount] 2)
+  (test "bag count"       [(Bag "a" "a" "b") count]       3)
+  (test "bag distinctCount" [(Bag "a" "a" "b") distinctCount] 2)
   (test "bag absent"     [(Bag "a") count: "z"]         0)
   (test "bag includes"   [(Bag "a") includes: "a"]      true)
   (test "bag add"        [[(Bag "a") add: "a"] count: "a"] 2)

@@ -1,9 +1,10 @@
 ; indexable.moof — positional access
 ;
-; some collections have a natural integer index: strings have
+; Some collections have a natural integer index: strings have
 ; character positions, tables have sequential slots. Indexable
-; captures this: implement at: + length, and you get iteration,
-; search, and all of Iterable for free via protocol inclusion.
+; captures this: implement at: + count, and you get iteration,
+; search, and the full collection algebra for free via protocol
+; inclusion (Iterable).
 ;
 ; this is the bridge: positional access → iteration → the full
 ; collection algebra. conform to Indexable and you automatically
@@ -12,7 +13,7 @@
 ; conforming types: String, Table.
 
 (defprotocol Indexable
-  "Positional access. Implement at: + length to get iteration,
+  "Positional access. Implement at: + count to get iteration,
    search, and the full Iterable collection algebra. Indexable
    includes Iterable: conforming gives you ~40 methods from
    just two implementations."
@@ -21,7 +22,7 @@
     "Return the element at the given integer index (0-based).
      Out-of-bounds access should return nil.")
 
-  (require (length)
+  (require (count)
     "Return the number of elements as an integer.")
 
   ; each: using toList → Cons each: (recursive, no mutation)
@@ -29,16 +30,16 @@
     [[self toList] each: block])
 
   (provide (first)
-    (if [[self length] > 0] [self at: 0] nil))
+    (if [[self count] > 0] [self at: 0] nil))
 
   (provide (last)
-    (if [[self length] > 0] [self at: [[self length] - 1]] nil))
+    (if [[self count] > 0] [self at: [[self count] - 1]] nil))
 
   (provide (empty?)
-    (eq [self length] 0))
+    (eq [self count] 0))
 
   (provide (indexOf: x)
-    (let ((len [self length])
+    (let ((len [self count])
           (go (fn (go i)
                 (if [i >= len] nil
                   (if [[self at: i] equal: x] i
@@ -47,7 +48,7 @@
 
   ; fold: recursive over indices
   (provide (fold:with: init f)
-    (let ((len [self length])
+    (let ((len [self count])
           (go (fn (go acc i)
                 (if [i >= len] acc
                   (go go (f acc [self at: i]) [i + 1])))))
@@ -55,7 +56,7 @@
 
   ; toList: recursive build from end
   (provide (toList)
-    (let ((len [self length])
+    (let ((len [self count])
           (go (fn (go acc i)
                 (if [i < 0] acc
                   (go go (cons [self at: i] acc) [i - 1])))))

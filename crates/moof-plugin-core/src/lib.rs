@@ -203,16 +203,21 @@ impl moof_core::Plugin for CorePlugin {
             Ok(Value::boolean(heap.values_equal(receiver, other)))
         });
 
-        // Object: print — outputs and returns self
+        // Object: print — outputs describe WITHOUT newline, returns self
+        // (chainable for tap-style pipelines).
         native(heap, obj_id, "print", |heap, receiver, _args| {
-            println!("{}", heap.format_value(receiver));
+            use std::io::Write;
+            print!("{}", heap.format_value(receiver));
+            let _ = std::io::stdout().flush();
             Ok(receiver)
         });
 
-        // Object: println — outputs and returns nil
+        // Object: println — outputs describe WITH newline, returns self
+        // (chainable). Matches `[x print] [\"\\n\" print]` semantically
+        // and keeps return-value uniformity.
         native(heap, obj_id, "println", |heap, receiver, _args| {
             println!("{}", heap.format_value(receiver));
-            Ok(Value::NIL)
+            Ok(receiver)
         });
 
         // Object: show — default display for REPL (Showable protocol base)

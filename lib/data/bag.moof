@@ -2,8 +2,8 @@
 ;
 ;   (Bag "apple" "apple" "banana")      → {apple×2, banana×1}
 ;   [b count: "apple"]                  → 2
-;   [b size]                            → 3   (total occurrences)
-;   [b uniqueCount]                     → 2   (distinct elements)
+;   [b count]                            → 3   (total occurrences)
+;   [b distinctCount]                     → 2   (distinct elements)
 ;
 ; backed by a Table { element → count }. conforms to Iterable
 ; (each: visits each element count-many times — same shape as
@@ -40,16 +40,17 @@
     (let ((n [@items at: x]))
       (if (nil? n) 0 n))
 
-  ; size — total occurrences (sum of all counts)
-  [size]
+  ; count — total occurrences (sum of all multiplicities).
+  ; semantically "number of elements when walked as an Iterable".
+  [count]
     [[@items values] fold: 0 with: |a n| [a + n]]
 
-  ; uniqueCount — distinct elements
-  [uniqueCount]
+  ; distinctCount — number of distinct element values
+  [distinctCount]
     [[@items keys] count]
 
   [empty?]
-    (eq [self uniqueCount] 0)
+    (eq [self distinctCount] 0)
 
   ; includes: x — at least one occurrence?
   [includes: x]  [@items contains: x]
@@ -88,7 +89,7 @@
 ; the actual state lives).
 (defequal Bag
   (if (not [other is: Bag]) false
-    (if (not (eq [self uniqueCount] [other uniqueCount])) false
+    (if (not (eq [self distinctCount] [other distinctCount])) false
       [[[self counts] keys] all: |k|
         (eq [self count: k] [other count: k])])))
 

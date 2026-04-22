@@ -25,7 +25,7 @@ impl Plugin for CollectionsPlugin {
             let id = receiver.as_any_object().ok_or("cdr: not a cons")?;
             Ok(heap.cdr(id))
         });
-        native(heap, cons_id, "length", |heap, receiver, _args| {
+        native(heap, cons_id, "count", |heap, receiver, _args| {
             let mut count = 0i64;
             let mut cur = receiver;
             while let Some(id) = cur.as_any_object() {
@@ -36,6 +36,12 @@ impl Plugin for CollectionsPlugin {
             }
             Ok(Value::integer(count))
         });
+        // legacy alias: `length` on lists is idiomatic in many langs,
+        // so keep it pointing at the same native.
+        let length_sym = heap.intern("length");
+        let count_sym  = heap.intern("count");
+        let cons_count = heap.get(cons_id).handler_get(count_sym).unwrap();
+        heap.get_mut(cons_id).handler_set(length_sym, cons_count);
         native(heap, cons_id, "describe", |heap, receiver, _args| {
             let s = heap.format_value(receiver);
             Ok(heap.alloc_string(&s))
@@ -46,11 +52,16 @@ impl Plugin for CollectionsPlugin {
         heap.type_protos[PROTO_STR] = str_proto;
         let str_id = str_proto.as_any_object().unwrap();
 
-        native(heap, str_id, "length", |heap, receiver, _args| {
-            let id = receiver.as_any_object().ok_or("length: not a string")?;
-            let s = heap.get_string(id).ok_or("length: not a Text object")?;
-            Ok(Value::integer(s.len() as i64))
+        native(heap, str_id, "count", |heap, receiver, _args| {
+            let id = receiver.as_any_object().ok_or("count: not a string")?;
+            let s = heap.get_string(id).ok_or("count: not a Text object")?;
+            Ok(Value::integer(s.chars().count() as i64))
         });
+        // legacy alias: `length` for strings is idiomatic.
+        let length_sym = heap.intern("length");
+        let count_sym  = heap.intern("count");
+        let str_count  = heap.get(str_id).handler_get(count_sym).unwrap();
+        heap.get_mut(str_id).handler_set(length_sym, str_count);
         native(heap, str_id, "at:", |heap, receiver, args| {
             let id = receiver.as_any_object().ok_or("at: not a string")?;
             let s = heap.get_string(id).ok_or("at: not a Text object")?;
@@ -236,11 +247,16 @@ impl Plugin for CollectionsPlugin {
             new_seq.push(val);
             Ok(heap.alloc_table(new_seq, new_map))
         });
-        native(heap, table_id, "length", |heap, receiver, _args| {
-            let id = receiver.as_any_object().ok_or("length: not a table")?;
-            let t = heap.get_table(id).ok_or("length: not a Table")?;
+        native(heap, table_id, "count", |heap, receiver, _args| {
+            let id = receiver.as_any_object().ok_or("count: not a table")?;
+            let t = heap.get_table(id).ok_or("count: not a Table")?;
             Ok(Value::integer(t.seq.len() as i64))
         });
+        // legacy alias: `length` for table sequential-part count.
+        let length_sym = heap.intern("length");
+        let count_sym  = heap.intern("count");
+        let tbl_count  = heap.get(table_id).handler_get(count_sym).unwrap();
+        heap.get_mut(table_id).handler_set(length_sym, tbl_count);
         native(heap, table_id, "keys", |heap, receiver, _args| {
             let id = receiver.as_any_object().ok_or("keys: not a table")?;
             let keys: Vec<Value> = {

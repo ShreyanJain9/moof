@@ -14,28 +14,16 @@
 ; specific types override for better display.
 
 (defprotocol Showable
-  "Self-describing display. Implement describe to control how
-   your object renders as text. describe returns the value as a
-   string; show returns how the REPL displays it (usually
-   describe + type annotation). Every object has defaults from
-   Object — override for custom display."
+  "Self-describing display. describe is the canonical string rep;
+   show is describe plus type annotation for REPL output. print
+   and println output describe and return self so they chain in
+   tap-style pipelines."
 
   (require (describe)
-    "Return a string representation of self.
-     Should be unambiguous: [\"hello\" describe] => \"hello\",
-     [42 describe] => \"42\", ['foo describe] => \"foo\".")
+    "Return a String representation of self.")
 
   (provide (show)
-    (str [self describe] "  : " [[self type] describe]))
-
-  (provide (toString)
-    [self describe])
-
-  (provide (print)
-    (do [[self describe] println] self))
-
-  (provide (println)
-    (do [[self describe] println] nil)))
+    (str [self describe] "  : " [[self type] describe])))
 
 ; ── type-specific show overrides ───────────────────────
 ; the REPL calls [value show] to display results.
@@ -54,7 +42,7 @@
   (str "\"" self "\"  : String"))
 
 (defmethod Cons show ()
-  (str [self describe] "  : Cons (" [self length] " elements)"))
+  (str [self describe] "  : Cons (" [self count] " elements)"))
 
 (defmethod Table show ()
   (str [self describe] "  : Table"))

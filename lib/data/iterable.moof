@@ -248,5 +248,3 @@
 (alias Cons filter: select:)
 (alias Cons collect: map:)
 (alias Cons detect: find:)
-(alias Cons do: each:)
-(alias Cons size count)

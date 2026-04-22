@@ -15,7 +15,7 @@
   [includes: val]
     (and [val >= @start] [val <= @end])
 
-  [size]
+  [count]
     [[[[@end - @start] / @step] + 1] max: 0]
 
   [min] @start

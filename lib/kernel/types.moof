@@ -76,7 +76,7 @@
 (defmethod Boolean ifTrue: (block) (if self (block) nil))
 (defmethod Boolean ifFalse: (block) (if self nil (block)))
 (defmethod Boolean ifTrue:ifFalse: (t f) (if self (t) (f)))
-(defmethod Boolean toString () (if self "true" "false"))
+; Boolean's describe returns "true" or "false" via native format_value
 
 ; ── String extras ──────────────────────────────────────
 
@@ -96,7 +96,6 @@
 (defmethod String capitalize ()
   (if [self empty?] self
     [[[self at: 0] toUpper] ++ [self substring: 1 to: [self length]]]))
-(defmethod String toString () self)
 
 ; ── Cons extras ────────────────────────────────────────
 

@@ -94,4 +94,3 @@
 (defmethod Integer factorial ()
   (if [self <= 1] 1 [self * [[self dec] factorial]]))
 
-(defmethod Integer toString () [self describe])
