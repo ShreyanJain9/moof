@@ -1,7 +1,7 @@
-use crate::plugins::native;
-use crate::heap::*;
-use crate::object::HeapObject;
-use crate::value::Value;
+use moof_core::native;
+use moof_core::heap::*;
+use moof_core::object::HeapObject;
+use moof_core::value::Value;
 
 pub struct CorePlugin;
 
@@ -263,7 +263,7 @@ impl super::Plugin for CorePlugin {
         native(heap, sym_proto_id, "hash", |heap, receiver, _args| {
             let sym_id = receiver.as_symbol().ok_or("hash: not a symbol")?;
             let name = heap.symbol_name(sym_id);
-            Ok(Value::integer(crate::plugins::fnv1a_64(name.as_bytes()) as i64))
+            Ok(Value::integer(moof_core::fnv1a_64(name.as_bytes()) as i64))
         });
 
         // -- Nil prototype --
@@ -286,7 +286,7 @@ impl super::Plugin for CorePlugin {
         // from Integer 0 / Float 0.0 / Boolean false.
         native(heap, nil_id, "hash", |_heap, receiver, _args| {
             let bits = receiver.to_bits().to_le_bytes();
-            Ok(Value::integer(crate::plugins::fnv1a_64(&bits) as i64))
+            Ok(Value::integer(moof_core::fnv1a_64(&bits) as i64))
         });
 
         // -- Boolean prototype --
@@ -311,7 +311,7 @@ impl super::Plugin for CorePlugin {
         // from Integer 1 / Integer 2 / Nil / Float bits.
         native(heap, bool_id, "hash", |_heap, receiver, _args| {
             let bits = receiver.to_bits().to_le_bytes();
-            Ok(Value::integer(crate::plugins::fnv1a_64(&bits) as i64))
+            Ok(Value::integer(moof_core::fnv1a_64(&bits) as i64))
         });
 
         // -- Register all prototypes as globals --

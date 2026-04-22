@@ -2,9 +2,9 @@
 // (or fail) asynchronously via the scheduler. then: chains a
 // continuation; flatMap: and map: are aliases.
 
-use crate::plugins::native;
-use crate::heap::*;
-use crate::value::Value;
+use moof_core::native;
+use moof_core::heap::*;
+use moof_core::value::Value;
 
 pub fn register(heap: &mut Heap) {
     // pre-intern every symbol — captured by u32 in closures.

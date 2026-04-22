@@ -1,0 +1,13 @@
+[package]
+name = "moof-caps"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "built-in capability plugins for moof: console, clock, file, random"
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+moof-core = { path = "../moof-core" }
+moof-runtime = { path = "../moof-runtime" }

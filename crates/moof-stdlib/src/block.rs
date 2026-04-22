@@ -1,6 +1,6 @@
-use crate::plugins::{Plugin, native};
-use crate::heap::*;
-use crate::value::Value;
+use moof_core::{Plugin, native};
+use moof_core::heap::*;
+use moof_core::value::Value;
 
 pub struct BlockPlugin;
 

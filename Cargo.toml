@@ -4,6 +4,8 @@ members = [
     "crates/moof-core",
     "crates/moof-lang",
     "crates/moof-runtime",
+    "crates/moof-stdlib",
+    "crates/moof-caps",
     "crates/moof-cli",
 ]
 # Example plugins are separate workspaces (they depend on the published

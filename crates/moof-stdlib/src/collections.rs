@@ -1,6 +1,6 @@
-use crate::plugins::native;
-use crate::heap::*;
-use crate::value::Value;
+use moof_core::native;
+use moof_core::heap::*;
+use moof_core::value::Value;
 
 use super::Plugin;
 
@@ -143,7 +143,7 @@ impl Plugin for CollectionsPlugin {
         native(heap, str_id, "hash", |heap, receiver, _args| {
             let id = receiver.as_any_object().ok_or("hash: not a string")?;
             let s = heap.get_string(id).ok_or("hash: not Text")?;
-            Ok(Value::integer(crate::plugins::fnv1a_64(s.as_bytes()) as i64))
+            Ok(Value::integer(moof_core::fnv1a_64(s.as_bytes()) as i64))
         });
         native(heap, str_id, "indexOf:", |heap, receiver, args| {
             let id = receiver.as_any_object().ok_or("indexOf: not a string")?;

@@ -6,12 +6,12 @@
 // plugins/mod.rs operates on whatever heap you hand it, so each
 // capability passes its own vat.heap. isolation is preserved.
 
-use crate::vat::Vat;
-use crate::value::Value;
-use super::{CapabilityPlugin, native};
+use moof_runtime::Vat;
+use moof_runtime::CapabilityPlugin;
+use moof_core::{Heap, Value, native};
 
 /// Pull a String out of the first arg, or return an error explaining why.
-fn string_arg(heap: &crate::heap::Heap, args: &[Value], label: &str) -> Result<String, String> {
+fn string_arg(heap: &Heap, args: &[Value], label: &str) -> Result<String, String> {
     let v = args.first().copied().unwrap_or(Value::NIL);
     if let Some(id) = v.as_any_object() {
         if let Some(s) = heap.get_string(id) {
@@ -184,7 +184,7 @@ fn xorshift64_step(x: u64) -> u64 {
 }
 
 /// Advance the capability's seed slot, returning the new state.
-fn advance_seed(heap: &mut crate::heap::Heap, obj_id: u32) -> u64 {
+fn advance_seed(heap: &mut moof_core::Heap, obj_id: u32) -> u64 {
     let seed_sym = heap.intern("seed");
     let cur = heap.get(obj_id).slot_get(seed_sym)
         .and_then(|v| v.as_integer()).unwrap_or(1) as u64;

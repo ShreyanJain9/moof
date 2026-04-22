@@ -4,9 +4,9 @@
 // needs to construct Err values before the moof stdlib loads.
 // Result is the shared parent for [obj is: Result] checks.
 
-use crate::plugins::native;
-use crate::heap::*;
-use crate::value::Value;
+use moof_core::native;
+use moof_core::heap::*;
+use moof_core::value::Value;
 
 pub fn register(heap: &mut Heap) {
     // pre-intern symbols used by every handler

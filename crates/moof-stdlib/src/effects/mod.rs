@@ -1,8 +1,8 @@
 // Effects plugin — types that touch the outside world or cross vat
 // boundaries. Each type gets its own module.
 
-use crate::plugins::Plugin;
-use crate::heap::Heap;
+use moof_core::Plugin;
+use moof_core::heap::Heap;
 
 mod result;
 mod farref;

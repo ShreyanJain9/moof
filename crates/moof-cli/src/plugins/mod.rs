@@ -1,59 +1,28 @@
-// Plugin system: native modules that extend the objectspace.
+// Manifest-driven plugin dispatch for moof-cli.
 //
-// The `Plugin` trait + `native()` helpers live in moof-core; the
-// `CapabilityPlugin` trait + dynload (dylib loading) live in
-// moof-runtime. This module is moof-cli's glue: it owns the
-// concrete built-in plugin impls and the manifest-driven dispatch
-// (`builtin_type_plugin` / `builtin_capability` / `register_from_manifest`).
+// The concrete plugin impls now live in sibling crates:
+//   - moof-stdlib: type plugins (core, numeric, collections, effects,
+//                  block, json, vec3)
+//   - moof-caps:   capability plugins (console, clock, file, random)
+//
+// moof-cli wires the manifest to those catalogs here. External
+// type-plugin authors should depend on `moof-core` directly (and,
+// for capability-plugin authors, `moof-runtime` + `moof-core`).
 
-pub mod core;
-pub mod numeric;
-pub mod collections;
-pub mod effects;
-pub mod block;
-pub mod capabilities;
-pub mod json;
-pub mod vec3;
-
-use moof_core::Heap;
-use moof_core::Plugin;
+use moof_core::{Heap, Plugin};
 use moof_runtime::CapabilityPlugin;
+
+pub use moof_core::{native, int_binop, float_binop, float_unary, fnv1a_64};
+pub use moof_stdlib::{builtin_type_plugin, register_all};
+pub use moof_caps::builtin_capability;
+
 use moof_runtime::dynload;
 
-// re-export moof-core plugin API so existing `use crate::plugins::native`
-// call sites keep working without churn.
-pub use moof_core::{native, int_binop, float_binop, float_unary, fnv1a_64};
-
-/// Look up a built-in type plugin by name.
-pub fn builtin_type_plugin(name: &str) -> Option<Box<dyn Plugin>> {
-    match name {
-        "core" => Some(Box::new(core::CorePlugin)),
-        "numeric" => Some(Box::new(numeric::NumericPlugin)),
-        "collections" => Some(Box::new(collections::CollectionsPlugin)),
-        "block" => Some(Box::new(block::BlockPlugin)),
-        "effects" => Some(Box::new(effects::EffectsPlugin)),
-        "json" => Some(Box::new(json::JsonPlugin)),
-        "vec3" => Some(Box::new(vec3::Vec3Plugin)),
-        _ => None,
-    }
-}
-
-/// Look up a built-in capability plugin by name.
-pub fn builtin_capability(name: &str) -> Option<Box<dyn CapabilityPlugin>> {
-    match name {
-        "console" => Some(Box::new(capabilities::ConsoleCapability)),
-        "clock"   => Some(Box::new(capabilities::ClockCapability)),
-        "file"    => Some(Box::new(capabilities::FileCapability)),
-        "random"  => Some(Box::new(capabilities::RandomCapability)),
-        _ => None,
-    }
-}
-
 /// Resolve a manifest's [types] hashmap into a list of boxed plugins.
-/// Built-ins map via `builtin_type_plugin`; dylib entries are loaded
-/// via `DynTypePlugin` (which owns the Library handle so it stays
-/// resident as long as the Box does). Plugins are ordered with
-/// "core" first so the rest can depend on Object + base types.
+/// Built-ins map via `moof_stdlib::builtin_type_plugin`; dylib entries
+/// are loaded via `DynTypePlugin` (which owns the Library handle so
+/// it stays resident as long as the Box does). Plugins are ordered
+/// with "core" first so the rest can depend on Object + base types.
 pub fn resolve_type_plugins(
     types: &std::collections::HashMap<String, String>,
 ) -> Vec<Box<dyn Plugin>> {
@@ -84,9 +53,6 @@ pub fn resolve_type_plugins(
     plugins
 }
 
-/// Register all default type plugins (fallback when no manifest).
-pub fn register_all(heap: &mut Heap) {
-    for name in ["core", "numeric", "collections", "block", "effects", "json"] {
-        if let Some(p) = builtin_type_plugin(name) { p.register(heap); }
-    }
-}
+// Compatibility: legacy callers expected `plugins::CapabilityPlugin`
+// at this path. Keep the re-export.
+pub use moof_runtime::CapabilityPlugin as _CapabilityPlugin;

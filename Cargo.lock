@@ -1205,13 +1205,23 @@ dependencies = [
  "heed",
  "indexmap",
  "libloading",
+ "moof-caps",
  "moof-core",
  "moof-lang",
  "moof-runtime",
+ "moof-stdlib",
  "rustyline",
  "serde",
  "serde_json",
  "toml",
+]
+
+[[package]]
+name = "moof-caps"
+version = "2.0.0-alpha.1"
+dependencies = [
+ "moof-core",
+ "moof-runtime",
 ]
 
 [[package]]
@@ -1244,6 +1254,15 @@ dependencies = [
  "moof-lang",
  "serde",
  "toml",
+]
+
+[[package]]
+name = "moof-stdlib"
+version = "2.0.0-alpha.1"
+dependencies = [
+ "indexmap",
+ "moof-core",
+ "serde_json",
 ]
 
 [[package]]

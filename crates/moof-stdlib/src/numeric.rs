@@ -1,6 +1,6 @@
-use crate::plugins::{Plugin, native, int_binop, float_binop, float_unary};
-use crate::heap::*;
-use crate::value::Value;
+use moof_core::{Plugin, native, int_binop, float_binop, float_unary};
+use moof_core::heap::*;
+use moof_core::value::Value;
 
 pub struct NumericPlugin;
 
@@ -61,7 +61,7 @@ impl Plugin for NumericPlugin {
         // get distinct hashes.
         native(heap, int_id, "hash", |_heap, receiver, _args| {
             let bits = receiver.to_bits().to_le_bytes();
-            Ok(Value::integer(crate::plugins::fnv1a_64(&bits) as i64))
+            Ok(Value::integer(moof_core::fnv1a_64(&bits) as i64))
         });
 
         // bitwise
@@ -149,7 +149,7 @@ impl Plugin for NumericPlugin {
         // (matching IEEE where NaN != NaN — values_equal agrees).
         native(heap, float_id, "hash", |_heap, receiver, _args| {
             let bits = receiver.to_bits().to_le_bytes();
-            Ok(Value::integer(crate::plugins::fnv1a_64(&bits) as i64))
+            Ok(Value::integer(moof_core::fnv1a_64(&bits) as i64))
         });
 
         // constants

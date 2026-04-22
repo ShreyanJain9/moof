@@ -1,9 +1,9 @@
 // Vat — the spawn/serve entrypoints. calling [Vat spawn: block]
 // queues a SpawnRequest that the scheduler picks up between turns.
 
-use crate::plugins::native;
-use crate::heap::*;
-use crate::value::Value;
+use moof_core::native;
+use moof_core::heap::*;
+use moof_core::value::Value;
 
 pub fn register(heap: &mut Heap) {
     let object_proto = heap.type_protos[PROTO_OBJ];

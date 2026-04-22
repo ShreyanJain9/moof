@@ -4,9 +4,9 @@
 // applies f to the reply and merges deltas if f returns another
 // Update.
 
-use crate::plugins::native;
-use crate::heap::*;
-use crate::value::Value;
+use moof_core::native;
+use moof_core::heap::*;
+use moof_core::value::Value;
 
 pub fn register(heap: &mut Heap) {
     // pre-intern every symbol this module uses. handler closures

@@ -2,8 +2,8 @@
 // FarRef is intercepted by doesNotUnderstand: and turned into an
 // outgoing message + a pending Act for the result.
 
-use crate::plugins::native;
-use crate::heap::*;
+use moof_core::native;
+use moof_core::heap::*;
 
 pub fn register(heap: &mut Heap) {
     let object_proto = heap.type_protos[PROTO_OBJ];

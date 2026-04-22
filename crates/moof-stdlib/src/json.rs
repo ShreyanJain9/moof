@@ -13,10 +13,10 @@
 // fallible ops return the raw value on success, an Err on failure.
 // same convention as the File / Random / HTTP capabilities.
 
-use crate::plugins::{Plugin, native};
-use crate::heap::*;
-use crate::object::HeapObject;
-use crate::value::Value;
+use moof_core::{Plugin, native};
+use moof_core::heap::*;
+use moof_core::object::HeapObject;
+use moof_core::value::Value;
 use serde_json::Value as JV;
 
 pub struct JsonPlugin;

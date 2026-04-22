@@ -15,10 +15,10 @@
 // new Vec3 — this is the canonical pattern for borrowing + re-
 // allocating in the same &mut Heap call.
 
-use crate::foreign::ForeignType;
-use crate::heap::Heap;
-use crate::value::Value;
-use crate::plugins::{Plugin, native};
+use moof_core::foreign::ForeignType;
+use moof_core::heap::Heap;
+use moof_core::value::Value;
+use moof_core::{Plugin, native};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Vec3 {
@@ -157,7 +157,7 @@ impl Plugin for Vec3Plugin {
 
         // 3. Create the prototype object (a plain General) and bind
         //    `Vec3` in the root env so moof code can send to it.
-        let object_proto = heap.type_protos[crate::heap::PROTO_OBJ];
+        let object_proto = heap.type_protos[moof_core::heap::PROTO_OBJ];
         let proto = heap.make_object(object_proto);
         let proto_id = proto.as_any_object().unwrap();
 
