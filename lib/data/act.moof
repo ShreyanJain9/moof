@@ -132,6 +132,12 @@
 ; The ambient monad is inferred from the FIRST `<-` bind's source
 ; and cached in a gensym so `yield` can pure-lift into it without
 ; re-evaluating the source.
+;
+; Mixing monad types inside a single `do` is allowed IF there's no
+; yield — each bind uses its own then: and values flow through.
+; If you yield, the lift targets the first bind's monad, which is
+; ambiguous if subsequent binds use a different one; that's the
+; only case where "same-monad" really matters.
 
 (defn %do-arrow-bind? (form)
   (if (not (cons? form)) false

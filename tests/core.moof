@@ -77,6 +77,14 @@
   (test "pure Result"  [Result pure: 5]  { Ok value: 5 })
   (test "pure Cons"    [Cons pure: 5]    (list 5))
 
+  ; without yield, do permits mixing monad types — each bind uses
+  ; its own then:. only yield would force an ambient type (via the
+  ; first bind's parent.pure:), which is why mixing + yield is
+  ; ambiguous. mixing + no-yield is fine.
+  (test "mixed monads no yield"
+    (do (x <- (Some 5)) (y <- { Ok value: 10 }) [x + y])
+    15)
+
   (test "update delta" [(update { count: 5 } 42) delta] { count: 5 })
   (test "update reply" [(update { count: 5 } 42) reply] 42)
 
