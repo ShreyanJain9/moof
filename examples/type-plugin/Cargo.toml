@@ -6,5 +6,8 @@ edition = "2024"
 [lib]
 crate-type = ["cdylib"]
 
+# Depends on ONLY moof-core — the plugin-facing API. No parser,
+# compiler, VM, scheduler, stdlib, or capabilities pulled in.
+# Build size + compile time are proportional to what you actually use.
 [dependencies]
-moof = { path = "../../crates/moof-cli" }
+moof-core = { path = "../../crates/moof-core" }

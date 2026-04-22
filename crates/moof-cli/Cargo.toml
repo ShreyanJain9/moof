@@ -9,6 +9,7 @@ description = "a persistent, concurrent objectspace"
 crate-type = ["lib", "cdylib"]
 
 [dependencies]
+moof-core = { path = "../moof-core" }
 rustyline = "15"
 serde = { version = "1", features = ["derive"] }
 bincode = "1"

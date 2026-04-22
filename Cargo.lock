@@ -1205,10 +1205,20 @@ dependencies = [
  "heed",
  "indexmap",
  "libloading",
+ "moof-core",
  "rustyline",
  "serde",
  "serde_json",
  "toml",
+]
+
+[[package]]
+name = "moof-core"
+version = "2.0.0-alpha.1"
+dependencies = [
+ "bincode",
+ "indexmap",
+ "serde",
 ]
 
 [[package]]

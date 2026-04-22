@@ -18,9 +18,7 @@
 
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
-use moof::{Heap, Plugin, Value};
-use moof::foreign::ForeignType;
-use moof::plugins::native;
+use moof_core::{Heap, Plugin, Value, ForeignType, native};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Color { pub r: u8, pub g: u8, pub b: u8 }
@@ -83,7 +81,7 @@ impl Plugin for ColorPlugin {
         });
 
         // Object prototype hoisted in core plugin — we inherit from it.
-        let object_proto = heap.type_protos[moof::heap::PROTO_OBJ];
+        let object_proto = heap.type_protos[moof_core::heap::PROTO_OBJ];
         let proto = heap.make_object(object_proto);
         let proto_id = proto.as_any_object().unwrap();
 
