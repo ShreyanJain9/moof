@@ -1,0 +1,19 @@
+[package]
+name = "moof-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "moof runtime: Vat, Scheduler, manifest, image store, dynamic plugin loading, CapabilityPlugin trait"
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+moof-core = { path = "../moof-core" }
+moof-lang = { path = "../moof-lang" }
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+heed = "0.22"
+libloading = "0.8"
+toml = "0.8"
+indexmap = { version = "2", features = ["serde"] }

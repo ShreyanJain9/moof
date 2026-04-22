@@ -1,11 +1,10 @@
 // Plugin system: native modules that extend the objectspace.
 //
-// `Plugin` + `native()` and friends now live in moof-core so that
-// external type-plugin authors can depend on just that one crate.
-// This module keeps the bits that need the full moof-cli stack:
-// the `CapabilityPlugin` trait (which owns a `Vat`), the built-in
-// registry (`builtin_type_plugin` / `builtin_capability`), and
-// `register_from_manifest` (which wires dylibs through dynload).
+// The `Plugin` trait + `native()` helpers live in moof-core; the
+// `CapabilityPlugin` trait + dynload (dylib loading) live in
+// moof-runtime. This module is moof-cli's glue: it owns the
+// concrete built-in plugin impls and the manifest-driven dispatch
+// (`builtin_type_plugin` / `builtin_capability` / `register_from_manifest`).
 
 pub mod core;
 pub mod numeric;
@@ -13,30 +12,17 @@ pub mod collections;
 pub mod effects;
 pub mod block;
 pub mod capabilities;
-pub mod dynload;
 pub mod json;
 pub mod vec3;
 
 use moof_core::Heap;
 use moof_core::Plugin;
-use crate::vat::Vat;
+use moof_runtime::CapabilityPlugin;
+use moof_runtime::dynload;
 
 // re-export moof-core plugin API so existing `use crate::plugins::native`
 // call sites keep working without churn.
 pub use moof_core::{native, int_binop, float_binop, float_unary, fnv1a_64};
-
-/// A native capability that lives in its own vat.
-/// Creates a root object with native handlers. Sends to the
-/// capability go through FarRef → outbox → scheduler → native
-/// handler → Act resolution. All effects are mediated.
-pub trait CapabilityPlugin {
-    /// The name used to bind the FarRef in the REPL (e.g. "console").
-    fn name(&self) -> &str;
-
-    /// Set up native handlers on a root object in the given vat.
-    /// Returns the root object ID (for FarRef creation).
-    fn setup(&self, vat: &mut Vat) -> u32;
-}
 
 /// Look up a built-in type plugin by name.
 pub fn builtin_type_plugin(name: &str) -> Option<Box<dyn Plugin>> {
@@ -63,42 +49,39 @@ pub fn builtin_capability(name: &str) -> Option<Box<dyn CapabilityPlugin>> {
     }
 }
 
-/// Register type plugins on a heap based on manifest [types].
-/// Entries are `builtin:NAME` (compiled in) or a path to a cdylib
-/// that exports `moof_create_type_plugin`. Dylibs are held by the
-/// scheduler's `loaded_type_plugins` vec so they stay resident for
-/// the process lifetime (unload-while-in-use = UB).
-pub fn register_from_manifest(
-    heap: &mut Heap,
+/// Resolve a manifest's [types] hashmap into a list of boxed plugins.
+/// Built-ins map via `builtin_type_plugin`; dylib entries are loaded
+/// via `DynTypePlugin` (which owns the Library handle so it stays
+/// resident as long as the Box does). Plugins are ordered with
+/// "core" first so the rest can depend on Object + base types.
+pub fn resolve_type_plugins(
     types: &std::collections::HashMap<String, String>,
-    dylib_keepalives: &mut Vec<dynload::DynTypePlugin>,
-) {
-    // ensure "core" loads first, then alphabetical
+) -> Vec<Box<dyn Plugin>> {
     let mut names: Vec<&String> = types.keys().collect();
     names.sort_by(|a, b| {
         if a.as_str() == "core" { std::cmp::Ordering::Less }
         else if b.as_str() == "core" { std::cmp::Ordering::Greater }
         else { a.cmp(b) }
     });
+    let mut plugins: Vec<Box<dyn Plugin>> = Vec::new();
     for name in names {
         let spec = &types[name];
         if let Some(builtin_name) = crate::manifest::Manifest::is_builtin(spec) {
-            if let Some(plugin) = builtin_type_plugin(builtin_name) {
-                plugin.register(heap);
-            } else {
-                eprintln!("  ~ unknown builtin type: {builtin_name}");
+            match builtin_type_plugin(builtin_name) {
+                Some(p) => plugins.push(p),
+                None => eprintln!("  ~ unknown builtin type: {builtin_name}"),
             }
         } else {
             match dynload::DynTypePlugin::load(std::path::Path::new(spec)) {
                 Ok(plugin) => {
                     eprintln!("  loaded type plugin '{}' from {spec}", plugin.name());
-                    plugin.register(heap);
-                    dylib_keepalives.push(plugin);
+                    plugins.push(Box::new(plugin));
                 }
                 Err(e) => eprintln!("  ~ type plugin '{name}' failed to load: {e}"),
             }
         }
     }
+    plugins
 }
 
 /// Register all default type plugins (fallback when no manifest).

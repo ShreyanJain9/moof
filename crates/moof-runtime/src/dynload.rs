@@ -17,10 +17,11 @@ use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 
-use crate::heap::Heap;
-use crate::value::Value;
+use moof_core::heap::Heap;
+use moof_core::value::Value;
 use crate::vat::Vat;
-use super::{CapabilityPlugin, Plugin};
+use super::CapabilityPlugin;
+use moof_core::Plugin;
 
 // ═══════════════════════════════════════════════════════════
 // C ABI types and callbacks

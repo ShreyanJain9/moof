@@ -9,10 +9,10 @@
 //
 // Vat itself (the per-context execution environment) lives in vat.rs.
 
-use crate::heap::{Heap, OutgoingMessage, SpawnRequest};
-use crate::value::Value;
+use moof_core::heap::{Heap, OutgoingMessage, SpawnRequest};
+use moof_core::value::Value;
 use crate::vat::{Vat, Message};
-use crate::plugins::CapabilityPlugin;
+use crate::capability::CapabilityPlugin;
 
 /// Merge two delta objects: base slots + override slots → new object.
 fn merge_deltas(heap: &mut Heap, base: Value, overrides: Value) -> Value {
@@ -68,14 +68,19 @@ pub struct Scheduler {
     pub vats: Vec<Vat>,
     pub fuel_per_turn: u64,
     next_vat_id: u32,
-    // keep dylib handles alive
     _plugin_handles: Vec<Box<dyn CapabilityPlugin>>,
-    /// Dynamically loaded plugins (for persistence/reload).
     pub loaded_plugins: Vec<LoadedPlugin>,
-    /// Dylib-loaded type plugins — must stay resident for the
-    /// process lifetime so fn-pointers in the foreign-type vtable
-    /// remain valid.
-    _type_plugin_dylibs: Vec<crate::plugins::dynload::DynTypePlugin>,
+
+    /// Type plugins registered on every new vat's heap at spawn
+    /// time. Populated by moof-cli from the manifest (both builtins
+    /// and dylib-loaded plugins go here). Dylib-loaded plugins own
+    /// their `libloading::Library` internally, so the dylib stays
+    /// resident as long as the Box<dyn Plugin> does.
+    type_plugins: Vec<Box<dyn moof_core::Plugin>>,
+
+    /// Source snippets eval'd on each new vat after plugin registration.
+    /// Lets every cross-vat spawn have the same stdlib loaded.
+    pub bootstrap_sources: Vec<String>,
 }
 
 impl Scheduler {
@@ -86,46 +91,57 @@ impl Scheduler {
             next_vat_id: 0,
             _plugin_handles: Vec::new(),
             loaded_plugins: Vec::new(),
-            _type_plugin_dylibs: Vec::new(),
+            type_plugins: Vec::new(),
+            bootstrap_sources: Vec::new(),
         }
     }
 
-    /// Spawn a new vat with bootstrap loaded. Returns the vat ID.
+    /// Install the list of type plugins that every new vat will get.
+    /// moof-cli calls this at startup with the resolved manifest types
+    /// (builtin or dylib-loaded). Replaces the whole list — call once
+    /// after manifest parsing.
+    pub fn install_type_plugins(&mut self, plugins: Vec<Box<dyn moof_core::Plugin>>) {
+        self.type_plugins = plugins;
+    }
+
+    /// Ordered list of source files to eval on every newly-spawned vat
+    /// after type plugins register. moof-cli populates from manifest's
+    /// [sources.files]. Passed as snippets, not paths, so vats spawned
+    /// from other threads don't need filesystem access.
+    pub fn set_bootstrap_sources(&mut self, sources: Vec<String>) {
+        self.bootstrap_sources = sources;
+    }
+
+    /// Spawn a new vat and initialize it: register installed type
+    /// plugins, eval bootstrap sources. Returns the vat id.
     pub fn spawn_vat(&mut self) -> u32 {
         let id = self.next_vat_id;
         self.next_vat_id += 1;
         let mut vat = Vat::new(id);
-        vat.load_bootstrap();
+        for plugin in &self.type_plugins {
+            plugin.register(&mut vat.heap);
+        }
+        for source in &self.bootstrap_sources {
+            let _ = vat.eval_source(source);
+        }
         self.vats.push(vat);
         id
     }
 
-    /// Spawn a vat with type plugins from a manifest. No source files loaded.
-    pub fn spawn_vat_with_manifest(&mut self, manifest: &crate::manifest::Manifest) -> u32 {
-        let id = self.next_vat_id;
-        self.next_vat_id += 1;
-        let mut vat = Vat::new_bare(id);
-        crate::plugins::register_from_manifest(
-            &mut vat.heap,
-            &manifest.types,
-            &mut self._type_plugin_dylibs,
-        );
-        self.vats.push(vat);
-        id
-    }
-
-    /// Spawn a bare vat (no bootstrap). Used for the init vat.
+    /// Spawn a bare vat with no plugins or bootstrap. Used for the
+    /// init vat that doesn't need userland.
     pub fn spawn_bare_vat(&mut self) -> u32 {
         let id = self.next_vat_id;
         self.next_vat_id += 1;
-        let vat = Vat::new(id);
-        self.vats.push(vat);
+        self.vats.push(Vat::new(id));
         id
     }
 
-    /// Spawn a capability vat from a CapabilityPlugin.
-    /// Returns (vat_id, root_object_id).
-    pub fn spawn_capability(&mut self, cap: &dyn crate::plugins::CapabilityPlugin) -> (u32, u32) {
+    /// Spawn a capability vat from a `CapabilityPlugin`. Returns
+    /// `(vat_id, root_object_id)`. Capability vats are bare: they
+    /// don't get userland plugins or bootstrap — just the heap +
+    /// whatever the capability's setup installs.
+    pub fn spawn_capability(&mut self, cap: &dyn crate::capability::CapabilityPlugin) -> (u32, u32) {
         let id = self.next_vat_id;
         self.next_vat_id += 1;
         let mut vat = Vat::new(id);
@@ -142,7 +158,7 @@ impl Scheduler {
             return Err(format!("plugin '{}' already loaded from {:?}", existing.name, existing.path));
         }
 
-        let plugin = crate::plugins::dynload::DynCapabilityPlugin::load(path)?;
+        let plugin = crate::dynload::DynCapabilityPlugin::load(path)?;
         let name = plugin.name().to_string();
         let plugin_path = plugin.path().to_path_buf();
         let (vat_id, obj_id) = self.spawn_capability(&plugin);
@@ -311,13 +327,13 @@ impl Scheduler {
                 let child_id = self.spawn_vat();
 
                 let result = match req.payload {
-                    crate::heap::SpawnPayload::Source(ref source) => {
+                    moof_core::heap::SpawnPayload::Source(ref source) => {
                         self.vat_mut(child_id).eval_source(source)
                     }
-                    crate::heap::SpawnPayload::Closure(closure_val) => {
+                    moof_core::heap::SpawnPayload::Closure(closure_val) => {
                         self.run_closure_in_vat(closure_val, parent_vat_id, child_id, &[])
                     }
-                    crate::heap::SpawnPayload::ClosureWithArgs(closure_val, ref args) => {
+                    moof_core::heap::SpawnPayload::ClosureWithArgs(closure_val, ref args) => {
                         let args = args.clone();
                         self.run_closure_in_vat(closure_val, parent_vat_id, child_id, &args)
                     }
@@ -511,7 +527,7 @@ impl Scheduler {
                 .map(|v| self.copy_value_across(*v, from_vat_id, to_vat_id).to_bits())
                 .collect();
 
-            let desc = crate::lang::compiler::ClosureDesc {
+            let desc = moof_lang::lang::compiler::ClosureDesc {
                 chunk,
                 param_names,
                 is_operative: is_op,
@@ -571,7 +587,7 @@ impl Scheduler {
                 return self.vat_mut(to_vat).heap.alloc_string(&s);
             }
             match from_heap.get(obj_id) {
-                crate::object::HeapObject::General { slot_names, slot_values, foreign, .. } => {
+                moof_core::object::HeapObject::General { slot_names, slot_values, foreign, .. } => {
                     let names: Vec<String> = slot_names.iter()
                         .map(|s| from_heap.symbol_name(*s).to_string())
                         .collect();
@@ -583,7 +599,7 @@ impl Scheduler {
                     // and pick up the target's prototype by prototype_name
                     // (session-local proto Values never match across
                     // heaps; the semantic name is the stable link).
-                    let foreign_translated: Option<(crate::foreign::ForeignData, Option<Value>)> = match foreign {
+                    let foreign_translated: Option<(moof_core::foreign::ForeignData, Option<Value>)> = match foreign {
                         Some(fd) => {
                             let src_vt = from_heap.foreign_registry().vtable(fd.type_id)
                                 .expect("source foreign type_id has no vtable");
@@ -600,7 +616,7 @@ impl Scheduler {
                                 Ok(tid) => {
                                     let target_proto = self.vat(to_vat).heap.lookup_type(proto_name);
                                     let proto_opt = if target_proto.is_nil() { None } else { Some(target_proto) };
-                                    Some((crate::foreign::ForeignData {
+                                    Some((moof_core::foreign::ForeignData {
                                         type_id: tid,
                                         payload: new_payload,
                                     }, proto_opt))
@@ -629,11 +645,11 @@ impl Scheduler {
                         if is_farref {
                             self.vat(to_vat).heap.lookup_type("FarRef")
                         } else {
-                            self.vat(to_vat).heap.type_protos[crate::heap::PROTO_OBJ]
+                            self.vat(to_vat).heap.type_protos[moof_core::heap::PROTO_OBJ]
                         }
                     });
                     let to_heap = &mut self.vat_mut(to_vat).heap;
-                    let new_val = to_heap.alloc_val(crate::object::HeapObject::General {
+                    let new_val = to_heap.alloc_val(moof_core::object::HeapObject::General {
                         proto,
                         slot_names: new_names,
                         slot_values: new_vals,

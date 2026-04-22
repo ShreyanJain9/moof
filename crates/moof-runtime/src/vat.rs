@@ -7,10 +7,10 @@
 // vat's heap by the scheduler.
 
 use std::collections::VecDeque;
-use crate::heap::Heap;
-use crate::vm::VM;
-use crate::value::Value;
-use crate::lang::compiler::Compiler;
+use moof_core::heap::Heap;
+use moof_lang::vm::VM;
+use moof_core::value::Value;
+use moof_lang::lang::compiler::Compiler;
 
 /// A message queued for delivery to a vat.
 pub struct Message {
@@ -53,11 +53,12 @@ const BOOTSTRAP_FILES: &[&str] = &[
 ];
 
 impl Vat {
-    /// Create a new vat with default type plugins registered on its heap.
+    /// Create a bare vat — just a heap + VM. Type plugins are
+    /// registered separately by the caller (moof-cli does this via
+    /// `moof_stdlib::register_all` or a manifest-driven loader).
     pub fn new(id: u32) -> Self {
         let mut heap = Heap::new();
         heap.vat_id = id;
-        crate::plugins::register_all(&mut heap);
         Vat {
             id,
             heap,
@@ -67,23 +68,13 @@ impl Vat {
         }
     }
 
-    /// Create a bare vat (no type plugins). Plugins registered separately.
-    pub fn new_bare(id: u32) -> Self {
-        let mut heap = Heap::new();
-        heap.vat_id = id;
-        Vat {
-            id,
-            heap,
-            vm: VM::new(),
-            mailbox: VecDeque::new(),
-            status: VatStatus::Idle,
-        }
-    }
+    #[deprecated(note = "use Vat::new — plugin registration is now caller's responsibility")]
+    pub fn new_bare(id: u32) -> Self { Self::new(id) }
 
-    /// Load the core stdlib files into this vat. Used when spawning
-    /// vats that should have the full language available (e.g. REPL).
-    pub fn load_bootstrap(&mut self) {
-        for path in BOOTSTRAP_FILES {
+    /// Load a list of source files into this vat, evaluating each in
+    /// turn. Typically called by moof-cli after plugins are registered.
+    pub fn load_bootstrap_files(&mut self, paths: &[&str]) {
+        for path in paths {
             if let Ok(source) = std::fs::read_to_string(path) {
                 match self.eval_source(&source) {
                     Ok(_) => eprintln!("  loaded {path}"),
@@ -93,10 +84,16 @@ impl Vat {
         }
     }
 
+    /// Legacy: load the hardcoded kernel bootstrap paths.
+    #[deprecated(note = "use load_bootstrap_files or manifest-driven loading")]
+    pub fn load_bootstrap(&mut self) {
+        self.load_bootstrap_files(BOOTSTRAP_FILES);
+    }
+
     /// Evaluate source code in this vat's heap + VM.
     pub fn eval_source(&mut self, source: &str) -> Result<Value, String> {
-        let tokens = crate::lang::lexer::tokenize(source).map_err(|e| format!("lex: {e}"))?;
-        let mut parser = crate::lang::parser::Parser::new(&tokens, &mut self.heap);
+        let tokens = moof_lang::lang::lexer::tokenize(source).map_err(|e| format!("lex: {e}"))?;
+        let mut parser = moof_lang::lang::parser::Parser::new(&tokens, &mut self.heap);
         let exprs = parser.parse_all().map_err(|e| format!("parse: {e}"))?;
         let mut last = Value::NIL;
         for expr in &exprs {

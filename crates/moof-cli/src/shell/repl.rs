@@ -45,7 +45,23 @@ pub fn run() {
 
     let mut sched = Scheduler::new(100_000);
 
-    // vat 0: init vat (bare)
+    // Resolve the manifest's [types] entries once — both built-ins
+    // and dylibs become Box<dyn Plugin>. The scheduler will register
+    // them on every new vat (including cross-vat spawns), so the
+    // spawn scheduler doesn't need to know where specific plugins
+    // come from.
+    let type_plugins = moof::plugins::resolve_type_plugins(&manifest.types);
+
+    // Likewise pre-read the bootstrap source files so spawned vats
+    // can eval them without filesystem access.
+    let bootstrap_sources: Vec<String> = manifest.sources.files.iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .collect();
+
+    sched.install_type_plugins(type_plugins);
+    sched.set_bootstrap_sources(bootstrap_sources);
+
+    // vat 0: init vat (bare, no plugins — doesn't run user code)
     let _init_vat_id = sched.spawn_bare_vat();
 
     // spawn capability vats from manifest
@@ -59,7 +75,6 @@ pub fn run() {
                 eprintln!("  ~ unknown builtin capability: {builtin_name}");
             }
         } else {
-            // external plugin dylib
             match sched.load_plugin(Path::new(spec)) {
                 Ok((loaded_name, vat_id, obj_id)) => {
                     cap_refs.push((name.clone(), vat_id, obj_id));
@@ -70,17 +85,15 @@ pub fn run() {
         }
     }
 
-    // spawn REPL vat — type plugins registered from manifest
-    let repl_vat_id = sched.spawn_vat_with_manifest(&manifest);
+    // REPL vat — plugins + bootstrap applied by Scheduler::spawn_vat
+    // using the installed type_plugins + bootstrap_sources above.
+    let repl_vat_id = sched.spawn_vat();
 
-    // load source files from manifest
+    // eprintln load messages (bootstrap source eval results go
+    // through the generic spawn path; we just record that they ran).
     for source_path in &manifest.sources.files {
-        if let Ok(source) = std::fs::read_to_string(source_path) {
-            let vat = sched.vat_mut(repl_vat_id);
-            match vat.eval_source(&source) {
-                Ok(_) => {},
-                Err(e) => { eprintln!("  ~ error in {source_path}: {e}"); return; }
-            }
+        if Path::new(source_path).exists() {
+            eprintln!("  loaded {source_path}");
         } else {
             eprintln!("  ~ source not found: {source_path}");
         }

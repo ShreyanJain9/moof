@@ -13,8 +13,8 @@
 use std::path::Path;
 use heed::types::*;
 use heed::{Database, Env, EnvOpenOptions};
-use crate::object::HeapObject;
-use crate::heap::Heap;
+use moof_core::object::HeapObject;
+use moof_core::heap::Heap;
 
 pub struct Store {
     env: Env,
@@ -47,7 +47,7 @@ impl Store {
     pub fn save_all(
         &self,
         heap: &Heap,
-        closure_chunks: &[crate::lang::compiler::ClosureDesc],
+        closure_chunks: &[moof_lang::lang::compiler::ClosureDesc],
     ) -> Result<(), String> {
         let mut wtxn = self.env.write_txn().map_err(|e| format!("txn: {e}"))?;
 
