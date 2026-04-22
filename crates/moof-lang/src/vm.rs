@@ -3,11 +3,11 @@
 // ONE opcode loop. Closure calls push frames, returns pop them.
 // No duplicated opcode handling. Fuel counting and TCO built in.
 
-use crate::dispatch;
-use crate::heap::Heap;
+use moof_core::dispatch;
+use moof_core::heap::Heap;
 use crate::lang::compiler::{ClosureDesc, CompileResult};
 use crate::opcodes::{Chunk, Op};
-use crate::value::Value;
+use moof_core::value::Value;
 
 /// Result of running the VM. Distinguishes normal completion, yield, and error.
 pub enum RunResult {

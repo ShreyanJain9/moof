@@ -10,9 +10,9 @@
 //   (%object-literal items...)          — from { Parent x: 10 }
 //   (%table-literal (seq...) (k1 v1 k2 v2...)) — from #[1 2 "x" => 3]
 
-use crate::heap::Heap;
+use moof_core::heap::Heap;
 use crate::lang::lexer::Token;
-use crate::value::Value;
+use moof_core::value::Value;
 
 pub struct Parser<'a> {
     tokens: &'a [Token],

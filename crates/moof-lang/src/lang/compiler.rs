@@ -3,9 +3,9 @@
 // Walks the AST (cons cells in the heap) and emits bytecode into Chunks.
 // Handles special forms: def, quote, send, if, fn, %dot, %block, %object-literal.
 
-use crate::heap::Heap;
+use moof_core::heap::Heap;
 use crate::opcodes::{Chunk, Op};
-use crate::value::Value;
+use moof_core::value::Value;
 
 pub struct ClosureDesc {
     pub chunk: Chunk,
@@ -1034,7 +1034,7 @@ impl<'a> Compiler<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::heap::Heap;
+    use moof_core::heap::Heap;
 
     /// Test that the compiler does not emit TryCatch or Throw opcodes.
     /// These are deprecated and rejected by the VM at runtime.
