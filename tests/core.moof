@@ -197,6 +197,25 @@
   (test "Set conforms Showable"    (conforms? (Set 1) Showable)   true)
   (test "Bag conforms Showable"    (conforms? (Bag "a") Showable) true)
 
+  ; wave 6.4 — mutation invariant: collections are COW; only
+  ; Update-returning handlers on defservers actually mutate state.
+  ; at:put: / add: / remove: all return NEW containers.
+  (test "Table at:put: returns new"
+    (let ((t #[1 2 3]))
+      (let ((u [t at: 0 put: 99]))
+        [[t at: 0] equal: 1]))
+    true)
+  (test "Set add: returns new"
+    (let ((s (Set 1 2)))
+      (let ((s2 [s add: 3]))
+        [s count]))
+    2)
+  (test "Bag add: returns new"
+    (let ((b (Bag "a")))
+      (let ((b2 [b add: "a"]))
+        [b count: "a"]))
+    1)
+
   ; rendering
   (test "Set describe"        [(Set 1 2 3) describe]                "{1, 2, 3}")
 
