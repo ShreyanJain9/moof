@@ -76,12 +76,18 @@ impl VM {
     }
 
     /// Push a closure frame. Returns Ok(()) if frame was pushed.
+    ///
+    /// `unpacked` is the flat list of arg values (receiver + send args
+    /// already merged, or the pre-unpacked contents of a `call:` arg
+    /// list). Callers build this Vec directly — we avoid round-tripping
+    /// through a moof-heap cons chain, which was the dominant per-call
+    /// allocation in tight recursion.
     fn push_closure_frame(
         &mut self,
         heap: &mut Heap,
         closure_val: Value,
         code_idx: usize,
-        args: &[Value],
+        unpacked: Vec<Value>,
         result_reg: u8,
     ) -> Result<(), String> {
         if code_idx >= self.closure_descs.len() {
@@ -99,10 +105,6 @@ impl VM {
         let captures_from_obj = heap.closure_captures(closure_val);
 
         let mut regs = vec![Value::NIL; chunk.num_regs as usize + 16];
-
-        // unpack args: args[0] is the cons list of actual arguments
-        let arg_list = args.first().copied().unwrap_or(Value::NIL);
-        let unpacked = heap.list_to_vec(arg_list);
 
         if is_operative && rest_reg.is_some() && arity > 0 {
             // operative with rest param: $env is last positional, gets last arg (env).
@@ -279,20 +281,22 @@ impl VM {
                         let result = dispatch::call_native(heap, handler, recv, &send_args)?;
                         self.frames.last_mut().unwrap().regs[dst as usize] = result;
                     } else if let Some((code_idx, _)) = heap.as_closure(handler) {
-                        // closure call — push frame!
-                        // for call: — if handler IS the receiver (closure calling itself),
-                        // pass args directly. if handler is a separate method, prepend self.
-                        let arg_list = if sel_sym == heap.sym_call && handler == recv {
-                            // direct closure call — args[0] is the args list
-                            send_args.first().copied().unwrap_or(Value::NIL)
-                        } else {
-                            // method dispatch (including user-defined call: handlers):
-                            // prepend receiver as self
-                            let mut full = vec![recv];
-                            full.extend_from_slice(&send_args);
-                            heap.list(&full)
-                        };
-                        self.push_closure_frame(heap, handler, code_idx, &[arg_list], dst)?;
+                        // Closure call. Build the args Vec directly — no
+                        // intermediate cons chain. For `[f call: arglist]`
+                        // where handler==recv (generic closure call) we
+                        // unpack the arg list once; for method dispatch
+                        // we prepend the receiver.
+                        let unpacked: Vec<Value> =
+                            if sel_sym == heap.sym_call && handler == recv {
+                                let arg_list = send_args.first().copied().unwrap_or(Value::NIL);
+                                heap.list_to_vec(arg_list)
+                            } else {
+                                let mut full = Vec::with_capacity(1 + send_args.len());
+                                full.push(recv);
+                                full.extend_from_slice(&send_args);
+                                full
+                            };
+                        self.push_closure_frame(heap, handler, code_idx, unpacked, dst)?;
                     } else {
                         return Err(format!("handler is not callable"));
                     }
@@ -346,14 +350,22 @@ impl VM {
                         let result = dispatch::call_native(heap, handler, recv, &send_args)?;
                         self.frames.last_mut().unwrap().regs[dst as usize] = result;
                     } else if let Some((code_idx, _)) = heap.as_closure(handler) {
-                        // closure: REPLACE current frame instead of pushing
-                        let arg_list = if sel_sym == heap.sym_call && handler == recv {
-                            send_args.first().copied().unwrap_or(Value::NIL)
-                        } else {
-                            let mut full = vec![recv];
-                            full.extend_from_slice(&send_args);
-                            heap.list(&full)
-                        };
+                        // Closure tail call: REPLACE current frame. Build
+                        // the args Vec directly — no intermediate cons
+                        // chain. This is the difference between infinite
+                        // tail recursion allocating bounded memory
+                        // (GC'd) vs. the ~10k cons pairs per scheduler
+                        // turn that dominated allocation before.
+                        let unpacked: Vec<Value> =
+                            if sel_sym == heap.sym_call && handler == recv {
+                                let arg_list = send_args.first().copied().unwrap_or(Value::NIL);
+                                heap.list_to_vec(arg_list)
+                            } else {
+                                let mut full = Vec::with_capacity(1 + send_args.len());
+                                full.push(recv);
+                                full.extend_from_slice(&send_args);
+                                full
+                            };
                         // build new frame contents
                         if code_idx >= self.closure_descs.len() {
                             return Err(format!("tail_call: code_idx {} out of bounds", code_idx));
@@ -376,8 +388,7 @@ impl VM {
                         f.desc_base = closure_desc_base;
                         // result_reg stays the same (we're replacing, not pushing)
 
-                        // unpack args
-                        let unpacked = heap.list_to_vec(arg_list);
+                        // `unpacked` was built above (no cons-chain allocation).
                         if is_operative && rest_reg.is_some() && arity > 0 {
                             let n_before_env = arity - 1;
                             for i in 0..n_before_env.min(unpacked.len()) {
@@ -778,14 +789,17 @@ impl VM {
                 Err(msg) => return Ok(heap.make_error(&msg)),
             }
         } else if let Some((code_idx, _)) = heap.as_closure(handler) {
-            let arg_list = if selector == heap.sym_call && handler == receiver {
-                args.first().copied().unwrap_or(Value::NIL)
-            } else {
-                let mut full = vec![receiver];
-                full.extend_from_slice(args);
-                heap.list(&full)
-            };
-            match self.push_closure_frame(heap, handler, code_idx, &[arg_list], 0) {
+            let unpacked: Vec<Value> =
+                if selector == heap.sym_call && handler == receiver {
+                    let arg_list = args.first().copied().unwrap_or(Value::NIL);
+                    heap.list_to_vec(arg_list)
+                } else {
+                    let mut full = Vec::with_capacity(1 + args.len());
+                    full.push(receiver);
+                    full.extend_from_slice(args);
+                    full
+                };
+            match self.push_closure_frame(heap, handler, code_idx, unpacked, 0) {
                 Ok(()) => self.run(heap),
                 Err(msg) => Ok(heap.make_error(&msg)),
             }
