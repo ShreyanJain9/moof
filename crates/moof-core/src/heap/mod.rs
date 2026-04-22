@@ -313,10 +313,7 @@ impl Heap {
         let id = val.as_any_object()?;
         let expected = self.foreign_registry.lookup(T::type_name())?;
         let obj = self.get_mut(id);
-        let fd = match obj {
-            HeapObject::General { foreign: Some(fd), .. } => fd,
-            _ => return None,
-        };
+        let fd = obj.foreign.as_mut()?;
         if fd.type_id != expected { return None; }
         if Arc::strong_count(&fd.payload) > 1 {
             let cloned: T = unsafe {
@@ -625,15 +622,13 @@ impl Heap {
     /// cross-vat symbol-id mismatch during migration.
     pub fn as_closure(&self, val: Value) -> Option<(usize, bool)> {
         let id = val.as_any_object()?;
-        let HeapObject::General { proto, slot_values, slot_names, .. } = self.get(id) else {
-            return None;
-        };
+        let obj = self.get(id);
         let closure_proto = self.type_protos.get(PROTO_CLOSURE).copied().unwrap_or(Value::NIL);
-        if slot_names.len() < Self::CLOSURE_FIXED_SLOTS || *proto != closure_proto {
+        if obj.slot_names.len() < Self::CLOSURE_FIXED_SLOTS || obj.proto != closure_proto {
             return None;
         }
-        let code_idx = slot_values[Self::SLOT_CODE_IDX].as_integer()? as usize;
-        let is_op = slot_values[Self::SLOT_IS_OPERATIVE].is_true();
+        let code_idx = obj.slot_values[Self::SLOT_CODE_IDX].as_integer()? as usize;
+        let is_op = obj.slot_values[Self::SLOT_IS_OPERATIVE].is_true();
         Some((code_idx, is_op))
     }
 
@@ -647,14 +642,12 @@ impl Heap {
 
     pub fn closure_captures(&self, val: Value) -> Vec<(u32, Value)> {
         let Some(id) = val.as_any_object() else { return Vec::new(); };
-        let HeapObject::General { slot_names, slot_values, .. } = self.get(id) else {
-            return Vec::new();
-        };
-        if slot_names.len() <= Self::CLOSURE_FIXED_SLOTS {
+        let obj = self.get(id);
+        if obj.slot_names.len() <= Self::CLOSURE_FIXED_SLOTS {
             return Vec::new();
         }
-        slot_names.iter().skip(Self::CLOSURE_FIXED_SLOTS)
-            .zip(slot_values.iter().skip(Self::CLOSURE_FIXED_SLOTS))
+        obj.slot_names.iter().skip(Self::CLOSURE_FIXED_SLOTS)
+            .zip(obj.slot_values.iter().skip(Self::CLOSURE_FIXED_SLOTS))
             .map(|(s, v)| (*s, *v))
             .collect()
     }
@@ -662,39 +655,32 @@ impl Heap {
     /// Check if a closure is "pure" (no FarRef captures, safe to memoize).
     pub fn closure_is_pure(&self, val: Value) -> bool {
         let Some(id) = val.as_any_object() else { return false; };
-        let HeapObject::General { slot_values, slot_names, .. } = self.get(id) else {
-            return false;
-        };
-        if slot_names.len() < Self::CLOSURE_FIXED_SLOTS { return false; }
-        slot_values[Self::SLOT_IS_PURE].is_true()
+        let obj = self.get(id);
+        if obj.slot_names.len() < Self::CLOSURE_FIXED_SLOTS { return false; }
+        obj.slot_values[Self::SLOT_IS_PURE].is_true()
     }
 
     /// Return a closure's arity, if it is one.
     pub fn closure_arity(&self, val: Value) -> Option<u8> {
         let id = val.as_any_object()?;
-        let HeapObject::General { slot_values, slot_names, .. } = self.get(id) else {
-            return None;
-        };
-        if slot_names.len() < Self::CLOSURE_FIXED_SLOTS { return None; }
-        Some(slot_values[Self::SLOT_ARITY].as_integer()? as u8)
+        let obj = self.get(id);
+        if obj.slot_names.len() < Self::CLOSURE_FIXED_SLOTS { return None; }
+        Some(obj.slot_values[Self::SLOT_ARITY].as_integer()? as u8)
     }
 
     /// Override the is_pure metadata flag on a closure.
     pub fn set_closure_pure(&mut self, val: Value, is_pure: bool) {
         let Some(id) = val.as_any_object() else { return; };
-        if let HeapObject::General { slot_values, slot_names, .. } = self.get_mut(id) {
-            if slot_names.len() >= Self::CLOSURE_FIXED_SLOTS {
-                slot_values[Self::SLOT_IS_PURE] = Value::boolean(is_pure);
-            }
+        let obj = self.get_mut(id);
+        if obj.slot_names.len() >= Self::CLOSURE_FIXED_SLOTS {
+            obj.slot_values[Self::SLOT_IS_PURE] = Value::boolean(is_pure);
         }
     }
 
     /// Get the prototype for any value (including primitives and optimized types).
     pub fn prototype_of(&self, val: Value) -> Value {
         if let Some(id) = val.as_any_object() {
-            if let HeapObject::General { proto, .. } = self.get(id) {
-                return *proto;
-            }
+            return self.get(id).proto;
         }
         let tag = val.type_tag() as usize;
         self.type_protos.get(tag).copied().unwrap_or(Value::NIL)
@@ -705,29 +691,24 @@ impl Heap {
         let mut names = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
-        // start with the receiver's own handlers — General and Environment
-        // both carry per-instance handler tables (closures are Generals).
+        // start with the receiver's own handlers — closures and user objects
+        // both carry per-instance handler tables.
         if let Some(id) = val.as_any_object() {
-            if let HeapObject::General { handlers, .. } = self.get(id) {
-                for &(sel, _) in handlers {
-                    if seen.insert(sel) { names.push(sel); }
-                }
+            for &(sel, _) in &self.get(id).handlers {
+                if seen.insert(sel) { names.push(sel); }
             }
         }
 
-        // walk the prototype chain — accept any variant that carries handlers.
+        // walk the prototype chain.
         let mut proto = self.prototype_of(val);
         for _ in 0..256 {
             if proto.is_nil() { break; }
             let Some(id) = proto.as_any_object() else { break; };
-            let (handlers, next) = match self.get(id) {
-                HeapObject::General { handlers, proto, .. } => (handlers, *proto),
-                _ => break,
-            };
-            for &(sel, _) in handlers {
+            let obj = self.get(id);
+            for &(sel, _) in &obj.handlers {
                 if seen.insert(sel) { names.push(sel); }
             }
-            proto = next;
+            proto = obj.proto;
         }
         names
     }

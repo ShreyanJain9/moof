@@ -101,43 +101,36 @@ impl Heap {
     }
 
     fn object_to_image(&self, obj: &HeapObject) -> Result<HeapObjectImage, String> {
-        Ok(match obj {
-            HeapObject::General { proto, slot_names, slot_values, handlers, foreign } => {
-                let foreign_img = match foreign {
-                    Some(fd) => {
-                        let vt = self.foreign_registry().vtable(fd.type_id)
-                            .ok_or_else(|| format!("unknown foreign type_id {} at save", fd.type_id))?;
-                        let bytes = (vt.serialize)(&*fd.payload);
-                        Some(ForeignImage { name: vt.id.clone(), bytes })
-                    }
-                    None => None,
-                };
-                HeapObjectImage::General {
-                    proto: *proto,
-                    slot_names: slot_names.clone(),
-                    slot_values: slot_values.clone(),
-                    handlers: handlers.clone(),
-                    foreign: foreign_img,
-                }
+        let foreign_img = match &obj.foreign {
+            Some(fd) => {
+                let vt = self.foreign_registry().vtable(fd.type_id)
+                    .ok_or_else(|| format!("unknown foreign type_id {} at save", fd.type_id))?;
+                let bytes = (vt.serialize)(&*fd.payload);
+                Some(ForeignImage { name: vt.id.clone(), bytes })
             }
+            None => None,
+        };
+        Ok(HeapObjectImage::General {
+            proto: obj.proto,
+            slot_names: obj.slot_names.clone(),
+            slot_values: obj.slot_values.clone(),
+            handlers: obj.handlers.clone(),
+            foreign: foreign_img,
         })
     }
 
     fn object_from_image(&self, img: HeapObjectImage) -> Result<HeapObject, String> {
-        Ok(match img {
-            HeapObjectImage::General { proto, slot_names, slot_values, handlers, foreign } => {
-                let foreign_data = match foreign {
-                    Some(fimg) => {
-                        let type_id = self.foreign_registry().resolve(&fimg.name)?;
-                        let vt = self.foreign_registry().vtable(type_id)
-                            .ok_or_else(|| format!("vtable missing for '{}' after resolve", fimg.name.name))?;
-                        let payload = (vt.deserialize)(&fimg.bytes)?;
-                        Some(ForeignData { type_id, payload })
-                    }
-                    None => None,
-                };
-                HeapObject::General { proto, slot_names, slot_values, handlers, foreign: foreign_data }
+        let HeapObjectImage::General { proto, slot_names, slot_values, handlers, foreign } = img;
+        let foreign_data = match foreign {
+            Some(fimg) => {
+                let type_id = self.foreign_registry().resolve(&fimg.name)?;
+                let vt = self.foreign_registry().vtable(type_id)
+                    .ok_or_else(|| format!("vtable missing for '{}' after resolve", fimg.name.name))?;
+                let payload = (vt.deserialize)(&fimg.bytes)?;
+                Some(ForeignData { type_id, payload })
             }
-        })
+            None => None,
+        };
+        Ok(HeapObject { proto, slot_names, slot_values, handlers, foreign: foreign_data })
     }
 }

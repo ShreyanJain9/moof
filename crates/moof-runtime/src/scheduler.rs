@@ -586,79 +586,76 @@ impl Scheduler {
                 let s = s.to_string();
                 return self.vat_mut(to_vat).heap.alloc_string(&s);
             }
-            match from_heap.get(obj_id) {
-                moof_core::object::HeapObject::General { slot_names, slot_values, foreign, .. } => {
-                    let names: Vec<String> = slot_names.iter()
-                        .map(|s| from_heap.symbol_name(*s).to_string())
-                        .collect();
-                    let vals: Vec<Value> = slot_values.iter().copied().collect();
-                    let foreign = foreign.clone();  // Arc + id, cheap
+            let src_obj = from_heap.get(obj_id);
+            let names: Vec<String> = src_obj.slot_names.iter()
+                .map(|s| from_heap.symbol_name(*s).to_string())
+                .collect();
+            let vals: Vec<Value> = src_obj.slot_values.clone();
+            let foreign = src_obj.foreign.clone();  // Arc + id, cheap
 
-                    // Translate foreign payload: clone across using the
-                    // source vtable, resolve the target type_id by name,
-                    // and pick up the target's prototype by prototype_name
-                    // (session-local proto Values never match across
-                    // heaps; the semantic name is the stable link).
-                    let foreign_translated: Option<(moof_core::foreign::ForeignData, Option<Value>)> = match foreign {
-                        Some(fd) => {
-                            let src_vt = from_heap.foreign_registry().vtable(fd.type_id)
-                                .expect("source foreign type_id has no vtable");
-                            let src_name = src_vt.id.clone();
-                            let proto_name: &str = (src_vt.prototype_name)();
-                            let clone_across_fn = src_vt.clone_across;
-                            let new_payload: std::sync::Arc<dyn std::any::Any + Send + Sync> =
-                                clone_across_fn(&*fd.payload, &mut |v| {
-                                    self.copy_value_across(v, _from_vat, to_vat)
-                                });
-                            let target_id = self.vat(to_vat).heap.foreign_registry()
-                                .resolve(&src_name);
-                            match target_id {
-                                Ok(tid) => {
-                                    let target_proto = self.vat(to_vat).heap.lookup_type(proto_name);
-                                    let proto_opt = if target_proto.is_nil() { None } else { Some(target_proto) };
-                                    Some((moof_core::foreign::ForeignData {
-                                        type_id: tid,
-                                        payload: new_payload,
-                                    }, proto_opt))
-                                }
-                                Err(e) => {
-                                    eprintln!("  ~ cross-vat foreign copy failed: {e}");
-                                    return Value::NIL;
-                                }
-                            }
+            // Translate foreign payload: clone across using the
+            // source vtable, resolve the target type_id by name,
+            // and pick up the target's prototype by prototype_name
+            // (session-local proto Values never match across
+            // heaps; the semantic name is the stable link).
+            let foreign_translated: Option<(moof_core::foreign::ForeignData, Option<Value>)> = match foreign {
+                Some(fd) => {
+                    let src_vt = from_heap.foreign_registry().vtable(fd.type_id)
+                        .expect("source foreign type_id has no vtable");
+                    let src_name = src_vt.id.clone();
+                    let proto_name: &str = (src_vt.prototype_name)();
+                    let clone_across_fn = src_vt.clone_across;
+                    let new_payload: std::sync::Arc<dyn std::any::Any + Send + Sync> =
+                        clone_across_fn(&*fd.payload, &mut |v| {
+                            self.copy_value_across(v, _from_vat, to_vat)
+                        });
+                    let target_id = self.vat(to_vat).heap.foreign_registry()
+                        .resolve(&src_name);
+                    match target_id {
+                        Ok(tid) => {
+                            let target_proto = self.vat(to_vat).heap.lookup_type(proto_name);
+                            let proto_opt = if target_proto.is_nil() { None } else { Some(target_proto) };
+                            Some((moof_core::foreign::ForeignData {
+                                type_id: tid,
+                                payload: new_payload,
+                            }, proto_opt))
                         }
-                        None => None,
-                    };
-
-                    let is_farref = names.iter().any(|n| n == "__target_vat");
-                    let new_names: Vec<u32> = names.iter()
-                        .map(|n| self.vat_mut(to_vat).heap.intern(n))
-                        .collect();
-                    let new_vals: Vec<Value> = vals.iter()
-                        .map(|v| self.copy_value_across(*v, _from_vat, to_vat))
-                        .collect();
-                    let (foreign_data, foreign_proto) = match foreign_translated {
-                        Some((fd, p)) => (Some(fd), p),
-                        None => (None, None),
-                    };
-                    let proto = foreign_proto.unwrap_or_else(|| {
-                        if is_farref {
-                            self.vat(to_vat).heap.lookup_type("FarRef")
-                        } else {
-                            self.vat(to_vat).heap.type_protos[moof_core::heap::PROTO_OBJ]
+                        Err(e) => {
+                            eprintln!("  ~ cross-vat foreign copy failed: {e}");
+                            return Value::NIL;
                         }
-                    });
-                    let to_heap = &mut self.vat_mut(to_vat).heap;
-                    let new_val = to_heap.alloc_val(moof_core::object::HeapObject::General {
-                        proto,
-                        slot_names: new_names,
-                        slot_values: new_vals,
-                        handlers: Vec::new(),
-                        foreign: foreign_data,
-                    });
-                    return new_val;
+                    }
                 }
-            }
+                None => None,
+            };
+
+            let is_farref = names.iter().any(|n| n == "__target_vat");
+            let new_names: Vec<u32> = names.iter()
+                .map(|n| self.vat_mut(to_vat).heap.intern(n))
+                .collect();
+            let new_vals: Vec<Value> = vals.iter()
+                .map(|v| self.copy_value_across(*v, _from_vat, to_vat))
+                .collect();
+            let (foreign_data, foreign_proto) = match foreign_translated {
+                Some((fd, p)) => (Some(fd), p),
+                None => (None, None),
+            };
+            let proto = foreign_proto.unwrap_or_else(|| {
+                if is_farref {
+                    self.vat(to_vat).heap.lookup_type("FarRef")
+                } else {
+                    self.vat(to_vat).heap.type_protos[moof_core::heap::PROTO_OBJ]
+                }
+            });
+            let to_heap = &mut self.vat_mut(to_vat).heap;
+            let new_val = to_heap.alloc_val(moof_core::object::HeapObject {
+                proto,
+                slot_names: new_names,
+                slot_values: new_vals,
+                handlers: Vec::new(),
+                foreign: foreign_data,
+            });
+            return new_val;
         }
         val
     }

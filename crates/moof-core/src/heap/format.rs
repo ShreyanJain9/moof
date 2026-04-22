@@ -81,23 +81,20 @@ impl Heap {
             visiting.pop();
             return result;
         }
-        let result = match self.get(id) {
-            HeapObject::General { slot_names, slot_values, foreign, .. } => {
-                if let Some(fd) = foreign.as_ref()
-                    .and_then(|fd| self.foreign_registry().vtable(fd.type_id).map(|vt| (fd, vt)))
-                {
-                    (fd.1.describe)(&*fd.0.payload)
-                } else if slot_names.is_empty() {
-                    format!("<object#{id}>")
-                } else {
-                    let slots: Vec<_> = slot_names.iter().zip(slot_values.iter())
-                        .map(|(n, v)| format!("{}: {}",
-                            self.symbol_name(*n),
-                            self.format_value_at(*v, visiting)))
-                        .collect();
-                    format!("{{ {} }}", slots.join(" "))
-                }
-            }
+        let obj = self.get(id);
+        let result = if let Some(fd) = obj.foreign.as_ref()
+            .and_then(|fd| self.foreign_registry().vtable(fd.type_id).map(|vt| (fd, vt)))
+        {
+            (fd.1.describe)(&*fd.0.payload)
+        } else if obj.slot_names.is_empty() {
+            format!("<object#{id}>")
+        } else {
+            let slots: Vec<_> = obj.slot_names.iter().zip(obj.slot_values.iter())
+                .map(|(n, v)| format!("{}: {}",
+                    self.symbol_name(*n),
+                    self.format_value_at(*v, visiting)))
+                .collect();
+            format!("{{ {} }}", slots.join(" "))
         };
         visiting.pop();
         result
@@ -183,43 +180,40 @@ impl Heap {
             }
             return format!("#[{}]  : Table ({} seq, {} map)", parts.join(" "), t.seq.len(), t.map.len());
         }
-        match self.get(id) {
-            HeapObject::General { slot_names, slot_values, handlers, .. } => {
-                if slot_names.is_empty() && handlers.is_empty() {
-                    return format!("<object#{id}>");
-                }
-                let nslots = slot_names.len();
-                let nhandlers = handlers.len();
-
-                // compact display for small objects
-                if nslots <= 4 && nhandlers == 0 {
-                    let slots: Vec<_> = slot_names.iter().zip(slot_values.iter())
-                        .map(|(n, v)| format!("{}: {}", self.symbol_name(*n), self.format_value(*v)))
-                        .collect();
-                    return format!("{{ {} }}", slots.join(", "));
-                }
-
-                // rich multi-line display
-                let mut lines = Vec::new();
-                for (n, v) in slot_names.iter().zip(slot_values.iter()) {
-                    lines.push(format!("    {}: {}", self.symbol_name(*n), self.format_value(*v)));
-                }
-                let handler_names: Vec<_> = handlers.iter()
-                    .map(|(s, _)| self.symbol_name(*s).to_string())
-                    .collect();
-
-                let handler_info = if nhandlers == 0 {
-                    String::new()
-                } else if nhandlers <= 6 {
-                    format!("\n    responds to: {}", handler_names.join(", "))
-                } else {
-                    format!("\n    responds to: {}, ... ({nhandlers} total)",
-                        handler_names[..4].join(", "))
-                };
-
-                format!("  {{ {nslots} slots, {nhandlers} handlers{handler_info}\n{}\n  }}", lines.join("\n"))
-            }
+        let obj = self.get(id);
+        if obj.slot_names.is_empty() && obj.handlers.is_empty() {
+            return format!("<object#{id}>");
         }
+        let nslots = obj.slot_names.len();
+        let nhandlers = obj.handlers.len();
+
+        // compact display for small objects
+        if nslots <= 4 && nhandlers == 0 {
+            let slots: Vec<_> = obj.slot_names.iter().zip(obj.slot_values.iter())
+                .map(|(n, v)| format!("{}: {}", self.symbol_name(*n), self.format_value(*v)))
+                .collect();
+            return format!("{{ {} }}", slots.join(", "));
+        }
+
+        // rich multi-line display
+        let mut lines = Vec::new();
+        for (n, v) in obj.slot_names.iter().zip(obj.slot_values.iter()) {
+            lines.push(format!("    {}: {}", self.symbol_name(*n), self.format_value(*v)));
+        }
+        let handler_names: Vec<_> = obj.handlers.iter()
+            .map(|(s, _)| self.symbol_name(*s).to_string())
+            .collect();
+
+        let handler_info = if nhandlers == 0 {
+            String::new()
+        } else if nhandlers <= 6 {
+            format!("\n    responds to: {}", handler_names.join(", "))
+        } else {
+            format!("\n    responds to: {}, ... ({nhandlers} total)",
+                handler_names[..4].join(", "))
+        };
+
+        format!("  {{ {nslots} slots, {nhandlers} handlers{handler_info}\n{}\n  }}", lines.join("\n"))
     }
 
     fn list_len(&self, mut id: u32) -> usize {

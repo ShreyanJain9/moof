@@ -48,12 +48,12 @@ impl moof_core::Plugin for CorePlugin {
 
             // get the original object's slots + handlers
             let recv_id = receiver.as_any_object().ok_or("with: receiver must be an object")?;
-            let (orig_proto, orig_names, orig_vals, orig_handlers, orig_foreign) = match heap.get(recv_id) {
-                HeapObject::General { proto, slot_names, slot_values, handlers, foreign } => {
-                    (*proto, slot_names.clone(), slot_values.clone(), handlers.clone(), foreign.clone())
-                }
-                _ => return Err("with: receiver must be a general object".into()),
-            };
+            let recv_obj = heap.get(recv_id);
+            let orig_proto = recv_obj.proto;
+            let orig_names = recv_obj.slot_names.clone();
+            let orig_vals = recv_obj.slot_values.clone();
+            let orig_handlers = recv_obj.handlers.clone();
+            let orig_foreign = recv_obj.foreign.clone();
 
             let override_names_syms: Vec<u32> = heap.get(override_id).slot_names();
             let override_vals: Vec<Value> = override_names_syms.iter()
@@ -71,7 +71,7 @@ impl moof_core::Plugin for CorePlugin {
                 }
             }
 
-            let new_obj = heap.alloc_val(HeapObject::General {
+            let new_obj = heap.alloc_val(HeapObject {
                 proto: orig_proto,
                 slot_names: new_names,
                 slot_values: new_vals,

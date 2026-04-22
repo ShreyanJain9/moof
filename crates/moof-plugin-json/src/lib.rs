@@ -15,7 +15,6 @@
 
 use moof_core::{Plugin, native};
 use moof_core::heap::*;
-use moof_core::object::HeapObject;
 use moof_core::value::Value;
 use serde_json::Value as JV;
 
@@ -159,9 +158,9 @@ fn to_json(heap: &Heap, v: Value) -> Result<JV, String> {
         }
     }
     // General with no foreign payload: treat as a plain record
-    let HeapObject::General { slot_names, slot_values, .. } = heap.get(id);
+    let obj_ref = heap.get(id);
     let mut obj = serde_json::Map::new();
-    for (n, v) in slot_names.iter().zip(slot_values.iter()) {
+    for (n, v) in obj_ref.slot_names.iter().zip(obj_ref.slot_values.iter()) {
         obj.insert(heap.symbol_name(*n).to_string(), to_json(heap, *v)?);
     }
     Ok(JV::Object(obj))
