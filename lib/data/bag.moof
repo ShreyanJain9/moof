@@ -102,3 +102,5 @@
 ; (the existing Iterable's `tally` returns a Table of counts; this
 ; gives you the proper type instead.)
 (alias Cons tallyBag toBag)
+
+(conform Bag Showable)

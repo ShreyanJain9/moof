@@ -111,3 +111,5 @@
 
 (defmethod Cons  toSet () [Set from: self])
 (defmethod Table toSet () [Set from: self])
+
+(conform Set Showable)

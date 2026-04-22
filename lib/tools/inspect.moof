@@ -158,3 +158,5 @@
        'doc         |v|
          (or v.doc "(no docstring)"))
   })
+
+(conform Inspector Showable)

@@ -48,3 +48,5 @@
 [Integer handle: 'to:by: with:
   (fn (self end step)
     { Range start: self end: end step: step })]
+
+(conform Range Showable)

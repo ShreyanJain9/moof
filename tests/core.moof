@@ -191,6 +191,12 @@
   ; identical: stays as bit-identity — different allocations, not identical
   (test "Some identical false" [(Some 5) identical: (Some 5)] false)
 
+  ; wave 6.3 — Showable conformance across stateful + record types
+  (test "Option conforms Showable" (conforms? (Some 5) Showable)  true)
+  (test "Range conforms Showable"  (conforms? [1 to: 3] Showable) true)
+  (test "Set conforms Showable"    (conforms? (Set 1) Showable)   true)
+  (test "Bag conforms Showable"    (conforms? (Bag "a") Showable) true)
+
   ; rendering
   (test "Set describe"        [(Set 1 2 3) describe]                "{1, 2, 3}")
 

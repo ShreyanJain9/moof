@@ -129,3 +129,5 @@
     [describe]
       (str "<Workspace " [@title describe] ">")
   })
+
+(conform Workspace Showable)

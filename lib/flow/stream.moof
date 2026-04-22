@@ -84,3 +84,5 @@
 
 ; stream-of — finite stream of the given values (variadic)
 (defn stream-of args (stream-from args))
+
+(conform Stream Showable)

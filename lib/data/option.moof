@@ -63,3 +63,7 @@
 
 (conform Some Equatable)
 (conform None Equatable)
+
+(conform Option Showable)
+(conform Some   Showable)
+(conform None   Showable)
