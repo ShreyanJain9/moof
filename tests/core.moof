@@ -181,6 +181,16 @@
   (test "Set equal same"      [(Set 1 2 3) equal: (Set 3 2 1)]      true)
   (test "Set equal diff"      [(Set 1 2 3) equal: (Set 1 2)]        false)
 
+  ; wave 6.2 — record types (Some/None/Ok/Err) compare structurally
+  (test "Some equal"    [(Some 5) equal: (Some 5)]           true)
+  (test "Some differ"   [(Some 5) equal: (Some 6)]           false)
+  (test "None equal"    [None equal: None]                    true)
+  (test "Ok equal"      [{ Ok value: 1 } equal: { Ok value: 1 }]  true)
+  (test "Err equal"     [(err "x") equal: (err "x")]          true)
+  (test "Err differ"    [(err "a") equal: (err "b")]          false)
+  ; identical: stays as bit-identity — different allocations, not identical
+  (test "Some identical false" [(Some 5) identical: (Some 5)] false)
+
   ; rendering
   (test "Set describe"        [(Set 1 2 3) describe]                "{1, 2, 3}")
 
@@ -542,6 +552,7 @@
         (_ <- [w bind: (quote x) to: 42])
         [w lookup: (quote x)])
     42)
+
 ))
 
 ; report is async now (core-tests is an Act<suite>). run (report core-tests)

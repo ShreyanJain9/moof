@@ -9,3 +9,13 @@
 ; [result recover: |e| fallback] handles errors.
 
 (defn err (msg) { Err message: msg })
+
+; structural equality: two Oks equal if their values equal; two
+; Errs equal if their messages equal; never cross-type.
+(defmethod Ok equal: (other)
+  (if [self identical: other] true
+    (if [other is: Ok] [@value equal: other.value] false)))
+
+(defmethod Err equal: (other)
+  (if [self identical: other] true
+    (if [other is: Err] [@message equal: other.message] false)))

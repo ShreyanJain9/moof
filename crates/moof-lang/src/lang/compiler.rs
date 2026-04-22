@@ -42,7 +42,7 @@ fn patch_make_closure_ops(chunk: &mut Chunk, offset: u16) {
         if pc >= 4 {
             let prev = crate::opcodes::Op::from_u8(chunk.code[pc - 4]);
             if prev == Some(crate::opcodes::Op::Send) || prev == Some(crate::opcodes::Op::TailCall) {
-                pc += 4;
+                pc += 5;
             }
         }
     }
@@ -127,6 +127,25 @@ impl<'a> Compiler<'a> {
     fn emit_load_const(&mut self, dst: u8, val: Value) {
         let idx = self.chunk.add_constant(val.to_bits());
         self.chunk.emit(Op::LoadConst, dst, (idx >> 8) as u8, idx as u8);
+    }
+
+    /// Emit a Send or TailCall with a 16-bit selector constant index.
+    ///
+    /// Layout (9 bytes total):
+    ///   [Op][dst][recv][sel_lo]  [sel_hi][nargs][a0][a1][a2]
+    ///
+    /// Giving the selector a full u16 avoids the 256-constant limit that
+    /// truncating to u8 used to impose — big programs (e.g. tests/core.moof
+    /// with hundreds of quoted test forms) overflowed the old one-byte
+    /// selector field and silently produced wrong bytecode.
+    fn emit_send(&mut self, op: Op, dst: u8, recv: u8, sel_const: u16,
+                 nargs: u8, a0: u8, a1: u8, a2: u8) {
+        self.chunk.emit(op, dst, recv, sel_const as u8);      // sel_lo in c
+        self.chunk.code.push((sel_const >> 8) as u8);         // sel_hi
+        self.chunk.code.push(nargs);
+        self.chunk.code.push(a0);
+        self.chunk.code.push(a1);
+        self.chunk.code.push(a2);
     }
 
     /// Compile an expression, placing the result in `dst`.
@@ -232,18 +251,12 @@ impl<'a> Compiler<'a> {
                         arg_regs.push(r);
                     }
 
-                    // emit SEND dst, recv, sel_const
-                    self.chunk.emit(Op::Send, dst, recv_reg, sel_const as u8);
-                    // emit nargs + arg registers (packed into next 4 bytes)
+                    // emit SEND dst, recv, 16-bit sel, nargs, up to 3 arg regs
                     let nargs = arg_regs.len() as u8;
                     let a0 = arg_regs.first().copied().unwrap_or(0);
                     let a1 = arg_regs.get(1).copied().unwrap_or(0);
                     let a2 = arg_regs.get(2).copied().unwrap_or(0);
-                    self.chunk.code.push(nargs);
-                    self.chunk.code.push(a0);
-                    self.chunk.code.push(a1);
-                    self.chunk.code.push(a2);
-
+                    self.emit_send(Op::Send, dst, recv_reg, sel_const, nargs, a0, a1, a2);
                     return Ok(());
                 }
 
@@ -635,11 +648,8 @@ impl<'a> Compiler<'a> {
                             self.compile_expr(kv_items[i * 2], key_reg)?;
                             self.compile_expr(kv_items[i * 2 + 1], val_reg)?;
                             // send at:put: to the table (dst), result goes to discard
-                            self.chunk.emit(Op::Send, discard_reg, dst, at_put_const as u8);
-                            self.chunk.code.push(2);
-                            self.chunk.code.push(key_reg);
-                            self.chunk.code.push(val_reg);
-                            self.chunk.code.push(0);
+                            self.emit_send(Op::Send, discard_reg, dst, at_put_const,
+                                           2, key_reg, val_reg, 0);
                         }
                     }
 
@@ -746,12 +756,7 @@ impl<'a> Compiler<'a> {
                     self.emit_load_const(field_reg, field);
 
                     let sel_const = self.add_sym_const(self.heap.sym_slot_at);
-                    self.chunk.emit(Op::Send, dst, recv_reg, sel_const as u8);
-                    self.chunk.code.push(1); // nargs = 1
-                    self.chunk.code.push(field_reg);
-                    self.chunk.code.push(0);
-                    self.chunk.code.push(0);
-
+                    self.emit_send(Op::Send, dst, recv_reg, sel_const, 1, field_reg, 0, 0);
                     return Ok(());
                 }
 
@@ -827,11 +832,7 @@ impl<'a> Compiler<'a> {
                                 // emit [list append: rest] to concatenate
                                 let sel_const = self.add_sym_const(
                                     self.heap.find_symbol("append:").unwrap_or(0));
-                                self.chunk.emit(Op::Send, dst, list_reg, sel_const as u8);
-                                self.chunk.code.push(1); // nargs
-                                self.chunk.code.push(rest_reg);
-                                self.chunk.code.push(0);
-                                self.chunk.code.push(0);
+                                self.emit_send(Op::Send, dst, list_reg, sel_const, 1, rest_reg, 0, 0);
                                 return Ok(());
                             }
                         }
@@ -943,20 +944,19 @@ impl<'a> Compiler<'a> {
         self.chunk.emit(Op::LoadNil, list_reg, 0, 0);
         // env is last element
         self.chunk.emit(Op::Cons, list_reg, env_reg, list_reg);
-        // args in reverse order (so they end up in correct list order)
+        // args in reverse order (so they end up in correct list order).
+        // reuse ONE scratch register across iterations — a fresh alloc
+        // per arg would overflow the u8 register space for operatives
+        // with hundreds of arg forms (e.g. `(suite ... 300 tests ...)`).
+        let scratch = self.alloc_reg();
         for i in (1..items.len()).rev() {
-            let r = self.alloc_reg();
-            self.emit_load_const(r, items[i]); // raw AST, not compiled
-            self.chunk.emit(Op::Cons, list_reg, r, list_reg);
+            self.emit_load_const(scratch, items[i]);
+            self.chunk.emit(Op::Cons, list_reg, scratch, list_reg);
         }
 
         // emit [operative call: args-list]
         let call_const = self.add_sym_const(self.heap.sym_call);
-        self.chunk.emit(Op::Send, dst, func_reg, call_const as u8);
-        self.chunk.code.push(1);
-        self.chunk.code.push(list_reg);
-        self.chunk.code.push(0);
-        self.chunk.code.push(0);
+        self.emit_send(Op::Send, dst, func_reg, call_const, 1, list_reg, 0, 0);
         Ok(())
     }
 
@@ -980,12 +980,7 @@ impl<'a> Compiler<'a> {
 
         // emit SEND recv, call:, (the list)
         let call_const = self.add_sym_const(self.heap.sym_call);
-        self.chunk.emit(Op::Send, dst, recv_reg, call_const as u8);
-        self.chunk.code.push(1); // nargs = 1 (the list)
-        self.chunk.code.push(list_reg);
-        self.chunk.code.push(0);
-        self.chunk.code.push(0);
-
+        self.emit_send(Op::Send, dst, recv_reg, call_const, 1, list_reg, 0, 0);
         Ok(())
     }
 

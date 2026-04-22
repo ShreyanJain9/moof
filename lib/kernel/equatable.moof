@@ -1,0 +1,45 @@
+; equatable.moof — structural equality contract
+;
+; Every value in moof responds to `equal:` and `identical:`. The
+; protocol formalizes the contract so user code can safely ask
+; "are these two values the same?" without knowing the concrete
+; types. `identical:` is bit-identity (pointer equality for heap
+; objects, bit-exact for primitives); `equal:` is structural —
+; same content, possibly different identity.
+;
+;   [(Some 5) identical: (Some 5)]   ; false — different allocations
+;   [(Some 5) equal: (Some 5)]       ; true  — same structure
+;   [(Set 1 2) equal: (Set 2 1)]     ; true  — order-insensitive
+;
+; Object gets a native default (bit-identity + string content)
+; so primitives and strings Just Work. Record types (Ok, Err,
+; Some, None) install structural equal: in their respective
+; defining files. Collections use `defequal` (kernel/types.moof)
+; which short-circuits identity and then compares content.
+
+(defprotocol Equatable
+  "Structural equality. Implement `equal:` returning a Boolean;
+   self is compared against the argument by content. Two values
+   that `equal:` should always have equal `hash`es (see Hashable)
+   — the two contracts are linked.
+
+   Object provides a default `equal:` that combines bit-identity
+   and string-content equality, so primitives + strings conform
+   out of the box. Record-like types (Some, Ok, user objects)
+   need to define structural `equal:` explicitly — identity is
+   almost always the wrong default for them."
+
+  (require (equal: other)
+    "True iff self and other have the same content. Must be
+     symmetric, reflexive, and transitive. Use `identical:` for
+     pointer identity; use `is:` for type containment."))
+
+; Note: identical: is NOT in the provides — Object has a native
+; handler already, and having the protocol re-provide it would
+; cause `[conform X Equatable]` to shadow the native with a
+; handler that recursively calls identical: (infinite loop, OOM).
+; identical: stays as Object's native, unprovided here.
+
+; Primitive + string conformance is automatic via Object's native
+; equal:. Records need explicit impls — installed in their own
+; files (option.moof for Some/None, etc.).

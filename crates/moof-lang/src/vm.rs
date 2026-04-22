@@ -227,14 +227,18 @@ impl VM {
                 }
 
                 Op::Send => {
-                    // CONTRACT: The compiler packs up to 3 direct args in registers following
-                    // the Send instruction (nargs byte + 3 arg register bytes). The VM reads
-                    // these via f.code[f.pc + i]. For sends with >3 args, the compiler must
-                    // construct an explicit argument list and use a different calling convention.
-                    // This limit is documented in core-contract-matrix.md.
+                    // CONTRACT: Send is 9 bytes — opcode + dst + recv + sel_lo,
+                    // followed by 5 trailing bytes: sel_hi, nargs, a0, a1, a2.
+                    // sel is a 16-bit constant pool index (low byte in c,
+                    // high byte in first trailing slot). nargs is 0..=3;
+                    // >3 args use an explicit argument list + `call:`.
                     let dst = a;
                     let recv = f.regs[b as usize];
-                    let sel_idx = c as usize;
+                    if f.pc + 4 >= f.code.len() {
+                        return Err("send: truncated".into());
+                    }
+                    let sel_hi = f.code[f.pc] as usize;
+                    let sel_idx = (sel_hi << 8) | (c as usize);
                     let sel_sym = if sel_idx < f.constants.len() {
                         Value::from_bits(f.constants[sel_idx]).as_symbol()
                             .ok_or("send: selector constant is not a symbol")?
@@ -242,16 +246,13 @@ impl VM {
                         return Err("send: selector constant out of bounds".into());
                     };
 
-                    if f.pc + 3 >= f.code.len() {
-                        return Err("send: truncated nargs".into());
-                    }
-                    let nargs = f.code[f.pc] as usize;
-                    let arg_start = f.pc + 1;
+                    let nargs = f.code[f.pc + 1] as usize;
+                    let arg_start = f.pc + 2;
                     let mut send_args = Vec::with_capacity(nargs);
                     for i in 0..nargs.min(3) {
                         send_args.push(f.regs[f.code[arg_start + i] as usize]);
                     }
-                    f.pc += 4;
+                    f.pc += 5;
 
                     // look up handler
                     let lookup = dispatch::lookup_handler(heap, recv, sel_sym);
@@ -298,11 +299,16 @@ impl VM {
                 }
 
                 Op::TailCall => {
-                    // TailCall: same as Send but reuses the current frame for closures.
-                    // This turns recursive calls into O(1) frame usage.
+                    // TailCall: same encoding as Send (9 bytes, 16-bit sel);
+                    // reuses the current frame for the called closure so
+                    // tail-recursion is O(1) in frame depth.
                     let dst = a;
                     let recv = f.regs[b as usize];
-                    let sel_idx = c as usize;
+                    if f.pc + 4 >= f.code.len() {
+                        return Err("tail_call: truncated".into());
+                    }
+                    let sel_hi = f.code[f.pc] as usize;
+                    let sel_idx = (sel_hi << 8) | (c as usize);
                     let sel_sym = if sel_idx < f.constants.len() {
                         Value::from_bits(f.constants[sel_idx]).as_symbol()
                             .ok_or("tail_call: selector not a symbol")?
@@ -310,16 +316,13 @@ impl VM {
                         return Err("tail_call: selector out of bounds".into());
                     };
 
-                    if f.pc + 3 >= f.code.len() {
-                        return Err("tail_call: truncated".into());
-                    }
-                    let nargs = f.code[f.pc] as usize;
-                    let arg_start = f.pc + 1;
+                    let nargs = f.code[f.pc + 1] as usize;
+                    let arg_start = f.pc + 2;
                     let mut send_args = Vec::with_capacity(nargs);
                     for i in 0..nargs.min(3) {
                         send_args.push(f.regs[f.code[arg_start + i] as usize]);
                     }
-                    f.pc += 4;
+                    f.pc += 5;
 
                     let lookup = dispatch::lookup_handler(heap, recv, sel_sym);
                     let (handler, _) = match lookup {

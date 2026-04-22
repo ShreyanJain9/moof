@@ -148,12 +148,12 @@ impl Chunk {
     pub fn optimize_tail_calls(&mut self) {
         let code_len = self.code.len();
         let mut pc = 0;
-        while pc + 11 < code_len {
+        while pc + 12 < code_len {
             if Op::from_u8(self.code[pc]) == Some(Op::Send) {
                 let dst = self.code[pc + 1];
-                // Send is 8 bytes (opcode + dst/recv/sel + nargs/a0/a1/a2);
-                // the instruction immediately after starts at pc + 8.
-                if self.reaches_return_with_dst(pc + 8, dst, 4) {
+                // Send is 9 bytes (opcode + dst/recv/sel_lo + sel_hi/nargs/a0/a1/a2);
+                // the instruction immediately after starts at pc + 9.
+                if self.reaches_return_with_dst(pc + 9, dst, 4) {
                     self.code[pc] = Op::TailCall as u8;
                 }
             }
@@ -161,7 +161,7 @@ impl Chunk {
             if pc >= 4 {
                 let prev = Op::from_u8(self.code[pc - 4]);
                 if prev == Some(Op::Send) || prev == Some(Op::TailCall) {
-                    pc += 4;
+                    pc += 5;
                 }
             }
         }

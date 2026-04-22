@@ -50,3 +50,16 @@
 
 (conform Some Thenable)
 (conform None Thenable)
+
+; structural equality: two Somes equal if their values equal;
+; two Nones are always equal (they're singletons structurally);
+; never cross-variant.
+(defmethod Some equal: (other)
+  (if [self identical: other] true
+    (if [other is: Some] [@value equal: other.value] false)))
+
+(defmethod None equal: (other)
+  [other is: None])
+
+(conform Some Equatable)
+(conform None Equatable)
