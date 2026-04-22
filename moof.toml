@@ -80,6 +80,8 @@ files = [
 ]
 
 [grants]
-# which capabilities each context can access.
-# the REPL gets these as FarRef bindings.
-repl = ["console", "clock", "file", "random"]
+# which capabilities each interface can access.
+# System holds all capabilities and delegates based on this table;
+# requests for anything not listed here are silently dropped.
+repl   = ["console", "clock", "file", "random"]
+script = ["console", "clock", "file", "random"]

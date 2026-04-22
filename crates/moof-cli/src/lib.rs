@@ -7,7 +7,7 @@
 // capability-plugin authors who need `Vat` access.
 
 pub mod plugins;
-pub mod boot;
+pub mod system;
 
 // re-export moof-core / moof-lang / moof-runtime at their historical
 // module paths so existing `moof::heap::X`, `moof::vm::X`, etc. keep

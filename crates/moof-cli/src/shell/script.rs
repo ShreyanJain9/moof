@@ -1,25 +1,19 @@
-// Script runner: a sibling interface to the REPL.
+// Script runner — an Interface. Sibling of the REPL.
 //
-// Boots the system the same way the REPL does, spawns a user vat
-// with the [grants] for `script` (falling back to repl's grants),
-// evaluates the file, drains, prints the final result, and exits.
-//
-// The point of this module is not that anyone needs to run scripts
-// right now — it's that the REPL isn't special. Boot is shared;
-// the interface is a thin consumer; you can build a new one in a
-// hundred lines.
+// The user says `moof file.moof`; main dispatches here; System hands
+// us a vat with the allowed caps; we eval the file, print the result,
+// return. No boot orchestration; no capability authority.
 
-use moof::boot::BootedSystem;
+use moof::system::{Interface, System};
 use moof::manifest::Manifest;
-use moof::store::Store;
 use std::path::Path;
 
 const MANIFEST_PATH: &str = "moof.toml";
 
 pub fn run(path: &str) -> i32 {
-    let source = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => { eprintln!("  ~ read {path}: {e}"); return 1; }
+    let Ok(source) = std::fs::read_to_string(path) else {
+        eprintln!("  ~ cannot read {path}");
+        return 1;
     };
 
     let manifest = match Path::new(MANIFEST_PATH).exists() {
@@ -27,30 +21,33 @@ pub fn run(path: &str) -> i32 {
         false => Manifest::default(),
     };
 
-    let mut sys = BootedSystem::boot(manifest);
-    // prefer a `script` grants entry, fall back to `repl`'s list.
-    let grants = sys.manifest.grants.get("script")
-        .or_else(|| sys.manifest.grants.get("repl"))
-        .cloned().unwrap_or_default();
-    let vat_id = sys.spawn_with_caps(&grants);
+    let mut sys = System::boot(manifest);
+    let mut script = ScriptInterface { source };
+    sys.run(&mut script)
+}
 
-    let code = match sys.eval(vat_id, &source) {
-        Ok(v) => {
-            let vat = sys.scheduler.vat(vat_id);
-            println!("{}", vat.heap.display_value(v));
-            0
-        }
-        Err(e) => { eprintln!("  ~ {e}"); 1 }
-    };
+struct ScriptInterface {
+    source: String,
+}
 
-    // save on exit, same as the REPL — scripts build up the image too.
-    let store_path = &sys.manifest.image.path;
-    if let Ok(store) = Store::open(Path::new(store_path)) {
-        let vat = sys.scheduler.vat(vat_id);
-        if let Err(e) = store.save_all(&vat.heap, vat.vm.closure_descs_ref()) {
-            eprintln!("  ~ save failed: {e}");
-        }
+impl Interface for ScriptInterface {
+    fn name(&self) -> &str { "script" }
+
+    fn required_caps(&self) -> Vec<&str> {
+        // same default ask as the repl; manifest's [grants.script]
+        // (falls back to [grants.repl] if absent — see manifest loader)
+        // decides what's actually granted.
+        vec!["console", "clock", "file", "random"]
     }
 
-    code
+    fn run(&mut self, sys: &mut System, vat_id: u32) -> i32 {
+        match sys.eval(vat_id, &self.source) {
+            Ok(v) => {
+                let vat = sys.vat(vat_id);
+                println!("{}", vat.heap.display_value(v));
+                0
+            }
+            Err(e) => { eprintln!("  ~ {e}"); 1 }
+        }
+    }
 }
