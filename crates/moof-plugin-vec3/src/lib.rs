@@ -146,19 +146,15 @@ impl Plugin for Vec3Plugin {
     fn name(&self) -> &str { "vec3" }
 
     fn register(&self, heap: &mut Heap) {
-        // 1. Register the rust-side type in the foreign registry.
-        heap.register_foreign_type::<Vec3>().expect("register Vec3");
-
-        // 2. Cache virtual slot symbols for zero-heap-lookup reads.
+        // Cache virtual slot symbols for zero-heap-lookup reads.
         let sx = heap.intern("x");
         let sy = heap.intern("y");
         let sz = heap.intern("z");
         VEC3_SLOT_SYMS.store(Vec3SlotSyms { x: sx, y: sy, z: sz });
 
-        // 3. Create the prototype object (a plain General) and bind
-        //    `Vec3` in the root env so moof code can send to it.
-        let object_proto = heap.type_protos[moof_core::heap::PROTO_OBJ];
-        let proto = heap.make_object(object_proto);
+        // Register the type, create its proto, install typeName,
+        // and bind `Vec3` in the root env — all in one call.
+        let proto = moof_core::register_foreign_proto::<Vec3>(heap);
         let proto_id = proto.as_any_object().unwrap();
 
         // Class-side constructor: (Vec3 new: x y: y z: z)
@@ -198,10 +194,6 @@ impl Plugin for Vec3Plugin {
             let me = heap.foreign_clone::<Vec3>(receiver).ok_or("magnitude: receiver not a Vec3")?;
             Ok(Value::float(me.magnitude()))
         });
-
-        // 4. Bind `Vec3` in the root env as the prototype.
-        let vec3_sym = heap.intern("Vec3");
-        heap.env_def(vec3_sym, proto);
     }
 }
 

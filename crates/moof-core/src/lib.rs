@@ -26,4 +26,4 @@ pub use value::Value;
 pub use heap::Heap;
 pub use object::HeapObject;
 pub use foreign::{ForeignType, ForeignData, ForeignTypeId, ForeignTypeName, ForeignVTable, ForeignTypeRegistry};
-pub use plugin::{Plugin, native, int_binop, float_binop, float_unary, fnv1a_64};
+pub use plugin::{Plugin, native, int_binop, float_binop, float_unary, fnv1a_64, register_foreign_proto};

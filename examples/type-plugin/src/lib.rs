@@ -73,16 +73,13 @@ impl Plugin for ColorPlugin {
     fn name(&self) -> &str { "color" }
 
     fn register(&self, heap: &mut Heap) {
-        heap.register_foreign_type::<Color>().expect("register Color");
         COLOR_SYMS.store(ColorSyms {
             r: heap.intern("r"),
             g: heap.intern("g"),
             b: heap.intern("b"),
         });
 
-        // Object prototype hoisted in core plugin — we inherit from it.
-        let object_proto = heap.type_protos[moof_core::heap::PROTO_OBJ];
-        let proto = heap.make_object(object_proto);
+        let proto = moof_core::register_foreign_proto::<Color>(heap);
         let proto_id = proto.as_any_object().unwrap();
 
         native(heap, proto_id, "r:g:b:", |heap, _recv, args| {
@@ -113,9 +110,6 @@ impl Plugin for ColorPlugin {
             let c = heap.foreign_clone::<Color>(receiver).ok_or("hex: receiver not a Color")?;
             Ok(heap.alloc_string(&format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b)))
         });
-
-        let sym = heap.intern("Color");
-        heap.env_def(sym, proto);
     }
 }
 
