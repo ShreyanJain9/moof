@@ -14,6 +14,7 @@ members = [
     "crates/moof-plugin-block",
     "crates/moof-plugin-json",
     "crates/moof-plugin-vec3",
+    "crates/moof-plugin-gui",
 
     # capability plugins — each is a cdylib loaded at runtime
     "crates/moof-cap-console",

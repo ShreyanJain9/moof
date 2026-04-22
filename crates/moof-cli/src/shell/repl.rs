@@ -146,30 +146,6 @@ pub fn run() {
             }
             continue;
         }
-        // (:notebook NAME) — open a GUI window showing the named
-        // Workspace (the binding must evaluate to a Workspace value).
-        // blocks until the window is closed.
-        if trimmed.starts_with("(:notebook ") && trimmed.ends_with(')') {
-            let expr_str = trimmed.strip_prefix("(:notebook ").unwrap()
-                .strip_suffix(')').unwrap().trim();
-            let vat = sched.vat_mut(repl_vat_id);
-            match vat.eval_source(expr_str) {
-                Ok(v) => {
-                    let vat = sched.vat(repl_vat_id);
-                    match super::notebook::NotebookSnapshot::from_workspace(&vat.heap, v) {
-                        Ok(snap) => {
-                            if let Err(e) = super::notebook::show_workspace(snap) {
-                                eprintln!("  ~ notebook: {e}");
-                            }
-                        }
-                        Err(e) => eprintln!("  ~ not a Workspace: {e}"),
-                    }
-                }
-                Err(e) => eprintln!("  ~ :notebook eval: {e}"),
-            }
-            continue;
-        }
-
         // accumulate multi-line input
         let mut input = trimmed.to_string();
         loop {

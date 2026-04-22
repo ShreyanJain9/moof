@@ -19,5 +19,4 @@ heed = "0.22"
 libloading = "0.8"
 serde_json = "1"
 toml = "0.8"
-eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
 indexmap = { version = "2", features = ["serde"] }

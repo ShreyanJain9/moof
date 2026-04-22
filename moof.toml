@@ -19,6 +19,7 @@ effects = "builtin:effects"
 block = "builtin:block"
 json = "builtin:json"
 vec3 = "builtin:vec3"
+gui = "builtin:gui"
 
 # external dylib type plugin example (build via:
 # cd examples/type-plugin && cargo build --release

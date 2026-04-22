@@ -1201,7 +1201,6 @@ name = "moof"
 version = "2.0.0-alpha.1"
 dependencies = [
  "bincode",
- "eframe",
  "heed",
  "indexmap",
  "libloading",
@@ -1290,6 +1289,14 @@ dependencies = [
 name = "moof-plugin-effects"
 version = "2.0.0-alpha.1"
 dependencies = [
+ "moof-core",
+]
+
+[[package]]
+name = "moof-plugin-gui"
+version = "2.0.0-alpha.1"
+dependencies = [
+ "eframe",
  "moof-core",
 ]
 
