@@ -216,6 +216,15 @@
         [b count: "a"]))
     1)
 
+  ; wave 6.5 — constructor uniformity. value-wrapping types accept
+  ; a single positional arg via (Type x); the object-literal form
+  ; { Type field: v } still works and is useful when you want to
+  ; name fields explicitly.
+  (test "Ok construct"    [(Ok 42) equal: { Ok value: 42 }]     true)
+  (test "Err construct"   [(Err "x") equal: { Err message: "x" }] true)
+  (test "Some construct"  [(Some 5) equal: { Some value: 5 }]   true)
+  (test "None construct"  [(None) equal: None]                   true)
+
   ; rendering
   (test "Set describe"        [(Set 1 2 3) describe]                "{1, 2, 3}")
 

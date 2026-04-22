@@ -21,6 +21,9 @@
   [some?]    false
   [or: default]  default
   [recover: f]   (f nil)
+  ; (None) is the singleton — call: returns self so (None) works
+  ; as a constructor alongside (Some x).
+  [call: args]  self
 })
 
 (def Some {

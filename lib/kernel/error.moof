@@ -1,17 +1,30 @@
 ; error.moof — Result-based error handling
 ;
-; no try/catch. errors are values: { Err message: "..." }
-; use Result (Ok/Err) for operations that can fail.
-; use recover: on Results and Acts for error handling.
+; No try/catch. Errors are values: { Err message: "..." }.
+; Use Result (Ok/Err) for operations that can fail. Use recover:
+; on Results and Acts for error handling.
 ;
-; (err "message") creates an Err value.
-; [result ok?] checks if it succeeded.
-; [result recover: |e| fallback] handles errors.
+; Construction follows the stdlib's one-payload convention —
+; `(Ok value)` and `(Err message)` as function-call syntax that
+; routes through each type's class-side `call:` handler. The
+; object-literal form `{ Ok value: x }` still works and is useful
+; when you want to be explicit about the slot name.
+;
+; Predicates + chaining:
+;   [r ok?]             — true for Ok, false for Err
+;   [r then: f]         — Ok → apply f; Err → pass through
+;   [r recover: f]      — Err → apply f to message; Ok → pass through
 
-(defn err (msg) { Err message: msg })
+; Construction sugar: (Ok x) / (Err msg) via class-side call:.
+(defmethod Ok  call: (args) { Ok  value:   [args car] })
+(defmethod Err call: (args) { Err message: [args car] })
 
-; structural equality: two Oks equal if their values equal; two
-; Errs equal if their messages equal; never cross-type.
+; Legacy: `(err msg)` — kept so older code keeps working, delegates
+; to the new constructor path.
+(defn err (msg) (Err msg))
+
+; Structural equality: two Oks equal iff their values equal; two
+; Errs equal iff their messages equal; never cross-variant.
 (defmethod Ok equal: (other)
   (if [self identical: other] true
     (if [other is: Ok] [@value equal: other.value] false)))
