@@ -1,0 +1,12 @@
+[package]
+name = "moof-plugin-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "moof built-in type plugin: core"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+moof-core = { path = "../moof-core" }

@@ -8,9 +8,10 @@ name = "moof"
 path = ".moof/store"
 
 [types]
-# structural plugins — registered on every vat's heap.
-# "builtin:X" = compiled into the moof binary.
-# "path/to/lib.dylib" = load external plugin.
+# structural plugins — registered on every vat's heap. every plugin
+# is a cdylib loaded at runtime; nothing is baked into moof-cli.
+#   "builtin:X"           → target/<profile>/libmoof_plugin_X.{dylib,so,dll}
+#   "path/to/plugin.dylib" → literal path, for external plugins
 core = "builtin:core"
 numeric = "builtin:numeric"
 collections = "builtin:collections"

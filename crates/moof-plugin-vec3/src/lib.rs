@@ -204,3 +204,11 @@ impl Plugin for Vec3Plugin {
         heap.env_def(vec3_sym, proto);
     }
 }
+
+/// Entry point for dylib loading. moof-cli's manifest loader
+/// calls this via `libloading` when a `[types]` entry points
+/// at this crate's cdylib.
+#[unsafe(no_mangle)]
+pub fn moof_create_type_plugin() -> Box<dyn moof_core::Plugin> {
+    Box::new(Vec3Plugin)
+}

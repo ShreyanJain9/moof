@@ -5,7 +5,7 @@ use moof_core::value::Value;
 
 pub struct CorePlugin;
 
-impl super::Plugin for CorePlugin {
+impl moof_core::Plugin for CorePlugin {
     fn name(&self) -> &str { "core" }
 
     fn register(&self, heap: &mut Heap) {
@@ -330,4 +330,12 @@ impl super::Plugin for CorePlugin {
         let env_sym = heap.intern("Env");
         heap.env_def(env_sym, Value::nursery(heap.env));
     }
+}
+
+/// Entry point for dylib loading. moof-cli's manifest loader
+/// calls this via `libloading` when a `[types]` entry points
+/// at this crate's cdylib.
+#[unsafe(no_mangle)]
+pub fn moof_create_type_plugin() -> Box<dyn moof_core::Plugin> {
+    Box::new(CorePlugin)
 }

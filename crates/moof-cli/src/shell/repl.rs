@@ -64,24 +64,17 @@ pub fn run() {
     // vat 0: init vat (bare, no plugins — doesn't run user code)
     let _init_vat_id = sched.spawn_bare_vat();
 
-    // spawn capability vats from manifest
+    // spawn capability vats from manifest — every capability is a
+    // dylib, whether builtin: shorthand or explicit path.
     let mut cap_refs: Vec<(String, u32, u32)> = Vec::new();
     for (name, spec) in &manifest.capabilities {
-        if let Some(builtin_name) = Manifest::is_builtin(spec) {
-            if let Some(cap) = moof::plugins::builtin_capability(builtin_name) {
+        match moof::plugins::resolve_capability(spec) {
+            Ok(cap) => {
                 let (vat_id, obj_id) = sched.spawn_capability(cap.as_ref());
                 cap_refs.push((name.clone(), vat_id, obj_id));
-            } else {
-                eprintln!("  ~ unknown builtin capability: {builtin_name}");
+                eprintln!("  loaded capability '{}' from {spec}", cap.name());
             }
-        } else {
-            match sched.load_plugin(Path::new(spec)) {
-                Ok((loaded_name, vat_id, obj_id)) => {
-                    cap_refs.push((name.clone(), vat_id, obj_id));
-                    eprintln!("  loaded plugin '{loaded_name}'");
-                }
-                Err(e) => eprintln!("  ~ plugin error for '{name}': {e}"),
-            }
+            Err(e) => eprintln!("  ~ capability '{name}' failed: {e}"),
         }
     }
 

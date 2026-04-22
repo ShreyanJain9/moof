@@ -12,8 +12,6 @@ crate-type = ["lib", "cdylib"]
 moof-core = { path = "../moof-core" }
 moof-lang = { path = "../moof-lang" }
 moof-runtime = { path = "../moof-runtime" }
-moof-stdlib = { path = "../moof-stdlib" }
-moof-caps = { path = "../moof-caps" }
 rustyline = "15"
 serde = { version = "1", features = ["derive"] }
 bincode = "1"

@@ -4,12 +4,25 @@ members = [
     "crates/moof-core",
     "crates/moof-lang",
     "crates/moof-runtime",
-    "crates/moof-stdlib",
-    "crates/moof-caps",
     "crates/moof-cli",
+
+    # type plugins — each is a cdylib loaded at runtime
+    "crates/moof-plugin-core",
+    "crates/moof-plugin-numeric",
+    "crates/moof-plugin-collections",
+    "crates/moof-plugin-effects",
+    "crates/moof-plugin-block",
+    "crates/moof-plugin-json",
+    "crates/moof-plugin-vec3",
+
+    # capability plugins — each is a cdylib loaded at runtime
+    "crates/moof-cap-console",
+    "crates/moof-cap-clock",
+    "crates/moof-cap-file",
+    "crates/moof-cap-random",
 ]
-# Example plugins are separate workspaces (they depend on the published
-# versions of moof-core etc) and intentionally not workspace members.
+# Example plugins are separate workspaces (they depend on published
+# versions of moof-core, not the in-tree paths) — kept out.
 exclude = [
     "examples/rust-plugin",
     "examples/type-plugin",

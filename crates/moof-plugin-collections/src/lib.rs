@@ -2,7 +2,7 @@ use moof_core::native;
 use moof_core::heap::*;
 use moof_core::value::Value;
 
-use super::Plugin;
+use moof_core::Plugin;
 
 pub struct CollectionsPlugin;
 
@@ -295,4 +295,12 @@ impl Plugin for CollectionsPlugin {
         let table_sym = heap.intern("Table");
         heap.env_def(table_sym, table_proto);
     }
+}
+
+/// Entry point for dylib loading. moof-cli's manifest loader
+/// calls this via `libloading` when a `[types]` entry points
+/// at this crate's cdylib.
+#[unsafe(no_mangle)]
+pub fn moof_create_type_plugin() -> Box<dyn moof_core::Plugin> {
+    Box::new(CollectionsPlugin)
 }

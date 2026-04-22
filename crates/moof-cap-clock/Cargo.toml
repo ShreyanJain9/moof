@@ -1,0 +1,13 @@
+[package]
+name = "moof-cap-clock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "moof built-in capability: clock (wall + monotonic)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+moof-core = { path = "../moof-core" }
+moof-runtime = { path = "../moof-runtime" }

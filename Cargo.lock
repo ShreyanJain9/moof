@@ -1205,11 +1205,9 @@ dependencies = [
  "heed",
  "indexmap",
  "libloading",
- "moof-caps",
  "moof-core",
  "moof-lang",
  "moof-runtime",
- "moof-stdlib",
  "rustyline",
  "serde",
  "serde_json",
@@ -1217,7 +1215,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "moof-caps"
+name = "moof-cap-clock"
+version = "2.0.0-alpha.1"
+dependencies = [
+ "moof-core",
+ "moof-runtime",
+]
+
+[[package]]
+name = "moof-cap-console"
+version = "2.0.0-alpha.1"
+dependencies = [
+ "moof-core",
+ "moof-runtime",
+]
+
+[[package]]
+name = "moof-cap-file"
+version = "2.0.0-alpha.1"
+dependencies = [
+ "moof-core",
+ "moof-runtime",
+]
+
+[[package]]
+name = "moof-cap-random"
 version = "2.0.0-alpha.1"
 dependencies = [
  "moof-core",
@@ -1243,6 +1265,58 @@ dependencies = [
 ]
 
 [[package]]
+name = "moof-plugin-block"
+version = "2.0.0-alpha.1"
+dependencies = [
+ "moof-core",
+]
+
+[[package]]
+name = "moof-plugin-collections"
+version = "2.0.0-alpha.1"
+dependencies = [
+ "indexmap",
+ "moof-core",
+]
+
+[[package]]
+name = "moof-plugin-core"
+version = "2.0.0-alpha.1"
+dependencies = [
+ "moof-core",
+]
+
+[[package]]
+name = "moof-plugin-effects"
+version = "2.0.0-alpha.1"
+dependencies = [
+ "moof-core",
+]
+
+[[package]]
+name = "moof-plugin-json"
+version = "2.0.0-alpha.1"
+dependencies = [
+ "indexmap",
+ "moof-core",
+ "serde_json",
+]
+
+[[package]]
+name = "moof-plugin-numeric"
+version = "2.0.0-alpha.1"
+dependencies = [
+ "moof-core",
+]
+
+[[package]]
+name = "moof-plugin-vec3"
+version = "2.0.0-alpha.1"
+dependencies = [
+ "moof-core",
+]
+
+[[package]]
 name = "moof-runtime"
 version = "2.0.0-alpha.1"
 dependencies = [
@@ -1254,15 +1328,6 @@ dependencies = [
  "moof-lang",
  "serde",
  "toml",
-]
-
-[[package]]
-name = "moof-stdlib"
-version = "2.0.0-alpha.1"
-dependencies = [
- "indexmap",
- "moof-core",
- "serde_json",
 ]
 
 [[package]]
