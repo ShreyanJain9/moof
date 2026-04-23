@@ -424,6 +424,18 @@ impl System {
             .filter(|c| allowed.contains(c))
             .collect();
         let vat_id = self.spawn_for_interface(&label, &caps);
+
+        // bind argv in the vat's env so moof-side interfaces
+        // (e.g. lib/bin/eval.moof) can read their arguments.
+        let args = iface.argv();
+        let vat = self.scheduler.vat_mut(vat_id);
+        let arg_vals: Vec<Value> = args.iter()
+            .map(|s| vat.heap.alloc_string(s))
+            .collect();
+        let arg_list = vat.heap.list(&arg_vals);
+        let argv_sym = vat.heap.intern("argv");
+        vat.heap.env_def(argv_sym, arg_list);
+
         let code = iface.run(self, vat_id);
         if let Err(e) = self.save_image(vat_id) {
             eprintln!("  ~ save: {e}");
@@ -444,6 +456,11 @@ pub trait Interface {
     /// Caps this interface wants. System intersects with grants_for
     /// and silently drops anything not explicitly allowed.
     fn required_caps(&self) -> Vec<&str>;
+
+    /// String arguments to expose to the moof side as an `argv`
+    /// binding. Default: no args. Interfaces like a script runner
+    /// override to surface the command-line tail.
+    fn argv(&self) -> Vec<String> { Vec::new() }
 
     /// Run until done. Returns a process exit code.
     fn run(&mut self, sys: &mut System, vat_id: u32) -> i32;

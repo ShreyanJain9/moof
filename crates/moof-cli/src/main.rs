@@ -1,15 +1,24 @@
 // moof — dispatch to an interface.
 //
-// Interfaces are siblings:
-//   moof                 → REPL
-//   moof <file.moof>     → script (eval file, print result, exit)
-//   moof -e "expr"       → eval the argument, print, exit
-//   moof --help | -h     → usage
+// The rust side does one thing: pick a moof source file + argv and
+// hand control to the script runner (or the repl for no-args).
+// The actual behaviors live as moof code in lib/bin/*.moof, so
+// anyone can inspect, edit, or replace them.
 //
-// The REPL is not privileged. Adding a new interface means a new
-// sibling under `shell::`, not a modification of the REPL.
+//   moof                      → REPL
+//   moof <file.moof> args...  → run that file with argv = [args...]
+//   moof -e "<expr>"          → run lib/bin/eval.moof with argv = [expr]
+//   moof --help | -h          → usage
+//
+// Adding a new top-level command means adding a moof file under
+// lib/bin/, not a new Rust file.
 
 mod shell;
+
+/// Path to the bundled eval script. Loaded from the current working
+/// directory's lib/bin so it's editable as part of the source tree.
+/// Future: honor a search path (~/.moof/bin, plugin dirs, etc.).
+const EVAL_SCRIPT: &str = "lib/bin/eval.moof";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -19,10 +28,10 @@ fn main() {
             print_usage();
         }
         [flag, expr] if flag == "-e" => {
-            std::process::exit(shell::eval::run(expr.clone()));
+            std::process::exit(shell::script::run(EVAL_SCRIPT, vec![expr.clone()]));
         }
-        [path] if !path.starts_with('-') => {
-            std::process::exit(shell::script::run(path));
+        [path, rest @ ..] if !path.starts_with('-') => {
+            std::process::exit(shell::script::run(path, rest.to_vec()));
         }
         _ => {
             print_usage();
@@ -33,8 +42,8 @@ fn main() {
 
 fn print_usage() {
     eprintln!("usage:");
-    eprintln!("  moof                — interactive repl");
-    eprintln!("  moof <file.moof>    — evaluate a file, print result, exit");
-    eprintln!("  moof -e \"<expr>\"    — evaluate the expression, print, exit");
-    eprintln!("  moof -h | --help    — this message");
+    eprintln!("  moof                      — interactive repl");
+    eprintln!("  moof <file.moof> args...  — run file with argv=[args]");
+    eprintln!("  moof -e \"<expr>\"          — evaluate the expression (via lib/bin/eval.moof)");
+    eprintln!("  moof -h | --help          — this message");
 }

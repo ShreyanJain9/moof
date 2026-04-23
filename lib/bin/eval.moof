@@ -1,0 +1,33 @@
+; eval.moof — `moof -e "<expr>"` implemented in moof itself.
+;
+; Invoked by the rust entry-point when the user passes `-e EXPR`:
+; System spawns a user vat, grants caps per [grants.eval], binds
+; `argv` to `(EXPR)`, and evaluates this file in that vat.
+;
+; We parse the source via the `evaluator` capability, evaluate each
+; top-level form in turn, and print the last value via `console`.
+;
+; Nothing here is privileged. Anyone can replace this file to
+; change what `-e` does — or write their own `lib/bin/<thing>.moof`
+; and invoke it with `moof lib/bin/<thing>.moof args...`.
+
+; fold each top-level form through (eval ...) — can't use map
+; because `eval` is a compile-time special form (not a function),
+; so we recurse explicitly.
+(defn eval-all (forms last-value)
+  (if (nil? forms)
+    last-value
+    (eval-all [forms cdr] (eval [forms car]))))
+
+; echo a value unless it's nil or an Act (Acts represent effects
+; that already produced their output).
+(defn echo-result (result)
+  (if (nil? result) nil
+    (if [result is: Act] nil
+      (do (_ <- [console println: [result describe]])
+          nil))))
+
+; main: parse argv[0], eval all forms, echo the last value.
+(let ((src (if (nil? argv) "" [argv car])))
+  (do (forms <- [evaluator parse: src])
+      (echo-result (eval-all forms nil))))
