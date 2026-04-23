@@ -961,7 +961,8 @@ mod tests {
         let obj = h.make_object(Value::NIL);
         assert!(obj.is_nursery());
         let id = obj.as_nursery().unwrap();
-        assert!(matches!(h.get(id), HeapObject::General { .. }));
+        // HeapObject is a struct now; just check proto is nil.
+        assert!(h.get(id).proto.is_nil());
     }
 
     #[test]

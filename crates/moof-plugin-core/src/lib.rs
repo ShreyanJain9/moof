@@ -86,6 +86,17 @@ impl moof_core::Plugin for CorePlugin {
             Ok(heap.prototype_of(receiver))
         });
 
+        // Object: content-hash — content-addressable identity. Same
+        // content → same hex string everywhere, always. Stable across
+        // runs, processes, machines. The primitive underneath the
+        // URL/resolver story (see docs/persistence.md,
+        // docs/addressing.md). Distinct from `hash` (Hashable protocol,
+        // fnv-ish i64 used by collections for bucketing).
+        native(heap, obj_id, "content-hash", |heap, receiver, _args| {
+            let h = heap.hash_value(receiver);
+            Ok(heap.alloc_string(&moof_core::hash_hex(&h)))
+        });
+
         // Object: slotNames — real slots plus foreign virtual-slot names.
         native(heap, obj_id, "slotNames", |heap, receiver, _args| {
             if let Some(id) = receiver.as_any_object() {

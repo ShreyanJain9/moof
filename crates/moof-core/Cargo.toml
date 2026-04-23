@@ -12,3 +12,4 @@ crate-type = ["lib"]
 serde = { version = "1", features = ["derive"] }
 bincode = "1"
 indexmap = { version = "2", features = ["serde"] }
+blake3 = "1"
