@@ -1,0 +1,86 @@
+; url.moof — stable content-or-resource identifiers.
+;
+; A URL is a first-class moof value. Every FarRef carries one.
+; Immutable values, capabilities, vats, services, federated peers
+; — all addressable under a single scheme. No special cases; the
+; resolver pattern-matches on the path to produce the right thing.
+;
+; Shape:
+;
+;   moof:<path>
+;   moof:peer/<peer-id>/<path>      (federated, future)
+;
+; Well-known path conventions:
+;
+;   /caps/<name>          — capability FarRefs (console, clock, ...)
+;   /vats/<id>            — a live vat reference
+;   /vats/<id>/objs/<id>  — a specific object in a vat (defserver)
+;   /services/<name>      — supervised services
+;   /blobs/<hex-hash>     — content-addressed immutable value
+;   /env/<symbol>         — a binding in the current env
+;
+; These are *conventions* enforced by the resolver capability, not
+; hard-coded kinds. Anything handing out resources registers a path
+; prefix and a handler with the resolver.
+;
+; URL is immutable. Constructed by parse:
+;
+;   (URL "moof:/caps/console")
+;   [URL parse: "moof:/caps/console"]
+
+(def URL {
+  scheme: "moof"                ; string for now (no toSymbol stdlib yet)
+  path:   "/"
+
+  [typeName]  'URL
+  [describe]  (str @scheme ":" @path)
+
+  ; class-side constructor: (URL str) → a parsed URL value.
+  [call: args]  [URL parse: [args car]]
+
+  ; true iff the URL's path starts with `prefix`.
+  ; used by pattern-match-style resolvers.
+  [startsWith: prefix]
+    [@path startsWith: prefix]
+
+  ; the path segments after a given prefix, as a list. returns nil
+  ; if the URL doesn't start with that prefix. example:
+  ;   [(URL "moof:/caps/console") after: "/caps/"] → ("console")
+  [after: prefix]
+    (if [@path startsWith: prefix]
+      [[@path drop: [prefix length]] split: "/"]
+      nil)
+})
+
+(conform URL Showable)
+
+; ──────────────────────────────────────────────────────────
+; parser. extracts scheme + path from "<scheme>:<path>".
+; for now the only supported scheme is "moof". future: http,
+; peer-specific, etc. returns an Err for malformed input.
+; ──────────────────────────────────────────────────────────
+
+(defmethod URL parse: (s)
+  (let ((colon [s indexOf: ":"]))
+    (if [colon < 0]
+      (Err (str "URL: missing scheme separator: " [s describe]))
+      (let ((scheme-str [s substring: 0 to: colon])
+            (path-str   [s substring: [colon + 1] to: [s length]]))
+        { URL scheme: scheme-str path: path-str }))))
+
+; ──────────────────────────────────────────────────────────
+; common constructors — short, composable, and discoverable
+; through the env.
+; ──────────────────────────────────────────────────────────
+
+(defn url-cap (name)
+  { URL scheme: "moof" path: (str "/caps/" [name describe]) })
+
+(defn url-vat (id)
+  { URL scheme: "moof" path: (str "/vats/" [id describe]) })
+
+(defn url-service (name)
+  { URL scheme: "moof" path: (str "/services/" [name describe]) })
+
+(defn url-blob (hash-hex)
+  { URL scheme: "moof" path: (str "/blobs/" hash-hex) })

@@ -197,11 +197,12 @@ impl System {
             }
         }
         for (name, src_vat, src_obj) in grants {
-            // named FarRef so it survives image restart: the name is
-            // the stable handle, (vat_id, obj_id) get re-resolved on
-            // load against the current session's cap registry.
-            let farref = self.scheduler.create_farref_named(
-                target_vat, src_vat, src_obj, Some(&name),
+            // every capability FarRef carries a URL. the URL is the
+            // stable identity that survives restart; the (vat_id,
+            // obj_id) cache gets refreshed on load via resolve.
+            let url = format!("moof:/caps/{name}");
+            let farref = self.scheduler.create_farref(
+                target_vat, src_vat, src_obj, Some(&url),
             );
             let sym = self.scheduler.vat_mut(target_vat).heap.intern(&name);
             self.scheduler.vat_mut(target_vat).heap.env_def(sym, farref);
@@ -313,15 +314,16 @@ impl System {
 
     // ─────────── cap-FarRef rewiring after image load ───────────
 
-    /// After loading an image, every FarRef that was created for a
-    /// capability carries a stable `__target_name` slot. This walks
-    /// the target vat's heap, finds such FarRefs, looks up the name
-    /// in the current session's capability registry, and patches
-    /// `__target_vat` / `__target_obj` to the fresh (live) ids.
+    /// After loading an image, every FarRef carries a `url` slot
+    /// — the canonical identity of the target resource. This walks
+    /// the target vat's heap, finds FarRefs with a URL, resolves
+    /// the URL against the current session's runtime state, and
+    /// refreshes `__target_vat` / `__target_obj`.
     ///
-    /// FarRefs without `__target_name` (e.g. user-to-defserver refs)
-    /// are left untouched — they'll only work if vat ids happen to
-    /// line up (same manifest → same boot order → same ids).
+    /// Resolution is the same pattern-matching logic the moof-side
+    /// resolver uses: `/caps/<name>` → cap registry,
+    /// `/vats/<id>/objs/<obj>` → live vat id + obj id.
+    /// FarRefs without a `url` slot are left untouched.
     fn rewire_cap_farrefs(&mut self, vat_id: u32) {
         // snapshot the cap registry — reading from self while
         // mutating heap is easier without borrow juggling.
@@ -331,31 +333,29 @@ impl System {
         let heap = &mut self.scheduler.vat_mut(vat_id).heap;
 
         let farref_proto = heap.type_protos[moof_core::heap::PROTO_FARREF];
-        let Some(farref_proto_id) = farref_proto.as_any_object() else { return };
+        if farref_proto.as_any_object().is_none() { return; }
         let tgt_vat_sym = heap.intern("__target_vat");
         let tgt_obj_sym = heap.intern("__target_obj");
-        let tgt_name_sym = heap.intern("__target_name");
+        let url_sym = heap.intern("url");
 
         let mut patched = 0;
         let total = heap.object_count();
         for id in 0..total as u32 {
             if heap.get(id).proto != farref_proto { continue; }
-            let Some(name_val) = heap.get(id).slot_get(tgt_name_sym) else { continue };
-            let Some(name_id) = name_val.as_any_object() else { continue };
-            let Some(name_str) = heap.get_string(name_id).map(|s| s.to_string()) else { continue };
+            let Some(url_val) = heap.get(id).slot_get(url_sym) else { continue };
+            let Some(url_id) = url_val.as_any_object() else { continue };
+            let Some(url_str) = heap.get_string(url_id).map(|s| s.to_string()) else { continue };
 
-            if let Some(&(live_vat, live_obj)) = caps.get(&name_str) {
+            if let Some((live_vat, live_obj)) = resolve_url(&url_str, &caps) {
                 let obj = heap.get_mut(id);
                 obj.slot_set(tgt_vat_sym, Value::integer(live_vat as i64));
                 obj.slot_set(tgt_obj_sym, Value::integer(live_obj as i64));
                 patched += 1;
             }
         }
-        // blindly noisy if zero; useful signal when non-zero.
         if patched > 0 {
-            eprintln!("  re-resolved {patched} capability FarRefs by name");
+            eprintln!("  re-resolved {patched} FarRefs via URL");
         }
-        let _ = farref_proto_id; // suppress warning (we use farref_proto directly)
     }
 
     // ─────────── mirror state into the `system` capability ───────────
@@ -408,6 +408,25 @@ impl System {
         let grants_list = heap.list(&grants_entries);
         let grants_slot = heap.intern("grants-table");
         heap.get_mut(sys_obj).slot_set(grants_slot, grants_list);
+
+        // resolve-table: list of (url-string . (vat-id obj-id)) pairs
+        // covering every capability. `[system resolve: url]` walks
+        // this at runtime to return a fresh FarRef. Keep in sync
+        // with the rust-side resolve_url() — same URL shapes.
+        let resolve_entries: Vec<Value> = self.capabilities.iter()
+            .map(|c| {
+                let url_str = format!("moof:/caps/{}", c.name);
+                let url_val = heap.alloc_string(&url_str);
+                let pair_val = heap.list(&[
+                    Value::integer(c.vat_id as i64),
+                    Value::integer(c.obj_id as i64),
+                ]);
+                heap.cons(url_val, pair_val)
+            })
+            .collect();
+        let resolve_list = heap.list(&resolve_entries);
+        let resolve_slot = heap.intern("resolve-table");
+        heap.get_mut(sys_obj).slot_set(resolve_slot, resolve_list);
     }
 
     // ─────────── running an interface ───────────
@@ -442,6 +461,39 @@ impl System {
         }
         code
     }
+}
+
+/// Resolve a `moof:<path>` URL against the current runtime's live
+/// resources. Returns `(vat_id, obj_id)` for the addressed resource,
+/// or None if the URL is malformed / refers to something absent.
+///
+/// Pattern-match on the path:
+///   moof:/caps/<name>             → cap registry
+///   moof:/vats/<id>/objs/<id>     → explicit (vat, obj) pair
+///
+/// Keep this in sync with the moof-side resolver in lib/kernel/url.moof
+/// — same URL shapes, same semantics. The rust version exists only
+/// because image-load happens before the scheduler can dispatch
+/// cross-vat messages.
+pub(crate) fn resolve_url(
+    url: &str,
+    caps: &std::collections::HashMap<String, (u32, u32)>,
+) -> Option<(u32, u32)> {
+    // strip "moof:" — only scheme we handle here.
+    let path = url.strip_prefix("moof:")?;
+
+    if let Some(name) = path.strip_prefix("/caps/") {
+        return caps.get(name).copied();
+    }
+    if let Some(rest) = path.strip_prefix("/vats/") {
+        // "<vat-id>/objs/<obj-id>"
+        let (vat_s, rest) = rest.split_once('/')?;
+        let obj_s = rest.strip_prefix("objs/")?;
+        let vat: u32 = vat_s.parse().ok()?;
+        let obj: u32 = obj_s.parse().ok()?;
+        return Some((vat, obj));
+    }
+    None
 }
 
 /// An interface is a peer consumer of System. It declares its name

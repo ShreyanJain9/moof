@@ -204,7 +204,8 @@ impl Scheduler {
         for path in paths {
             match self.load_plugin(path) {
                 Ok((name, vat_id, obj_id)) => {
-                    let farref = self.create_farref(repl_vat_id, vat_id, obj_id);
+                    let url = format!("moof:/caps/{name}");
+                    let farref = self.create_farref(repl_vat_id, vat_id, obj_id, Some(&url));
                     let sym = self.vat_mut(repl_vat_id).heap.intern(&name);
                     self.vat_mut(repl_vat_id).heap.env_def(sym, farref);
                     eprintln!("  reloaded plugin '{name}'");
@@ -215,43 +216,37 @@ impl Scheduler {
     }
 
     /// Create a FarRef in a vat pointing to an object in another vat.
-    pub fn create_farref(&mut self, in_vat: u32, target_vat: u32, target_obj: u32) -> Value {
-        self.create_farref_named(in_vat, target_vat, target_obj, None)
-    }
-
-    /// Create a FarRef that carries its capability name as a slot.
-    /// Named FarRefs survive image restart: loading the image
-    /// re-resolves the name against the current session's capability
-    /// registry, so the FarRef points at the fresh (vat_id, obj_id)
-    /// rather than the stale ones from the save session.
+    /// The `url` argument is the canonical identity of the target
+    /// resource — a string in the `moof:<path>` form. Every FarRef
+    /// the runtime hands out carries a URL: capabilities use
+    /// `moof:/caps/<name>`, user defservers use
+    /// `moof:/vats/<id>/objs/<id>`. Image restart re-resolves the
+    /// URL to refresh `(vat_id, obj_id)`, which are session-local.
     ///
-    /// `name` should be the stable capability name (e.g. "console",
-    /// "clock") from the manifest's [capabilities] section.
-    pub fn create_farref_named(
+    /// Pass `None` only for legacy / ad-hoc FarRefs that don't
+    /// belong to a stable resource; those won't survive restart.
+    pub fn create_farref(
         &mut self,
         in_vat: u32,
         target_vat: u32,
         target_obj: u32,
-        name: Option<&str>,
+        url: Option<&str>,
     ) -> Value {
         let vat = self.vat_mut(in_vat);
         let farref_proto = vat.heap.lookup_type("FarRef");
         let tgt_vat_sym = vat.heap.intern("__target_vat");
         let tgt_obj_sym = vat.heap.intern("__target_obj");
-        let (names, values) = match name {
-            Some(n) => {
-                let tgt_name_sym = vat.heap.intern("__target_name");
-                let name_val = vat.heap.alloc_string(n);
-                (
-                    vec![tgt_vat_sym, tgt_obj_sym, tgt_name_sym],
-                    vec![Value::integer(target_vat as i64), Value::integer(target_obj as i64), name_val],
-                )
-            }
-            None => (
-                vec![tgt_vat_sym, tgt_obj_sym],
-                vec![Value::integer(target_vat as i64), Value::integer(target_obj as i64)],
-            ),
-        };
+        let mut names = vec![tgt_vat_sym, tgt_obj_sym];
+        let mut values = vec![
+            Value::integer(target_vat as i64),
+            Value::integer(target_obj as i64),
+        ];
+        if let Some(u) = url {
+            let url_sym = vat.heap.intern("url");
+            let url_val = vat.heap.alloc_string(u);
+            names.push(url_sym);
+            values.push(url_val);
+        }
         vat.heap.make_object_with_slots(farref_proto, names, values)
     }
 
@@ -393,7 +388,11 @@ impl Scheduler {
                         if req.serve {
                             // serve mode: return a FarRef to the object in the child vat
                             if let Some(obj_id) = val.as_any_object() {
-                                let farref = self.create_farref(parent_vat_id, child_id, obj_id);
+                                // user-defserver FarRef — URL addresses the specific
+                                // (vat, obj) pair. resolver will hand back a live
+                                // handle on restart (if the defserver's been spawned).
+                                let url = format!("moof:/vats/{child_id}/objs/{obj_id}");
+                                let farref = self.create_farref(parent_vat_id, child_id, obj_id, Some(&url));
                                 self.resolve_act(parent_vat_id, req.act_id, farref, false);
                             } else {
                                 let err = self.vat_mut(parent_vat_id).heap
