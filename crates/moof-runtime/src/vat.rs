@@ -92,15 +92,48 @@ impl Vat {
 
     /// Evaluate source code in this vat's heap + VM.
     pub fn eval_source(&mut self, source: &str) -> Result<Value, String> {
-        let tokens = moof_lang::lang::lexer::tokenize(source).map_err(|e| format!("lex: {e}"))?;
-        let mut parser = moof_lang::lang::parser::Parser::new(&tokens, &mut self.heap);
-        let exprs = parser.parse_all().map_err(|e| format!("parse: {e}"))?;
+        self.eval_source_with_origin(source, "<eval>")
+    }
+
+    /// Evaluate source text, attaching source + origin records to
+    /// every closure desc produced. The `label` is a file path or
+    /// sentinel like "<repl>" / "<eval>"; it shows up as the
+    /// closure's origin for introspection ([closure origin]).
+    pub fn eval_source_with_origin(&mut self, source: &str, label: &str)
+        -> Result<Value, String>
+    {
+        // Split top-level forms with byte ranges so each form's source
+        // text can be attached to closures it produces. Fallback: if
+        // splitting produced nothing (empty input), act like a no-op
+        // and return NIL.
+        let forms = moof_core::source::split_top_level_forms(source);
         let mut last = Value::NIL;
-        for expr in &exprs {
-            let result = Compiler::compile_toplevel(&self.heap, *expr)
-                .map_err(|e| format!("compile: {e}"))?;
-            last = self.vm.eval_result(&mut self.heap, result)
-                .map_err(|e| format!("eval: {e}"))?;
+        for (form_text, range) in forms {
+            // re-tokenize + parse the per-form slice so parse errors
+            // point at the right form and extra top-level atoms don't
+            // bleed across.
+            let tokens = moof_lang::lang::lexer::tokenize(&form_text)
+                .map_err(|e| format!("lex: {e}"))?;
+            let mut parser = moof_lang::lang::parser::Parser::new(&tokens, &mut self.heap);
+            let exprs = parser.parse_all().map_err(|e| format!("parse: {e}"))?;
+
+            let source_record = moof_core::source::ClosureSource {
+                text: form_text,
+                origin: moof_core::source::SourceOrigin {
+                    label: label.to_string(),
+                    byte_start: range.start,
+                    byte_end: range.end,
+                },
+            };
+
+            for expr in &exprs {
+                let result = Compiler::compile_toplevel_with_source(
+                    &self.heap, *expr, Some(source_record.clone()))
+                    .map_err(|e| format!("compile: {e}"))?;
+                last = self.vm.eval_result_with_source(
+                    &mut self.heap, result, Some(source_record.clone()))
+                    .map_err(|e| format!("eval: {e}"))?;
+            }
         }
         Ok(last)
     }

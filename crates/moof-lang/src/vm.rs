@@ -32,6 +32,12 @@ pub struct VM {
     frames: Vec<Frame>,
     closure_descs: Vec<ClosureDesc>,
     pub fuel: u64,      // 0 = unlimited
+    /// Stack of "currently active" source records — the source text
+    /// of the outermost top-level form whose eval is in progress.
+    /// Op::Eval reads the top of this stack so closures created via
+    /// runtime macro expansion (vau operatives) inherit the outer
+    /// form's source. Push on eval_result_with_source, pop at end.
+    active_sources: Vec<Option<moof_core::source::ClosureSource>>,
 }
 
 impl VM {
@@ -40,6 +46,7 @@ impl VM {
             frames: Vec::new(),
             closure_descs: Vec::new(),
             fuel: 0,
+            active_sources: Vec::new(),
         }
     }
 
@@ -837,13 +844,44 @@ impl VM {
         err == "__yield__"
     }
 
+    /// Evaluate a CompileResult with a known outer source record.
+    /// Pushes `source` onto the active-sources stack so any Op::Eval
+    /// invoked during this evaluation (vau macro expansion) produces
+    /// closures carrying the same source text.
+    pub fn eval_result_with_source(
+        &mut self,
+        heap: &mut Heap,
+        result: CompileResult,
+        source: Option<moof_core::source::ClosureSource>,
+    ) -> Result<Value, String> {
+        self.active_sources.push(source);
+        let out = self.eval_result(heap, result);
+        self.active_sources.pop();
+        out
+    }
+
     /// Evaluate a CompileResult, accumulating closure descs.
+    /// Inherits the current active-source from the stack (for nested
+    /// Op::Eval invocations). Prefer `eval_result_with_source` from
+    /// top-level eval paths so the source is available to any inner
+    /// Op::Eval triggered by macro expansion.
     pub fn eval_result(&mut self, heap: &mut Heap, result: CompileResult) -> Result<Value, String> {
         let base_idx = self.closure_descs.len();
         self.closure_descs.extend(result.closure_descs);
         let chunk = result.chunk;
+        // inherited source for descs that didn't get one at compile time
+        // (produced by Op::Eval from a runtime-constructed AST).
+        let inherited = self.active_sources.last().cloned().flatten();
         for i in base_idx..self.closure_descs.len() {
             self.closure_descs[i].desc_base = base_idx;
+            if self.closure_descs[i].source.is_none() {
+                self.closure_descs[i].source = inherited.clone();
+            }
+            // mirror source into the heap so native handlers on the
+            // Block prototype can read it without VM access.
+            if let Some(src) = self.closure_descs[i].source.clone() {
+                heap.register_closure_source(i, src);
+            }
         }
         // push frame with desc_base set correctly
         let regs = vec![Value::NIL; chunk.num_regs as usize + 1];

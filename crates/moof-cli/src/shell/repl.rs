@@ -77,7 +77,7 @@ impl Interface for ReplInterface {
         // the repl would like the stdlib caps + system introspection;
         // System filters against the manifest's [grants.repl] list,
         // so anything not in the manifest is silently dropped.
-        vec!["console", "clock", "file", "random", "system"]
+        vec!["console", "clock", "file", "random", "system", "evaluator"]
     }
 
     fn run(&mut self, sys: &mut System, vat_id: u32) -> i32 {
@@ -135,38 +135,55 @@ fn handle_command(trimmed: &str, sys: &mut System, vat_id: u32) -> bool {
 }
 
 fn eval_and_print(sys: &mut System, vat_id: u32, input: &str) {
-    let vat = sys.vat_mut(vat_id);
-
-    let tokens = match moof_lang::lang::lexer::tokenize(input) {
-        Ok(t) => t,
-        Err(e) => { eprintln!("  ~ lex: {e}"); return; }
-    };
-    let mut parser = moof_lang::lang::parser::Parser::new(&tokens, &mut vat.heap);
-    let exprs = match parser.parse_all() {
-        Ok(e) => e,
-        Err(e) => { eprintln!("  ~ parse: {e}"); return; }
-    };
-
-    for expr in &exprs {
+    // split into top-level forms so each one's source text can be
+    // attached to the closures it produces (powers [closure source]
+    // et al. in the inspector). label each repl form as <repl>.
+    for (form_text, range) in moof_core::source::split_top_level_forms(input) {
         let vat = sys.vat_mut(vat_id);
-        match moof_lang::lang::compiler::Compiler::compile_toplevel(&vat.heap, *expr) {
-            Ok(result) => match vat.vm.eval_result(&mut vat.heap, result) {
-                Ok(val) => {
-                    sys.drain();
-                    let vat = sys.vat_mut(vat_id);
-                    let show_sym = vat.heap.intern("show");
-                    let displayed = match vat.vm.send_message(&mut vat.heap, val, show_sym, &[]) {
-                        Ok(show_val) => match show_val.as_any_object().and_then(|id| vat.heap.get_string(id)) {
-                            Some(s) => s.to_string(),
-                            None => vat.heap.display_value(val),
-                        },
-                        Err(_) => vat.heap.display_value(val),
-                    };
-                    println!("  {displayed}");
-                }
-                Err(e) => eprintln!("  ~ {e}"),
+
+        let tokens = match moof_lang::lang::lexer::tokenize(&form_text) {
+            Ok(t) => t,
+            Err(e) => { eprintln!("  ~ lex: {e}"); continue; }
+        };
+        let mut parser = moof_lang::lang::parser::Parser::new(&tokens, &mut vat.heap);
+        let exprs = match parser.parse_all() {
+            Ok(e) => e,
+            Err(e) => { eprintln!("  ~ parse: {e}"); continue; }
+        };
+
+        let source_record = moof_core::source::ClosureSource {
+            text: form_text.clone(),
+            origin: moof_core::source::SourceOrigin {
+                label: "<repl>".to_string(),
+                byte_start: range.start,
+                byte_end: range.end,
             },
-            Err(e) => eprintln!("  ~ compile: {e}"),
+        };
+
+        for expr in &exprs {
+            let vat = sys.vat_mut(vat_id);
+            match moof_lang::lang::compiler::Compiler::compile_toplevel_with_source(
+                &vat.heap, *expr, Some(source_record.clone()),
+            ) {
+                Ok(result) => match vat.vm.eval_result_with_source(
+                    &mut vat.heap, result, Some(source_record.clone())) {
+                    Ok(val) => {
+                        sys.drain();
+                        let vat = sys.vat_mut(vat_id);
+                        let show_sym = vat.heap.intern("show");
+                        let displayed = match vat.vm.send_message(&mut vat.heap, val, show_sym, &[]) {
+                            Ok(show_val) => match show_val.as_any_object().and_then(|id| vat.heap.get_string(id)) {
+                                Some(s) => s.to_string(),
+                                None => vat.heap.display_value(val),
+                            },
+                            Err(_) => vat.heap.display_value(val),
+                        };
+                        println!("  {displayed}");
+                    }
+                    Err(e) => eprintln!("  ~ {e}"),
+                },
+                Err(e) => eprintln!("  ~ compile: {e}"),
+            }
         }
     }
 }

@@ -81,6 +81,12 @@ pub struct Scheduler {
     /// Source snippets eval'd on each new vat after plugin registration.
     /// Lets every cross-vat spawn have the same stdlib loaded.
     pub bootstrap_sources: Vec<String>,
+
+    /// Origin labels paired with `bootstrap_sources` (same length).
+    /// Used so closures compiled from bootstrap files carry their
+    /// actual file path as origin, not "<eval>". Stays empty when
+    /// sources are set without paths.
+    pub bootstrap_source_labels: Vec<String>,
 }
 
 impl Scheduler {
@@ -93,6 +99,7 @@ impl Scheduler {
             loaded_plugins: Vec::new(),
             type_plugins: Vec::new(),
             bootstrap_sources: Vec::new(),
+            bootstrap_source_labels: Vec::new(),
         }
     }
 
@@ -110,6 +117,16 @@ impl Scheduler {
     /// from other threads don't need filesystem access.
     pub fn set_bootstrap_sources(&mut self, sources: Vec<String>) {
         self.bootstrap_sources = sources;
+        self.bootstrap_source_labels.clear();  // unlabelled
+    }
+
+    /// Install bootstrap sources paired with their origin labels
+    /// (typically file paths from the manifest). Closures compiled
+    /// from these sources carry their file path as origin, so
+    /// inspectors can point users back at the source file.
+    pub fn set_bootstrap_sources_with_labels(&mut self, sources: Vec<(String, String)>) {
+        self.bootstrap_sources = sources.iter().map(|(s, _)| s.clone()).collect();
+        self.bootstrap_source_labels = sources.into_iter().map(|(_, l)| l).collect();
     }
 
     /// Spawn a new vat and initialize it: register installed type
@@ -121,8 +138,11 @@ impl Scheduler {
         for plugin in &self.type_plugins {
             plugin.register(&mut vat.heap);
         }
-        for source in &self.bootstrap_sources {
-            let _ = vat.eval_source(source);
+        for (i, source) in self.bootstrap_sources.iter().enumerate() {
+            let label = self.bootstrap_source_labels.get(i)
+                .map(|s| s.as_str())
+                .unwrap_or("<bootstrap>");
+            let _ = vat.eval_source_with_origin(source, label);
         }
         self.vats.push(vat);
         id
@@ -499,7 +519,7 @@ impl Scheduler {
                 (d.chunk.clone(), d.param_names.clone(), d.is_operative,
                  d.capture_names.clone(), d.capture_parent_regs.clone(),
                  d.capture_local_regs.clone(), d.capture_values.clone(),
-                 d.rest_param_reg, const_vals)
+                 d.rest_param_reg, const_vals, d.source.clone())
             })
             .collect();
 
@@ -522,10 +542,18 @@ impl Scheduler {
         let target_base = self.vat(to_vat_id).vm.closure_descs_ref().len();
         let new_code_idx = target_base + (code_idx - src_desc_base);
 
-        for (mut chunk, param_names, is_op, cap_names, cap_parent, cap_local, cap_vals, rest_reg, const_vals) in src_descs {
+        for (mut chunk, param_names, is_op, cap_names, cap_parent, cap_local, cap_vals, rest_reg, const_vals, src) in src_descs {
             chunk.constants = const_vals.iter()
                 .map(|v| self.copy_value_across(*v, from_vat_id, to_vat_id).to_bits())
                 .collect();
+
+            // register the source record in the target vat's heap at
+            // the code_idx this desc will land at; keeps [closure source]
+            // functional across migrations.
+            if let Some(s) = src.clone() {
+                let target_idx = self.vat(to_vat_id).vm.closure_descs_ref().len();
+                self.vat_mut(to_vat_id).heap.register_closure_source(target_idx, s);
+            }
 
             let desc = moof_lang::lang::compiler::ClosureDesc {
                 chunk,
@@ -537,6 +565,7 @@ impl Scheduler {
                 capture_values: cap_vals,
                 desc_base: target_base,
                 rest_param_reg: rest_reg,
+                source: src,
             };
             self.vat_mut(to_vat_id).vm.add_closure_desc(desc);
         }

@@ -28,11 +28,12 @@ color = "examples/type-plugin/target/release/libmoof_color_plugin.dylib"
 
 [capabilities]
 # each capability gets its own vat. accessed via FarRef → Act.
-console = "builtin:console"
-clock   = "builtin:clock"
-file    = "builtin:file"
-random  = "builtin:random"
-system  = "builtin:system"
+console   = "builtin:console"
+clock     = "builtin:clock"
+file      = "builtin:file"
+random    = "builtin:random"
+system    = "builtin:system"
+evaluator = "builtin:eval"
 
 [sources]
 # moof files eval'd into the image, in order.
@@ -78,11 +79,12 @@ files = [
 
   # system — vat-0 substrate (skeleton today; grows per docs/system.md)
   "lib/system/system.moof",
+  "lib/system/source.moof",
 ]
 
 [grants]
 # which capabilities each interface can access.
 # System holds all capabilities and delegates based on this table;
 # requests for anything not listed here are silently dropped.
-repl   = ["console", "clock", "file", "random", "system"]
-script = ["console", "clock", "file", "random", "system"]
+repl   = ["console", "clock", "file", "random", "system", "evaluator"]
+script = ["console", "clock", "file", "random", "system", "evaluator"]

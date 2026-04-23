@@ -1230,6 +1230,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "moof-cap-eval"
+version = "2.0.0-alpha.1"
+dependencies = [
+ "moof-core",
+ "moof-lang",
+ "moof-runtime",
+]
+
+[[package]]
 name = "moof-cap-file"
 version = "2.0.0-alpha.1"
 dependencies = [

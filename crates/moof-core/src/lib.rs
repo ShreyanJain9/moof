@@ -21,9 +21,11 @@ pub mod foreign;
 pub mod heap;
 pub mod dispatch;
 pub mod plugin;
+pub mod source;
 
 pub use value::Value;
 pub use heap::Heap;
 pub use object::HeapObject;
 pub use foreign::{ForeignType, ForeignData, ForeignTypeId, ForeignTypeName, ForeignVTable, ForeignTypeRegistry};
 pub use plugin::{Plugin, native, int_binop, float_binop, float_unary, fnv1a_64, register_foreign_proto};
+pub use source::{ClosureSource, SourceOrigin, split_top_level_forms};

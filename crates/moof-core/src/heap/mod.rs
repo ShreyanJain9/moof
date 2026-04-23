@@ -144,6 +144,14 @@ pub struct Heap {
     /// through the registered `ForeignTypeName`. Immutable by
     /// construction: `foreign_ref` but no `foreign_mut`.
     foreign_registry: ForeignTypeRegistry,
+
+    /// Source-text records, indexed by closure `code_idx` (the same
+    /// index that keys into VM.closure_descs). An entry at position N
+    /// is the source that produced the closure desc at position N.
+    /// `None` means no source is attached (generated code, imported
+    /// from an older image, etc.). Accessed by the `source` and
+    /// `origin` native handlers on the Block/Closure prototype.
+    pub closure_sources: Vec<Option<crate::source::ClosureSource>>,
 }
 
 pub type NativeFn = Box<dyn Fn(&mut Heap, Value, &[Value]) -> Result<Value, String>>;
@@ -175,6 +183,7 @@ impl Heap {
             native_idx: std::collections::HashMap::new(),
             send_cache: std::collections::HashMap::new(),
             foreign_registry: ForeignTypeRegistry::new(),
+            closure_sources: Vec::new(),
         };
 
         // intern well-known symbols
@@ -614,6 +623,24 @@ impl Heap {
         let call_sym = self.sym_call;
         self.get_mut(id).handler_set(call_sym, val);
         val
+    }
+
+    /// Record the source text for a closure desc, keyed by its
+    /// `code_idx`. Multiple closure instances from the same desc
+    /// share a single source record.
+    pub fn register_closure_source(&mut self, code_idx: usize, src: crate::source::ClosureSource) {
+        while self.closure_sources.len() <= code_idx {
+            self.closure_sources.push(None);
+        }
+        self.closure_sources[code_idx] = Some(src);
+    }
+
+    /// The source text + origin attached to the closure desc at
+    /// `code_idx`, if any. Returns None for natively-generated
+    /// closures or closures restored from an older image without
+    /// source records.
+    pub fn closure_source(&self, code_idx: usize) -> Option<&crate::source::ClosureSource> {
+        self.closure_sources.get(code_idx).and_then(|o| o.as_ref())
     }
 
     /// Check if a value is a closure object. Returns (code_idx, is_operative)

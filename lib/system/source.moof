@@ -1,0 +1,58 @@
+; source.moof — source navigation helpers.
+;
+; every closure compiled from moof code carries:
+;   [closure source]   → the source text of the form that defined it
+;   [closure origin]   → { label byte-start byte-end }
+;
+; these are native handlers on the Block prototype, populated by the
+; compiler via ClosureDesc. this file wraps them in higher-level
+; navigation:
+;
+;   [Foo source-of: 'bar:]        → source text of Foo's bar: handler
+;   [Foo origin-of: 'bar:]        → origin record
+;   [Foo where: 'bar:]            → "lib/data/foo.moof:689-1133"
+;
+; the goal: make image→file navigation a one-message gesture so
+; inspectors, the "jump to definition" feature, and the eventual
+; save-back-to-file workflow all build on the same primitive.
+
+(defmethod Object source-of: (sel)
+  "the source text of this object's handler for `sel`, or nil."
+  (let ((h [self handlerAt: sel]))
+    (if (nil? h) nil
+      (if [[h typeName] identical: 'Block] [h source]
+        nil))))
+
+(defmethod Object origin-of: (sel)
+  "provenance record { label byte-start byte-end } for this object's
+   handler for `sel`, or nil."
+  (let ((h [self handlerAt: sel]))
+    (if (nil? h) nil
+      (if [[h typeName] identical: 'Block] [h origin]
+        nil))))
+
+(defmethod Object where: (sel)
+  "human-readable location for this object's handler for `sel`.
+   format: 'label:byte-start-byte-end' or nil."
+  (let ((o [self origin-of: sel]))
+    (if (nil? o) nil
+      (str o.label ":" [o.byte-start describe] "-" [o.byte-end describe]))))
+
+; ───────────────────────────────────────────────────────────
+; reload — file → image.
+;
+; the authoring-loop move the old rust-side (reload "path.moof")
+; did, now expressible entirely in moof. reads the file via the
+; `file` cap, parses via `evaluator`, evaluates each top-level
+; form in the caller's vat via the `eval` operative. requires
+; `file` and `evaluator` caps granted.
+;
+;   [reload: "lib/system/source.moof"]
+;
+; returns an Act that resolves to nil when reload is complete.
+; ───────────────────────────────────────────────────────────
+
+(defn reload: (path)
+  (do (src   <- [file read: path])
+      (forms <- [evaluator parse: src])
+      [forms each: |f| (eval f)]))

@@ -72,7 +72,9 @@ impl Store {
         self.meta.put(&mut wtxn, "env_id", &env_bytes)
             .map_err(|e| format!("put env: {e}"))?;
 
-        // write closure descs (bytecode chunks + metadata)
+        // write closure descs (bytecode chunks + metadata). source
+        // is included so live inspectors still see handler source
+        // after save/restore.
         let desc_data: Vec<SerializableClosureDesc> = closure_chunks.iter().map(|d| {
             SerializableClosureDesc {
                 code: d.chunk.code.clone(),
@@ -86,6 +88,7 @@ impl Store {
                 capture_local_regs: d.capture_local_regs.clone(),
                 desc_base: d.desc_base,
                 rest_param_reg: d.rest_param_reg,
+                source: d.source.clone(),
             }
         }).collect();
         let desc_bytes = bincode::serialize(&desc_data).map_err(|e| format!("serialize descs: {e}"))?;
@@ -150,4 +153,6 @@ pub struct SerializableClosureDesc {
     pub capture_local_regs: Vec<u8>,
     pub desc_base: usize,
     pub rest_param_reg: Option<u8>,
+    #[serde(default)]
+    pub source: Option<moof_core::source::ClosureSource>,
 }

@@ -17,6 +17,11 @@ pub struct ClosureDesc {
     pub capture_values: Vec<Value>,
     pub desc_base: usize,
     pub rest_param_reg: Option<u8>,  // if set, extra args go here as a list
+    /// Source text + origin attached at compile time. All descs
+    /// produced by compiling a top-level form share the same source
+    /// (the whole form) — per-lambda source requires parser position
+    /// tracking, a future refinement.
+    pub source: Option<moof_core::source::ClosureSource>,
 }
 
 pub struct CompileResult {
@@ -56,6 +61,12 @@ pub struct Compiler<'a> {
     locals: Vec<(u32, u8)>,
     captures: Vec<(u32, u8, u8)>, // (symbol_id, parent_reg, local_reg)
     parent_locals: Vec<(u32, u8)>, // locals from the enclosing compiler (includes its captures)
+    /// The source record for the top-level form being compiled, if
+    /// known. Every ClosureDesc produced by this compiler (and its
+    /// sub-compilers) inherits this — so every closure emitted
+    /// while compiling `(defmethod Foo bar: ...)` carries that full
+    /// form as its source.
+    source: Option<moof_core::source::ClosureSource>,
 }
 
 impl<'a> Compiler<'a> {
@@ -68,6 +79,7 @@ impl<'a> Compiler<'a> {
             locals: Vec::new(),
             captures: Vec::new(),
             parent_locals: Vec::new(),
+            source: None,
         }
     }
 
@@ -315,6 +327,7 @@ impl<'a> Compiler<'a> {
                     // compile body — force-capture ancestor variables
                     let mut sub = Compiler::new(self.heap, "<vau>");
                     sub.parent_locals = self.build_sub_parent_locals();
+                    sub.source = self.source.clone();
                     sub.chunk.arity = arity;
                     for &sym in &param_syms {
                         let reg = sub.alloc_reg();
@@ -363,6 +376,7 @@ impl<'a> Compiler<'a> {
                         capture_parent_regs,
                         capture_local_regs,
                         capture_values: Vec::new(), desc_base: 0, rest_param_reg: rest_reg,
+                        source: self.source.clone(),
                     };
                     let idx = self.closure_descs.len();
                     self.closure_descs.push(desc);
@@ -382,6 +396,7 @@ impl<'a> Compiler<'a> {
 
                     let mut sub = Compiler::new(self.heap, "<fn>");
                     sub.parent_locals = self.build_sub_parent_locals();
+                    sub.source = self.source.clone();
                     sub.chunk.arity = arity;
                     for &sym in &positional {
                         let reg = sub.alloc_reg();
@@ -440,6 +455,7 @@ impl<'a> Compiler<'a> {
                         capture_parent_regs,
                         capture_local_regs,
                         capture_values: Vec::new(), desc_base: 0, rest_param_reg: rest_reg,
+                        source: self.source.clone(),
                     };
                     let idx = self.closure_descs.len();
                     self.closure_descs.push(desc);
@@ -1013,9 +1029,23 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    /// Compile a top-level expression.
+    /// Compile a top-level expression. No source text attached;
+    /// closures produced will have `None` for source.
     pub fn compile_toplevel(heap: &Heap, expr: Value) -> Result<CompileResult, String> {
+        Self::compile_toplevel_with_source(heap, expr, None)
+    }
+
+    /// Compile a top-level expression with a source record that will
+    /// be attached to every closure desc the compiler produces. This
+    /// is the preferred entry when the source text is known (e.g.
+    /// eval_source has it).
+    pub fn compile_toplevel_with_source(
+        heap: &Heap,
+        expr: Value,
+        source: Option<moof_core::source::ClosureSource>,
+    ) -> Result<CompileResult, String> {
         let mut c = Compiler::new(heap, "<toplevel>");
+        c.source = source;
         let dst = c.alloc_reg();
         c.compile_expr(expr, dst)?;
         c.chunk.emit(Op::Return, dst, 0, 0);

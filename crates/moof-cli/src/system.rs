@@ -64,12 +64,14 @@ impl System {
         let mut scheduler = Scheduler::new(100_000);
 
         let type_plugins = plugins::resolve_type_plugins(&manifest.types);
-        let bootstrap_sources: Vec<String> = manifest.sources.files.iter()
-            .filter_map(|p| std::fs::read_to_string(p).ok())
+        let bootstrap_sources: Vec<(String, String)> = manifest.sources.files.iter()
+            .filter_map(|p| {
+                std::fs::read_to_string(p).ok().map(|s| (s, p.clone()))
+            })
             .collect();
 
         scheduler.install_type_plugins(type_plugins);
-        scheduler.set_bootstrap_sources(bootstrap_sources);
+        scheduler.set_bootstrap_sources_with_labels(bootstrap_sources);
 
         // vat 0: reserved as System's home. today bare; phase 1 of
         // the system.md plan installs a full System defserver here.

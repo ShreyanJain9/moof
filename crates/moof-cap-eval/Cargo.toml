@@ -1,0 +1,14 @@
+[package]
+name = "moof-cap-eval"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "moof built-in capability: eval (parse moof source into AST forms)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+moof-core = { path = "../moof-core" }
+moof-lang = { path = "../moof-lang" }
+moof-runtime = { path = "../moof-runtime" }

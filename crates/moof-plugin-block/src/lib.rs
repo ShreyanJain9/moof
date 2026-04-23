@@ -46,6 +46,42 @@ impl Plugin for BlockPlugin {
             Ok(heap.make_closure(code_idx, arity, false, &captures))
         });
 
+        // Block: source — the source text of the form that defined this
+        // closure, or nil if none was recorded. Looks up the closure's
+        // code_idx in the heap's closure_sources parallel table.
+        native(heap, block_id, "source", |heap, receiver, _args| {
+            let (code_idx, _) = heap.as_closure(receiver).ok_or("source: not a closure")?;
+            match heap.closure_source(code_idx) {
+                Some(src) => {
+                    let text = src.text.clone();
+                    Ok(heap.alloc_string(&text))
+                }
+                None => Ok(Value::NIL),
+            }
+        });
+
+        // Block: origin — provenance record as a plain object:
+        // { label: <string> byte-start: <int> byte-end: <int> } or nil.
+        native(heap, block_id, "origin", |heap, receiver, _args| {
+            let (code_idx, _) = heap.as_closure(receiver).ok_or("origin: not a closure")?;
+            let Some(src) = heap.closure_source(code_idx) else { return Ok(Value::NIL); };
+            let label = src.origin.label.clone();
+            let byte_start = src.origin.byte_start as i64;
+            let byte_end = src.origin.byte_end as i64;
+
+            let label_val = heap.alloc_string(&label);
+            let label_sym = heap.intern("label");
+            let start_sym = heap.intern("byte-start");
+            let end_sym = heap.intern("byte-end");
+            // inherit from Object so slotAt: / dot-access works naturally.
+            let object_proto = heap.type_protos[PROTO_OBJ];
+            Ok(heap.make_object_with_slots(
+                object_proto,
+                vec![label_sym, start_sym, end_sym],
+                vec![label_val, Value::integer(byte_start), Value::integer(byte_end)],
+            ))
+        });
+
         // Block: describe — human-readable description
         native(heap, block_id, "describe", |heap, receiver, _args| {
             let s = heap.format_value(receiver);
