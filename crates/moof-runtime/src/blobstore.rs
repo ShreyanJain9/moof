@@ -24,7 +24,10 @@ use moof_core::canonical::{Hash, hash_hex,
     BTAG_CONS, BTAG_TEXT, BTAG_BYTES, BTAG_TABLE, BTAG_GENERAL, BTAG_FOREIGN};
 use moof_core::heap::Heap;
 use moof_core::object::HeapObject;
+use moof_core::source::ClosureSource;
 use moof_core::Value;
+use moof_lang::lang::compiler::ClosureDesc;
+use moof_lang::opcodes::Chunk;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -122,13 +125,34 @@ impl BlobStore {
             .ok_or("save_value: primitives aren't blob-addressable")?;
         let mut wtxn = self.env.write_txn().map_err(|e| format!("txn: {e}"))?;
 
-        // walk every reachable heap object, put each one's blob.
-        // canonical_blob_bytes is pure; we compute bytes + hash + put
-        // if absent. identical content skips the write.
-        let reachable = heap.reachable_objects(val);
+        // cycle-placeholder blob for back-edges.
+        let placeholder_bytes = moof_core::cycle_placeholder_blob_bytes();
+        let placeholder_hash = moof_core::cycle_placeholder();
+        if self.blobs.get(&wtxn, placeholder_hash.as_slice())
+            .map_err(|e| format!("get placeholder: {e}"))?.is_none()
+        {
+            self.blobs.put(&mut wtxn, placeholder_hash.as_slice(), &placeholder_bytes)
+                .map_err(|e| format!("put placeholder: {e}"))?;
+        }
+
+        // collect reachable, then iteratively compute every blob's
+        // canonical hash via fixpoint. naive per-object hashing is
+        // path-dependent for cyclic graphs — two reachers of the
+        // same object encode different parent blobs with different
+        // sub-hashes, so the stored sub-blob's hash doesn't match
+        // what the parent's encoding references. fixpoint fixes this
+        // by using a stable table: every round, each id's encoding
+        // emits sub-refs using the table; round-end the table is
+        // updated with the new hash per id; iterate till stable.
+        let reachable: Vec<u32> = heap.reachable_objects(val).into_iter().collect();
+        let hashes = compute_hash_table(heap, &reachable);
+
+        // write every (hash, bytes) — bytes computed using the final
+        // table, guaranteed consistent with any sub-ref inside any
+        // other blob's bytes.
         for obj_id in &reachable {
-            let bytes = heap.canonical_blob_bytes(*obj_id);
-            let hash: Hash = blake3::hash(&bytes).into();
+            let bytes = canonical_blob_bytes_using_table(heap, *obj_id, &hashes);
+            let hash = *hashes.get(obj_id).expect("id not in hash table");
             if self.blobs.get(&wtxn, hash.as_slice())
                 .map_err(|e| format!("get blob: {e}"))?.is_none()
             {
@@ -137,8 +161,8 @@ impl BlobStore {
             }
         }
 
-        // the root's blob hash — what the caller uses to retrieve it.
-        let root = heap.hash_blob(root_id);
+        // the root's final blob hash.
+        let root = *hashes.get(&root_id).expect("root not in hash table");
 
         // extra refs — one put each.
         for (name, hash) in extra_refs {
@@ -178,6 +202,254 @@ impl BlobStore {
         let mut memo: HashMap<Hash, Value> = HashMap::new();
         load_blob(self, &rtxn, hash, heap, &mut memo)
     }
+
+    // ─────────── closure-desc persistence ───────────
+
+    /// Encode the whole closure_descs vec as a single blob, store it,
+    /// and return the blob's hash. The blob also contains any value
+    /// constants inside the descs — those are encoded canonically so
+    /// they share with the rest of the heap's blobs where possible.
+    pub fn save_closure_descs(
+        &self,
+        heap: &Heap,
+        descs: &[ClosureDesc],
+    ) -> Result<Hash, String> {
+        // Collect every reachable heap id via desc constants + captures.
+        let mut reach_set = std::collections::HashSet::new();
+        for d in descs {
+            for bits in &d.chunk.constants {
+                let v = Value::from_bits(*bits);
+                for id in heap.reachable_objects(v) { reach_set.insert(id); }
+            }
+            for v in &d.capture_values {
+                for id in heap.reachable_objects(*v) { reach_set.insert(id); }
+            }
+        }
+        let reach: Vec<u32> = reach_set.into_iter().collect();
+        // fixpoint-hash every reachable id — same technique as
+        // save_value. needed so any sub-refs inside desc constants
+        // use path-independent hashes matching what we store.
+        let hashes = compute_hash_table(heap, &reach);
+
+        let mut wtxn = self.env.write_txn().map_err(|e| format!("txn: {e}"))?;
+
+        // placeholder blob.
+        let placeholder_bytes = moof_core::cycle_placeholder_blob_bytes();
+        let placeholder_hash = moof_core::cycle_placeholder();
+        if self.blobs.get(&wtxn, placeholder_hash.as_slice())
+            .map_err(|e| format!("get placeholder: {e}"))?.is_none()
+        {
+            self.blobs.put(&mut wtxn, placeholder_hash.as_slice(), &placeholder_bytes)
+                .map_err(|e| format!("put placeholder: {e}"))?;
+        }
+
+        // write each reachable blob under its final hash.
+        for id in &reach {
+            let bytes = canonical_blob_bytes_using_table(heap, *id, &hashes);
+            let h = *hashes.get(id).expect("id not in hash table");
+            if self.blobs.get(&wtxn, h.as_slice())
+                .map_err(|e| format!("get: {e}"))?.is_none()
+            {
+                self.blobs.put(&mut wtxn, h.as_slice(), &bytes)
+                    .map_err(|e| format!("put: {e}"))?;
+            }
+        }
+
+        // encode the descs themselves; sub-value refs inside go
+        // through the same hash table for consistency with stored blobs.
+        let bytes = encode_closure_descs_with(heap, descs, &hashes);
+        let h: Hash = blake3::hash(&bytes).into();
+        if self.blobs.get(&wtxn, h.as_slice())
+            .map_err(|e| format!("get: {e}"))?.is_none()
+        {
+            self.blobs.put(&mut wtxn, h.as_slice(), &bytes)
+                .map_err(|e| format!("put: {e}"))?;
+        }
+        wtxn.commit().map_err(|e| format!("commit: {e}"))?;
+        Ok(h)
+    }
+
+    /// Rehydrate a closure_descs vec from a stored blob. Value
+    /// constants and capture values are restored into `heap`.
+    pub fn load_closure_descs(
+        &self,
+        hash: &Hash,
+        heap: &mut Heap,
+    ) -> Result<Vec<ClosureDesc>, String> {
+        let rtxn = self.env.read_txn().map_err(|e| format!("txn: {e}"))?;
+        let bytes = self.blobs.get(&rtxn, hash.as_slice())
+            .map_err(|e| format!("get: {e}"))?
+            .ok_or_else(|| format!("closure-descs blob missing: {}", hash_hex(hash)))?
+            .to_vec();
+        let mut memo: HashMap<Hash, Value> = HashMap::new();
+        decode_closure_descs(self, &rtxn, &bytes, heap, &mut memo)
+    }
+}
+
+// ─────────── fixpoint canonical hashing ───────────
+//
+// Direct canonical hashing has a cycle problem: the hash of X's blob
+// depends on whether X's sub-ref Y is encoded normally or as a
+// cycle-placeholder (which happens if Y's encoding transitively loops
+// back into X). Different walks of the graph treat different edges
+// as back-edges, producing different hashes for the same object.
+//
+// Fixpoint fixes this: every object starts with placeholder hash;
+// each round re-encodes using the current table; iterate till nothing
+// changes. All objects in the graph converge to canonical hashes
+// that are path-independent and stable.
+//
+// Acyclic graphs converge in `depth` rounds. Cyclic graphs take one
+// more round after their components stabilize. For typical moof
+// images (~1000 reachable objects), this is millisecond-scale.
+
+type HashTable = std::collections::HashMap<u32, Hash>;
+
+fn compute_hash_table(heap: &Heap, ids: &[u32]) -> HashTable {
+    let mut table: HashTable = ids.iter().copied()
+        .map(|id| (id, moof_core::cycle_placeholder()))
+        .collect();
+    // sentinel: how many rounds with zero changes to conclude fixpoint
+    let mut rounds_without_change = 0;
+    // safety bound — we should converge in a handful of rounds
+    for _ in 0..1024 {
+        let mut changed = false;
+        for id in ids {
+            let bytes = canonical_blob_bytes_using_table(heap, *id, &table);
+            let new_hash: Hash = blake3::hash(&bytes).into();
+            if table.get(id).copied().unwrap() != new_hash {
+                table.insert(*id, new_hash);
+                changed = true;
+            }
+        }
+        if !changed {
+            rounds_without_change += 1;
+            if rounds_without_change >= 1 { break; }
+        } else {
+            rounds_without_change = 0;
+        }
+    }
+    table
+}
+
+fn canonical_value_bytes_using_table(heap: &Heap, val: Value, table: &HashTable) -> Vec<u8> {
+    if val.is_nil()   { return vec![VTAG_NIL]; }
+    if val.is_true()  { return vec![VTAG_TRUE]; }
+    if val.is_false() { return vec![VTAG_FALSE]; }
+
+    if let Some(i) = val.as_integer() {
+        let mut out = Vec::with_capacity(9);
+        out.push(VTAG_INT);
+        out.extend_from_slice(&i.to_be_bytes());
+        return out;
+    }
+    if let Some(f) = val.as_float() {
+        let mut out = Vec::with_capacity(9);
+        out.push(VTAG_FLOAT);
+        out.extend_from_slice(&f.to_bits().to_be_bytes());
+        return out;
+    }
+    if let Some(sym_id) = val.as_symbol() {
+        let name = heap.symbol_name(sym_id);
+        let name_bytes = name.as_bytes();
+        let mut out = Vec::with_capacity(5 + name_bytes.len());
+        out.push(VTAG_SYMBOL);
+        out.extend_from_slice(&(name_bytes.len() as u32).to_be_bytes());
+        out.extend_from_slice(name_bytes);
+        return out;
+    }
+    if let Some(obj_id) = val.as_any_object() {
+        // use the table — may be placeholder in early rounds.
+        let hash = table.get(&obj_id).copied()
+            .unwrap_or_else(|| moof_core::cycle_placeholder());
+        let mut out = Vec::with_capacity(33);
+        out.push(VTAG_BLOB);
+        out.extend_from_slice(&hash);
+        return out;
+    }
+    vec![VTAG_NIL]
+}
+
+fn canonical_blob_bytes_using_table(heap: &Heap, obj_id: u32, table: &HashTable) -> Vec<u8> {
+    let val = Value::nursery(obj_id);
+    // fast paths for known foreign types — replicate Heap's
+    // canonical_blob_bytes structure, but using the table for
+    // sub-refs instead of recursive hash_blob.
+
+    if heap.is_pair(val) {
+        let (car, cdr) = heap.pair_of(obj_id).unwrap_or((Value::NIL, Value::NIL));
+        let mut out = vec![BTAG_CONS];
+        out.extend(canonical_value_bytes_using_table(heap, car, table));
+        out.extend(canonical_value_bytes_using_table(heap, cdr, table));
+        return out;
+    }
+    if heap.is_text(val) {
+        // text has no sub-refs; canonical_blob_bytes is already
+        // path-independent, just call it.
+        return heap.canonical_blob_bytes(obj_id);
+    }
+    if heap.is_bytes(val) {
+        return heap.canonical_blob_bytes(obj_id);
+    }
+    if heap.is_table(val) {
+        // walk sub-values via table
+        let t = heap.foreign_ref::<moof_core::heap::Table>(val);
+        if let Some(t) = t {
+            let mut out = vec![BTAG_TABLE];
+            out.extend_from_slice(&(t.seq.len() as u32).to_be_bytes());
+            for v in &t.seq {
+                out.extend(canonical_value_bytes_using_table(heap, *v, table));
+            }
+            let mut entries: Vec<(Vec<u8>, Value)> = t.map.iter()
+                .map(|(k, v)| (canonical_value_bytes_using_table(heap, *k, table), *v))
+                .collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+            for (kb, v) in entries {
+                out.extend(kb);
+                out.extend(canonical_value_bytes_using_table(heap, v, table));
+            }
+            return out;
+        }
+        return vec![BTAG_TABLE, 0, 0, 0, 0, 0, 0, 0, 0];
+    }
+
+    // generic foreign (no sub-refs inside the payload beyond what
+    // trace visits — serialize deterministically via the vtable).
+    if heap.get(obj_id).foreign.is_some() {
+        return heap.canonical_blob_bytes(obj_id);
+    }
+
+    // general object: proto + sorted slots + sorted handlers.
+    let obj = heap.get(obj_id);
+    let proto_bytes = canonical_value_bytes_using_table(heap, obj.proto, table);
+    let mut slot_entries: Vec<(String, Value)> = obj.slot_names.iter()
+        .zip(obj.slot_values.iter())
+        .map(|(&sym, &v)| (heap.symbol_name(sym).to_string(), v))
+        .collect();
+    slot_entries.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    let mut handler_entries: Vec<(String, Value)> = obj.handlers.iter()
+        .map(|&(sym, v)| (heap.symbol_name(sym).to_string(), v))
+        .collect();
+    handler_entries.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+
+    let mut out = vec![BTAG_GENERAL];
+    out.extend(proto_bytes);
+    out.extend_from_slice(&(slot_entries.len() as u32).to_be_bytes());
+    for (name, v) in &slot_entries {
+        let nb = name.as_bytes();
+        out.extend_from_slice(&(nb.len() as u32).to_be_bytes());
+        out.extend_from_slice(nb);
+        out.extend(canonical_value_bytes_using_table(heap, *v, table));
+    }
+    out.extend_from_slice(&(handler_entries.len() as u32).to_be_bytes());
+    for (name, v) in &handler_entries {
+        let nb = name.as_bytes();
+        out.extend_from_slice(&(nb.len() as u32).to_be_bytes());
+        out.extend_from_slice(nb);
+        out.extend(canonical_value_bytes_using_table(heap, *v, table));
+    }
+    out
 }
 
 // ─────────── canonical blob decoders ───────────
@@ -220,12 +492,26 @@ fn load_blob(
 
     if bytes.is_empty() { return Err("empty blob".into()); }
     let tag = bytes[0];
+
+    // For General objects, pre-allocate an empty placeholder and
+    // insert into memo BEFORE recursing — this breaks cycles in the
+    // blob DAG (e.g. closure ↔ proto chain). The recursive decode
+    // then FILLS IN the pre-allocated id.
+    if tag == BTAG_GENERAL {
+        let placeholder_id = heap.alloc_val(HeapObject::new_empty(Value::NIL));
+        let placeholder_val = Value::nursery(placeholder_id.as_any_object().unwrap());
+        memo.insert(*hash, placeholder_val);
+        // decode the bytes and POPULATE the placeholder in place
+        // rather than allocating a fresh object.
+        decode_general_into(placeholder_id.as_any_object().unwrap(), store, rtxn, &bytes, heap, memo)?;
+        return Ok(placeholder_val);
+    }
+
     let val = match tag {
         BTAG_CONS    => decode_cons(store, rtxn, &bytes, heap, memo)?,
         BTAG_TEXT    => decode_text(&bytes, heap)?,
         BTAG_BYTES   => decode_bytes(&bytes, heap)?,
         BTAG_TABLE   => decode_table(store, rtxn, &bytes, heap, memo)?,
-        BTAG_GENERAL => decode_general(store, rtxn, &bytes, heap, memo)?,
         BTAG_FOREIGN => decode_foreign(&bytes, heap)?,
         _ => return Err(format!("unknown blob tag: 0x{:02x}", tag)),
     };
@@ -328,13 +614,17 @@ fn decode_table(
     Ok(heap.alloc_table(seq, map))
 }
 
-fn decode_general(
+/// Decode a BTAG_GENERAL blob into an already-allocated placeholder
+/// object. The placeholder was registered in the memo before this
+/// call, so cycles back to the same hash resolve to the same id.
+fn decode_general_into(
+    target_id: u32,
     store: &BlobStore,
     rtxn: &heed::RoTxn,
     bytes: &[u8],
     heap: &mut Heap,
     memo: &mut HashMap<Hash, Value>,
-) -> Result<Value, String> {
+) -> Result<(), String> {
     let mut offset = 1;
     let proto = decode_value(store, rtxn, bytes, &mut offset, heap, memo)?;
 
@@ -358,14 +648,241 @@ fn decode_general(
         handlers.push((sym, v));
     }
 
-    let obj = HeapObject {
-        proto,
-        slot_names,
-        slot_values,
-        handlers,
-        foreign: None,
-    };
-    Ok(heap.alloc_val(obj))
+    let obj = heap.get_mut(target_id);
+    obj.proto = proto;
+    obj.slot_names = slot_names;
+    obj.slot_values = slot_values;
+    obj.handlers = handlers;
+    obj.foreign = None;
+    Ok(())
+}
+
+// ─────────── closure desc codec ───────────
+//
+// Format (all integers big-endian):
+//   u32 n_descs
+//   for each desc:
+//     u32 code-len + code bytes
+//     u32 n-constants + [canonical value bytes per constant]
+//     u8 arity
+//     u8 num_regs
+//     u32 name-len + name utf8
+//     u32 n-param-names + [utf8 each]                (symbols by name)
+//     u8 is_operative
+//     u32 n-cap-names + [utf8 each]
+//     u32 n-cap-parent + [u8 each]
+//     u32 n-cap-local + [u8 each]
+//     u32 n-cap-values + [canonical value bytes]
+//     u32 desc_base
+//     u8 has_rest_reg + (u8 rest_reg if has)
+//     u8 has_source + (if 1: source encoding)
+//
+// Source encoding (when present):
+//   u32 text-len + text utf8
+//   u32 label-len + label utf8
+//   u64 byte_start
+//   u64 byte_end
+
+fn encode_closure_descs_with(heap: &Heap, descs: &[ClosureDesc], table: &HashTable) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&(descs.len() as u32).to_be_bytes());
+    for d in descs {
+        encode_desc_with(heap, d, table, &mut out);
+    }
+    out
+}
+
+fn encode_desc_with(heap: &Heap, d: &ClosureDesc, table: &HashTable, out: &mut Vec<u8>) {
+    // code
+    out.extend_from_slice(&(d.chunk.code.len() as u32).to_be_bytes());
+    out.extend_from_slice(&d.chunk.code);
+
+    // constants — each a canonical Value (using table for heap refs)
+    out.extend_from_slice(&(d.chunk.constants.len() as u32).to_be_bytes());
+    for bits in &d.chunk.constants {
+        let v = Value::from_bits(*bits);
+        out.extend(canonical_value_bytes_using_table(heap, v, table));
+    }
+
+    out.push(d.chunk.arity);
+    out.push(d.chunk.num_regs);
+
+    let name = d.chunk.name.as_bytes();
+    out.extend_from_slice(&(name.len() as u32).to_be_bytes());
+    out.extend_from_slice(name);
+
+    out.extend_from_slice(&(d.param_names.len() as u32).to_be_bytes());
+    for &sym in &d.param_names {
+        let n = heap.symbol_name(sym).as_bytes();
+        out.extend_from_slice(&(n.len() as u32).to_be_bytes());
+        out.extend_from_slice(n);
+    }
+
+    out.push(d.is_operative as u8);
+
+    out.extend_from_slice(&(d.capture_names.len() as u32).to_be_bytes());
+    for &sym in &d.capture_names {
+        let n = heap.symbol_name(sym).as_bytes();
+        out.extend_from_slice(&(n.len() as u32).to_be_bytes());
+        out.extend_from_slice(n);
+    }
+
+    out.extend_from_slice(&(d.capture_parent_regs.len() as u32).to_be_bytes());
+    out.extend_from_slice(&d.capture_parent_regs);
+
+    out.extend_from_slice(&(d.capture_local_regs.len() as u32).to_be_bytes());
+    out.extend_from_slice(&d.capture_local_regs);
+
+    out.extend_from_slice(&(d.capture_values.len() as u32).to_be_bytes());
+    for v in &d.capture_values {
+        out.extend(canonical_value_bytes_using_table(heap, *v, table));
+    }
+
+    out.extend_from_slice(&(d.desc_base as u32).to_be_bytes());
+
+    match d.rest_param_reg {
+        Some(r) => { out.push(1); out.push(r); }
+        None => { out.push(0); }
+    }
+
+    match &d.source {
+        Some(s) => {
+            out.push(1);
+            let text = s.text.as_bytes();
+            let label = s.origin.label.as_bytes();
+            out.extend_from_slice(&(text.len() as u32).to_be_bytes());
+            out.extend_from_slice(text);
+            out.extend_from_slice(&(label.len() as u32).to_be_bytes());
+            out.extend_from_slice(label);
+            out.extend_from_slice(&(s.origin.byte_start as u64).to_be_bytes());
+            out.extend_from_slice(&(s.origin.byte_end as u64).to_be_bytes());
+        }
+        None => out.push(0),
+    }
+}
+
+fn decode_closure_descs(
+    store: &BlobStore,
+    rtxn: &heed::RoTxn,
+    bytes: &[u8],
+    heap: &mut Heap,
+    memo: &mut HashMap<Hash, Value>,
+) -> Result<Vec<ClosureDesc>, String> {
+    let mut offset = 0;
+    let n = read_u32(bytes, &mut offset)? as usize;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        out.push(decode_desc(store, rtxn, bytes, &mut offset, heap, memo)?);
+    }
+    Ok(out)
+}
+
+fn decode_desc(
+    store: &BlobStore,
+    rtxn: &heed::RoTxn,
+    bytes: &[u8],
+    offset: &mut usize,
+    heap: &mut Heap,
+    memo: &mut HashMap<Hash, Value>,
+) -> Result<ClosureDesc, String> {
+    let code_len = read_u32(bytes, offset)? as usize;
+    if *offset + code_len > bytes.len() { return Err("truncated code".into()); }
+    let code = bytes[*offset..*offset + code_len].to_vec();
+    *offset += code_len;
+
+    let n_const = read_u32(bytes, offset)? as usize;
+    let mut constants = Vec::with_capacity(n_const);
+    for _ in 0..n_const {
+        let v = decode_value(store, rtxn, bytes, offset, heap, memo)?;
+        constants.push(v.to_bits());
+    }
+
+    if *offset + 2 > bytes.len() { return Err("truncated arity/regs".into()); }
+    let arity = bytes[*offset]; *offset += 1;
+    let num_regs = bytes[*offset]; *offset += 1;
+
+    let name = read_len_utf8(bytes, offset)?;
+
+    let n_params = read_u32(bytes, offset)? as usize;
+    let mut param_names = Vec::with_capacity(n_params);
+    for _ in 0..n_params {
+        let n = read_len_utf8(bytes, offset)?;
+        param_names.push(heap.intern(&n));
+    }
+
+    if *offset >= bytes.len() { return Err("truncated is_operative".into()); }
+    let is_operative = bytes[*offset] != 0; *offset += 1;
+
+    let n_cap = read_u32(bytes, offset)? as usize;
+    let mut capture_names = Vec::with_capacity(n_cap);
+    for _ in 0..n_cap {
+        let n = read_len_utf8(bytes, offset)?;
+        capture_names.push(heap.intern(&n));
+    }
+
+    let n_cap_parent = read_u32(bytes, offset)? as usize;
+    if *offset + n_cap_parent > bytes.len() { return Err("truncated cap-parent".into()); }
+    let capture_parent_regs = bytes[*offset..*offset + n_cap_parent].to_vec();
+    *offset += n_cap_parent;
+
+    let n_cap_local = read_u32(bytes, offset)? as usize;
+    if *offset + n_cap_local > bytes.len() { return Err("truncated cap-local".into()); }
+    let capture_local_regs = bytes[*offset..*offset + n_cap_local].to_vec();
+    *offset += n_cap_local;
+
+    let n_cap_vals = read_u32(bytes, offset)? as usize;
+    let mut capture_values = Vec::with_capacity(n_cap_vals);
+    for _ in 0..n_cap_vals {
+        capture_values.push(decode_value(store, rtxn, bytes, offset, heap, memo)?);
+    }
+
+    let desc_base = read_u32(bytes, offset)? as usize;
+
+    if *offset >= bytes.len() { return Err("truncated rest-reg flag".into()); }
+    let has_rest = bytes[*offset] != 0; *offset += 1;
+    let rest_param_reg = if has_rest {
+        if *offset >= bytes.len() { return Err("truncated rest-reg".into()); }
+        let r = bytes[*offset]; *offset += 1;
+        Some(r)
+    } else { None };
+
+    if *offset >= bytes.len() { return Err("truncated source flag".into()); }
+    let has_source = bytes[*offset] != 0; *offset += 1;
+    let source = if has_source {
+        let text = read_len_utf8(bytes, offset)?;
+        let label = read_len_utf8(bytes, offset)?;
+        if *offset + 16 > bytes.len() { return Err("truncated source offsets".into()); }
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&bytes[*offset..*offset + 8]);
+        *offset += 8;
+        let byte_start = u64::from_be_bytes(a) as usize;
+        a.copy_from_slice(&bytes[*offset..*offset + 8]);
+        *offset += 8;
+        let byte_end = u64::from_be_bytes(a) as usize;
+        Some(ClosureSource {
+            text,
+            origin: moof_core::source::SourceOrigin {
+                label, byte_start, byte_end,
+            },
+        })
+    } else { None };
+
+    let mut chunk = Chunk::new(name, arity, num_regs);
+    chunk.code = code;
+    chunk.constants = constants;
+
+    Ok(ClosureDesc {
+        chunk,
+        param_names,
+        is_operative,
+        capture_names,
+        capture_parent_regs,
+        capture_local_regs,
+        capture_values,
+        desc_base,
+        rest_param_reg,
+        source,
+    })
 }
 
 fn decode_foreign(bytes: &[u8], heap: &mut Heap) -> Result<Value, String> {
@@ -546,6 +1063,81 @@ mod tests {
         let restored = store.load_value(&root, &mut fresh).unwrap();
         assert_eq!(fresh.get_string(restored.as_any_object().unwrap()),
             Some("hello from the image"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn closure_descs_round_trip() {
+        use moof_lang::opcodes::Chunk;
+        let dir = tempdir();
+        let store = BlobStore::open(&dir).unwrap();
+        let mut heap = Heap::new();
+
+        // Construct a minimal closure desc with a few constants and
+        // captures — exercises the value codec paths.
+        let mut chunk = Chunk::new("test", 2, 4);
+        chunk.code = vec![0x01, 0x02, 0x03];
+        chunk.constants = vec![
+            Value::integer(42).to_bits(),
+            Value::NIL.to_bits(),
+        ];
+        let sym_x = heap.intern("x");
+        let sym_y = heap.intern("y");
+        let sym_z = heap.intern("z");
+        let captured_list = heap.list(&[Value::integer(1), Value::integer(2)]);
+        let desc = ClosureDesc {
+            chunk,
+            param_names: vec![sym_x, sym_y],
+            is_operative: false,
+            capture_names: vec![sym_z],
+            capture_parent_regs: vec![3],
+            capture_local_regs: vec![5],
+            capture_values: vec![captured_list],
+            desc_base: 0,
+            rest_param_reg: Some(7),
+            source: Some(moof_core::source::ClosureSource {
+                text: "(defn foo ...)".to_string(),
+                origin: moof_core::source::SourceOrigin {
+                    label: "test.moof".to_string(),
+                    byte_start: 10, byte_end: 24,
+                },
+            }),
+        };
+        let descs = vec![desc];
+
+        let hash = store.save_closure_descs(&heap, &descs).unwrap();
+
+        // load into a fresh heap
+        let mut fresh = Heap::new();
+        let loaded = store.load_closure_descs(&hash, &mut fresh).unwrap();
+        assert_eq!(loaded.len(), 1);
+        let d = &loaded[0];
+        assert_eq!(d.chunk.code, vec![0x01, 0x02, 0x03]);
+        assert_eq!(d.chunk.arity, 2);
+        assert_eq!(d.chunk.num_regs, 4);
+        assert_eq!(d.chunk.constants.len(), 2);
+        assert_eq!(Value::from_bits(d.chunk.constants[0]).as_integer(), Some(42));
+        assert!(Value::from_bits(d.chunk.constants[1]).is_nil());
+        assert_eq!(d.param_names.len(), 2);
+        assert_eq!(fresh.symbol_name(d.param_names[0]), "x");
+        assert_eq!(fresh.symbol_name(d.param_names[1]), "y");
+        assert_eq!(d.is_operative, false);
+        assert_eq!(d.capture_parent_regs, vec![3]);
+        assert_eq!(d.capture_local_regs, vec![5]);
+        assert_eq!(d.capture_values.len(), 1);
+        // captured list is a cons of 1, 2
+        let items = fresh.list_to_vec(d.capture_values[0]);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].as_integer(), Some(1));
+        assert_eq!(items[1].as_integer(), Some(2));
+        assert_eq!(d.rest_param_reg, Some(7));
+        assert!(d.source.is_some());
+        let src = d.source.as_ref().unwrap();
+        assert_eq!(src.text, "(defn foo ...)");
+        assert_eq!(src.origin.label, "test.moof");
+        assert_eq!(src.origin.byte_start, 10);
+        assert_eq!(src.origin.byte_end, 24);
 
         std::fs::remove_dir_all(&dir).ok();
     }

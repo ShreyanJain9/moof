@@ -30,4 +30,4 @@ pub use object::HeapObject;
 pub use foreign::{ForeignType, ForeignData, ForeignTypeId, ForeignTypeName, ForeignVTable, ForeignTypeRegistry};
 pub use plugin::{Plugin, native, int_binop, float_binop, float_unary, fnv1a_64, register_foreign_proto};
 pub use source::{ClosureSource, SourceOrigin, split_top_level_forms};
-pub use canonical::{Hash, hash_hex};
+pub use canonical::{Hash, hash_hex, cycle_placeholder, cycle_placeholder_blob_bytes};

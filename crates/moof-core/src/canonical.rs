@@ -93,14 +93,24 @@ impl Heap {
     }
 }
 
-/// Well-known placeholder hash for a cycle in the content graph.
-/// Closures reference their proto, whose handlers reference closures,
-/// so prototype chains are often cyclic. When a top-level hash walks
-/// into the same blob it's already computing, we emit this fixed
-/// sentinel instead of recursing. The sentinel is blake3("moof-cycle")
-/// — distinct from any real value's hash (with overwhelming
-/// probability), and stable across runs.
-fn cycle_placeholder() -> Hash { blake3::hash(b"moof-cycle").into() }
+/// Canonical bytes for the cycle-placeholder blob: an empty General
+/// object (proto=nil, no slots, no handlers). Produces a fixed
+/// 10-byte sequence, hence a fixed hash. The blob store writes this
+/// blob unconditionally during save so any cycle-reference inside a
+/// real blob can be resolved on load to an empty object (rather than
+/// an "unknown blob" error). Lossy for cyclic data — cycles become
+/// empty objects — but cycles aren't expressible as pure content
+/// anyway.
+pub fn cycle_placeholder_blob_bytes() -> Vec<u8> {
+    vec![BTAG_GENERAL, VTAG_NIL, 0, 0, 0, 0, 0, 0, 0, 0]
+}
+
+/// Hash of the cycle-placeholder blob. Stable across runs, processes,
+/// machines. Returned whenever canonicalization revisits an in-flight
+/// blob (prototype chain cycles).
+pub fn cycle_placeholder() -> Hash {
+    blake3::hash(&cycle_placeholder_blob_bytes()).into()
+}
 
 impl Heap {
     // ─────────── value encoding ───────────

@@ -54,6 +54,11 @@ impl VM {
         self.closure_descs.push(desc);
     }
 
+    /// Replace all closure descs (used on image load).
+    pub fn set_closure_descs(&mut self, descs: Vec<ClosureDesc>) {
+        self.closure_descs = descs;
+    }
+
     pub fn closure_descs_ref(&self) -> &[ClosureDesc] {
         &self.closure_descs
     }

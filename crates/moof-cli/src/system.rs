@@ -149,7 +149,16 @@ impl System {
     /// skipped with a warning. Nothing else can spawn a user vat;
     /// nothing else can grant caps.
     pub fn spawn_for_interface(&mut self, label: &str, cap_names: &[String]) -> u32 {
+        // spawn_vat registers plugins + runs bootstrap. If an image
+        // exists, we then overlay it on top: loaded env replaces the
+        // bootstrap env, loaded closure_descs replace the bootstrap
+        // ones. User state from previous sessions returns.
         let id = self.scheduler.spawn_vat();
+        match self.try_load_into(id) {
+            Ok(true) => eprintln!("  image loaded into vat {id}"),
+            Ok(false) => {}  // fresh image or missing; bootstrap-only state
+            Err(e) => eprintln!("  ~ image load failed: {e} (continuing with bootstrap)"),
+        }
         self.grant_internal(id, cap_names, label);
         self.user_vats.push(UserVatEntry {
             id,
@@ -204,16 +213,81 @@ impl System {
     /// Drain pending cross-vat work.
     pub fn drain(&mut self) { self.scheduler.drain(); }
 
-    /// Save the given vat's heap to the image store.
+    /// Save the given vat's heap to the image store. Uses the
+    /// content-addressed BlobStore: every reachable value becomes
+    /// a blob keyed by its blake3 hash, with root refs
+    /// `roots.env` and `roots.closure-descs` pointing at the
+    /// current heads. See docs/persistence.md.
     pub fn save_image(&self, vat_id: u32) -> Result<usize, String> {
-        use crate::store::Store;
+        use moof_runtime::BlobStore;
         let store_path = &self.manifest.image.path;
-        let store = Store::open(Path::new(store_path))
-            .map_err(|e| format!("open store: {e}"))?;
+        let store = BlobStore::open(Path::new(store_path))
+            .map_err(|e| format!("open blobstore: {e}"))?;
         let vat = self.scheduler.vat(vat_id);
-        store.save_all(&vat.heap, vat.vm.closure_descs_ref())
-            .map_err(|e| format!("save: {e}"))?;
+
+        // save closure descs first — env bindings may reference
+        // closures whose code_idx points into this vec.
+        let descs_hash = store.save_closure_descs(&vat.heap, vat.vm.closure_descs_ref())?;
+
+        // save env: every reachable blob gets put. returns the
+        // env value's own blob hash.
+        let env_val = Value::nursery(vat.heap.env);
+        let env_hash = store.save_value(&vat.heap, env_val, &[])?;
+
+        // write roots (two separate txns; acceptable for v0.
+        // atomicity would require threading extra_refs through
+        // save_value with a known-upfront hash, which we don't have
+        // until after save_value returns).
+        store.put_ref("roots.env", &env_hash)?;
+        store.put_ref("roots.closure-descs", &descs_hash)?;
+
         Ok(vat.heap.object_count())
+    }
+
+    /// Attempt to restore a vat's heap from a saved image. Returns
+    /// true if an image was found and loaded, false if no image
+    /// exists (first boot). Errors on corruption. Called by
+    /// spawn_for_interface when appropriate.
+    fn try_load_into(&mut self, vat_id: u32) -> Result<bool, String> {
+        use moof_runtime::BlobStore;
+        let store_path = &self.manifest.image.path;
+        if !Path::new(store_path).exists() { return Ok(false); }
+
+        let store = BlobStore::open(Path::new(store_path))
+            .map_err(|e| format!("open blobstore: {e}"))?;
+        let Some(env_hash) = store.get_ref("roots.env")
+            .map_err(|e| format!("get roots.env: {e}"))?
+        else { return Ok(false); };
+        let Some(descs_hash) = store.get_ref("roots.closure-descs")
+            .map_err(|e| format!("get roots.closure-descs: {e}"))?
+        else { return Ok(false); };
+
+        let vat = self.scheduler.vat_mut(vat_id);
+
+        // load closure descs — they populate VM.closure_descs at
+        // their saved indices. Any heap values they reference get
+        // allocated into the heap during decode.
+        let descs = store.load_closure_descs(&descs_hash, &mut vat.heap)?;
+        vat.vm.set_closure_descs(descs);
+        // mirror sources into the heap's closure_sources table so
+        // [closure source] keeps working.
+        let descs_snapshot: Vec<_> = vat.vm.closure_descs_ref().iter()
+            .enumerate()
+            .map(|(i, d)| (i, d.source.clone()))
+            .collect();
+        for (i, src) in descs_snapshot {
+            if let Some(s) = src {
+                vat.heap.register_closure_source(i, s);
+            }
+        }
+
+        // load env — replaces the bare env the vat was created with.
+        let env_val = store.load_value(&env_hash, &mut vat.heap)?;
+        if let Some(env_id) = env_val.as_any_object() {
+            vat.heap.env = env_id;
+        }
+
+        Ok(true)
     }
 
     // ─────────── low-level vat access for interfaces ───────────
