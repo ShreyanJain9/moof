@@ -27,7 +27,11 @@ impl Heap {
         if let Some(n) = val.as_integer() { return n.to_string(); }
         if val.is_float() { return format!("{}", f64::from_bits(val.to_bits())); }
         if let Some(id) = val.as_symbol() {
-            return format!("'{}", self.symbol_name(id));
+            // Symbols print bare, like classic lisp. `'x` is reader
+            // syntax for (quote x); when printing, the underlying
+            // symbol is just its name. `(quote X)` gets the `'X`
+            // shorthand in list formatting below.
+            return self.symbol_name(id).to_string();
         }
         if let Some(id) = val.as_any_object() {
             // cycle detection: if we're already mid-format on this id
@@ -116,6 +120,31 @@ impl Heap {
     }
 
     fn format_list_at(&self, mut id: u32, visiting: &mut Vec<u32>) -> String {
+        // reader-syntax shortcuts: (quote X) → 'X, (quasiquote X) → `X,
+        // (unquote X) → ,X, (unquote-splicing X) → ,@X. matches how
+        // moof's parser reads these forms, so displayed output can be
+        // pasted back in.
+        if let Some((car, cdr)) = self.pair_of(id) {
+            if let Some(sym) = car.as_symbol() {
+                let name = self.symbol_name(sym);
+                let prefix = match name {
+                    "quote"            => Some("'"),
+                    "quasiquote"       => Some("`"),
+                    "unquote"          => Some(","),
+                    "unquote-splicing" => Some(",@"),
+                    _ => None,
+                };
+                if let Some(p) = prefix {
+                    // must be exactly (quote X) — one arg, nil tail.
+                    if let Some((arg, tail)) = cdr.as_any_object().and_then(|aid| self.pair_of(aid)) {
+                        if tail.is_nil() {
+                            return format!("{p}{}", self.format_value_at(arg, visiting));
+                        }
+                    }
+                }
+            }
+        }
+
         let mut items = Vec::new();
         let mut tail = Value::NIL;
         loop {
@@ -154,7 +183,11 @@ impl Heap {
             return format!("{}  : Float", f64::from_bits(val.to_bits()));
         }
         if let Some(id) = val.as_symbol() {
-            return format!("'{}", self.symbol_name(id));
+            // Symbols print bare, like classic lisp. `'x` is reader
+            // syntax for (quote x); when printing, the underlying
+            // symbol is just its name. `(quote X)` gets the `'X`
+            // shorthand in list formatting below.
+            return self.symbol_name(id).to_string();
         }
         if let Some(id) = val.as_any_object() {
             return self.display_object(id);

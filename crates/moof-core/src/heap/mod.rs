@@ -579,16 +579,31 @@ impl Heap {
     /// work. Dispatch dispatches to the rust fn when `native_idx`
     /// is present on the closure.
     ///
-    /// `name` is used only for describe / reflection. The "#N"
-    /// convention from prior versions is gone — the native's
-    /// identity is the object itself, not a symbol.
-    pub fn register_native(&mut self, name: &str, f: impl Fn(&mut Heap, Value, &[Value]) -> Result<Value, String> + 'static) -> Value {
+    /// Arity is inferred from the selector shape (smalltalk
+    /// convention): `foo:` → 1, `foo:bar:` → 2, `+` / `<` / other
+    /// binary operators → 1, bare unary method `describe` → 0.
+    /// Use `register_native_arity` if you need to override.
+    pub fn register_native(
+        &mut self,
+        name: &str,
+        f: impl Fn(&mut Heap, Value, &[Value]) -> Result<Value, String> + 'static,
+    ) -> Value {
+        let arity = selector_arity(name);
+        self.register_native_arity(name, arity, f)
+    }
+
+    /// Register with an explicit arity, for selectors whose natural
+    /// arity doesn't follow the smalltalk inference (e.g. a method
+    /// named `where` that takes one arg, or operative variants).
+    pub fn register_native_arity(
+        &mut self,
+        name: &str,
+        arity: u8,
+        f: impl Fn(&mut Heap, Value, &[Value]) -> Result<Value, String> + 'static,
+    ) -> Value {
         let idx = self.natives.len();
         self.natives.push(Box::new(f));
 
-        // allocate a Block-proto heap object that looks like a
-        // closure but has native_idx set. code_idx is a sentinel
-        // (-1) — never indexed into closure_descs.
         let proto = self.type_protos.get(PROTO_CLOSURE).copied()
             .unwrap_or_else(|| self.type_protos[PROTO_OBJ]);
 
@@ -602,8 +617,8 @@ impl Heap {
 
         let names  = vec![code_idx_sym, arity_sym, is_op_sym, is_pure_sym, native_sym, name_sym_s];
         let values = vec![
-            Value::integer(-1),              // code_idx sentinel
-            Value::integer(0),               // arity unknown (rust fn)
+            Value::integer(-1),              // code_idx sentinel (natives don't use bytecode)
+            Value::integer(arity as i64),    // arity from selector or explicit
             Value::boolean(false),           // not operative
             Value::boolean(true),            // native handlers are pure-ish by default
             Value::integer(idx as i64),      // native_idx → natives[idx]
@@ -612,7 +627,6 @@ impl Heap {
 
         let id = self.alloc(HeapObject::new_general(proto, names, values));
         let val = Value::nursery(id);
-        // install call: → self so dispatch through Block proto works.
         let call_sym = self.sym_call;
         self.get_mut(id).handler_set(call_sym, val);
         val
@@ -628,6 +642,32 @@ impl Heap {
         let v = obj.slot_get(self.sym_native_idx)?;
         Some(v.as_integer()? as usize)
     }
+}
+
+/// Infer a selector's arity by smalltalk convention:
+///   unary methods (`describe`, `reverse`)            → 0
+///   binary operators (`+`, `<`, `++`, `==`, ...)     → 1
+///   keyword selectors (`at:`, `at:put:`, `fold:with:`) → count of ':'
+///
+/// Used by `register_native` when the plugin doesn't explicitly
+/// declare arity.
+pub fn selector_arity(sel: &str) -> u8 {
+    let colons = sel.chars().filter(|&c| c == ':').count();
+    if colons > 0 { return colons as u8; }
+    // binary operators: all short non-alphanumeric selectors,
+    // plus a small hand-maintained list of moof operators.
+    const BINARY_OPS: &[&str] = &[
+        "+", "-", "*", "/", "%", "<", ">", "=", "<=", ">=",
+        "==", "!=", "++", "&&", "||", "<<", ">>", "..",
+    ];
+    if BINARY_OPS.contains(&sel) { return 1; }
+    // fallthrough — treat as unary (0 args).
+    0
+}
+
+impl Heap {
+    // dummy impl block to preserve the "impl Heap { … }" boundary
+    // that the rest of this file expects.
 
     /// Value equality (like Ruby's eql?). Compares content for strings.
     pub fn values_equal(&self, a: Value, b: Value) -> bool {
