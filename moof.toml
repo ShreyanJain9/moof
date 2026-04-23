@@ -88,3 +88,4 @@ files = [
 # requests for anything not listed here are silently dropped.
 repl   = ["console", "clock", "file", "random", "system", "evaluator"]
 script = ["console", "clock", "file", "random", "system", "evaluator"]
+eval   = ["console", "clock", "file", "random", "system", "evaluator"]

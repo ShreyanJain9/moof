@@ -216,15 +216,43 @@ impl Scheduler {
 
     /// Create a FarRef in a vat pointing to an object in another vat.
     pub fn create_farref(&mut self, in_vat: u32, target_vat: u32, target_obj: u32) -> Value {
+        self.create_farref_named(in_vat, target_vat, target_obj, None)
+    }
+
+    /// Create a FarRef that carries its capability name as a slot.
+    /// Named FarRefs survive image restart: loading the image
+    /// re-resolves the name against the current session's capability
+    /// registry, so the FarRef points at the fresh (vat_id, obj_id)
+    /// rather than the stale ones from the save session.
+    ///
+    /// `name` should be the stable capability name (e.g. "console",
+    /// "clock") from the manifest's [capabilities] section.
+    pub fn create_farref_named(
+        &mut self,
+        in_vat: u32,
+        target_vat: u32,
+        target_obj: u32,
+        name: Option<&str>,
+    ) -> Value {
         let vat = self.vat_mut(in_vat);
         let farref_proto = vat.heap.lookup_type("FarRef");
         let tgt_vat_sym = vat.heap.intern("__target_vat");
         let tgt_obj_sym = vat.heap.intern("__target_obj");
-        vat.heap.make_object_with_slots(
-            farref_proto,
-            vec![tgt_vat_sym, tgt_obj_sym],
-            vec![Value::integer(target_vat as i64), Value::integer(target_obj as i64)],
-        )
+        let (names, values) = match name {
+            Some(n) => {
+                let tgt_name_sym = vat.heap.intern("__target_name");
+                let name_val = vat.heap.alloc_string(n);
+                (
+                    vec![tgt_vat_sym, tgt_obj_sym, tgt_name_sym],
+                    vec![Value::integer(target_vat as i64), Value::integer(target_obj as i64), name_val],
+                )
+            }
+            None => (
+                vec![tgt_vat_sym, tgt_obj_sym],
+                vec![Value::integer(target_vat as i64), Value::integer(target_obj as i64)],
+            ),
+        };
+        vat.heap.make_object_with_slots(farref_proto, names, values)
     }
 
     /// Get a reference to a vat by ID.

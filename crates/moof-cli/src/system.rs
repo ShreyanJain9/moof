@@ -197,7 +197,12 @@ impl System {
             }
         }
         for (name, src_vat, src_obj) in grants {
-            let farref = self.scheduler.create_farref(target_vat, src_vat, src_obj);
+            // named FarRef so it survives image restart: the name is
+            // the stable handle, (vat_id, obj_id) get re-resolved on
+            // load against the current session's cap registry.
+            let farref = self.scheduler.create_farref_named(
+                target_vat, src_vat, src_obj, Some(&name),
+            );
             let sym = self.scheduler.vat_mut(target_vat).heap.intern(&name);
             self.scheduler.vat_mut(target_vat).heap.env_def(sym, farref);
         }
@@ -250,23 +255,29 @@ impl System {
         let store = BlobStore::open(Path::new(store_path))
             .map_err(|e| format!("open blobstore: {e}"))?;
 
-        let vat = self.scheduler.vat_mut(vat_id);
-        let Some(snap) = store.load_snapshot(&mut vat.heap)? else {
-            return Ok(false);
+        let snap = {
+            let vat = self.scheduler.vat_mut(vat_id);
+            let Some(s) = store.load_snapshot(&mut vat.heap)? else {
+                return Ok(false);
+            };
+            // install type_protos so primitive dispatch sees loaded protos.
+            for (i, v) in s.type_protos.iter().enumerate() {
+                if i < vat.heap.type_protos.len() {
+                    vat.heap.type_protos[i] = *v;
+                }
+            }
+            // heal foreign protos: bootstrap-era strings/cons-cells/etc
+            // had their .proto set to the FRESH plugin proto, which we
+            // just overwrote in type_protos. Walk the heap and fix them.
+            vat.heap.heal_foreign_protos();
+            s
         };
 
-        // install type_protos so primitive dispatch sees loaded protos.
-        for (i, v) in snap.type_protos.into_iter().enumerate() {
-            if i < vat.heap.type_protos.len() {
-                vat.heap.type_protos[i] = v;
-            }
-        }
-        // heal foreign protos: bootstrap-era strings/cons-cells/etc
-        // had their .proto set to the FRESH plugin proto, which we
-        // just overwrote in type_protos. Walk the heap and fix them
-        // so dispatch on a bootstrap-era "" reaches the loaded
-        // String proto (and thus loaded handlers/closures).
-        vat.heap.heal_foreign_protos();
+        // re-resolve capability FarRefs by name (requires &mut self
+        // for the cap registry, so outside the vat borrow above).
+        self.rewire_cap_farrefs(vat_id);
+
+        let vat = self.scheduler.vat_mut(vat_id);
 
         // install closure_descs; mirror sources into heap.
         let descs = snap.closure_descs;
@@ -299,6 +310,53 @@ impl System {
 
     pub fn vat(&self, id: u32) -> &Vat { self.scheduler.vat(id) }
     pub fn vat_mut(&mut self, id: u32) -> &mut Vat { self.scheduler.vat_mut(id) }
+
+    // ─────────── cap-FarRef rewiring after image load ───────────
+
+    /// After loading an image, every FarRef that was created for a
+    /// capability carries a stable `__target_name` slot. This walks
+    /// the target vat's heap, finds such FarRefs, looks up the name
+    /// in the current session's capability registry, and patches
+    /// `__target_vat` / `__target_obj` to the fresh (live) ids.
+    ///
+    /// FarRefs without `__target_name` (e.g. user-to-defserver refs)
+    /// are left untouched — they'll only work if vat ids happen to
+    /// line up (same manifest → same boot order → same ids).
+    fn rewire_cap_farrefs(&mut self, vat_id: u32) {
+        // snapshot the cap registry — reading from self while
+        // mutating heap is easier without borrow juggling.
+        let caps: std::collections::HashMap<String, (u32, u32)> = self.capabilities.iter()
+            .map(|c| (c.name.clone(), (c.vat_id, c.obj_id)))
+            .collect();
+        let heap = &mut self.scheduler.vat_mut(vat_id).heap;
+
+        let farref_proto = heap.type_protos[moof_core::heap::PROTO_FARREF];
+        let Some(farref_proto_id) = farref_proto.as_any_object() else { return };
+        let tgt_vat_sym = heap.intern("__target_vat");
+        let tgt_obj_sym = heap.intern("__target_obj");
+        let tgt_name_sym = heap.intern("__target_name");
+
+        let mut patched = 0;
+        let total = heap.object_count();
+        for id in 0..total as u32 {
+            if heap.get(id).proto != farref_proto { continue; }
+            let Some(name_val) = heap.get(id).slot_get(tgt_name_sym) else { continue };
+            let Some(name_id) = name_val.as_any_object() else { continue };
+            let Some(name_str) = heap.get_string(name_id).map(|s| s.to_string()) else { continue };
+
+            if let Some(&(live_vat, live_obj)) = caps.get(&name_str) {
+                let obj = heap.get_mut(id);
+                obj.slot_set(tgt_vat_sym, Value::integer(live_vat as i64));
+                obj.slot_set(tgt_obj_sym, Value::integer(live_obj as i64));
+                patched += 1;
+            }
+        }
+        // blindly noisy if zero; useful signal when non-zero.
+        if patched > 0 {
+            eprintln!("  re-resolved {patched} capability FarRefs by name");
+        }
+        let _ = farref_proto_id; // suppress warning (we use farref_proto directly)
+    }
 
     // ─────────── mirror state into the `system` capability ───────────
 
