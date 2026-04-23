@@ -122,6 +122,15 @@ pub struct Heap {
     pub sym_at_put: u32,
     pub sym_message: u32,     // message — Error slot
 
+    // closure slot symbols — metadata lives on every closure under
+    // these names. looked up by symbol (NOT by index) so canonical
+    // serialization's slot-sort can reorder them without breaking
+    // dispatch.
+    pub sym_code_idx: u32,
+    pub sym_arity: u32,
+    pub sym_is_operative: u32,
+    pub sym_is_pure: u32,
+
     // type prototypes: indexed by PROTO_* constants
     pub type_protos: Vec<Value>,
 
@@ -178,6 +187,7 @@ impl Heap {
             sym_parent: 0, sym_describe: 0, sym_dnu: 0,
             sym_length: 0, sym_at: 0, sym_at_put: 0,
             sym_message: 0,
+            sym_code_idx: 0, sym_arity: 0, sym_is_operative: 0, sym_is_pure: 0,
             type_protos: vec![Value::NIL; 17],
             natives: Vec::new(),
             native_idx: std::collections::HashMap::new(),
@@ -201,6 +211,10 @@ impl Heap {
         h.sym_at = h.intern("at:");
         h.sym_at_put = h.intern("at:put:");
         h.sym_message = h.intern("message");
+        h.sym_code_idx = h.intern("code_idx");
+        h.sym_arity = h.intern("arity");
+        h.sym_is_operative = h.intern("is_operative");
+        h.sym_is_pure = h.intern("is_pure");
         let bindings_sym = h.intern("bindings");
 
         // Register the core foreign types before anything else
@@ -625,6 +639,42 @@ impl Heap {
         val
     }
 
+    /// After an image load, bootstrap-era foreign values (strings,
+    /// cons cells, bytes, tables) have their `.proto` fields set to
+    /// the FRESH session's plugin-created protos. Load overwrites
+    /// `type_protos` with the loaded protos, but not these per-object
+    /// fields. Dispatch on a bootstrap-era string would walk the
+    /// stale fresh proto's handlers (which reference this session's
+    /// fresh closures with fresh Block proto).
+    ///
+    /// Heal by walking the heap and updating every foreign value's
+    /// `.proto` to match `type_protos[tag]` for its foreign type.
+    /// O(heap size) — run once per image load.
+    pub fn heal_foreign_protos(&mut self) {
+        use crate::heap::{PROTO_CONS, PROTO_STR, PROTO_BYTES, PROTO_TABLE};
+        let cons_proto  = self.type_protos[PROTO_CONS];
+        let str_proto   = self.type_protos[PROTO_STR];
+        let bytes_proto = self.type_protos[PROTO_BYTES];
+        let table_proto = self.type_protos[PROTO_TABLE];
+
+        let pair_tid  = self.foreign_registry.lookup(Pair::type_name());
+        let text_tid  = self.foreign_registry.lookup(Text::type_name());
+        let bytes_tid = self.foreign_registry.lookup(Bytes::type_name());
+        let table_tid = self.foreign_registry.lookup(Table::type_name());
+
+        for obj in self.objects.iter_mut() {
+            let Some(fd) = &obj.foreign else { continue; };
+            let expected = if Some(fd.type_id) == pair_tid  { Some(cons_proto) }
+                      else if Some(fd.type_id) == text_tid  { Some(str_proto) }
+                      else if Some(fd.type_id) == bytes_tid { Some(bytes_proto) }
+                      else if Some(fd.type_id) == table_tid { Some(table_proto) }
+                      else { None };
+            if let Some(p) = expected {
+                if !p.is_nil() { obj.proto = p; }
+            }
+        }
+    }
+
     /// Record the source text for a closure desc, keyed by its
     /// `code_idx`. Multiple closure instances from the same desc
     /// share a single source record.
@@ -643,38 +693,35 @@ impl Heap {
         self.closure_sources.get(code_idx).and_then(|o| o.as_ref())
     }
 
-    /// Check if a value is a closure object. Returns (code_idx, is_operative)
-    /// if so. Detection is proto-based: closures delegate to PROTO_CLOSURE.
-    /// Slot access uses fixed INDEXES (not names) to stay robust against
-    /// cross-vat symbol-id mismatch during migration.
+    /// Check if a value is a closure object. Returns (code_idx,
+    /// is_operative) if so. Detection is proto-based + looks up
+    /// metadata slots by NAME (not index) so canonical serialization's
+    /// slot-sort doesn't break round-trip.
     pub fn as_closure(&self, val: Value) -> Option<(usize, bool)> {
         let id = val.as_any_object()?;
         let obj = self.get(id);
         let closure_proto = self.type_protos.get(PROTO_CLOSURE).copied().unwrap_or(Value::NIL);
-        if obj.slot_names.len() < Self::CLOSURE_FIXED_SLOTS || obj.proto != closure_proto {
-            return None;
-        }
-        let code_idx = obj.slot_values[Self::SLOT_CODE_IDX].as_integer()? as usize;
-        let is_op = obj.slot_values[Self::SLOT_IS_OPERATIVE].is_true();
+        if obj.proto != closure_proto { return None; }
+        let code_idx = obj.slot_get(self.sym_code_idx)?.as_integer()? as usize;
+        let is_op = obj.slot_get(self.sym_is_operative)
+            .map(|v| v.is_true()).unwrap_or(false);
         Some((code_idx, is_op))
     }
 
-    /// Fixed slot positions on every closure. Metadata occupies 0..4;
-    /// captures start at CLOSURE_FIXED_SLOTS.
-    const SLOT_CODE_IDX: usize = 0;
-    const SLOT_ARITY: usize = 1;
-    const SLOT_IS_OPERATIVE: usize = 2;
-    const SLOT_IS_PURE: usize = 3;
-    const CLOSURE_FIXED_SLOTS: usize = 4;
+    /// Names of the 4 metadata slots on every closure. Used to
+    /// distinguish captures from metadata when walking slots.
+    fn is_closure_metadata_slot(&self, sym: u32) -> bool {
+        sym == self.sym_code_idx
+            || sym == self.sym_arity
+            || sym == self.sym_is_operative
+            || sym == self.sym_is_pure
+    }
 
     pub fn closure_captures(&self, val: Value) -> Vec<(u32, Value)> {
         let Some(id) = val.as_any_object() else { return Vec::new(); };
         let obj = self.get(id);
-        if obj.slot_names.len() <= Self::CLOSURE_FIXED_SLOTS {
-            return Vec::new();
-        }
-        obj.slot_names.iter().skip(Self::CLOSURE_FIXED_SLOTS)
-            .zip(obj.slot_values.iter().skip(Self::CLOSURE_FIXED_SLOTS))
+        obj.slot_names.iter().zip(obj.slot_values.iter())
+            .filter(|(sym, _)| !self.is_closure_metadata_slot(**sym))
             .map(|(s, v)| (*s, *v))
             .collect()
     }
@@ -682,26 +729,21 @@ impl Heap {
     /// Check if a closure is "pure" (no FarRef captures, safe to memoize).
     pub fn closure_is_pure(&self, val: Value) -> bool {
         let Some(id) = val.as_any_object() else { return false; };
-        let obj = self.get(id);
-        if obj.slot_names.len() < Self::CLOSURE_FIXED_SLOTS { return false; }
-        obj.slot_values[Self::SLOT_IS_PURE].is_true()
+        self.get(id).slot_get(self.sym_is_pure)
+            .map(|v| v.is_true()).unwrap_or(false)
     }
 
     /// Return a closure's arity, if it is one.
     pub fn closure_arity(&self, val: Value) -> Option<u8> {
         let id = val.as_any_object()?;
-        let obj = self.get(id);
-        if obj.slot_names.len() < Self::CLOSURE_FIXED_SLOTS { return None; }
-        Some(obj.slot_values[Self::SLOT_ARITY].as_integer()? as u8)
+        Some(self.get(id).slot_get(self.sym_arity)?.as_integer()? as u8)
     }
 
     /// Override the is_pure metadata flag on a closure.
     pub fn set_closure_pure(&mut self, val: Value, is_pure: bool) {
         let Some(id) = val.as_any_object() else { return; };
-        let obj = self.get_mut(id);
-        if obj.slot_names.len() >= Self::CLOSURE_FIXED_SLOTS {
-            obj.slot_values[Self::SLOT_IS_PURE] = Value::boolean(is_pure);
-        }
+        let sym = self.sym_is_pure;
+        self.get_mut(id).slot_set(sym, Value::boolean(is_pure));
     }
 
     /// Get the prototype for any value (including primitives and optimized types).

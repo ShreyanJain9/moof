@@ -31,6 +31,15 @@ use moof_lang::opcodes::Chunk;
 use std::collections::HashMap;
 use std::path::Path;
 
+/// Full image snapshot: the three heads System cares about,
+/// produced by `BlobStore::load_snapshot` and consumed by
+/// `System::try_load_into`.
+pub struct Snapshot {
+    pub type_protos: Vec<Value>,
+    pub closure_descs: Vec<ClosureDesc>,
+    pub env: Value,
+}
+
 pub struct BlobStore {
     env: Env,
     blobs: Database<Bytes, Bytes>,  // hash bytes → canonical bytes
@@ -189,6 +198,164 @@ impl BlobStore {
         let rtxn = self.env.read_txn().map_err(|e| format!("txn: {e}"))?;
         let n = self.blobs.len(&rtxn).map_err(|e| format!("len: {e}"))?;
         Ok(n)
+    }
+
+    // ─────────── atomic snapshot: env + descs + type_protos ───────────
+
+    /// Save a full image snapshot in one lmdb txn: env value, closure
+    /// descs, type-prototype table. Writes `roots.env`,
+    /// `roots.closure-descs`, `roots.type-protos` atomically. On any
+    /// error the txn aborts; no partial state is committed.
+    ///
+    /// This is the preferred save entry. The earlier `save_value` and
+    /// `save_closure_descs` methods each use their own txn — callable
+    /// but non-atomic if you need to coordinate several roots.
+    pub fn save_snapshot(
+        &self,
+        heap: &Heap,
+        env_val: Value,
+        descs: &[ClosureDesc],
+        type_protos: &[Value],
+    ) -> Result<(), String> {
+        let env_id = env_val.as_any_object()
+            .ok_or("save_snapshot: env must be a heap object")?;
+
+        // ── fixpoint-hash EVERY reachable id across env + descs +
+        //    type_protos in one pass, so sub-refs resolve consistently
+        //    no matter which root first touched them.
+        let mut reach_set: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for id in heap.reachable_objects(env_val) { reach_set.insert(id); }
+        for d in descs {
+            for bits in &d.chunk.constants {
+                let v = Value::from_bits(*bits);
+                for id in heap.reachable_objects(v) { reach_set.insert(id); }
+            }
+            for v in &d.capture_values {
+                for id in heap.reachable_objects(*v) { reach_set.insert(id); }
+            }
+        }
+        for v in type_protos {
+            for id in heap.reachable_objects(*v) { reach_set.insert(id); }
+        }
+        let reach: Vec<u32> = reach_set.into_iter().collect();
+        let hashes = compute_hash_table(heap, &reach);
+
+        // ── one write txn for everything ──
+        let mut wtxn = self.env.write_txn().map_err(|e| format!("txn: {e}"))?;
+
+        // cycle placeholder blob — needed if any object references a
+        // cycle back-edge.
+        let placeholder_bytes = moof_core::cycle_placeholder_blob_bytes();
+        let placeholder_hash = moof_core::cycle_placeholder();
+        if self.blobs.get(&wtxn, placeholder_hash.as_slice())
+            .map_err(|e| format!("get placeholder: {e}"))?.is_none()
+        {
+            self.blobs.put(&mut wtxn, placeholder_hash.as_slice(), &placeholder_bytes)
+                .map_err(|e| format!("put placeholder: {e}"))?;
+        }
+
+        // write each reachable heap object's blob.
+        for id in &reach {
+            let bytes = canonical_blob_bytes_using_table(heap, *id, &hashes);
+            let h = *hashes.get(id).expect("id not in hash table");
+            if self.blobs.get(&wtxn, h.as_slice())
+                .map_err(|e| format!("get: {e}"))?.is_none()
+            {
+                self.blobs.put(&mut wtxn, h.as_slice(), &bytes)
+                    .map_err(|e| format!("put: {e}"))?;
+            }
+        }
+
+        // closure-descs blob.
+        let descs_bytes = encode_closure_descs_with(heap, descs, &hashes);
+        let descs_hash: Hash = blake3::hash(&descs_bytes).into();
+        if self.blobs.get(&wtxn, descs_hash.as_slice())
+            .map_err(|e| format!("get descs: {e}"))?.is_none()
+        {
+            self.blobs.put(&mut wtxn, descs_hash.as_slice(), &descs_bytes)
+                .map_err(|e| format!("put descs: {e}"))?;
+        }
+
+        // type-protos blob: u32 count + canonical value bytes per entry.
+        let type_protos_bytes = encode_type_protos_with(heap, type_protos, &hashes);
+        let type_protos_hash: Hash = blake3::hash(&type_protos_bytes).into();
+        if self.blobs.get(&wtxn, type_protos_hash.as_slice())
+            .map_err(|e| format!("get type-protos: {e}"))?.is_none()
+        {
+            self.blobs.put(&mut wtxn, type_protos_hash.as_slice(), &type_protos_bytes)
+                .map_err(|e| format!("put type-protos: {e}"))?;
+        }
+
+        // root refs.
+        let env_hash = *hashes.get(&env_id).expect("env root not hashed");
+        self.refs.put(&mut wtxn, "roots.env", env_hash.as_slice())
+            .map_err(|e| format!("put roots.env: {e}"))?;
+        self.refs.put(&mut wtxn, "roots.closure-descs", descs_hash.as_slice())
+            .map_err(|e| format!("put roots.closure-descs: {e}"))?;
+        self.refs.put(&mut wtxn, "roots.type-protos", type_protos_hash.as_slice())
+            .map_err(|e| format!("put roots.type-protos: {e}"))?;
+
+        wtxn.commit().map_err(|e| format!("commit: {e}"))?;
+        Ok(())
+    }
+
+    /// Load the type_protos Vec from a stored blob, reconstructing
+    /// any referenced heap objects into `heap` along the way.
+    pub fn load_type_protos(&self, hash: &Hash, heap: &mut Heap) -> Result<Vec<Value>, String> {
+        let rtxn = self.env.read_txn().map_err(|e| format!("txn: {e}"))?;
+        let bytes = self.blobs.get(&rtxn, hash.as_slice())
+            .map_err(|e| format!("get: {e}"))?
+            .ok_or_else(|| format!("type-protos blob missing: {}", hash_hex(hash)))?
+            .to_vec();
+        let mut memo: HashMap<Hash, Value> = HashMap::new();
+        decode_type_protos(self, &rtxn, &bytes, heap, &mut memo)
+    }
+
+    /// Load a full image snapshot: type-protos + closure-descs + env,
+    /// sharing one hash→Value memo across all three decodes so the
+    /// same blob hash resolves to the same heap id everywhere. This
+    /// is crucial: if the three loads each had their own memo, a
+    /// prototype reached via both type_protos and env would land as
+    /// TWO distinct heap objects, and closure dispatch (which
+    /// compares against type_protos[PROTO_CLOSURE]) would fail.
+    ///
+    /// Returns (type_protos_vec, closure_descs_vec, env_value) on
+    /// success; caller installs each where it belongs. Returns None
+    /// if any of the roots is missing (no image / partial snapshot).
+    pub fn load_snapshot(
+        &self,
+        heap: &mut Heap,
+    ) -> Result<Option<Snapshot>, String> {
+        let Some(env_hash) = self.get_ref("roots.env")? else { return Ok(None); };
+        let Some(descs_hash) = self.get_ref("roots.closure-descs")? else { return Ok(None); };
+        let type_protos_hash = self.get_ref("roots.type-protos")?;
+
+        let rtxn = self.env.read_txn().map_err(|e| format!("txn: {e}"))?;
+        let mut memo: HashMap<Hash, Value> = HashMap::new();
+
+        // (1) type-protos first — so anything that references them
+        // (handlers, protos in env) gets the right shared instance.
+        let type_protos = if let Some(h) = type_protos_hash {
+            let bytes = self.blobs.get(&rtxn, h.as_slice())
+                .map_err(|e| format!("get type-protos blob: {e}"))?
+                .ok_or_else(|| format!("type-protos blob missing: {}", hash_hex(&h)))?
+                .to_vec();
+            decode_type_protos(self, &rtxn, &bytes, heap, &mut memo)?
+        } else {
+            Vec::new()
+        };
+
+        // (2) closure-descs.
+        let descs_bytes = self.blobs.get(&rtxn, descs_hash.as_slice())
+            .map_err(|e| format!("get descs blob: {e}"))?
+            .ok_or_else(|| format!("closure-descs blob missing: {}", hash_hex(&descs_hash)))?
+            .to_vec();
+        let descs = decode_closure_descs(self, &rtxn, &descs_bytes, heap, &mut memo)?;
+
+        // (3) env.
+        let env = load_blob(self, &rtxn, &env_hash, heap, &mut memo)?;
+
+        Ok(Some(Snapshot { type_protos, closure_descs: descs, env }))
     }
 
     // ─────────── load path ───────────
@@ -883,6 +1050,33 @@ fn decode_desc(
         rest_param_reg,
         source,
     })
+}
+
+// ─────────── type-protos codec ───────────
+
+fn encode_type_protos_with(heap: &Heap, protos: &[Value], table: &HashTable) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&(protos.len() as u32).to_be_bytes());
+    for v in protos {
+        out.extend(canonical_value_bytes_using_table(heap, *v, table));
+    }
+    out
+}
+
+fn decode_type_protos(
+    store: &BlobStore,
+    rtxn: &heed::RoTxn,
+    bytes: &[u8],
+    heap: &mut Heap,
+    memo: &mut HashMap<Hash, Value>,
+) -> Result<Vec<Value>, String> {
+    let mut offset = 0;
+    let n = read_u32(bytes, &mut offset)? as usize;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        out.push(decode_value(store, rtxn, bytes, &mut offset, heap, memo)?);
+    }
+    Ok(out)
 }
 
 fn decode_foreign(bytes: &[u8], heap: &mut Heap) -> Result<Value, String> {
