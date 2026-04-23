@@ -17,6 +17,7 @@ impl moof_core::Plugin for CorePlugin {
         heap.type_protos[PROTO_OBJ] = object_proto;
         let obj_id = object_proto.as_any_object().unwrap();
 
+
         // fix up root environment's VM-internal proto to Object (was NIL at
         // allocation time — before Object existed). the env's `parent` slot is
         // the semantic outer-scope pointer (NIL at root) and stays untouched.
@@ -129,30 +130,16 @@ impl moof_core::Plugin for CorePlugin {
             Ok(receiver)
         });
 
-        // Object: handlerAt: — read a handler value by selector (for aliasing)
+        // Object: handlerAt: — read a handler value by selector.
+        // Handlers are always Block-proto heap objects: user-defined
+        // closures are bytecode + captures; native handlers use the
+        // same shape with a `native_idx` slot. Either way the value
+        // is callable, describable, and carries a stable identity —
+        // so handlerAt: just returns it.
         native(heap, obj_id, "handlerAt:", |heap, receiver, args| {
-            let sel = args.first().and_then(|v| v.as_symbol()).ok_or("handlerAt: arg must be a symbol")?;
-            // walk the prototype chain looking for the handler
-            if let Some(id) = receiver.as_any_object() {
-                if let Some(handler) = heap.get(id).handler_get(sel) {
-                    return Ok(handler);
-                }
-            }
-            // check type proto
-            let proto = heap.prototype_of(receiver);
-            if let Some(pid) = proto.as_any_object() {
-                let mut current = pid;
-                for _ in 0..256 {
-                    if let Some(handler) = heap.get(current).handler_get(sel) {
-                        return Ok(handler);
-                    }
-                    match heap.get(current).proto().as_any_object() {
-                        Some(next) => current = next,
-                        None => break,
-                    }
-                }
-            }
-            Ok(Value::NIL)
+            let sel = args.first().and_then(|v| v.as_symbol())
+                .ok_or("handlerAt: arg must be a symbol")?;
+            Ok(lookup_handler_by_sel(heap, receiver, sel))
         });
 
         // Object: responds: — moved to moof (types.moof)
@@ -346,6 +333,33 @@ impl moof_core::Plugin for CorePlugin {
         let env_sym = heap.intern("Env");
         heap.env_def(env_sym, Value::nursery(heap.env));
     }
+}
+
+/// Look up a handler by selector on a value, walking the proto
+/// chain. Returns the raw handler value (a symbol for native
+/// handlers, a closure Value for moof-defined handlers, or NIL).
+/// Factored out so handlerAt: doesn't need to inline the walk.
+fn lookup_handler_by_sel(heap: &Heap, receiver: Value, sel: u32) -> Value {
+    // instance-local handlers win first.
+    if let Some(id) = receiver.as_any_object() {
+        if let Some(h) = heap.get(id).handler_get(sel) {
+            return h;
+        }
+    }
+    // then the prototype chain.
+    let proto = heap.prototype_of(receiver);
+    let Some(pid) = proto.as_any_object() else { return Value::NIL; };
+    let mut current = pid;
+    for _ in 0..256 {
+        if let Some(h) = heap.get(current).handler_get(sel) {
+            return h;
+        }
+        match heap.get(current).proto().as_any_object() {
+            Some(next) => current = next,
+            None => break,
+        }
+    }
+    Value::NIL
 }
 
 /// Entry point for dylib loading. moof-cli's manifest loader

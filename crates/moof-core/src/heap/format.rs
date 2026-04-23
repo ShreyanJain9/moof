@@ -42,6 +42,17 @@ impl Heap {
     }
 
     fn format_object_at(&self, id: u32, visiting: &mut Vec<u32>) -> String {
+        // native handlers share the closure shape (proto=Block) but
+        // have a native_idx slot. render by their registered name.
+        if self.as_native(Value::nursery(id)).is_some() {
+            let name_sym = self.find_symbol("native-name");
+            let name = name_sym
+                .and_then(|s| self.get(id).slot_get(s))
+                .and_then(|v| v.as_any_object())
+                .and_then(|sid| self.get_string(sid))
+                .unwrap_or("?");
+            return format!("<fn {name}>");
+        }
         // closures are Generals with a code_idx slot — detect + format specially.
         if let Some((_, is_op)) = self.as_closure(Value::nursery(id)) {
             let arity = self.closure_arity(Value::nursery(id)).unwrap_or(0);

@@ -130,16 +130,15 @@ pub struct Heap {
     pub sym_arity: u32,
     pub sym_is_operative: u32,
     pub sym_is_pure: u32,
+    pub sym_native_idx: u32,
 
     // type prototypes: indexed by PROTO_* constants
     pub type_protos: Vec<Value>,
 
-    // native handlers: name_sym → Rust closure
-    pub natives: Vec<(u32, NativeFn)>,
-    /// Parallel index: sym → position in `natives`. replaces the
-    /// linear scan that `find_native` used to do — every native
-    /// call previously walked the whole natives Vec.
-    native_idx: std::collections::HashMap<u32, usize>,
+    // native handlers, indexed by position. a Native-wrapped
+    // closure (register_native's return value) carries its index
+    // as a `native_idx` slot.
+    pub natives: Vec<NativeFn>,
 
     /// Send-site monomorphic cache. key: (starting_proto_id, selector).
     /// value: the handler value (native-sym or closure) resolved by
@@ -188,9 +187,9 @@ impl Heap {
             sym_length: 0, sym_at: 0, sym_at_put: 0,
             sym_message: 0,
             sym_code_idx: 0, sym_arity: 0, sym_is_operative: 0, sym_is_pure: 0,
+            sym_native_idx: 0,
             type_protos: vec![Value::NIL; 17],
             natives: Vec::new(),
-            native_idx: std::collections::HashMap::new(),
             send_cache: std::collections::HashMap::new(),
             foreign_registry: ForeignTypeRegistry::new(),
             closure_sources: Vec::new(),
@@ -215,6 +214,7 @@ impl Heap {
         h.sym_arity = h.intern("arity");
         h.sym_is_operative = h.intern("is_operative");
         h.sym_is_pure = h.intern("is_pure");
+        h.sym_native_idx = h.intern("native_idx");
         let bindings_sym = h.intern("bindings");
 
         // Register the core foreign types before anything else
@@ -571,21 +571,62 @@ impl Heap {
 
     // -- native handler registration --
 
+    /// Register a rust fn as a callable. Returns a Block-proto heap
+    /// object — the same shape as a moof-defined closure — with a
+    /// `native_idx` slot pointing at the registered fn's index in
+    /// `heap.natives`. Indistinguishable from a `<fn>` at the moof
+    /// surface: `[h call: args]`, `[h arity]`, `[h describe]` all
+    /// work. Dispatch dispatches to the rust fn when `native_idx`
+    /// is present on the closure.
+    ///
+    /// `name` is used only for describe / reflection. The "#N"
+    /// convention from prior versions is gone — the native's
+    /// identity is the object itself, not a symbol.
     pub fn register_native(&mut self, name: &str, f: impl Fn(&mut Heap, Value, &[Value]) -> Result<Value, String> + 'static) -> Value {
         let idx = self.natives.len();
-        let unique = format!("{name}#{idx}");
-        let sym = self.intern(&unique);
-        self.natives.push((sym, Box::new(f)));
-        self.native_idx.insert(sym, idx);
-        Value::symbol(sym) // the handler value IS the symbol — dispatch looks it up
+        self.natives.push(Box::new(f));
+
+        // allocate a Block-proto heap object that looks like a
+        // closure but has native_idx set. code_idx is a sentinel
+        // (-1) — never indexed into closure_descs.
+        let proto = self.type_protos.get(PROTO_CLOSURE).copied()
+            .unwrap_or_else(|| self.type_protos[PROTO_OBJ]);
+
+        let code_idx_sym = self.sym_code_idx;
+        let arity_sym    = self.sym_arity;
+        let is_op_sym    = self.sym_is_operative;
+        let is_pure_sym  = self.sym_is_pure;
+        let native_sym   = self.sym_native_idx;
+        let name_sym_s   = self.intern("native-name");
+        let name_val     = self.alloc_string(name);
+
+        let names  = vec![code_idx_sym, arity_sym, is_op_sym, is_pure_sym, native_sym, name_sym_s];
+        let values = vec![
+            Value::integer(-1),              // code_idx sentinel
+            Value::integer(0),               // arity unknown (rust fn)
+            Value::boolean(false),           // not operative
+            Value::boolean(true),            // native handlers are pure-ish by default
+            Value::integer(idx as i64),      // native_idx → natives[idx]
+            name_val,                        // native-name for describe
+        ];
+
+        let id = self.alloc(HeapObject::new_general(proto, names, values));
+        let val = Value::nursery(id);
+        // install call: → self so dispatch through Block proto works.
+        let call_sym = self.sym_call;
+        self.get_mut(id).handler_set(call_sym, val);
+        val
     }
 
-    pub fn find_native(&self, sym: u32) -> Option<usize> {
-        // O(1) hashmap lookup. previously this was a linear scan over
-        // the natives Vec — a real cost when every native call paid
-        // for it. the map is maintained in lockstep with the Vec by
-        // register_native.
-        self.native_idx.get(&sym).copied()
+    /// If `val` is a native-handler closure (Block-proto object with
+    /// a `native_idx` slot), return the native-registry index. Else
+    /// None. Dispatch calls this before `as_closure` — natives use
+    /// the rust fn path, bytecode closures use the frame-push path.
+    pub fn as_native(&self, val: Value) -> Option<usize> {
+        let id = val.as_any_object()?;
+        let obj = self.get(id);
+        let v = obj.slot_get(self.sym_native_idx)?;
+        Some(v.as_integer()? as usize)
     }
 
     /// Value equality (like Ruby's eql?). Compares content for strings.
@@ -702,10 +743,14 @@ impl Heap {
         let obj = self.get(id);
         let closure_proto = self.type_protos.get(PROTO_CLOSURE).copied().unwrap_or(Value::NIL);
         if obj.proto != closure_proto { return None; }
-        let code_idx = obj.slot_get(self.sym_code_idx)?.as_integer()? as usize;
+        // native handlers share the Block proto and closure shape but
+        // dispatch through a rust fn (via heap.as_native); they have
+        // a sentinel code_idx of -1 and are NOT real bytecode closures.
+        let code_idx_raw = obj.slot_get(self.sym_code_idx)?.as_integer()?;
+        if code_idx_raw < 0 { return None; }
         let is_op = obj.slot_get(self.sym_is_operative)
             .map(|v| v.is_true()).unwrap_or(false);
-        Some((code_idx, is_op))
+        Some((code_idx_raw as usize, is_op))
     }
 
     /// Names of the 4 metadata slots on every closure. Used to

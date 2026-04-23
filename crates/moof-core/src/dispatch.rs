@@ -75,24 +75,20 @@ fn lookup_in_chain(heap: &Heap, start_id: u32, selector: u32) -> Result<Option<V
     Err("delegation chain too deep (>256)".into())
 }
 
-/// Check if a value is a native handler (a symbol pointing to a registered native).
+/// Check if a value is a native handler. Native handlers are now
+/// Block-proto heap objects with a `native_idx` slot — same shape
+/// as moof-defined closures, except their dispatch calls a rust fn.
 pub fn is_native(heap: &Heap, handler: Value) -> bool {
-    if let Some(sym) = handler.as_symbol() {
-        heap.find_native(sym).is_some()
-    } else {
-        false
-    }
+    heap.as_native(handler).is_some()
 }
 
-/// Call a native handler. The handler value must be a symbol registered in heap.natives.
+/// Call a native handler. Reads the `native_idx` slot and invokes
+/// the corresponding rust fn from `heap.natives`.
 pub fn call_native(heap: &mut Heap, handler: Value, receiver: Value, args: &[Value]) -> Result<Value, String> {
-    let sym = handler.as_symbol().ok_or("not a native handler")?;
-    let idx = heap.find_native(sym).ok_or_else(|| {
-        format!("native '{}' not found", heap.symbol_name(sym))
-    })?;
-
-    // we need to pull the closure out to avoid borrow issues
-    // safety: we're taking a reference to the boxed closure, not moving it
-    let native = &heap.natives[idx].1 as *const crate::heap::NativeFn;
+    let idx = heap.as_native(handler).ok_or("not a native handler")?;
+    // safety: we're taking a pointer to the boxed closure, not moving it.
+    // the natives Vec isn't mutated during a dispatch, so the pointer is
+    // stable for this call.
+    let native = &heap.natives[idx] as *const crate::heap::NativeFn;
     unsafe { (*native)(heap, receiver, args) }
 }

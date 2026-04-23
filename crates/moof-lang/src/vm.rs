@@ -288,26 +288,33 @@ impl VM {
                         }
                     };
 
-                    // dispatch: native or closure?
+                    // dispatch: native or closure? natives and closures
+                    // both follow the same call protocol: on `[f call: lst]`
+                    // where the handler is the receiver (generic invocation),
+                    // the arg list unpacks into (first-as-receiver, rest-as-args).
+                    let unpacked_for_call: Option<Vec<Value>> =
+                        if sel_sym == heap.sym_call && handler == recv {
+                            let arg_list = send_args.first().copied().unwrap_or(Value::NIL);
+                            Some(heap.list_to_vec(arg_list))
+                        } else { None };
+
                     if dispatch::is_native(heap, handler) {
-                        let result = dispatch::call_native(heap, handler, recv, &send_args)?;
+                        let result = if let Some(unpacked) = unpacked_for_call {
+                            // unpacked[0] is the new receiver, the rest args.
+                            let new_recv = unpacked.first().copied().unwrap_or(Value::NIL);
+                            let new_args = &unpacked[1.min(unpacked.len())..];
+                            dispatch::call_native(heap, handler, new_recv, new_args)?
+                        } else {
+                            dispatch::call_native(heap, handler, recv, &send_args)?
+                        };
                         self.frames.last_mut().unwrap().regs[dst as usize] = result;
                     } else if let Some((code_idx, _)) = heap.as_closure(handler) {
-                        // Closure call. Build the args Vec directly — no
-                        // intermediate cons chain. For `[f call: arglist]`
-                        // where handler==recv (generic closure call) we
-                        // unpack the arg list once; for method dispatch
-                        // we prepend the receiver.
-                        let unpacked: Vec<Value> =
-                            if sel_sym == heap.sym_call && handler == recv {
-                                let arg_list = send_args.first().copied().unwrap_or(Value::NIL);
-                                heap.list_to_vec(arg_list)
-                            } else {
-                                let mut full = Vec::with_capacity(1 + send_args.len());
-                                full.push(recv);
-                                full.extend_from_slice(&send_args);
-                                full
-                            };
+                        let unpacked = unpacked_for_call.unwrap_or_else(|| {
+                            let mut full = Vec::with_capacity(1 + send_args.len());
+                            full.push(recv);
+                            full.extend_from_slice(&send_args);
+                            full
+                        });
                         self.push_closure_frame(heap, handler, code_idx, unpacked, dst)?;
                     } else {
                         return Err(format!("handler is not callable"));
