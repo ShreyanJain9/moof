@@ -62,6 +62,37 @@ pub fn hash_hex(h: &Hash) -> String {
     s
 }
 
+impl Heap {
+    /// Collect every heap object id reachable from `val` (itself +
+    /// transitive closure over proto, slot_values, handler values,
+    /// and foreign sub-values via the vtable's trace fn). Used by
+    /// the blob store's save path to enumerate blobs to persist.
+    pub fn reachable_objects(&self, val: Value) -> std::collections::HashSet<u32> {
+        let mut seen = std::collections::HashSet::new();
+        let mut worklist: Vec<u32> = Vec::new();
+        if let Some(id) = val.as_any_object() { worklist.push(id); }
+        while let Some(id) = worklist.pop() {
+            if !seen.insert(id) { continue; }
+            let obj = self.get(id);
+            if let Some(pid) = obj.proto.as_any_object() { worklist.push(pid); }
+            for v in &obj.slot_values {
+                if let Some(sid) = v.as_any_object() { worklist.push(sid); }
+            }
+            for (_, hv) in &obj.handlers {
+                if let Some(hid) = hv.as_any_object() { worklist.push(hid); }
+            }
+            if let Some(fd) = &obj.foreign {
+                if let Some(vt) = self.foreign_registry().vtable(fd.type_id) {
+                    (vt.trace)(&*fd.payload, &mut |v| {
+                        if let Some(sid) = v.as_any_object() { worklist.push(sid); }
+                    });
+                }
+            }
+        }
+        seen
+    }
+}
+
 /// Well-known placeholder hash for a cycle in the content graph.
 /// Closures reference their proto, whose handlers reference closures,
 /// so prototype chains are often cyclic. When a top-level hash walks
@@ -238,12 +269,14 @@ impl Heap {
         let vt = self.foreign_registry().vtable(fd.type_id)
             .expect("foreign_blob: no vtable");
         let type_name = vt.id.name.as_str();
+        let schema_hash = vt.id.schema_hash;
         let payload = (vt.serialize)(&*fd.payload);
         let name_bytes = type_name.as_bytes();
-        let mut out = Vec::with_capacity(1 + 4 + name_bytes.len() + 4 + payload.len());
+        let mut out = Vec::with_capacity(1 + 4 + name_bytes.len() + 8 + 4 + payload.len());
         out.push(BTAG_FOREIGN);
         out.extend_from_slice(&(name_bytes.len() as u32).to_be_bytes());
         out.extend_from_slice(name_bytes);
+        out.extend_from_slice(&schema_hash.to_be_bytes());
         out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
         out.extend_from_slice(&payload);
         out

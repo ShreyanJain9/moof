@@ -14,6 +14,7 @@ pub mod vat;
 pub mod scheduler;
 pub mod manifest;
 pub mod store;
+pub mod blobstore;
 pub mod dynload;
 pub mod capability;
 
@@ -21,5 +22,6 @@ pub use vat::Vat;
 pub use scheduler::Scheduler;
 pub use manifest::Manifest;
 pub use store::{Store, LoadedImage, SerializableClosureDesc};
+pub use blobstore::BlobStore;
 pub use dynload::{DynTypePlugin, DynCapabilityPlugin};
 pub use capability::CapabilityPlugin;

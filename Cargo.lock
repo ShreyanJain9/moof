@@ -1387,6 +1387,7 @@ name = "moof-runtime"
 version = "2.0.0-alpha.1"
 dependencies = [
  "bincode",
+ "blake3",
  "heed",
  "indexmap",
  "libloading",
