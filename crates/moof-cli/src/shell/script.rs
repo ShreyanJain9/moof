@@ -35,9 +35,8 @@ impl Interface for ScriptInterface {
 
     fn required_caps(&self) -> Vec<&str> {
         // same default ask as the repl; manifest's [grants.script]
-        // (falls back to [grants.repl] if absent — see manifest loader)
         // decides what's actually granted.
-        vec!["console", "clock", "file", "random"]
+        vec!["console", "clock", "file", "random", "system"]
     }
 
     fn run(&mut self, sys: &mut System, vat_id: u32) -> i32 {

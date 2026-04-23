@@ -21,6 +21,7 @@ members = [
     "crates/moof-cap-clock",
     "crates/moof-cap-file",
     "crates/moof-cap-random",
+    "crates/moof-cap-system",
 ]
 # Example plugins are separate workspaces (they depend on published
 # versions of moof-core, not the in-tree paths) — kept out.

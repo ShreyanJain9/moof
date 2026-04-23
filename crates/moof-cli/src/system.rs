@@ -50,6 +50,10 @@ pub struct System {
     capabilities: Vec<CapEntry>,
     user_vats: Vec<UserVatEntry>,
     init_vat_id: u32,
+    /// Location of the `system` capability's own heap object, if
+    /// spawned. Used by `push_state` to mirror System's rust-side
+    /// state into the capability's slots so moof can read it.
+    system_cap_loc: Option<(u32, u32)>,
 }
 
 impl System {
@@ -72,11 +76,15 @@ impl System {
         let init_vat_id = scheduler.spawn_bare_vat();
 
         let mut capabilities = Vec::new();
+        let mut system_cap_loc: Option<(u32, u32)> = None;
         for (name, spec) in &manifest.capabilities {
             match plugins::resolve_capability(spec) {
                 Ok(cap) => {
                     let (vat_id, obj_id) = scheduler.spawn_capability(cap.as_ref());
                     eprintln!("  loaded capability '{}' from {spec}", cap.name());
+                    if cap.name() == "system" {
+                        system_cap_loc = Some((vat_id, obj_id));
+                    }
                     capabilities.push(CapEntry { name: name.clone(), vat_id, obj_id });
                 }
                 Err(e) => eprintln!("  ~ capability '{name}' failed: {e}"),
@@ -91,13 +99,16 @@ impl System {
             }
         }
 
-        System {
+        let mut sys = System {
             scheduler,
             manifest,
             capabilities,
             user_vats: Vec::new(),
             init_vat_id,
-        }
+            system_cap_loc,
+        };
+        sys.push_state();
+        sys
     }
 
     // ─────────── accessors (read-only views) ───────────
@@ -143,6 +154,7 @@ impl System {
             owner_label: label.to_string(),
             granted_caps: cap_names.to_vec(),
         });
+        self.push_state();
         id
     }
 
@@ -160,6 +172,7 @@ impl System {
                 if !v.granted_caps.contains(name) { v.granted_caps.push(name.clone()); }
             }
         }
+        self.push_state();
     }
 
     fn grant_internal(&mut self, target_vat: u32, cap_names: &[String], label: &str) {
@@ -210,6 +223,58 @@ impl System {
 
     pub fn vat(&self, id: u32) -> &Vat { self.scheduler.vat(id) }
     pub fn vat_mut(&mut self, id: u32) -> &mut Vat { self.scheduler.vat_mut(id) }
+
+    // ─────────── mirror state into the `system` capability ───────────
+
+    /// Write the current capability list, user-vat list, and grants
+    /// table into the system cap's slots so moof code can read them
+    /// via `[system capabilities]`, `[system vats]`, `[system grants]`.
+    /// Called on boot and after any mutation. No-op if no `system`
+    /// capability is registered.
+    fn push_state(&mut self) {
+        let Some((sys_vat, sys_obj)) = self.system_cap_loc else { return; };
+
+        // Build everything into the cap vat's heap so it lives next
+        // to the slots we're about to write into.
+        let heap = &mut self.scheduler.vat_mut(sys_vat).heap;
+
+        // capabilities: list of symbols
+        let cap_syms: Vec<Value> = self.capabilities.iter()
+            .map(|c| {
+                let s = heap.intern(&c.name);
+                Value::symbol(s)
+            })
+            .collect();
+        let caps_list = heap.list(&cap_syms);
+        let caps_slot = heap.intern("capability-names");
+        heap.get_mut(sys_obj).slot_set(caps_slot, caps_list);
+
+        // user-vats: list of integers
+        let vat_ids: Vec<Value> = self.user_vats.iter()
+            .map(|v| Value::integer(v.id as i64))
+            .collect();
+        let vats_list = heap.list(&vat_ids);
+        let vats_slot = heap.intern("user-vats");
+        heap.get_mut(sys_obj).slot_set(vats_slot, vats_list);
+
+        // grants: list of (interface-sym . list-of-cap-syms) pairs
+        let grants_entries: Vec<Value> = self.manifest.grants.iter()
+            .map(|(iface, caps)| {
+                let iface_sym = heap.intern(iface);
+                let cap_vals: Vec<Value> = caps.iter()
+                    .map(|c| {
+                        let s = heap.intern(c);
+                        Value::symbol(s)
+                    })
+                    .collect();
+                let cap_list = heap.list(&cap_vals);
+                heap.cons(Value::symbol(iface_sym), cap_list)
+            })
+            .collect();
+        let grants_list = heap.list(&grants_entries);
+        let grants_slot = heap.intern("grants-table");
+        heap.get_mut(sys_obj).slot_set(grants_slot, grants_list);
+    }
 
     // ─────────── running an interface ───────────
 

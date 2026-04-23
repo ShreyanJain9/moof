@@ -74,10 +74,10 @@ impl Interface for ReplInterface {
     fn name(&self) -> &str { "repl" }
 
     fn required_caps(&self) -> Vec<&str> {
-        // the repl would like all four stdlib caps; System filters
-        // against the manifest's [grants.repl] list, so any of these
-        // that aren't in the manifest are silently dropped.
-        vec!["console", "clock", "file", "random"]
+        // the repl would like the stdlib caps + system introspection;
+        // System filters against the manifest's [grants.repl] list,
+        // so anything not in the manifest is silently dropped.
+        vec!["console", "clock", "file", "random", "system"]
     }
 
     fn run(&mut self, sys: &mut System, vat_id: u32) -> i32 {
@@ -119,36 +119,18 @@ impl Interface for ReplInterface {
     }
 }
 
-/// REPL meta-commands. Returns true if the line was a command.
+/// REPL meta-commands. Kept minimal on purpose: any command that
+/// can be a moof expression SHOULD be a moof expression, not a
+/// special case here.
+///
+/// Today this is empty — `(vats)` and `(plugins)` moved to the
+/// `system` capability, so `[system vats]` and `[system capabilities]`
+/// return Acts that the repl's drain handles. `(reload)` moved away
+/// too; users can compose file+eval once eval is a capability.
+///
+/// Returns true if the line was a command (skip normal eval).
+#[allow(dead_code, unused_variables)]
 fn handle_command(trimmed: &str, sys: &mut System, vat_id: u32) -> bool {
-    if trimmed == "(plugins)" {
-        let caps: Vec<&str> = sys.capability_names();
-        if caps.is_empty() {
-            println!("  no capabilities loaded");
-        } else {
-            for name in &caps { println!("  {name}"); }
-        }
-        return true;
-    }
-    if trimmed == "(vats)" {
-        println!("  user vats spawned by System:");
-        for (id, caps) in sys.user_vats() {
-            println!("    vat {id} — caps: [{}]", caps.join(", "));
-        }
-        return true;
-    }
-    if trimmed.starts_with("(reload ") && trimmed.ends_with(')') {
-        let path_str = trimmed.strip_prefix("(reload ").unwrap()
-            .strip_suffix(')').unwrap().trim().trim_matches('"');
-        match std::fs::read_to_string(path_str) {
-            Ok(source) => match sys.eval(vat_id, &source) {
-                Ok(_) => eprintln!("  reloaded {path_str}"),
-                Err(e) => eprintln!("  ~ error in {path_str}: {e}"),
-            },
-            Err(_) => eprintln!("  ~ file not found: {path_str}"),
-        }
-        return true;
-    }
     false
 }
 

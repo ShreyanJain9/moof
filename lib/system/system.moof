@@ -43,3 +43,29 @@
 })
 
 (conform System Showable)
+
+; ───────────────────────────────────────────────────────────
+; Interface — the protocol for anything that consumes System
+; and wants a user vat with capabilities granted. REPL, script
+; runner, future network listener, future morph editor all
+; conform.
+;
+; today only the rust-side `Interface` trait in
+; crates/moof-cli/src/system.rs implements this protocol. the
+; declaration here parks the shape so moof-level interfaces
+; (e.g. a workspace served over a socket) can register as
+; peers once rust exposes that plumbing.
+; ───────────────────────────────────────────────────────────
+
+(defprotocol Interface
+  "a peer consumer of System. declares a label (matched against
+   the manifest's [grants] table) and the capabilities it wants.
+   System grants the intersection and invokes run:."
+  (require (name)
+    "stable label as a symbol. must match a key in manifest grants.")
+  (require (requiredCaps)
+    "list of capability-name symbols this interface wants.")
+  (require (run: vatRef)
+    "run until done. vatRef is a FarRef to the vat System spawned
+     for this interface, with granted caps bound in its env. returns
+     an exit-code integer."))
