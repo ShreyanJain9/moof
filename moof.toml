@@ -47,6 +47,7 @@ files = [
   "lib/kernel/showable.moof",
   "lib/kernel/equatable.moof",
   "lib/kernel/url.moof",
+  "lib/kernel/namespace.moof",
 
   # data — value types + their protocols
   "lib/data/comparable.moof",

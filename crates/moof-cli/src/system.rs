@@ -411,8 +411,8 @@ impl System {
 
         // resolve-table: list of (url-string . (vat-id obj-id)) pairs
         // covering every capability. `[system resolve: url]` walks
-        // this at runtime to return a fresh FarRef. Keep in sync
-        // with the rust-side resolve_url() — same URL shapes.
+        // this at runtime to return a fresh FarRef. Kept alongside
+        // the root namespace for back-compat / fast-path lookup.
         let resolve_entries: Vec<Value> = self.capabilities.iter()
             .map(|c| {
                 let url_str = format!("moof:/caps/{}", c.name);
@@ -427,6 +427,50 @@ impl System {
         let resolve_list = heap.list(&resolve_entries);
         let resolve_slot = heap.intern("resolve-table");
         heap.get_mut(sys_obj).slot_set(resolve_slot, resolve_list);
+
+        // root: a nested Table forming the plan-9-shaped root
+        // namespace. leaves are proxies encoding the resolve target
+        // as a (vat-id obj-id) pair — moof-side `resolve:` wraps
+        // into a real FarRef. tree shape:
+        //
+        //   { caps: { console: (proxy) clock: (proxy) ... }
+        //     vats: { <id>: (proxy) ... }
+        //     services: #[]  (future)
+        //   }
+        //
+        // walks are uniform: [root walk: "/caps/console"] ↔ `caps` →
+        // look up `console` → proxy → turn into FarRef.
+        let caps_table = {
+            let mut map = indexmap::IndexMap::new();
+            for c in &self.capabilities {
+                let name_sym = heap.intern(&c.name);
+                let pair = heap.list(&[
+                    Value::integer(c.vat_id as i64),
+                    Value::integer(c.obj_id as i64),
+                ]);
+                map.insert(Value::symbol(name_sym), pair);
+            }
+            heap.alloc_table(Vec::new(), map)
+        };
+        let user_vats_table = {
+            let mut map = indexmap::IndexMap::new();
+            for v in &self.user_vats {
+                let key = Value::integer(v.id as i64);
+                let pair = heap.list(&[key, Value::integer(0)]);
+                map.insert(key, pair);
+            }
+            heap.alloc_table(Vec::new(), map)
+        };
+        let root_table = {
+            let mut map = indexmap::IndexMap::new();
+            let caps_sym = heap.intern("caps");
+            let vats_sym = heap.intern("vats");
+            map.insert(Value::symbol(caps_sym), caps_table);
+            map.insert(Value::symbol(vats_sym), user_vats_table);
+            heap.alloc_table(Vec::new(), map)
+        };
+        let root_slot = heap.intern("root");
+        heap.get_mut(sys_obj).slot_set(root_slot, root_table);
     }
 
     // ─────────── running an interface ───────────

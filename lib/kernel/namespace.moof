@@ -1,0 +1,50 @@
+; namespace.moof — plan-9-shaped trees of named values.
+;
+; A Namespace is a message-receiving object with named children.
+; Children are arbitrary values (including other namespaces).
+; You navigate by sending `at:` — everything is addressable as a
+; walk through the tree. URLs (lib/kernel/url.moof) are the on-disk
+; serialization format for a path; the tree is the primitive.
+;
+; Design: a namespace is just anything that responds to `at:`. A
+; Table works. A nested tree is Tables-in-Tables. `walk:` is the
+; one primitive for resolving paths.
+;
+;   [ns at: "caps"]                 ; one-level lookup
+;   [ns walk: "/caps/console"]      ; path walk (empty segments
+;                                   ; from leading slash are skipped)
+;
+; System's root is a Table containing caps, vats, services as
+; nested sub-tables. Leaves are FarRefs, plain values, or further
+; namespaces. URLs are a serialization of paths through this tree;
+; there's nothing magic about them, they just name a walk.
+
+; walk the `/`-separated path through a namespace-shaped value.
+; returns the leaf or nil if any segment is missing. empty
+; segments (leading '/', doubled slashes) are skipped.
+(defn walk-path (ns path)
+  (let ((stripped (if [path startsWith: "/"]
+                    [path substring: 1 to: [path length]]
+                    path))
+        (segs [stripped split: "/"]))
+    (ns-walk-segs ns segs)))
+
+(defn ns-walk-segs (ns segs)
+  (if (nil? segs)
+    ns
+    (let ((head [segs car])
+          (rest [segs cdr]))
+      (if [head equal: ""]
+        (ns-walk-segs ns rest)                ; skip empty
+        (let ((next [ns at: head]))
+          (if (nil? next)
+            nil
+            (ns-walk-segs next rest)))))))
+
+; install walk: on Table so `[some-table walk: "/foo/bar"]` works.
+; any proto can conform to this protocol by implementing at:.
+(defmethod Table walk: (path) (walk-path self path))
+
+; URL-aware walk: take a URL value, use its path.
+(defmethod Table walkTo: (url)
+  [self walk: url.path])

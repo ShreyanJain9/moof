@@ -27,6 +27,65 @@ pub const SLOT_GRANTS: &str = "grants-table";
 /// walks it and returns a fresh FarRef (in the cap's vat) for the
 /// matching entry. Cross-vat copy carries the FarRef to the caller.
 pub const SLOT_RESOLVE_TABLE: &str = "resolve-table";
+/// Root namespace: a nested Table forming the plan-9-shaped
+/// directory of everything the system owns. `[system root]`
+/// exposes it; moof code walks via `walk:` / `at:`. See
+/// `lib/kernel/namespace.moof`.
+pub const SLOT_ROOT: &str = "root";
+
+/// Parse a URL Value. Returns (scheme, path). Accepts both URL
+/// objects (with scheme + path slots) and plain strings in the
+/// form "scheme:path".
+fn parse_url(heap: &Heap, v: Value) -> Option<(String, String)> {
+    let id = v.as_any_object()?;
+    if let Some(s) = heap.get_string(id) {
+        let (scheme, rest) = s.split_once(':')?;
+        return Some((scheme.to_string(), rest.to_string()));
+    }
+    let scheme_sym = heap.find_symbol("scheme")?;
+    let path_sym = heap.find_symbol("path")?;
+    let scheme_v = heap.get(id).slot_get(scheme_sym)?;
+    let path_v = heap.get(id).slot_get(path_sym)?;
+    let scheme = heap.get_string(scheme_v.as_any_object()?)?.to_string();
+    let path = heap.get_string(path_v.as_any_object()?)?.to_string();
+    Some((scheme, path))
+}
+
+/// Walk a '/'-separated path through a namespace (a Table, nested).
+/// Empty segments are skipped. Returns the leaf value, or NIL if
+/// any segment is missing.
+fn walk_namespace(heap: &Heap, root: Value, path: &str) -> Value {
+    let stripped = path.strip_prefix('/').unwrap_or(path);
+    let mut cur = root;
+    for seg in stripped.split('/') {
+        if seg.is_empty() { continue; }
+        cur = at_lookup(heap, cur, seg);
+        if cur.is_nil() { return Value::NIL; }
+    }
+    cur
+}
+
+/// One-level namespace lookup: read the entry named `name` from a
+/// Table. Canonicalizes the key by interning as a symbol (mirrors
+/// moof's Table.at: semantics).
+fn at_lookup(heap: &Heap, ns: Value, name: &str) -> Value {
+    use moof_core::heap::Table;
+    let Some(id) = ns.as_any_object() else { return Value::NIL; };
+    let Some(table) = heap.foreign_ref::<Table>(Value::nursery(id)) else { return Value::NIL; };
+    // try symbol lookup first (how most keys are stored)
+    if let Some(sym_id) = heap.find_symbol(name) {
+        if let Some(v) = table.map.get(&Value::symbol(sym_id)) {
+            return *v;
+        }
+    }
+    // try integer lookup (vats are keyed by int)
+    if let Ok(n) = name.parse::<i64>() {
+        if let Some(v) = table.map.get(&Value::integer(n)) {
+            return *v;
+        }
+    }
+    Value::NIL
+}
 
 pub struct SystemCapability;
 
@@ -60,58 +119,54 @@ impl CapabilityPlugin for SystemCapability {
             read_slot(heap, recv, SLOT_GRANTS)
         });
 
+        // [system root] → the root namespace as a nested Table.
+        // moof code walks via `[root walk: "/caps/console"]` or
+        // `[root at: "caps" at: "console"]`. leaves at caps/* are
+        // (vat-id obj-id) pairs; pass through `[system resolve:]`
+        // (or the `fromProxy:` helper in lib/system) to get a
+        // live FarRef. See lib/kernel/namespace.moof.
+        native(heap, obj, "root", |heap, recv, _args| {
+            read_slot(heap, recv, SLOT_ROOT)
+        });
+
         // [system resolve: url] → a FarRef (or nil) for the URL.
-        // Walks the resolve-table slot, which rust-side System keeps
-        // in sync with the live cap / vat registries.
         //
-        // The FarRef is created fresh in this cap's vat with the
-        // right (target_vat, target_obj, url) slots; cross-vat copy
-        // carries it to the caller. The url argument may be a URL
-        // value (with a `path` slot) or a string.
+        // Internally: walk the root namespace. The path `/caps/console`
+        // navigates through the tree to a leaf (vat-id obj-id) pair;
+        // we wrap that into a fresh FarRef in this cap's vat.
+        // Cross-vat copy carries it to the caller.
+        //
+        // Accepts both URL values (with `path` slot) and plain strings.
         native(heap, obj, "resolve:", |heap, recv, args| {
             let url_arg = args.first().copied().unwrap_or(Value::NIL);
-            // accept both String and URL-with-.path
-            let url_str = url_arg.as_any_object()
-                .and_then(|id| heap.get_string(id).map(|s| s.to_string()))
-                .or_else(|| {
-                    // URL value: has scheme + path slots
-                    let uid = url_arg.as_any_object()?;
-                    let scheme_sym = heap.find_symbol("scheme")?;
-                    let path_sym = heap.find_symbol("path")?;
-                    let scheme_v = heap.get(uid).slot_get(scheme_sym)?;
-                    let path_v = heap.get(uid).slot_get(path_sym)?;
-                    let scheme = heap.get_string(scheme_v.as_any_object()?)?.to_string();
-                    let path = heap.get_string(path_v.as_any_object()?)?.to_string();
-                    Some(format!("{scheme}:{path}"))
-                })
-                .ok_or("resolve: argument must be a URL or String")?;
+            let (scheme, path) = parse_url(heap, url_arg)
+                .ok_or("resolve: argument must be a URL or 'scheme:path' String")?;
+            if scheme != "moof" { return Ok(Value::NIL); }
 
-            let table = read_slot(heap, recv, SLOT_RESOLVE_TABLE)?;
-            // table is a list of cons-pairs (url . (vat-id obj-id))
-            for entry in heap.list_to_vec(table) {
-                let (k, v) = heap.pair_of(entry.as_any_object().unwrap_or(0))
-                    .unwrap_or((Value::NIL, Value::NIL));
-                let entry_url = k.as_any_object()
-                    .and_then(|id| heap.get_string(id)).unwrap_or("").to_string();
-                if entry_url == url_str {
-                    // v is a 2-list (vat-id obj-id)
-                    let items = heap.list_to_vec(v);
-                    let vat_id = items.first().and_then(|v| v.as_integer()).unwrap_or(0) as u32;
-                    let obj_id = items.get(1).and_then(|v| v.as_integer()).unwrap_or(0) as u32;
-                    // build a FarRef in this cap's vat
-                    let farref_proto = heap.lookup_type("FarRef");
-                    let tv = heap.intern("__target_vat");
-                    let to = heap.intern("__target_obj");
-                    let us = heap.intern("url");
-                    let url_val = heap.alloc_string(&url_str);
-                    return Ok(heap.make_object_with_slots(
-                        farref_proto,
-                        vec![tv, to, us],
-                        vec![Value::integer(vat_id as i64), Value::integer(obj_id as i64), url_val],
-                    ));
-                }
-            }
-            Ok(Value::NIL)
+            // walk the root namespace to find the leaf.
+            let root = read_slot(heap, recv, SLOT_ROOT)?;
+            let leaf = walk_namespace(heap, root, &path);
+
+            // leaf should be a (vat-id obj-id) cons list for a valid
+            // capability/vat entry. otherwise nil.
+            let items = heap.list_to_vec(leaf);
+            if items.len() < 2 { return Ok(Value::NIL); }
+            let vat_id = items[0].as_integer().unwrap_or(0) as u32;
+            let obj_id = items[1].as_integer().unwrap_or(0) as u32;
+            if vat_id == 0 && obj_id == 0 { return Ok(Value::NIL); }
+
+            // build a FarRef in this cap's vat with the url slot.
+            let url_str = format!("{scheme}:{path}");
+            let farref_proto = heap.lookup_type("FarRef");
+            let tv = heap.intern("__target_vat");
+            let to = heap.intern("__target_obj");
+            let us = heap.intern("url");
+            let url_val = heap.alloc_string(&url_str);
+            Ok(heap.make_object_with_slots(
+                farref_proto,
+                vec![tv, to, us],
+                vec![Value::integer(vat_id as i64), Value::integer(obj_id as i64), url_val],
+            ))
         });
 
         // [system describe] → human-readable summary
