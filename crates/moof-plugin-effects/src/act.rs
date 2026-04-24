@@ -15,17 +15,10 @@ pub fn register(heap: &mut Heap) {
     let chain_sym        = heap.intern("__chain");
     let cont_fn_sym      = heap.intern("__cont_fn");
     let cont_val_sym     = heap.intern("__cont_val");
-    let target_vat_sym   = heap.intern("__target_vat");
-    let target_obj_sym   = heap.intern("__target_obj");
-    let selector_sym     = heap.intern("__selector");
     let then_sym         = heap.intern("then:");
     let flatmap_sym      = heap.intern("flatMap:");
     let map_sym          = heap.intern("map:");
     let act_sym          = heap.intern("Act");
-    let target_name_sym  = heap.intern("target");
-    let object_name_sym  = heap.intern("object");
-    let sel_name_sym     = heap.intern("selector");
-    let state_name_sym   = heap.intern("state");
 
     let object_proto = heap.type_protos[PROTO_OBJ];
     let act_proto    = heap.make_object(object_proto);
@@ -74,31 +67,14 @@ pub fn register(heap: &mut Heap) {
 
     native(heap, act_id, "recover:", |_heap, receiver, _args| Ok(receiver));
 
-    native(heap, act_id, "ok?", move |heap, receiver, _args| {
-        let id = receiver.as_any_object().ok_or("ok?: not an act")?;
-        let is_resolved = heap.get(id).slot_get(state_sym)
-            .map(|v| v == Value::symbol(resolved_sym)).unwrap_or(false);
-        Ok(Value::boolean(is_resolved))
-    });
-
-    native(heap, act_id, "result", move |heap, receiver, _args| {
-        let id = receiver.as_any_object().ok_or("result: not an act")?;
-        Ok(heap.get(id).slot_get(result_sym).unwrap_or(Value::NIL))
-    });
-
-    // inspect — return the Act's state as a data record
-    native(heap, act_id, "inspect", move |heap, receiver, _args| {
-        let id    = receiver.as_any_object().ok_or("inspect: not an act")?;
-        let tgt   = heap.get(id).slot_get(target_vat_sym).unwrap_or(Value::NIL);
-        let obj   = heap.get(id).slot_get(target_obj_sym).unwrap_or(Value::NIL);
-        let sel   = heap.get(id).slot_get(selector_sym).unwrap_or(Value::NIL);
-        let state = heap.get(id).slot_get(state_sym).unwrap_or(Value::NIL);
-        Ok(heap.make_object_with_slots(
-            Value::NIL,
-            vec![target_name_sym, object_name_sym, sel_name_sym, state_name_sym],
-            vec![tgt, obj, sel, state],
-        ))
-    });
+    // Acts are deliberately OPAQUE. no `ok?`, no `result`, no
+    // `inspect` probes from userland — those would let code
+    // bypass the scheduler's resolution machinery. the ONLY way
+    // to interact with an Act is to compose: [act then: f] or
+    // [act recover: f]. see docs/concepts/effects.md.
+    //
+    // debugging tools that need to see act state use rust-side
+    // heap introspection, not moof-side handlers.
 
     heap.env_def(act_sym, act_proto);
 }

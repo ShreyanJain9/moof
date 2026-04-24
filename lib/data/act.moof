@@ -69,36 +69,40 @@
 ; ═══════════════════════════════════════════════════════════
 
 (defprotocol Thenable
-  "Monadic bind. Implement then: (instance) and pure: (class-side)
-   to get do-notation and composition.
+  "Composition contract. Implement then: (instance) and pure:
+   (class-side) to get do-notation and universal composition.
+
+   Thenable is deliberately OPAQUE: it exposes `then:` and
+   `recover:` and nothing else. no `ok?`, no `pending?`, no
+   `resolved?` — those would be probes that bypass composition.
+   the scheduler handles resolution; user code describes what
+   to do when resolved via then:.
 
    Instance contract:
-     (then: f) — if self is the success case, call f with the
-                 unwrapped value and return f's result. if self
-                 is the failure case, return self unchanged.
-                 f MUST return the same monad type; the chain's
-                 final value is whatever the last f produced.
+     (then: f) — if self is the 'continue' case, call f with the
+                 inner value and return f's result. if self is
+                 a short-circuit case (Err, None, failed Act),
+                 return self unchanged — the chain halts.
 
    Class-side contract:
-     (pure: x) — wrap the bare value x in this monad's identity
+     (pure: x) — wrap the bare value x in this context's identity
                  form: Ok for Result, Some for Option, single-
                  element list for Cons, resolved Act for Act.
                  used by do-notation's `yield` to lift bare
-                 values into the ambient monad.
+                 values into the ambient context.
 
    do-notation desugars (x <- expr) to [expr then: |x| ...], so
    any type that impls Thenable composes in do-blocks uniformly."
 
   (require (then: f)
-    "Bind: unwrap self, apply f, return f's result. Failure
-     short-circuits. f must return the same monad type.")
+    "Bind: if self is the 'continue' case, apply f to the inner
+     value and return f's result. if self is a short-circuit,
+     return self unchanged.")
 
   (provide (map: f)
     [self then: |x| [[self parent] pure: (f x)]])
 
-  (provide (recover: f) self)
-
-  (provide (ok?) true))
+  (provide (recover: f) self))
 
 ; conform native / already-defined types. (Some/None conform in
 ; option.moof after they're defined.)
