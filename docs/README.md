@@ -1,41 +1,91 @@
 # moof documentation
 
-reference documentation for the moof language and runtime.
+welcome. moof is a persistent, concurrent objectspace — smalltalk's
+image, plan-9's namespaces, erlang's vats, kay-engelbart-atkinson's
+authoring vision, in one substrate.
 
-## guides
+this is the documentation tree. the structure:
 
-- [language](language.md) — syntax, special forms, evaluation model
-- [types](types.md) — every type and its handlers
-- [protocols](protocols.md) — the protocol system and standard protocols
-- [errors](errors.md) — error/result handling model
-- [conventions](conventions.md) — how we name things and write docs
-- [effects-and-vats](effects-and-vats.md) — effect boundary model and Act/vat architecture
-- [core-contract-matrix](core-contract-matrix.md) — wave-6 active/deprecated feature matrix
+## start here
 
-## design documents (in project root)
+if you have **five minutes**, read [vision/one-page.md](vision/one-page.md).
+it's the pitch in a page.
 
-- [VISION.md](../VISION.md) — the full v2 design
-- [STDLIB-PLAN.md](../STDLIB-PLAN.md) — stdlib design spec
-- [SYNTHESIS.md](../SYNTHESIS.md) — v1 post-mortem
+if you have **an hour**, read these in order:
+1. [vision/manifesto.md](vision/manifesto.md) — what moof is, why
+2. [concepts/objects.md](concepts/objects.md) — the material
+3. [concepts/messages.md](concepts/messages.md) — the one operation
+4. [concepts/vats.md](concepts/vats.md) — concurrency and isolation
+5. [concepts/effects.md](concepts/effects.md) — how things happen
 
-## current status
+if you're **contributing**, add after the hour:
+6. [concepts/persistence.md](concepts/persistence.md) — the image
+7. [concepts/capabilities.md](concepts/capabilities.md) — security
+8. [concepts/addressing.md](concepts/addressing.md) — URLs, namespaces
+9. [concepts/protocols.md](concepts/protocols.md) — the type system
+10. [laws/](laws/) — what moof commits to, what PRs get reviewed against
 
-the core language works: bytecode VM, message dispatch, prototype
-delegation, closures, vau operatives, LMDB persistence.
+## structure
 
-implemented (high level):
+```
+docs/
+├── vision/          why moof exists; what it's trying to be
+│   ├── one-page.md       the pitch in one page
+│   ├── manifesto.md      the long vision, in depth
+│   ├── lineage.md        debts to smalltalk, plan-9, erlang, etc.
+│   └── horizons.md       the far future: canvas, agent, federation
+│
+├── concepts/        what moof is — the computational model
+│   ├── objects.md        the object model, slots, handlers, prototypes
+│   ├── messages.md       send, dispatch, doesNotUnderstand
+│   ├── protocols.md      the type system: contracts + conformance
+│   ├── vats.md           concurrency, message boxes, scheduler
+│   ├── effects.md        Acts, Updates, purity, do-notation
+│   ├── persistence.md    content-addressing, the image, blobstore
+│   ├── addressing.md     URLs, paths, namespaces
+│   ├── capabilities.md   security via reference
+│   └── authoring.md      the canvas, liveness, the ladder
+│
+├── reference/       how to use moof — concrete, spec-like
+│   ├── syntax.md         s-expressions, sugar, reader rules
+│   ├── stdlib.md         the stdlib surface, linked to doctrine
+│   ├── vm.md             bytecode, dispatch, scheduler internals
+│   ├── plugins.md        writing type plugins and capabilities
+│   └── cli.md            moof command, flags, manifest
+│
+├── laws/            the constitution — what we commit to
+│   ├── substrate-laws.md       6 laws the runtime satisfies
+│   ├── stdlib-doctrine.md      the stdlib rulebook (long form)
+│   ├── stdlib-at-a-glance.md   the stdlib rulebook (one-pager)
+│   └── review-protocol.md      how PRs get reviewed
+│
+├── roadmap.md       where we are, where we're going
+├── glossary.md      every term in moof, defined
+└── archive/         older docs kept for reference, not canon
+```
 
-- runtime core: vm/heap/dispatch, foreign type registry migration path,
-  scheduler + vats, capability plugins, manifest bootstrap
-- stdlib surface: protocols + collection/query/reactive primitives,
-  Result/Act-oriented flows in current codepaths
-- test harness: Act-aware moof suite in `lib/tools/test.moof`
+## about these docs
 
-known wave-6 contract drift (in progress):
+every doc declares its **type** at the top:
 
-- some docs still describe removed forms (`while`, `:=`, try/catch)
-- opcode enum contains compatibility/debt members not emitted by current compiler
-- effects docs include long-term aspirations that exceed current runtime guarantees
+- **vision** — aspirational, the direction
+- **concept** — what we believe about how moof works (can be
+  designed-not-implemented, but the design IS the commitment)
+- **reference** — how it actually works today (commits to implementation)
+- **law** — invariants we refuse to violate
+- **roadmap** — what we're working on and in what order
 
-long-term work still ahead: fully coherent canvas environment,
-agent-as-vat workflow, federation/distribution, and deeper core simplification.
+when vision and reference disagree, vision points at where we're
+going and reference says what's there today. neither is allowed to
+lie. if reference says something is working, it works. if vision
+says something is planned, there's a roadmap item for it.
+
+## what's not here
+
+- **tutorials.** not written yet. the language is alpha; tutorials
+  would rot. start with the concept docs and the repl.
+- **API docs per type.** the moof inspector and `[Type describe]`
+  are the authoritative API browser. when docs get out of date,
+  the inspector doesn't.
+- **marketing.** this isn't a product, it's a substrate. come back
+  when the canvas lands.

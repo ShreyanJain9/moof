@@ -2,65 +2,79 @@
 
 > *"clarus the dogcow lives again"*
 
-a persistent, concurrent objectspace with capability security
-and a lisp-shaped surface syntax. your personal database.
-a federated web of objects.
+a persistent, concurrent objectspace — smalltalk's image, plan 9's
+namespaces, erlang's vats, kay-engelbart-atkinson's authoring
+vision, in one substrate.
+
+## one sentence
+
+moof is a personal dynamic medium — a living, accretive, shareable
+objectspace where the tools and the content are made of the same
+material, and everyone is an author.
 
 ## everything is an object
-
-integers, strings, cons cells, arrays, hashmaps, lambdas, vats,
-the canvas, the agent — all objects. objects have fixed public
-slots (data) and open handlers (behavior). the only operation
-is `send`.
 
 ```
 [3 + 4]                           ; message send to an integer
 { Point x: 3 y: 4 }              ; object literal (fixed shape)
 [list map: |x| [x * 2]]          ; block passed to a method
-[pt <- distanceTo: other]        ; eventual send (returns promise)
+[pt <- distanceTo: other]        ; eventual send (returns Act)
 [people where: |p| [p.age > 28]] ; query — objects are rows
-[Image search: "protocol"]        ; full-text search your objectspace
 ```
 
-## the big ideas
+## the commitments
 
-- **one type:** Object. cons, string, array, hashmap, vat — all objects.
-- **protocols:** the type system. implement `each:`, get 30 methods free.
-- **fixed-shape slots:** data is public and sealed. access is an array offset.
-- **open handlers:** add behavior to any object anytime. prototype delegation.
-- **vats:** erlang-style concurrent processes, objects, capability-isolated.
-- **capabilities:** a reference IS a capability. no IO without the IO object.
-- **LMDB persistence:** crash-safe, concurrent readers, instant startup.
-- **the canvas:** zoomable infinite spatial browser. every object renders itself.
-- **the agent:** an LLM in a vat with membraned capabilities.
-- **liveness:** mirrors, fix-and-proceed, Observable, reflective tower.
-  source code is objects — read, transform, reinstall from within moof.
-- **your database:** full-text search, reactive indexing, collections-as-tables.
-  `where:`, `groupBy:`, `join:on:` — queries as message sends.
-- **content-addressed:** every object state has a hash. undo, versioning,
-  deduplication, snapshots — all free. even locally.
-- **federated:** images talk via moof's own wire protocol (send,
-  serialized). far refs, capability-mediated, CRDT merging, pinning.
-- **your website:** publish objects as web pages. capabilities control
-  what's public. your database and your website are the same image.
-- **vau:** user code has compiler-level power. `if` is a library function.
+- **one type: Object.** cons, string, integer, vat, the canvas —
+  all objects. the VM optimizes; the semantics don't bend.
+- **one operation: send.** `(f x)` is `[f call: x]`. `obj.x` is
+  `[obj slotAt: 'x]`. `[3 + 4]` is a send. everything is a send.
+- **the image persists.** close moof, reopen, exactly where you
+  were. LMDB-backed blob store, content-addressed.
+- **vats are isolation.** single-threaded actors with private
+  heaps. cross-vat sends return Acts. let it crash.
+- **references are capabilities.** if you don't hold the Console,
+  you can't print. no ambient authority.
+- **protocols are the type system.** implement `fold:with:`, get
+  ~40 collection methods free. nominal + structurally queryable.
+- **every value has a URL.** content-addressed for immutable;
+  path-addressed for live. federation uses the same URLs with
+  a peer prefix.
 
 ## status
 
-design phase. see [VISION.md](VISION.md) for the full design,
-[SYNTHESIS.md](SYNTHESIS.md) for the v1 post-mortem. v1 is on
-`archive/v1` (tagged `v1-final`).
+alpha. the substrate works: REPL, image, vats, protocols, capabilities.
+the canvas is future work. the agent is future work. federation is
+future work. we're making a living thing, not shipping a product.
 
-## debts
+see [docs/roadmap.md](docs/roadmap.md) for waves and timing.
 
-erlang (processes, let-it-crash), E (capabilities, eventual sends),
-haskell (typeclasses as protocols, effects as capabilities),
-ruby (everything-is-object, blocks, Enumerable, open classes),
-self (prototypes, live environment, morphic),
-SQL (objects-as-rows, queries-as-sends),
-git (content-addressed storage, merkle DAG sync),
-IPLD (content identifiers, universal linking),
-kernel (vau).
+## read the docs
+
+if you have **five minutes**: [docs/vision/one-page.md](docs/vision/one-page.md)
+
+if you have **an hour**, read in order:
+1. [docs/vision/manifesto.md](docs/vision/manifesto.md) — what moof
+   is, why
+2. [docs/concepts/objects.md](docs/concepts/objects.md) — the material
+3. [docs/concepts/messages.md](docs/concepts/messages.md) — the one
+   operation
+4. [docs/concepts/vats.md](docs/concepts/vats.md) — concurrency
+5. [docs/concepts/effects.md](docs/concepts/effects.md) — how things
+   happen
+
+contributing?
+- [docs/laws/substrate-laws.md](docs/laws/substrate-laws.md) — the
+  six substrate invariants
+- [docs/laws/stdlib-doctrine.md](docs/laws/stdlib-doctrine.md) — the
+  stdlib rulebook
+- [docs/laws/review-protocol.md](docs/laws/review-protocol.md) — how
+  PRs get reviewed
+
+## debts (acknowledged)
+
+erlang, E (mark miller), haskell, ruby, self, SQL, git, IPLD, unix,
+plan 9, smalltalk, alan kay, doug engelbart, bill atkinson. see
+[docs/vision/lineage.md](docs/vision/lineage.md).
 
 ## license
 
