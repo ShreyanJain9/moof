@@ -23,13 +23,15 @@ if you have **an hour**, read these in order:
 4. [concepts/messages.md](concepts/messages.md) — the one operation
 5. [concepts/vats.md](concepts/vats.md) — concurrency and isolation
 6. [concepts/effects.md](concepts/effects.md) — how things happen
+7. [concepts/do-notation.md](concepts/do-notation.md) — the
+   composition syntax everything uses
 
 if you're **contributing**, add after the hour:
-7. [concepts/persistence.md](concepts/persistence.md) — the image
-8. [concepts/capabilities.md](concepts/capabilities.md) — security
-9. [concepts/addressing.md](concepts/addressing.md) — URLs, namespaces
-10. [concepts/protocols.md](concepts/protocols.md) — the type system
-11. [laws/](laws/) — what moof commits to, what PRs get reviewed against
+8. [concepts/persistence.md](concepts/persistence.md) — the image
+9. [concepts/capabilities.md](concepts/capabilities.md) — security
+10. [concepts/addressing.md](concepts/addressing.md) — URLs, namespaces
+11. [concepts/protocols.md](concepts/protocols.md) — the type system
+12. [laws/](laws/) — what moof commits to, what PRs get reviewed against
 
 ## structure
 
@@ -49,7 +51,8 @@ docs/
 │   ├── protocols.md      the type system: contracts + conformance (handlers)
 │   ├── schemas.md        explicit slot-type contracts (data shapes, optional)
 │   ├── vats.md           concurrency, message boxes, scheduler
-│   ├── effects.md        Acts, Updates, purity, do-notation
+│   ├── effects.md        Acts, Updates, purity
+│   ├── do-notation.md    the universal composition syntax
 │   ├── streams.md        temporal flows: unix streaming for typed values
 │   ├── persistence.md    content-addressing, the image, blobstore
 │   ├── addressing.md     URLs, paths, namespaces

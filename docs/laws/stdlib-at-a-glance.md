@@ -20,16 +20,21 @@ Numeric        + - * = <                     → arithmetic values
 Iterable       fold:with:                   → walkable sequence
 Indexable      at:, count                   → random-access sequence
 Callable       call:                         → invokable value
-Thenable       then: (+ class-side pure:)   → bind / sequence (do-notation)
-                 provides recover:, ok?, pending? with sensible defaults
+Thenable       then: + class-side pure:     → compose (do-notation)
+                 provides: map:, recover: — NO ok? NO pending?
 ```
 
 every other generic operation belongs inside one of these.
 
-`Thenable` is the universal comprehension contract — `(do ...)`
-over any Thenable returns a value in the SAME Thenable. Cons,
-Option, Result, Act, Update, Stream all conform. recover: / ok?
-/ pending? are provides with defaults; types override as needed.
+`Thenable` is moof's composition contract and the backbone of
+do-notation. Cons, Option, Result, Act, Update, Stream conform.
+Err/None override `recover:` to express failure; everyone else
+uses the default (`self`, "nothing to recover from").
+
+**Thenable is deliberately opaque.** no `ok?`, no `pending?`,
+no probing. you compose via `then:` or `recover:`, and the
+scheduler handles resolution. acts never expose "is it done?" —
+you bind through them instead.
 
 ## the deletion list
 

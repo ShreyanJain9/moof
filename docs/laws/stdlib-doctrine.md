@@ -110,30 +110,36 @@ is deleted. every one is minimal. every one has a clear reason to exist.
 - **conformers**: every `<fn>` value implicitly (native-level). target: add Transducer so `[xform (reducer)]` works, any user-defined callable wrapper.
 
 ### `Thenable` — the universal composition contract
-- **require**: `then:` (bind), and class-side `pure:` (lift a
-  value into this context)
+- **require**:
+  - `then:` (bind)
+  - class-side `pure:` (lift a value into this context)
 - **provides**:
-  - `map:` (fmap; derived from bind + pure)
-  - `recover:` (default: return self, i.e. "already fine").
-    Ok/Some/Cons/Act-with-Ok-result use the default; Err/None
-    override.
-  - `ok?` (default: `true`). Err/None override to `false`; Act
-    can defer to its resolved value.
-  - `pending?` (default: `false`). only Act/Update answer `true`
-    while unresolved.
+  - `map:` (fmap; derived as `[self then: |x| [self pure: (f x)]]`)
+  - `recover:` (default: `self` — "nothing to recover from").
+    Err and None override to run the continuation.
 - **conformers**: Cons, Option (via Some/None), Result (via
-  Ok/Err), Act, Update, Stream. target: every context
-  throughline 1 names.
+  Ok/Err), Act, Update, Stream.
 
-**why unified.** "Monadic / Fallible / Awaitable" was a theoretical
-split based on which optional capabilities a type had. in
-practice it meant extra conformances with no user-visible
-benefit. defaults cover the 90% case; overrides handle the rest.
-`(do ...)` works against Thenable — no need to join three
-protocols for one comprehension to run.
+**no introspection surface.** Thenable is deliberately opaque.
+no `ok?`, no `pending?`, no `resolved?`. the ONLY way to
+interact with a Thenable's contents is to compose — via `then:`
+or `recover:`. the scheduler handles resolution; users don't
+ask "is it done yet?"
 
-**total: 9 protocols.** Thenable kept fused; Reference,
-Buildable, Interface deleted. do-notation is universal.
+acts in particular are meant to stay opaque. probing their
+state is a violation of the abstraction. if a specific type
+wants to expose a diagnostic like `running?`, that's a
+type-specific method, NOT a Thenable method. keep Thenable
+minimal.
+
+**why fused.** an earlier doctrine proposed splitting Thenable
+into Monadic + Fallible + Awaitable. reverted — the split cost
+three conformances per type and bought nothing. Err and None
+override `recover:`; that's sufficient to express fallibility
+without exposing a `ok?` probe. one protocol, minimal surface.
+
+**total: 9 protocols.** Thenable fused; Reference, Buildable,
+Interface deleted. do-notation is universal.
 
 ---
 
@@ -157,11 +163,11 @@ Buildable, Interface deleted. do-notation is universal.
 an earlier version of this doctrine proposed splitting
 `Thenable` into `Monadic` + `Fallible` + `Awaitable`. that was a
 mistake: it turned one universal protocol into three, required
-every context to declare three conformances, and gained no
-user-visible benefit — every type was still either "Thenable or
-not." the fused shape is correct. sensible defaults for
-`recover:`/`ok?`/`pending?` let Cons be Thenable without
-hand-waving failure or pendingness semantics.
+every context to declare three conformances, and exposed
+`ok?` and `pending?` as public probes — violating Acts'
+opacity. the fused + opaque shape is correct. `recover:` (as
+a composition primitive, not a query) handles fallibility
+without breaking abstraction.
 
 ### widen (add conformers)
 

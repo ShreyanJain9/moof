@@ -31,38 +31,37 @@ moof's `Thenable` protocol is the contract: implement `then:`
 and you compose. every context above is Thenable. the single
 syntax for chaining is `(do ...)`.
 
-**do is the universal comprehension**
+**do has two modes: yielded (comprehension) and yield-free
+(sequencer)**
 
-this is the key. `(do ...)` doesn't enforce "you must stay in
-one kind of context." it's a comprehension: the block's OUTPUT
-TYPE is inferred from what you bind and what you yield.
+see [concepts/do-notation.md](concepts/do-notation.md) for the
+full treatment. the short version:
+
+- **without yield**, `(do ...)` is a sequencer. bindings from
+  different Thenables are fine; the block's result is whatever
+  the last form evaluates to; short-circuit propagates through
+  the Thenable chain.
+- **with yield**, `(do ...)` is a comprehension. all bindings
+  must be from the same Thenable kind (M); `(yield v)` lifts v
+  via `M.pure:`; result is M<v>.
 
 ```moof
-; bind from a stream → the result is a stream
-(do (x <- canvas-clicks)
-    (yield (str "click at " x)))
+; comprehension over a stream — block returns a stream
+(do (click <- canvas-clicks)
+    (yield (str "click at " click)))
 ; → Stream<String>
 
-; bind from a list → the result is a list
+; comprehension over a list
 (do (x <- (list 1 2 3))
     (yield [x * 2]))
 ; → Cons<Integer> = (2 4 6)
 
-; bind from an Act → the result is an Act
-(do (user <- [users <- get: 'alice])
-    (yield user.name))
-; → Act<String>
-
-; bind from an Option → the result is an Option
-(do (n <- [table at: 'count])
-    (yield [n + 1]))
-; → Option<Integer>
+; yield-free: sequence mixed effects; last form is block's value
+(do (n <- [table at: 'count])     ; Option
+    (user <- [users <- get: n])    ; Act
+    [console <- println: user.name])
+; block value is the final Act<nil>; short-circuits on None
 ```
-
-`(yield v)` lifts a pure value INTO the ambient context (via
-class-side `pure:`). bare expressions at the end are the
-block's result value directly. the surrounding context is
-determined by the bindings.
 
 this is the **universal comprehension dream** — SQL's `SELECT
 ... FROM ... WHERE` (comprehension over tables), haskell's
@@ -70,17 +69,10 @@ list/monad comprehensions, python's generator expressions, all
 collapsed into one syntax that works over Acts, Streams,
 Options, Results, Cons, Updates, and any user-written Thenable.
 
-**mixing kinds**
-
-single-kind-per-block is *not* enforced except where lifting
-requires it. effects in the middle don't care about kind —
-`(do (x <- list) [console <- println: x])` runs a println per
-element and the block produces... whatever the last expression
-produces, lifted if necessary.
-
-when two kinds fundamentally don't lift (binding an Option
-mid-Act-block without explicit promotion), the compiler can ask
-you to be explicit. most of the time it infers.
+**composition, not probing.** Thenable has only `then:` and
+`pure:` (required) plus `map:` and `recover:` (provided). no
+`ok?`, no `pending?`. acts stay opaque — you don't ask "is it
+done?", you just bind through them.
 
 **why this matters**
 

@@ -23,10 +23,11 @@ the canvas stacks aspects visually.
 **Atom** — a defserver wrapping a single mutable cell of state.
 `[atom get]`, `[atom swap: new]`. see `lib/flow/reactive.moof`.
 
-**Awaitable** — NOT a separate protocol. `pending?` is a
-Thenable provide with default `false`; Act and Update override
-it while unresolved. an earlier doctrine proposed splitting
-Thenable into Monadic + Fallible + Awaitable — reverted.
+**Awaitable** — NOT a protocol in moof. an earlier doctrine
+proposed splitting Thenable into Monadic + Fallible + Awaitable
+and exposing `pending?` as a probe. reverted. Acts are opaque —
+no `pending?`, no `ok?`, no introspection. you compose via
+`then:` or `recover:`; the scheduler handles resolution.
 
 ---
 
@@ -147,10 +148,10 @@ documented in `docs/exemptions.md` with owner and wave target.
 
 ## F
 
-**Fallible** — NOT a separate protocol. `ok?` and `recover:`
-are Thenable provides with defaults (`true` and `self`); Err,
-None override to express failure. an earlier doctrine proposed
-splitting Thenable; reverted.
+**Fallible** — NOT a protocol in moof. failure is expressed by
+overriding Thenable's `recover:` provide (default `self`;
+Err/None run their recovery continuation). no `ok?` probe —
+composition handles failure without introspection.
 
 **FarRef** — a proxy to an object in another vat. carries
 `__target_vat`, `__target_obj`, `url`. sends through it become
@@ -372,14 +373,15 @@ works as a map and a list simultaneously (Lua-style).
 
 **Text** — the rust struct backing String.
 
-**Thenable** — moof's universal composition protocol, and the
-contract behind `(do ...)` comprehensions. required: `then:`
-(bind) and class-side `pure:` (lift). provides with defaults:
-`map:`, `recover:` (default `self`), `ok?` (default `true`),
-`pending?` (default `false`). Cons, Option, Result (Ok/Err),
-Act, Update, Stream conform. an earlier doctrine proposed
-splitting into Monadic + Fallible + Awaitable; reverted —
-fused + defaults is the real shape.
+**Thenable** — moof's universal composition protocol and the
+contract behind `(do ...)`. required: `then:` (bind) and
+class-side `pure:` (lift). provides: `map:`, `recover:`
+(default `self`). **no introspection** — no `ok?`, no
+`pending?`, no `resolved?`. Acts in particular are opaque;
+you interact only through composition. Cons, Option (Some/None),
+Result (Ok/Err), Act, Update, Stream conform. an earlier
+doctrine proposed a probe-exposing split into Monadic +
+Fallible + Awaitable; reverted — fused-and-opaque is correct.
 
 **time-travel** — navigating past image states. content-
 addressing enables it; UI exposure pending.

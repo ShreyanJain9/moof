@@ -42,8 +42,9 @@ structurally:
 - **state**: `pending` or `resolved`
 - **result**: nil while pending; value or Err when resolved
 - **chain**: continuations to run when resolved
-- **conforms**: Thenable (with `pending?` overridden, `ok?` and
-  `recover:` deferred to resolved value)
+- **conforms**: Thenable (via its own `then:`/`pure:`; no
+  introspection is exposed — the state field above is internal
+  only)
 
 ```moof
 (def x [console <- println: "hi"])
@@ -113,110 +114,66 @@ almost always it does. don't invent a seventh effect type.
 
 ---
 
-## one protocol: Thenable
+## one protocol: Thenable (deliberately opaque)
 
-moof ships ONE Thenable protocol that handles composition for
-every context. minimal required methods; the rest are provides
-with sensible defaults.
+moof ships ONE composition protocol: `Thenable`. minimal
+surface, opaque by design.
 
-- **required**: `then:` (bind), class-side `pure:` (lift a value).
-- **provides with defaults** (override when needed):
-  - `recover:` (default: `self` — "i'm already fine"). overridden
-    by Err/None to run the recovery continuation.
-  - `ok?` (default: `true`). overridden by Err/None to return
-    `false`; Act defers to its resolved value when ready.
-  - `pending?` (default: `false`). overridden by Act/Update
-    while unresolved.
+- **required**:
+  - `then:` (bind)
+  - class-side `pure:` (lift a value)
+- **provides**:
+  - `map:` (fmap; derived from bind + pure)
+  - `recover:` (default: `self` — "nothing to recover from").
+    Err and None override to run the continuation.
 
-an earlier doctrine proposed splitting this into Monadic +
-Fallible + Awaitable. reverted — the split forced every type to
-declare three conformances to say what defaults would have said
-more cleanly. fused + defaults is the real shape.
+**no probes.** no `ok?`. no `pending?`. no `resolved?`. you
+interact with a Thenable ONLY by composing: `then:` chains a
+continuation; `recover:` chains a fallback. that's the entire
+interface.
 
-**you can always ask** any Thenable `recover:`, `ok?`, or
-`pending?` — Cons responds sensibly (`self`, `true`, `false`),
-Option responds sensibly, Act responds according to its
-resolution state. no "this type doesn't support that." just the
-defaults.
+**acts are opaque.** this isn't just minimalism — it's deliberate.
+an Act never exposes "is it done?" to userland because that
+question bypasses the scheduler. you don't wait on Acts; you
+compose through them. the scheduler runs everyone; your
+continuation fires when ready.
+
+the practical consequence: you can never write code that
+depends on Act resolution state from outside. you write code
+that describes what to do WHEN the Act resolves — via `then:`.
+the difference is the difference between pull and push, between
+polling and subscribing. moof picks push/subscribe, always.
 
 ---
 
-## do-notation — the universal comprehension
+## do-notation — see the dedicated doc
 
-`(do ...)` is not just Act-chaining. it's a comprehension that
-infers its output type from what you bind:
+do-notation is the composition syntax for everything Thenable —
+Acts, Updates, Options, Results, Cons, Streams. it has its own
+doc because it's a load-bearing primitive, not a sub-feature.
+
+**read [do-notation.md](do-notation.md) for the full treatment.**
+
+the short version relevant here:
+
+- `(do ... (yield v))` — single-kind comprehension: all binds
+  must be the same Thenable kind M; `(yield v)` lifts v via
+  `M.pure:`; block returns `M<v>`.
+- `(do ... bare-expr)` — flexible sequencer: bindings can mix
+  Thenable kinds; short-circuit propagates through each; block's
+  value is the last expression directly.
+
+Acts compose via do just like everything else:
 
 ```moof
-(do
-  e1                ; evaluate e1 (in ambient context)
-  (x = pure-val)    ; let binding (pure)
-  (y <- thenable)   ; bind: sequence through the context
-  (yield v))        ; lift v into the same context
-```
-
-- bind from an Act → block returns an Act.
-- bind from an Option → block returns an Option.
-- bind from a Cons → block returns a Cons (comprehension!).
-- bind from a Stream → block returns a Stream.
-- bind from a Result → block returns a Result; an Err
-  short-circuits.
-
-```moof
-; comprehension over a list: the result is a list
-(do (x <- (list 1 2 3))
-    (yield [x * 2]))
-; → (2 4 6)
-
-; comprehension over a stream: the result is a stream
-(do (click <- canvas-clicks)
-    (yield (str "click at " click)))
-; → Stream<String>
-
-; Act composition: the result is an Act
 (do (user <- [users <- get: 'alice])
-    (yield user.name))
+    (addr <- [user <- getAddress])
+    (yield addr.street))
 ; → Act<String>
-
-; short-circuit on failure: the result is an Option
-(do (n <- [table at: 'count])    ; Option<Integer>
-    (yield [n + 1]))
-; → Option<Integer>  — None if count is absent
 ```
 
-**`yield`** is how you lift a pure value back into the ambient
-Thenable. it calls the class-side `pure:` of whatever the block
-is returning. bare expressions at the end are the block's value
-directly (already in the right context, or lifted automatically
-when possible).
-
-**single-kind-per-block is NOT the rule.** effects in the middle
-don't care about kind — `(do (x <- list) [console <- println: x])`
-runs a println per list element (an effect in the middle of a
-list comprehension). the block's kind is whatever you're
-ultimately producing.
-
-when kinds genuinely don't lift (binding raw Options mid-Act),
-the compiler can ask for explicit promotion. most of the time,
-inference handles it.
-
----
-
-## why this is the universal comprehension
-
-SQL has `SELECT ... FROM ... WHERE`. haskell has list
-comprehensions and monad comprehensions. python has generator
-expressions. clojure has `for`. each is a syntax for
-"iterate-bind-and-produce" over some specific kind of
-collection.
-
-moof's `(do ...)` handles all of these with one syntax. the
-block's output type follows the input(s). you don't learn a
-different syntax for "comprehension over a database result" vs
-"comprehension over a stream" vs "sequential async operations"
-— they're all the same comprehension over different Thenables.
-
-this is the universal-comprehension dream cashed out. one
-notation, infinitely many usable contexts.
+Updates likewise. short-circuit on Err uses `recover:` (or
+propagates through `then:`'s Err handling).
 
 ---
 
