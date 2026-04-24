@@ -190,12 +190,12 @@ fn eval_and_print(sys: &mut System, vat_id: u32, input: &str) {
 
 fn safepoint_gc(sys: &mut System, vat_id: u32) {
     let vat = sys.vat_mut(vat_id);
-    if !vat.heap.gc_requested { return; }
+    if !vat.heap.gc_requested() { return; }
 
     let extra: Vec<moof_core::Value> = vat.vm.closure_descs_ref().iter()
         .flat_map(|d| d.chunk.constants.iter().map(|b| moof_core::Value::from_bits(*b)))
         .collect();
-    vat.heap.gc_requested = false;
+    vat.heap.clear_gc_requested();
     let stats = vat.heap.gc(&extra);
     eprintln!("  ~ gc: freed {} slots ({} live / {} total)",
         stats.freed, stats.live, stats.before);

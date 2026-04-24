@@ -30,6 +30,7 @@ use crate::object::HeapObject;
 use crate::value::Value;
 use crate::foreign::{ForeignData, ForeignType, ForeignTypeId, ForeignTypeRegistry};
 use crate::symtab::SymbolTable;
+use crate::arena::Arena;
 use indexmap::IndexMap;
 use std::sync::Arc;
 
@@ -79,27 +80,11 @@ pub struct OutgoingMessage {
 }
 
 pub struct Heap {
-    objects: Vec<HeapObject>,
-    /// Indexes into `objects` that have been freed by GC and can
-    /// be reused on alloc. Swept objects are tombstoned in place
-    /// (replaced with an empty General) so the slot is safe to
-    /// read — but callers shouldn't be holding refs to freed
-    /// slots in the first place.
-    free_list: Vec<u32>,
-    /// Set by moof code (e.g. [Vat requestGc]) when a GC is
-    /// desired. The scheduler / REPL loop polls this at safe
-    /// points and runs the actual collection. never run GC
-    /// directly from a native handler — VM frames are live.
-    pub gc_requested: bool,
-    /// Allocation counter since the last completed GC. when it
-    /// crosses `alloc_budget`, alloc flips gc_requested so the
-    /// next safepoint triggers a collection.
-    allocs_since_gc: usize,
-    /// Ratio-based GC budget: after each gc, set to live*2 (but
-    /// no less than MIN_GC_BUDGET). this adapts to working set —
-    /// steady-state programs get rare GCs, allocation-heavy ones
-    /// get frequent ones.
-    alloc_budget: usize,
+    /// Object allocation + GC accounting. Accessed via
+    /// Heap::alloc / get / get_mut / object_count / live_count etc.
+    /// `gc_requested` is a pub-accessed field on the inner Arena
+    /// (Heap::gc_requested is a delegating accessor).
+    pub(crate) arena: Arena,
     /// Symbol interning. Per-heap today; may become shared across
     /// vats in a future wave. Accessed via the public `intern`,
     /// `symbol_name`, and `find_symbol` methods below.
@@ -178,7 +163,7 @@ pub type NativeFn = Box<dyn Fn(&mut Heap, Value, &[Value]) -> Result<Value, Stri
 // anything through the heap's other fields.
 impl Drop for Heap {
     fn drop(&mut self) {
-        self.objects.clear();
+        self.arena.clear();
         self.foreign_registry = crate::foreign::ForeignTypeRegistry::new();
         self.send_cache.clear();
         self.type_protos.clear();
@@ -189,11 +174,7 @@ impl Drop for Heap {
 impl Heap {
     pub fn new() -> Self {
         let mut h = Heap {
-            objects: Vec::new(),
-            free_list: Vec::new(),
-            gc_requested: false,
-            allocs_since_gc: 0,
-            alloc_budget: Self::MIN_GC_BUDGET,
+            arena: Arena::new(),
             symbols: SymbolTable::new(),
             env: 0,
             rebound: std::collections::HashSet::new(),
@@ -384,37 +365,16 @@ impl Heap {
         }
     }
 
-    // -- object allocation --
+    // -- object allocation (thin delegations to the embedded Arena) --
 
-    /// Floor for the GC budget — keeps GCs from firing during the
-    /// first few allocations at program start.
-    pub const MIN_GC_BUDGET: usize = 2048;
-    /// Growth factor after a GC: next_budget = live_count * this.
-    /// 2x means ~50% collector-amortized overhead in the worst
-    /// case; tighten to 1.5 for more-frequent-smaller collections.
-    pub const GC_GROWTH_FACTOR: usize = 2;
+    /// Floor for the GC budget. Exposed for backward compat; real
+    /// constant lives on Arena.
+    pub const MIN_GC_BUDGET: usize = Arena::MIN_GC_BUDGET;
+    /// Growth factor after a GC. Exposed for backward compat.
+    pub const GC_GROWTH_FACTOR: usize = Arena::GC_GROWTH_FACTOR;
 
     pub fn alloc(&mut self, obj: HeapObject) -> u32 {
-        self.allocs_since_gc += 1;
-        if self.allocs_since_gc >= self.alloc_budget {
-            self.gc_requested = true;
-        }
-        // prefer freelist (reuse) over append (grow)
-        if let Some(id) = self.free_list.pop() {
-            self.objects[id as usize] = obj;
-            id
-        } else {
-            let id = self.objects.len() as u32;
-            self.objects.push(obj);
-            id
-        }
-    }
-
-    /// Called by gc() after a collection completes to reset the
-    /// budget based on the new live count.
-    pub(crate) fn set_alloc_budget_from_live(&mut self, live: usize) {
-        self.alloc_budget = (live * Self::GC_GROWTH_FACTOR).max(Self::MIN_GC_BUDGET);
-        self.allocs_since_gc = 0;
+        self.arena.alloc(obj)
     }
 
     pub fn alloc_val(&mut self, obj: HeapObject) -> Value {
@@ -422,12 +382,18 @@ impl Heap {
     }
 
     pub fn get(&self, id: u32) -> &HeapObject {
-        &self.objects[id as usize]
+        self.arena.get(id)
     }
 
     pub fn get_mut(&mut self, id: u32) -> &mut HeapObject {
-        &mut self.objects[id as usize]
+        self.arena.get_mut(id)
     }
+
+    /// Poll by scheduler / REPL safepoints. Set by the arena when
+    /// alloc crosses the budget.
+    pub fn gc_requested(&self) -> bool { self.arena.gc_requested }
+    pub fn clear_gc_requested(&mut self) { self.arena.gc_requested = false; }
+    pub fn request_gc(&mut self) { self.arena.gc_requested = true; }
 
     // -- convenience allocators --
 
@@ -770,7 +736,7 @@ impl Heap {
         let table_tid  = self.foreign_registry.lookup(Table::type_name());
         let bigint_tid = self.foreign_registry.lookup(BigInt::type_name());
 
-        for obj in self.objects.iter_mut() {
+        for obj in self.arena.objects_mut_slice().iter_mut() {
             let Some(fd) = &obj.foreign else { continue; };
             let expected = if Some(fd.type_id) == pair_tid    { Some(cons_proto) }
                       else if Some(fd.type_id) == text_tid    { Some(str_proto) }
@@ -931,14 +897,12 @@ impl Heap {
     }
 
     /// Total object count (includes freelist slots).
-    pub fn object_count(&self) -> usize { self.objects.len() }
+    pub fn object_count(&self) -> usize { self.arena.len() }
 
     /// Live object count (heap size minus freelist).
-    pub fn live_count(&self) -> usize {
-        self.objects.len() - self.free_list.len()
-    }
+    pub fn live_count(&self) -> usize { self.arena.live_count() }
 
-    pub fn objects_ref(&self) -> &[HeapObject] { &self.objects }
+    pub fn objects_ref(&self) -> &[HeapObject] { self.arena.objects() }
     pub fn symbols_ref(&self) -> &[String] { self.symbols.names() }
 
     // ============================================================
@@ -1096,7 +1060,7 @@ impl Heap {
     // ============================================================
 
     pub fn restore_objects(&mut self, objects: Vec<HeapObject>, symbols: Vec<String>, env_id: u32) {
-        self.objects = objects;
+        self.arena.restore(objects);
         self.symbols.restore(symbols);
         self.env = env_id;
         self.re_resolve_well_known_syms();
@@ -1109,7 +1073,7 @@ impl Heap {
         env_id: u32,
     ) -> Self {
         let mut h = Heap::new();
-        h.objects = objects;
+        h.arena.restore(objects);
         h.symbols.restore(symbols);
         h.env = env_id;
         h.re_resolve_well_known_syms();

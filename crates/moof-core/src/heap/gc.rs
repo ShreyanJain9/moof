@@ -41,7 +41,7 @@ impl Heap {
     /// registers). Today's single-threaded REPL passes &[] — we
     /// only GC when the VM is idle.
     pub fn gc(&mut self, extra_roots: &[Value]) -> GcStats {
-        let before = self.objects.len();
+        let before = self.arena.len();
         let mut marked = vec![false; before];
         let mut worklist: Vec<u32> = Vec::with_capacity(before / 4);
 
@@ -93,7 +93,7 @@ impl Heap {
 
         while let Some(id) = worklist.pop() {
             let idx = id as usize;
-            if idx >= self.objects.len() { continue; }
+            if idx >= self.arena.len() { continue; }
             self.mark_children_of(idx, &mut worklist, &mut marked);
         }
 
@@ -101,33 +101,33 @@ impl Heap {
 
         // collect existing free_list into a set so we don't double-free
         let free_set: std::collections::HashSet<u32> =
-            self.free_list.iter().copied().collect();
+            self.arena.free_list().iter().copied().collect();
 
         let mut newly_freed = 0usize;
-        for i in 0..self.objects.len() {
+        for i in 0..self.arena.len() {
             if !marked[i] && !free_set.contains(&(i as u32)) {
                 // tombstone — overwrite so any stale access sees nothing.
                 // parent=NIL prevents chain walking into this slot.
-                self.objects[i] = HeapObject::new_empty(Value::NIL);
-                self.free_list.push(i as u32);
+                *self.arena.get_mut(i as u32) = HeapObject::new_empty(Value::NIL);
+                self.arena.push_free(i as u32);
                 newly_freed += 1;
             }
         }
 
-        let live = before - self.free_list.len();
-        self.set_alloc_budget_from_live(live);
-        self.gc_requested = false;
+        let live = before - self.arena.free_list().len();
+        let free_total = self.arena.free_list().len();
+        self.arena.after_gc(live);
         GcStats {
             before,
             live,
             freed: newly_freed,
-            free_total: self.free_list.len(),
+            free_total,
         }
     }
 
     /// Walk children of object idx, marking + pushing to worklist.
     fn mark_children_of(&self, idx: usize, worklist: &mut Vec<u32>, marked: &mut [bool]) {
-        let obj = &self.objects[idx];
+        let obj = self.arena.get(idx as u32);
         mark_value_id(obj.proto, worklist, marked);
         for &v in &obj.slot_values { mark_value_id(v, worklist, marked); }
         for (_, v) in &obj.handlers { mark_value_id(*v, worklist, marked); }

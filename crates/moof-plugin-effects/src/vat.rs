@@ -40,7 +40,7 @@ pub fn register(heap: &mut Heap) {
     // the flag and runs the actual collection when the frame stack
     // is empty.
     native(heap, vat_id_obj, "requestGc", |heap, _receiver, _args| {
-        heap.gc_requested = true;
+        heap.request_gc();
         Ok(Value::NIL)
     });
 
