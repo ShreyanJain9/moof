@@ -29,6 +29,7 @@ pub use bigint::BigInt;
 use crate::object::HeapObject;
 use crate::value::Value;
 use crate::foreign::{ForeignData, ForeignType, ForeignTypeId, ForeignTypeRegistry};
+use crate::symtab::SymbolTable;
 use indexmap::IndexMap;
 use std::sync::Arc;
 
@@ -99,8 +100,10 @@ pub struct Heap {
     /// steady-state programs get rare GCs, allocation-heavy ones
     /// get frequent ones.
     alloc_budget: usize,
-    symbols: Vec<String>,
-    sym_reverse: std::collections::HashMap<String, u32>,
+    /// Symbol interning. Per-heap today; may become shared across
+    /// vats in a future wave. Accessed via the public `intern`,
+    /// `symbol_name`, and `find_symbol` methods below.
+    pub(crate) symbols: SymbolTable,
     pub env: u32,                                      // root environment object ID
     pub rebound: std::collections::HashSet<u32>,       // symbols that have been reassigned
     pub vat_id: u32,                                   // which vat this heap belongs to
@@ -191,8 +194,7 @@ impl Heap {
             gc_requested: false,
             allocs_since_gc: 0,
             alloc_budget: Self::MIN_GC_BUDGET,
-            symbols: Vec::new(),
-            sym_reverse: std::collections::HashMap::new(),
+            symbols: SymbolTable::new(),
             env: 0,
             rebound: std::collections::HashSet::new(),
             vat_id: 0,
@@ -266,20 +268,14 @@ impl Heap {
         h
     }
 
-    // -- symbol table --
+    // -- symbol table (thin delegations to the embedded SymbolTable) --
 
     pub fn intern(&mut self, name: &str) -> u32 {
-        if let Some(&id) = self.sym_reverse.get(name) {
-            return id;
-        }
-        let id = self.symbols.len() as u32;
-        self.symbols.push(name.to_string());
-        self.sym_reverse.insert(name.to_string(), id);
-        id
+        self.symbols.intern(name)
     }
 
     pub fn symbol_name(&self, id: u32) -> &str {
-        &self.symbols[id as usize]
+        self.symbols.name(id)
     }
 
     /// Canonicalize a Table/HashMap key: intern String content as a symbol
@@ -295,7 +291,7 @@ impl Heap {
 
     /// Look up a symbol ID by name without interning. Returns None if not found.
     pub fn find_symbol(&self, name: &str) -> Option<u32> {
-        self.sym_reverse.get(name).copied()
+        self.symbols.find(name)
     }
 
     // -- environment access --
@@ -312,7 +308,7 @@ impl Heap {
     // walk paths.
 
     fn env_bindings_id(&self, env_id: u32) -> Option<u32> {
-        let bindings_sym = self.sym_reverse.get("bindings").copied()?;
+        let bindings_sym = self.symbols.find("bindings")?;
         self.get(env_id).slot_get(bindings_sym)?.as_any_object()
     }
 
@@ -943,7 +939,7 @@ impl Heap {
     }
 
     pub fn objects_ref(&self) -> &[HeapObject] { &self.objects }
-    pub fn symbols_ref(&self) -> &[String] { &self.symbols }
+    pub fn symbols_ref(&self) -> &[String] { self.symbols.names() }
 
     // ============================================================
     // Foreign type registry — Ruby-style rust value wrapping.
@@ -1101,27 +1097,9 @@ impl Heap {
 
     pub fn restore_objects(&mut self, objects: Vec<HeapObject>, symbols: Vec<String>, env_id: u32) {
         self.objects = objects;
-        self.symbols = symbols;
+        self.symbols.restore(symbols);
         self.env = env_id;
-        self.sym_reverse.clear();
-        for (i, name) in self.symbols.iter().enumerate() {
-            self.sym_reverse.insert(name.clone(), i as u32);
-        }
-        // re-resolve well-known symbols
-        self.sym_car = self.sym_reverse.get("car").copied().unwrap_or(0);
-        self.sym_cdr = self.sym_reverse.get("cdr").copied().unwrap_or(0);
-        self.sym_call = self.sym_reverse.get("call:").copied().unwrap_or(0);
-        self.sym_slot_at = self.sym_reverse.get("slotAt:").copied().unwrap_or(0);
-        self.sym_slot_at_put = self.sym_reverse.get("slotAt:put:").copied().unwrap_or(0);
-        self.sym_slot_names = self.sym_reverse.get("slotNames").copied().unwrap_or(0);
-        self.sym_handler_names = self.sym_reverse.get("handlerNames").copied().unwrap_or(0);
-        self.sym_parent = self.sym_reverse.get("parent").copied().unwrap_or(0);
-        self.sym_describe = self.sym_reverse.get("describe").copied().unwrap_or(0);
-        self.sym_dnu = self.sym_reverse.get("doesNotUnderstand:").copied().unwrap_or(0);
-        self.sym_length = self.sym_reverse.get("length").copied().unwrap_or(0);
-        self.sym_at = self.sym_reverse.get("at:").copied().unwrap_or(0);
-        self.sym_at_put = self.sym_reverse.get("at:put:").copied().unwrap_or(0);
-        self.sym_message = self.sym_reverse.get("message").copied().unwrap_or_else(|| self.intern("message"));
+        self.re_resolve_well_known_syms();
     }
 
     /// Restore a heap from saved data.
@@ -1132,28 +1110,35 @@ impl Heap {
     ) -> Self {
         let mut h = Heap::new();
         h.objects = objects;
-        h.symbols = symbols;
+        h.symbols.restore(symbols);
         h.env = env_id;
-        h.sym_reverse.clear();
-        for (i, name) in h.symbols.iter().enumerate() {
-            h.sym_reverse.insert(name.clone(), i as u32);
-        }
-        // re-resolve well-known symbols
-        h.sym_car = h.sym_reverse.get("car").copied().unwrap_or(0);
-        h.sym_cdr = h.sym_reverse.get("cdr").copied().unwrap_or(0);
-        h.sym_call = h.sym_reverse.get("call:").copied().unwrap_or(0);
-        h.sym_slot_at = h.sym_reverse.get("slotAt:").copied().unwrap_or(0);
-        h.sym_slot_at_put = h.sym_reverse.get("slotAt:put:").copied().unwrap_or(0);
-        h.sym_slot_names = h.sym_reverse.get("slotNames").copied().unwrap_or(0);
-        h.sym_handler_names = h.sym_reverse.get("handlerNames").copied().unwrap_or(0);
-        h.sym_parent = h.sym_reverse.get("parent").copied().unwrap_or(0);
-        h.sym_describe = h.sym_reverse.get("describe").copied().unwrap_or(0);
-        h.sym_dnu = h.sym_reverse.get("doesNotUnderstand:").copied().unwrap_or(0);
-        h.sym_length = h.sym_reverse.get("length").copied().unwrap_or(0);
-        h.sym_at = h.sym_reverse.get("at:").copied().unwrap_or(0);
-        h.sym_at_put = h.sym_reverse.get("at:put:").copied().unwrap_or(0);
-        h.sym_message = h.sym_reverse.get("message").copied().unwrap_or_else(|| h.intern("message"));
+        h.re_resolve_well_known_syms();
         h
+    }
+
+    /// Re-resolve the cached well-known symbol ids from the current
+    /// SymbolTable state. Called after any operation that mass-
+    /// replaces the symbol table (image load).
+    fn re_resolve_well_known_syms(&mut self) {
+        let get_or_intern = |syms: &mut SymbolTable, name: &str| -> u32 {
+            syms.find(name).unwrap_or_else(|| syms.intern(name))
+        };
+        self.sym_car            = self.symbols.find("car").unwrap_or(0);
+        self.sym_cdr            = self.symbols.find("cdr").unwrap_or(0);
+        self.sym_call           = self.symbols.find("call:").unwrap_or(0);
+        self.sym_slot_at        = self.symbols.find("slotAt:").unwrap_or(0);
+        self.sym_slot_at_put    = self.symbols.find("slotAt:put:").unwrap_or(0);
+        self.sym_slot_names     = self.symbols.find("slotNames").unwrap_or(0);
+        self.sym_handler_names  = self.symbols.find("handlerNames").unwrap_or(0);
+        self.sym_parent         = self.symbols.find("parent").unwrap_or(0);
+        self.sym_describe       = self.symbols.find("describe").unwrap_or(0);
+        self.sym_dnu            = self.symbols.find("doesNotUnderstand:").unwrap_or(0);
+        self.sym_length         = self.symbols.find("length").unwrap_or(0);
+        self.sym_at             = self.symbols.find("at:").unwrap_or(0);
+        self.sym_at_put         = self.symbols.find("at:put:").unwrap_or(0);
+        // message is special — interned eagerly because some paths
+        // access it before image load runs.
+        self.sym_message        = get_or_intern(&mut self.symbols, "message");
     }
 }
 
