@@ -165,28 +165,32 @@ because selectors are symbols, you can:
 
 ---
 
-## synchronous vs eventual sends
+## local vs cross-vat sends
 
-two send forms:
+send syntax is identical regardless of where the receiver lives:
 
-- **synchronous.** `[obj sel: arg]` — when receiver and sender are
-  in the same vat. the handler runs; the result is the send's
-  value.
-- **eventual.** `[obj <- sel: arg]` — across vats. the send is
-  enqueued; the sender gets an Act immediately; the handler runs
-  later in the receiver's vat.
+```
+[obj sel: arg]
+```
 
-most of the time you don't write `<-`. moof infers it:
+what differs is what you get back:
 
-- if `obj` is a local value, sends are synchronous.
-- if `obj` is a FarRef (cross-vat), sends are eventual
-  automatically.
+- **local send.** receiver is in this vat. the handler runs; the
+  result is the send's value. returned directly.
+- **cross-vat send.** receiver is a FarRef to another vat. the
+  send is enqueued on this vat's outbox; the caller gets an
+  **Act** back immediately; the handler runs later in the target
+  vat, and the Act eventually resolves to the result.
 
-you can write `<-` explicitly when you want to defer a local call to
-a future tick (rare but legal).
+moof makes this determination from the receiver's kind — you do
+NOT write special syntax for cross-vat. there is no `<-` operator
+in sends, no separate "eventual send" form. a FarRef's
+`doesNotUnderstand:` intercepts every message and queues it; a
+local object dispatches inline. uniform surface, different
+machinery underneath.
 
-eventual sends return Acts — first-class effect descriptors. see
-[effects.md](effects.md) for how Acts compose.
+cross-vat returns always yield Acts; compose through them with
+`(do ...)`. see [effects.md](effects.md).
 
 ---
 
@@ -210,21 +214,23 @@ stylistic — use whatever reads best.
 
 ---
 
-## promise pipelining (eventual only)
+## promise pipelining (cross-vat chains)
 
-if `a` is a FarRef:
+if `a` is a FarRef, nested sends pipeline automatically:
 
 ```
-[[a <- foo] <- bar]
+[[a foo] bar]
 ```
 
-pipelines. the first send queues, returns an Act. the second send
-is queued on the ACT, not the result — so it's sent as soon as `a`
-receives `foo`, not after the reply has traveled all the way back.
+the inner `[a foo]` queues and returns an Act. the outer send
+`[... bar]` is queued on the Act, not on the resolved value —
+so `bar` is dispatched as soon as `a` produces `foo`'s reply,
+without round-tripping back through the caller.
 
-this is E language's promise pipelining. it makes chain-of-calls
-cheap across the network: one round trip per chain, not one per
-send.
+this is E language's promise pipelining. it makes chain-of-
+calls cheap across the network: one round trip per chain, not
+one per send. no extra syntax needed — the scheduler sees that
+the outer send's receiver is an Act, and queues appropriately.
 
 ---
 

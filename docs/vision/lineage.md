@@ -166,8 +166,9 @@ working applications because the ladder was continuous.
   no global namespace of resources.
 - near-refs and far-refs. same-vat sends are synchronous;
   cross-vat sends are eventual and return promises.
-- promise pipelining. `[[a <- b] <- c]` pipelines across the
-  network without explicit .then() chaining.
+- promise pipelining. `[[a b] c]` pipelines across the network
+  — the outer send goes to the Act returned by the inner send,
+  so there's one round trip per chain, not one per send.
 - membranes and facets. intercept all messages crossing a trust
   boundary. transform, log, allow, deny.
 

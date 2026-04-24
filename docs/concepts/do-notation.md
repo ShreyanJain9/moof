@@ -34,12 +34,12 @@ with the rest of the block as the continuation. `name` is the
 value the Thenable yields.
 
 ```moof
-(do (user <- [users <- get: 'alice])   ; Act<User> bound into user
+(do (user <- [users get: 'alice])   ; Act<User> bound into user
     (n    <- [table at: 'count])        ; Option<Integer> bound into n
     ...)
 ```
 
-### 2. let: `(name = expr)`
+### 2. let: `(let name expr)`
 
 pure binding. `name` becomes `expr`'s value. no Thenable
 involved. equivalent to wrapping the rest of the block in
@@ -47,7 +47,7 @@ involved. equivalent to wrapping the rest of the block in
 
 ```moof
 (do (n <- [table at: 'count])
-    (next = [n + 1])                   ; pure let
+    (let next [n + 1])                 ; pure let
     ...)
 ```
 
@@ -57,8 +57,8 @@ an expression not wrapped in bind or let. evaluated in order;
 its value is the block's value if it's the last form.
 
 ```moof
-(do (user <- [users <- get: 'alice])
-    [console <- println: (str "hi, " user.name)])  ; bare — side effect + final value
+(do (user <- [users get: 'alice])
+    [console println: (str "hi, " user.name)])  ; bare — side effect + final value
 ```
 
 ### 4. yield: `(yield expr)`
@@ -85,8 +85,8 @@ Err stops a Result chain, etc.).
 ```moof
 ; mixing kinds is fine without yield:
 (do (n <- [table at: 'count])     ; bind from Option
-    (user <- [users <- get: n])   ; bind from Act
-    [console <- println: user.name]) ; bare; block result is Act<nil>
+    (user <- [users get: n])   ; bind from Act
+    [console println: user.name]) ; bare; block result is Act<nil>
 ```
 
 - if `table` has no `count`, the Option short-circuits to `None`;
@@ -115,8 +115,8 @@ same kind of Thenable (M). the final `(yield v)` lifts v via
 ; → (2 4 6)  : Cons
 
 ; Act comprehension — block returns an Act
-(do (user <- [users <- get: 'alice])
-    (addr <- [user <- getAddress])
+(do (user <- [users get: 'alice])
+    (addr <- [user getAddress])
     (yield addr.street))
 ; → Act<String>
 
@@ -141,16 +141,45 @@ explicit lift).
 - you're doing a comprehension (for every x in this, produce y).
 
 **omit yield when**:
+- the final expression is already in the right context.
 - you're sequencing heterogeneous effects and want the last
   expression to be the block's value.
-- the final is already in the right context (an Act from a
-  send, a Result from a computation).
 - you genuinely want to mix Thenables in one flow.
 
 most of the time you'll omit yield — it's the common pattern
 of "do these things in order, final expression is what it is."
 yield is for when you're building a value from a comprehension
 and want the type to be crisp.
+
+**Acts almost never need yield.** Act's `then:` always chains
+to another Act (that's how async composition works). so if your
+do-block's final form is a send-that-returns-an-Act (very
+common — every cross-vat send does), the block's value is
+already an Act with no lifting required. yield an Act would be
+redundant.
+
+this pattern covers most effect code: a sequence of Acts, the
+last one being the "real" effect you wanted.
+
+```moof
+; yield-free; final is already Act<nil>
+(do (user <- [users get: id])
+    (let greeting (str "hi, " user.name))
+    [console println: greeting])
+; → Act<nil>
+
+; yield-free; final is an Act<Profile>
+(do (user <- [users get: id])
+    [user getProfile])
+; → Act<Profile>
+```
+
+yield kicks in when:
+- you're in a Cons/Option/Result/Stream comprehension and
+  producing a pure result: `(yield [x * 2])` — pure value
+  needs lifting into the list/option/etc.
+- you specifically want the block's type to be `M<v>` when the
+  final form would otherwise be bare.
 
 ---
 
@@ -177,7 +206,7 @@ semantics. nothing special-cased. see
 to HANDLE a failure — not just propagate it — use `recover:`:
 
 ```moof
-(do (user <- [[users <- get: id] recover: |err| (Err "user missing")])
+(do (user <- [[users get: id] recover: |err| (Err "user missing")])
     ...)
 ```
 
@@ -215,7 +244,7 @@ optimization — but it's close enough to read.
 ;; → (do-seq expr1 (do expr2 ...))
 ;; where do-seq runs expr1 (for effect), then the rest
 
-(do (x = v) body ...)
+(do (let x v) body ...)
 ;; → (let ((x v)) (do body ...))
 
 (do (x <- src) body ...)
@@ -236,8 +265,8 @@ necessary), then generates `[... then: |lastVar| (M pure: v)]`.
 ### sequential cross-vat calls
 
 ```moof
-(do (user <- [users <- get: id])
-    (profile <- [user <- getProfile])
+(do (user <- [users get: id])
+    (profile <- [user getProfile])
     (yield profile))
 ; → Act<Profile>
 ```
@@ -274,9 +303,9 @@ necessary), then generates `[... then: |lastVar| (M pure: v)]`.
 
 ```moof
 (do (click <- canvas-clicks)
-    [console <- println: (str "got " click)]     ; per-click effect
-    (target = (hit-test click))
-    (target-act <- [renderer <- render: target])  ; Act per click
+    [console println: (str "got " click)]     ; per-click effect
+    (let target (hit-test click))
+    (target-act <- [renderer render: target])  ; Act per click
     (yield target-act))
 ; → Stream<Act<Rendered>>
 ```
@@ -292,7 +321,7 @@ would require explicit lifting.
 
 ```moof
 (do (x <- (range 0 10))
-    [console <- println: x])
+    [console println: x])
 ; bare expression at end; block runs 10 println Acts; its value
 ; is the last Act<nil>. no yield means no comprehension;
 ; the block is just "do these things in sequence."

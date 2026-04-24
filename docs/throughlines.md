@@ -58,8 +58,8 @@ full treatment. the short version:
 
 ; yield-free: sequence mixed effects; last form is block's value
 (do (n <- [table at: 'count])     ; Option
-    (user <- [users <- get: n])    ; Act
-    [console <- println: user.name])
+    (user <- [users get: n])    ; Act
+    [console println: user.name])
 ; block value is the final Act<nil>; short-circuits on None
 ```
 

@@ -133,12 +133,16 @@ obj.slot          ; (slot access) = [obj slotAt: 'slot]
 @slot             ; self slot access in handlers
 #{ ... }          ; generic sugar form (rarely used; reserved)
 #[ ... ]          ; empty table literal (also seq/map initializer)
-<-                ; eventual send (in [obj <- sel: arg])
+<-                ; do-notation bind (in (x <- expr) inside do)
 |a b| expr        ; short lambda — (fn (a b) expr)
 |_| expr          ; one-arg lambda with ignored arg
 ||                ; zero-arg thunk
 ;  ...            ; line comment (to end of line)
 ```
+
+`<-` only appears inside `(do ...)` for binding. moof has NO
+separate eventual-send operator — a send to a FarRef returns
+an Act automatically; same syntax as local sends.
 
 ---
 
@@ -157,19 +161,25 @@ short lambdas are the 90% case. `fn` is the long form.
 
 ## do-notation
 
-`(do ...)` sequences expressions. inside, `(x <- expr)` is Monadic
-bind; `(x = expr)` is pure let; a bare expression is run for its
-effect:
+`(do ...)` is the universal composition syntax. clauses:
+
+- `(x <- expr)` — Thenable bind; `expr` must be a Thenable.
+- `(let x expr)` — pure let binding.
+- `(yield v)` — lift v into the ambient Thenable via `pure:`;
+  forces all binds in the block to the same kind.
+- bare expression — evaluated in order; the last one is the
+  block's value.
 
 ```moof
 (do
-  (user <- [users <- get: 'current])    ; bind — awaits Act
-  (greeting = (str "hello, " user.name)) ; let — pure
-  [console <- println: greeting])        ; effect — run for side effect
+  (user <- [users get: 'current])      ; bind — Act
+  (let greeting (str "hello, " user.name)) ; pure let
+  [console println: greeting])         ; bare; block value is Act<nil>
 ```
 
-works on anything Monadic: Act, Cons, Option, Result, Update. one
-syntax across them all.
+works on anything Thenable: Act, Cons, Option, Result, Update,
+Stream. see [../concepts/do-notation.md](../concepts/do-notation.md)
+for the full treatment.
 
 ---
 

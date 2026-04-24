@@ -47,7 +47,7 @@ structurally:
   only)
 
 ```moof
-(def x [console <- println: "hi"])
+(def x [console println: "hi"])
 ; x is an Act<nil>. println runs when the scheduler drains.
 ```
 
@@ -55,10 +55,16 @@ composed via `(do ...)`, same as any Thenable:
 
 ```moof
 (do
-  (greeting <- [user <- getName])     ; Act<String>
-  (prefixed = (str "hello, " greeting)) ; pure let
-  [console <- println: prefixed])     ; Act<nil>
+  (greeting <- [user getName])     ; Act<String>
+  (let prefixed (str "hello, " greeting)) ; pure let
+  [console println: prefixed])     ; bare; block value is Act<nil>
 ```
+
+note: no `(yield ...)` here. because the block's final form
+is `[console println: ...]` which is already an Act, and Act's
+`then:` always chains to another Act — the block's value IS
+that Act. yield is only needed when you want to lift a pure
+value; Act composition doesn't need it.
 
 this is the "promise" or "future" pattern, but first-class as a
 value. you can store an Act in a slot, pass it around, inspect
@@ -166,8 +172,8 @@ the short version relevant here:
 Acts compose via do just like everything else:
 
 ```moof
-(do (user <- [users <- get: 'alice])
-    (addr <- [user <- getAddress])
+(do (user <- [users get: 'alice])
+    (addr <- [user getAddress])
     (yield addr.street))
 ; → Act<String>
 ```

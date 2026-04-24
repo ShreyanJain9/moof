@@ -102,13 +102,17 @@ this is how 99% of sends work in practice.
 ### cross-vat sends are eventual
 
 if A is in vat 7 and B is a FarRef to something in vat 12,
-`[B foo: arg]` enqueues a message on vat 7's outbox. the scheduler
-delivers it to vat 12's mailbox. vat 12 eventually processes it.
-A gets an **Act** — a first-class effect descriptor — back
-immediately, representing the eventual result.
+`[B foo: arg]` enqueues a message on vat 7's outbox. the
+scheduler delivers it to vat 12's mailbox. vat 12 eventually
+processes it. A gets an **Act** — a first-class effect
+descriptor — back immediately, representing the eventual
+result.
 
-the syntax `[B <- foo: arg]` forces eventual semantics even in-vat
-(rare but legal, e.g. to defer to the next tick).
+send syntax is identical for local and cross-vat; what differs
+is the receiver's kind. moof has NO separate "eventual send"
+syntax (no `<-` operator). FarRefs intercept sends via
+`doesNotUnderstand:` and queue them; local objects dispatch
+inline.
 
 ### FarRefs
 

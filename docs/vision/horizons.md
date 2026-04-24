@@ -110,8 +110,9 @@ conflicts are conversations.
 
 - **URLs extend across machines.** `moof:peer/alice/vats/12` is
   alice's vat 12, reachable through a FarRef that does network
-  sends under the hood. the syntax matches local: `[[alice/vat
-  <- msg]]`.
+  sends under the hood. the syntax matches local: `[alice-vat
+  msg]`. a send to a FarRef returns an Act whether the FarRef
+  points next door or across the internet.
 - **content-addressed cache.** when you receive a value, its hash
   resolves to local bytes if you have them. federation cost is
   proportional to novelty, not size.
