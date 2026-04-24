@@ -49,7 +49,7 @@
   [count]    [[self run] count]
   [first]    [[self run] first]
   [toList]   [self run]
-  [any]      [[self run] empty?] ; inverted; returns false if empty
+  [any]      (not [[self run] empty?])
   [sum]      [[self run] sum]
 
   ; ── describe / show ───────────────────────────────────

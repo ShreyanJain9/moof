@@ -1,33 +1,12 @@
-; reference.moof — represented objects
+; reference.moof — File, a filesystem path as a moof value.
 ;
-; a Reference is a moof value that PROXIES an external source of
-; truth. contrast with a *stored* value (native moof object, fully
-; owned). a File represents a filesystem path; a GitBlob would
-; represent a content-addressed git object; an HTTPResource a URL.
+; the Reference protocol was removed per stdlib-doctrine.md: it had
+; one conformer (File), no generic operation depended on it, and the
+; pattern didn't recur. if git-blob / http-resource / s3-object types
+; ever land and the pattern repeats three times, reintroduce it then.
 ;
-; common protocol:
-;   [ref address]     canonical external identifier
-;   [ref content]     Act<String> — fetch current content
-;   [ref exists?]     Act<Boolean>
-;
-; each conforming type implements these by delegating to the
-; appropriate capability. the user sees ONE object (the reference);
-; the fetch/cache machinery is a type detail.
-
-(defprotocol Reference
-  "Proxies an external source of truth. Stored values ARE their
-   content; represented values POINT AT external content the
-   capability layer fetches on demand. Every Reference has an
-   `address` — a canonical identifier (path, url, hash). Content
-   access returns an Act so the vat boundary is explicit."
-
-  (require (address)
-    "Canonical identifier. filesystem path, URL, commit hash, etc.
-     must be unique per external entity — [a equal: b] on address
-     means a and b point at the same thing.")
-
-  (provide (describe)
-    (str "<" [[self typeName] describe] " " [[self address] describe] ">")))
+; File stays — it's a real type users reach for. it wraps a filesystem
+; path and delegates effectful operations to the `file` capability.
 
 ; ══════════════════════════════════════════════════════════
 ; File — a filesystem path as a first-class moof value
@@ -35,13 +14,13 @@
 ;
 ; usage:
 ;   (def readme (File "README.md"))
-;   [readme address]             → "README.md"
+;   [readme path]                → "README.md"
 ;   [readme content]             → Act<String> (goes through file cap)
 ;   [readme exists?]             → Act<Boolean>
 ;   [readme write: "new text"]   → Act<nil>
 ;
 ; all effectful ops return Acts via the `file` capability FarRef.
-; pure ops (address, typeName, describe) don't cross a vat.
+; pure ops (path, typeName, describe) don't cross a vat.
 
 (def File {
   [typeName]   'File
@@ -50,8 +29,7 @@
   ; (File "path") — construct a File proxy
   [call: args]  { File path: [args car] }
 
-  ; Reference protocol
-  [address]  @path
+  [path]  @path
 
   ; effectful operations — all return Acts via the file capability.
   ; the `file` FarRef is captured from the defining vat's env at
@@ -71,4 +49,4 @@
     (str "<File " @path ">  : File")
 })
 
-(conform File Reference)
+(conform File Showable)
