@@ -133,11 +133,18 @@ runs again.
 
 ## wave 12 — supervision + capability hardening
 
+- OTP-vocabulary supervisors: `supervisor`, `application`,
+  gen_server-as-defserver, gen_event-as-reactive-signal,
+  gen_statem-as-finite-state-defserver
 - supervision policies (always, on-failure, never, escalate)
 - restart on crash, adoption of orphans
 - capability revocation
 - membranes (attenuated FarRefs)
 - grant events recorded in an append-only log visible via System
+
+we take OTP's vocabulary wholesale (see
+[vision/lineage.md](vision/lineage.md)) — decades of production
+refinement we'd be foolish to reinvent.
 
 2–3 weeks.
 
@@ -153,6 +160,9 @@ the first visual interface.
 - aspect stacking (one object, many views)
 - inspector as a moof-level widget (subclassable)
 - direct-manipulation handler editing (edit source, live effect)
+- skeuomorphic AND typographic visual idioms supported per view
+  — no house aesthetic, authored per type. see
+  [vision/horizons.md](vision/horizons.md).
 
 3–4 weeks. the gate between "moof works" and "moof is a medium."
 
@@ -194,6 +204,16 @@ the roadmap past wave 15 is direction, not plan:
 
 - **authoring-for-all**: conform-button, halo-edit,
   view-protocol-picker as canvas gestures
+- **`defshape`**: explicit slot-type contracts for data shapes
+  (see [concepts/schemas.md](concepts/schemas.md)). optional
+  rigor; the emergent-default stays.
+- **optional static type layer**: haskell/typescript-style
+  annotation-and-check sitting above the dynamic substrate. the
+  protocol machinery is already shaped to accept it. sketched in
+  the archived [type-system.md](archive/type-system.md).
+- **first-class streams with backpressure**: push-based producer
+  coordination layered over the pull-based streams that ship
+  today (see [concepts/streams.md](concepts/streams.md)).
 - **full-text search** as an index-server
 - **reactive views**: dashboards that update live
 - **time-travel as navigation**: scrubbable past states
@@ -213,10 +233,11 @@ starts.
 
 ## what's NOT on the roadmap
 
-- **static type system.** moof is dynamic with protocols. a
-  haskell-style optional type layer might happen, but it's
-  speculative. [type-system.md](archive/type-system.md) has the
-  sketch.
+- **static type system as a replacement for the dynamic core.**
+  we do not plan to rebuild moof around haskell-style type
+  checking. but an OPTIONAL typed layer that you annotate when
+  you want checking is a legitimate future wave — see
+  `beyond` above.
 - **tell-layer DSL.** grammar-based natural-language command
   input was an exploration; no current intent to ship.
 - **morphic-on-vello as specified.** the specific renderer

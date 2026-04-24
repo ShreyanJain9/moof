@@ -246,6 +246,9 @@ rulebook.
 
 ## next
 
+- [schemas.md](schemas.md) — the sibling contract system. protocols
+  constrain HANDLERS; schemas constrain SLOTS. different layer,
+  same philosophy.
 - [../laws/stdlib-doctrine.md](../laws/stdlib-doctrine.md) — the
   rulebook for which protocols exist and why
 - [effects.md](effects.md) — Monadic, Fallible, Awaitable — the

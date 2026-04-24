@@ -13,9 +13,11 @@
 **the horizon.** a zoomable, inspectable, infinite UI where every
 object renders itself, every rendering has halo-accessible source,
 and editing code looks the same as arranging documents. morphic
-reread through moof's commitments: vector-first, typographic,
-plan-9-adjacent in aesthetic. no chrome. no windows. just objects,
-views, and space.
+reread through moof's commitments: vector-first, deeply
+authored. no single aesthetic — the medium supports both
+typographic minimalism (plan-9 adjacent) and rich skeuomorphism
+(hypercard adjacent) per view protocol. no windows in the
+overlapping-rectangles sense; just objects, views, and space.
 
 **the specific pieces**
 
@@ -24,6 +26,14 @@ views, and space.
   differently in `text`, `canvas`, `dot-graph`, `json-tree`
   because different mediums are different message targets. views
   aren't widgets; they're messages.
+- **skeuomorphism where it communicates.** a switchboard *should*
+  look like switches. a notebook *should* look like paper if
+  that's what the content wants. a file stack *should* look like
+  stacked cards. these are authoring choices per type, not a
+  house style. hypercard's lovingly-drawn buttons were part of
+  what made it feel authorable. moof lets a view be detailed and
+  physical, or quiet and typographic — the principle is that
+  every visual element should signal purpose, not decorate.
 - **halos are verbs.** click-and-hold on any pixel; a polymorphic
   ring of verbs appears, contributed by the object itself through
   `halo-verbs`. inspect, edit, duplicate, conform, stash. the halo

@@ -259,6 +259,8 @@ running-state persistence).
 ## next
 
 - [vats.md](vats.md) — the isolation boundary.
+- [streams.md](streams.md) — Act chains as temporal flows;
+  mailboxes as stream-shaped sources.
 - [capabilities.md](capabilities.md) — what "cross-vat reference"
   means in the security model.
 - [../laws/stdlib-doctrine.md](../laws/stdlib-doctrine.md) —

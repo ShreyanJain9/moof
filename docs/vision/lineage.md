@@ -29,10 +29,19 @@
   pointed at by `proto`.
 - the single-process assumption. smalltalk images run in one heap,
   one thread (classically). moof has vats.
-- the UI style. morphic was a revolution, but moof wants a
-  different aesthetic — typographic, quiet, plan-9 adjacent. we
-  keep the halo gesture and the live-editing commitment; the
-  pixelated chrome goes.
+
+**what we complicate, not abandon**
+- morphic's UI. moof keeps the **halo gesture** and the **live-
+  editing commitment** wholesale. but the visual style is an open
+  question, not a closed one. morphic was a specific aesthetic —
+  big rounded pixelated morphs, physicality emphasized. moof's
+  canvas can be more like that (skeuomorphic, physical
+  affordances that communicate purpose) OR more typographic
+  (quiet, text-forward) — whichever a view commits to. rendering
+  is per-protocol (see [horizons.md](horizons.md)), so a recipe
+  renders one way, a file system renders another. the moof
+  commitment is "views are messages"; the aesthetic menu is
+  open.
 
 ---
 
@@ -47,11 +56,15 @@
 - 9P in spirit: send a path, receive a value; remote and local
   look the same.
 
-**what we leave behind**
+**what we generalize**
 - the file abstraction. moof's unit of addressability is the
   object, not the byte stream. we generalize plan 9's insight from
   files to arbitrary values. "everything is a file" becomes
-  "everything is an object at some path."
+  "everything is an object at some path." we keep the
+  stream-oriented composition idea (see unix, below); we just
+  apply it to typed values instead of byte-streams.
+
+**what we leave behind**
 - the C-level machinery. plan 9's implementation is deep in the
   kernel; moof's namespace is a moof object.
 
@@ -62,23 +75,44 @@
 **what we take**
 - **processes everywhere.** vats are erlang processes. cheap,
   isolated, no shared memory, communicate by async messages.
+- **immutable-by-default, wholesale.** erlang values are
+  immutable; moof's are immutable too. this is a commitment,
+  not an optimization — no in-place mutation anywhere. servers
+  exist as the *structured exception*: mutable state behind a vat
+  boundary, accessed only via Update deltas. see
+  [../concepts/effects.md](../concepts/effects.md).
 - preemptive scheduling with fuel-based reductions. long-running
   vats can't starve others.
 - let-it-crash. a vat can die without taking down the image.
-  supervisors are objects that watch and restart per policy.
+- **OTP's vocabulary.** erlang's Open Telecom Platform isn't just
+  telecoms — it's a naming system and a set of idioms for
+  supervision. we steal the vocabulary directly:
+  - `supervisor` — a vat that watches child vats, restarts on
+    policy.
+  - restart strategies: `always`, `on-failure`, `never`,
+    `escalate`. (ok rest_for_one / one_for_all / one_for_one
+    mostly not — those are specific to erlang's linked-pair
+    model; we adapt what's idiomatically moof.)
+  - `application` — a bundle of supervised services that
+    starts/stops together.
+  - named patterns like gen_server (our `defserver`), gen_event
+    (our reactive signals), gen_statem (our finite-state
+    defservers).
+  - orderly startup/shutdown sequences.
+  OTP's real gift is that decades of production systems refined
+  these patterns; we'd be foolish to reinvent them.
 - the supervision tree as a first-class design concept.
 - hot code swapping. change a handler on a prototype, every
   delegating object gets the new behavior, no restart.
 
 **what we leave behind**
-- the immutable-by-default language. erlang's values are immutable;
-  moof's values are immutable too, but moof makes the stateful
-  case (servers behind vats) more ergonomic via `defserver`.
 - the syntax. erlang's is terse and unusual. moof's is lisp-shaped
   because the reader is a different concern.
-- the emphasis on soft real-time telecoms. moof is for personal
-  computing, not nine-nines uptime. we want the isolation but not
-  the OTP overhead.
+- erlang's *linked-pair* restart semantics. the more complex
+  multi-process restart strategies (rest_for_one, one_for_all)
+  are specific to erlang's process-linking model. moof's
+  supervision uses the same vocabulary but adapts the specifics
+  to the vat model.
 
 ---
 
@@ -158,14 +192,22 @@ working applications because the ladder was continuous.
 - laziness where you want it. streams are objects with a `next`
   handler that computes on demand.
 
-**what we leave behind**
-- static type-checking. moof's type system is dynamic with
-  protocols for structural reasoning. we believe the ceiling is
-  lower here than in haskell, but the floor is dramatically lower
-  too — anyone can build.
+**what we complicate, not abandon**
+- static type-checking is not present as a core commitment —
+  moof's protocols and the vat boundary do most of what haskell's
+  types do, without foreclosing the dynamic floor. but we don't
+  *rule out* an optional typed layer. a haskell-style or
+  typescript-style type system layered on moof — where you can
+  annotate, infer, and check — is a viable future wave, and the
+  protocol machinery is already shaped to accept it. see
+  [horizons.md](horizons.md) and the archived
+  [type-system.md](../archive/type-system.md) for the sketch.
+  the floor stays low; the ceiling can still rise.
 - purity enforcement at the type level. moof enforces purity
   through the vat boundary: if you hold no effectful references,
-  you can't have effects. pragmatic, not theoretical.
+  you can't have effects. pragmatic, not theoretical. a typed
+  layer could add algebraic-effect or IO-monad-style reasoning
+  on top, but the substrate commitment stays capability-based.
 
 ---
 
@@ -199,10 +241,17 @@ working applications because the ladder was continuous.
   the object model IS the query language.
 - indexes as computed views. maintained live by the reactive
   layer.
+- **schemas when you want them.** SQL made schemas mandatory.
+  noSQL swung to schema-free. moof wants both: the default is
+  schema-emergent (you build objects, shapes coalesce), but you
+  can declare explicit schemas — a prototype with required
+  slot-name-and-type contracts, queryable at runtime — whenever
+  the rigor pays off. see
+  [../concepts/schemas.md](../concepts/schemas.md).
 
 **what we leave behind**
-- the schema-first worldview. moof is schema-emergent; you build
-  objects, and the shapes coalesce.
+- schema-first as the *only* mode. mandatory up-front schemas
+  break fluidity for exploratory work.
 - the wire protocol. SQL's text-based query language is an
   accident of history. moof queries are compositions of message
   sends.
@@ -234,15 +283,28 @@ working applications because the ladder was continuous.
 
 **what we take**
 - composability. small tools that do one thing well, combined via
-  pipelines. moof's transducers are the moof-level version.
-- textual representation everywhere. moof values have a
-  human-readable `describe` by default.
+  pipelines.
+- **stream-centric design.** unix's real gift isn't text streams —
+  it's treating *everything as a flow of values*: files, input
+  events, sensor data, log output, mailboxes, rendered frames.
+  moof embraces streams as a first-class pattern. see
+  [../concepts/streams.md](../concepts/streams.md). the flow/
+  directory — transducers, streams, reactive signals — is
+  where moof operationalizes this.
+- textual representation as a fallback. every moof value has a
+  human-readable `describe` — text is the universal interop
+  surface, even when typed values are primary.
 - the philosophy of making the substrate into a workshop.
 
+**what we generalize**
+- the text-stream assumption. moof streams carry typed values, not
+  just bytes. but the *stream as composition primitive* stays —
+  a mailbox is a stream, a sensor is a stream, a canvas event
+  source is a stream. pipelines apply to all of them.
+
 **what we leave behind**
-- the text-stream assumption. moof pipelines carry typed values.
 - the process-as-isolation model. moof uses vats, which are both
-  cheaper and better-integrated.
+  cheaper and better-integrated than OS processes.
 
 ---
 

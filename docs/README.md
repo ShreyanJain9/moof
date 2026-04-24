@@ -38,9 +38,11 @@ docs/
 ├── concepts/        what moof is — the computational model
 │   ├── objects.md        the object model, slots, handlers, prototypes
 │   ├── messages.md       send, dispatch, doesNotUnderstand
-│   ├── protocols.md      the type system: contracts + conformance
+│   ├── protocols.md      the type system: contracts + conformance (handlers)
+│   ├── schemas.md        explicit slot-type contracts (data shapes, optional)
 │   ├── vats.md           concurrency, message boxes, scheduler
 │   ├── effects.md        Acts, Updates, purity, do-notation
+│   ├── streams.md        temporal flows: unix streaming for typed values
 │   ├── persistence.md    content-addressing, the image, blobstore
 │   ├── addressing.md     URLs, paths, namespaces
 │   ├── capabilities.md   security via reference

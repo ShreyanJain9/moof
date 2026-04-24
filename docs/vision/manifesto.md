@@ -211,15 +211,30 @@ moof treats it as a first-order feature.
 - **accretive, not replaceable.** "delete everything and start
   over" is hard to find for a reason. the default workflow is
   layering, not restart.
-- **low-contrast, typographic, quiet.** the UI fades; the content
-  is foreground. no splash screens. no onboarding tours. boot in
-  under a second and land where you left off.
+- **the content is foreground; the chrome signals purpose.**
+  moof doesn't prescribe a single visual style. a view can be
+  quiet and typographic (plan-9 adjacent) OR skeuomorphic and
+  physical (hypercard adjacent) — both traditions serve the
+  content-foreground principle when done deliberately.
+  rendering is per-protocol (see [horizons.md](horizons.md)):
+  a recipe might render as calm typography; a switchboard might
+  render as a panel of physical-looking switches; a canvas of
+  hand-inked notes might render like a real notebook. what we
+  reject is **chrome-for-chrome's-sake** — animations without
+  meaning, gradients for style alone, skeuomorphism that
+  decorates without communicating. we don't reject physical
+  metaphor. we reject visual noise.
+- **no splash screens. no onboarding tours.** boot in under a
+  second and land where you left off.
 
 this is the aesthetic of the grimoire you inherited from your
-teacher and are adding chapters to. it's the opposite of most
-modern software. it's closer to plan9, to emacs, to well-worn unix
-tools. it's what makes moof part of *you*, not part of a vendor's
-roadmap.
+teacher and are adding chapters to — but the grimoire can be
+illuminated manuscript or it can be a plain bound notebook; both
+fit, so long as every flourish is purposeful. it's the opposite
+of most modern software's chrome treadmill. it's closer to
+plan9, to emacs, to well-worn unix tools, to hypercard's
+lovingly-drawn card stacks. it's what makes moof part of *you*,
+not part of a vendor's roadmap.
 
 ---
 
