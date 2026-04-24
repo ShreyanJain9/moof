@@ -82,9 +82,13 @@ impl System {
         for (name, spec) in &manifest.capabilities {
             match plugins::resolve_capability(spec) {
                 Ok(cap) => {
-                    let (vat_id, obj_id) = scheduler.spawn_capability(cap.as_ref());
-                    eprintln!("  loaded capability '{}' from {spec}", cap.name());
-                    if cap.name() == "system" {
+                    let cap_name = cap.name().to_string();
+                    eprintln!("  loaded capability '{}' from {spec}", cap_name);
+                    // move the Box into the scheduler — it owns the
+                    // plugin's dylib, which the cap vat's natives
+                    // reference. see Scheduler::spawn_capability docs.
+                    let (vat_id, obj_id) = scheduler.spawn_capability(cap);
+                    if cap_name == "system" {
                         system_cap_loc = Some((vat_id, obj_id));
                     }
                     capabilities.push(CapEntry { name: name.clone(), vat_id, obj_id });

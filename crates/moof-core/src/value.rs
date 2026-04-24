@@ -40,6 +40,24 @@ impl Value {
         Value(QNAN | (TAG_INT << TAG_SHIFT) | ((n as u64) & PAYLOAD_MASK))
     }
 
+    /// Inclusive bounds of the i48 tagged-integer payload.
+    /// `Value::integer` silently truncates past these; callers that
+    /// need overflow-checked promotion use `try_integer` + the heap's
+    /// `alloc_integer` for the BigInt path.
+    pub const INT_MAX: i64 = (1i64 << 47) - 1;
+    pub const INT_MIN: i64 = -(1i64 << 47);
+
+    /// Like `integer`, but returns None if `n` would lose bits in
+    /// the i48 payload. Callers that need a guaranteed roundtrip
+    /// use this to decide between primitive and BigInt storage.
+    pub fn try_integer(n: i64) -> Option<Value> {
+        if n >= Self::INT_MIN && n <= Self::INT_MAX {
+            Some(Self::integer(n))
+        } else {
+            None
+        }
+    }
+
     pub fn float(f: f64) -> Value {
         Value(f.to_bits())
     }

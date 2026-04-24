@@ -89,6 +89,22 @@ pub struct Scheduler {
     pub bootstrap_source_labels: Vec<String>,
 }
 
+// Drop order: vats → capability plugin handles → type plugins.
+// Vats' heaps hold Box<dyn Fn> closures and foreign payloads whose
+// drop code lives in the plugin dylibs, so the dylibs must outlive
+// every vat. Rust drops struct fields in declaration order — vats
+// is declared before _plugin_handles which is declared before
+// type_plugins, so default order already matches, but we keep this
+// explicit Drop impl so the invariant is documented and any future
+// field-order shuffling doesn't silently become a segfault.
+impl Drop for Scheduler {
+    fn drop(&mut self) {
+        self.vats.clear();
+        self._plugin_handles.clear();
+        self.type_plugins.clear();
+    }
+}
+
 impl Scheduler {
     pub fn new(fuel_per_turn: u64) -> Self {
         Scheduler {
@@ -161,12 +177,20 @@ impl Scheduler {
     /// `(vat_id, root_object_id)`. Capability vats are bare: they
     /// don't get userland plugins or bootstrap — just the heap +
     /// whatever the capability's setup installs.
-    pub fn spawn_capability(&mut self, cap: &dyn crate::capability::CapabilityPlugin) -> (u32, u32) {
+    ///
+    /// **Critical**: the plugin Box is MOVED into `_plugin_handles`
+    /// and kept alive for the scheduler's lifetime. The cap's setup()
+    /// installed native closures in the vat's heap whose vtable
+    /// pointers live in the plugin's dylib — if we dropped the Box
+    /// now, the dylib would unload and those closures would become
+    /// dangling, crashing at drop time (or any dispatch before then).
+    pub fn spawn_capability(&mut self, cap: Box<dyn crate::capability::CapabilityPlugin>) -> (u32, u32) {
         let id = self.next_vat_id;
         self.next_vat_id += 1;
         let mut vat = Vat::new(id);
         let obj_id = cap.setup(&mut vat);
         self.vats.push(vat);
+        self._plugin_handles.push(cap);
         (id, obj_id)
     }
 
@@ -181,7 +205,9 @@ impl Scheduler {
         let plugin = crate::dynload::DynCapabilityPlugin::load(path)?;
         let name = plugin.name().to_string();
         let plugin_path = plugin.path().to_path_buf();
-        let (vat_id, obj_id) = self.spawn_capability(&plugin);
+        // spawn_capability moves the Box into _plugin_handles — so
+        // the dylib stays loaded while its natives are in use.
+        let (vat_id, obj_id) = self.spawn_capability(Box::new(plugin));
 
         self.loaded_plugins.push(LoadedPlugin {
             name: name.clone(),
@@ -189,8 +215,6 @@ impl Scheduler {
             vat_id,
             obj_id,
         });
-        // keep the dylib handle alive
-        self._plugin_handles.push(Box::new(plugin));
         Ok((name, vat_id, obj_id))
     }
 

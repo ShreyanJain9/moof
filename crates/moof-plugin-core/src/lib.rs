@@ -170,11 +170,13 @@ impl moof_core::Plugin for CorePlugin {
             Ok(heap.alloc_string(&s))
         });
 
-        // Object: type — returns a symbol for the type
+        // Object: type — returns a symbol for the type. Integer is
+        // "Integer" for both primitive i48 and BigInt foreign backings
+        // — users never see the bignum as a distinct type.
         native(heap, obj_id, "type", |heap, receiver, _args| {
             let name = if receiver.is_nil() { "Nil" }
                 else if receiver.is_bool() { "Boolean" }
-                else if receiver.is_integer() { "Integer" }
+                else if heap.is_any_integer(receiver) { "Integer" }
                 else if receiver.is_float() { "Float" }
                 else if receiver.is_symbol() { "Symbol" }
                 else if receiver.as_any_object().is_some() {

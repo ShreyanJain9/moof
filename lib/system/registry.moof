@@ -1,0 +1,58 @@
+; registry.moof — the service registry.
+;
+; wave 9.4: the registry is a plain Table of services keyed by
+; name. not a defserver yet — that would spawn a vat during
+; bootstrap, which triggers infinite recursion because spawning
+; re-runs bootstrap in the child vat (which re-spawns the
+; Registry, which re-runs bootstrap, …).
+;
+; once wave 9.6 inverts control (vat 0's moof owns boot), child
+; vats will receive a minimal bootstrap appropriate to their
+; role instead of the full kernel. at that point the Registry
+; can become a proper defserver and mutation becomes an Update.
+;
+; for now: services.moof defines the initial Table; System's
+; service handlers read it. dynamic registration at the repl
+; rebinds `system-registry` via plain `def`.
+;
+;   [Registry with: { services: (my-table) }]   ; construct
+;   [my-reg byName: 'clock]                      ; query
+;   [my-reg all]                                 ; list of services
+
+(def Registry {
+  services:    #[]                   ; Table: symbol → Service
+
+  [typeName]   'Registry
+
+  [byName: name]
+    [@services at: name]
+
+  [has?: name]
+    [@services contains: name]
+
+  [all]
+    [@services values]
+
+  [names]
+    [@services keys]
+
+  ; Table.count returns seq-length only (the table's list part);
+  ; for a map-only usage we want the key count instead.
+  [count]
+    [[@services keys] count]
+
+  ; non-destructive: returns a NEW Registry with the service added.
+  ; to bind into system-registry, rebind at the top level:
+  ;   (def system-registry [system-registry register: NewService])
+  [register: service]
+    (let ((name [service name]))
+      [self with: { services: [@services at: name put: service] }])
+
+  [unregister: name]
+    [self with: { services: [@services remove: name] }]
+
+  [describe]
+    (str "<Registry " [self count] " services>")
+})
+
+(conform Registry Showable)

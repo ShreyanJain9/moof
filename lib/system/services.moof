@@ -1,0 +1,72 @@
+; services.moof — declare the built-in services.
+;
+; each capability (clock, console, file, random, system, evaluator)
+; gets declared as a Service value. the spawners are thunks that
+; WILL call [Scheduler spawnCapability: name] once wave 9.5
+; exposes Scheduler as a moof-side capability. today the thunks
+; are defined but never called — rust still drives boot.
+;
+; `system-registry` is a plain Registry with the services table
+; populated. at the repl you can rebind it to add a new service:
+;
+;   (def MyService [Service with: { name: 'my-thing ... }])
+;   (def system-registry [system-registry register: MyService])
+;
+; wave 9.6 turns this into a live defserver; for now the static
+; binding is enough to back [System services] and friends.
+
+(def ClockService [Service with:
+  { name:        'clock
+    description: "monotonic + wall clock"
+    spawner:     || [Scheduler spawnCapability: 'clock]
+    restart:     'always
+    depends:     nil }])
+
+(def ConsoleService [Service with:
+  { name:        'console
+    description: "stdout/stderr writer"
+    spawner:     || [Scheduler spawnCapability: 'console]
+    restart:     'always
+    depends:     nil }])
+
+(def FileService [Service with:
+  { name:        'file
+    description: "filesystem read/write"
+    spawner:     || [Scheduler spawnCapability: 'file]
+    restart:     'always
+    depends:     nil }])
+
+(def RandomService [Service with:
+  { name:        'random
+    description: "entropy source + PRNG"
+    spawner:     || [Scheduler spawnCapability: 'random]
+    restart:     'always
+    depends:     nil }])
+
+(def SystemService [Service with:
+  { name:        'system
+    description: "introspection of capabilities + vats + grants"
+    spawner:     || [Scheduler spawnCapability: 'system]
+    restart:     'always
+    depends:     nil }])
+
+(def EvaluatorService [Service with:
+  { name:        'evaluator
+    description: "parse + eval moof source in a sandbox vat"
+    spawner:     || [Scheduler spawnCapability: 'evaluator]
+    restart:     'always
+    depends:     nil }])
+
+; the initial registry. every vat gets this same populated
+; binding at bootstrap; the repl can rebind after startup.
+;
+; #[] is an empty Table; to populate we chain at:put: calls.
+; folding register: through a list of services would also work
+; but the chained form is more readable at declaration time.
+(def system-registry
+  [[[[[[Registry register: ClockService]
+                 register: ConsoleService]
+                 register: FileService]
+                 register: RandomService]
+                 register: SystemService]
+                 register: EvaluatorService])

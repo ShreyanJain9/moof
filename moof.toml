@@ -79,8 +79,12 @@ files = [
   "lib/tools/workspace.moof",
   "lib/tools/test.moof",
 
-  # system — vat-0 substrate (skeleton today; grows per docs/system.md)
+  # system — vat-0 substrate. registry MUST come before
+  # services.moof (which uses it) and before system.moof (whose
+  # handlers reference system-registry).
+  "lib/system/registry.moof",
   "lib/system/system.moof",
+  "lib/system/services.moof",
   "lib/system/source.moof",
 ]
 

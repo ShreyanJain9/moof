@@ -16,6 +16,10 @@ pub enum Token {
 
     // literals
     Integer(i64),
+    // Decimal literal whose magnitude exceeds i48's payload. Carried
+    // as a string so the parser can hand it to Heap::alloc_integer
+    // (which sits above this crate and knows about BigInt).
+    BigInteger(std::string::String),
     Float(f64),
     String(std::string::String),
     Symbol(std::string::String),
@@ -187,10 +191,18 @@ impl Lexer {
                 self.pos += 1;
             }
             let text: std::string::String = self.chars[start..self.pos].iter().collect();
-            Token::Float(text.parse().unwrap())
+            Token::Float(text.parse().unwrap_or(f64::NAN))
         } else {
             let text: std::string::String = self.chars[start..self.pos].iter().collect();
-            Token::Integer(text.parse().unwrap())
+            // fits in i48? fast path. else promote to BigInteger, which
+            // the parser will realize as a foreign BigInt on the heap.
+            // still one moof-level Integer type either way.
+            const I48_MAX: i64 = (1 << 47) - 1;
+            const I48_MIN: i64 = -(1 << 47);
+            match text.parse::<i64>() {
+                Ok(n) if n >= I48_MIN && n <= I48_MAX => Token::Integer(n),
+                _ => Token::BigInteger(text),
+            }
         }
     }
 

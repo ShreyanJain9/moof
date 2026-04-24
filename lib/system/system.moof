@@ -1,24 +1,19 @@
-; system.moof — vat 0 substrate (phase 0 skeleton).
+; system.moof — vat 0 substrate.
 ;
-; this file lays out the *shape* of the future vat-0 init system
-; from docs/system.md. today: protocols + prototypes, no live
-; registry. rust-side boot (crates/moof-cli/src/boot.rs) still
-; does the orchestration.
+; wave 9.4: System exposes service-registry handlers backed by
+; `system-registry`, a Registry defserver spawned at bootstrap.
+; registration is live — you can add a Service at the repl and
+; [System services] sees it immediately. but spawners are not
+; called yet; rust still drives boot.
 ;
-; phase 1 promotes System to a proper defserver that owns the
-; capability registry and supervises services, at which point
-; the rust boot logic becomes "rehydrate the image; send
-; [System boot: manifest]".
+; wave 9.5 exposes a Scheduler capability so spawner thunks can
+; actually run. wave 9.6 moves the boot sequence itself into
+; moof, at which point this file supervises the lifecycle it
+; currently just describes.
 ;
-; phase 4 puts running-state into the image so reboot-is-
-; continuity.
-;
-; what lives here now:
-;   - Service:  the shape of a service declaration
-;   - System:   the shape of the vat-0 singleton
-;
-; no handlers beyond describe/typeName — the guts land with
-; phase 1.
+; wave 9.4 = shape + live registry.
+; wave 9.5 = spawners can be invoked.
+; wave 9.6 = [System boot: manifest] replaces rust's boot loop.
 
 (def Service {
   name:        nil
@@ -27,19 +22,63 @@
   restart:     'on-failure           ; 'always | 'on-failure | 'never
   depends:     nil                   ; list of service names
   health:      nil                   ; closure |vat-ref| returning bool
-  [typeName]   'Service
+
+  [typeName]    'Service
+  [name]        @name
+  [description] @description
+  [spawner]     @spawner
+  [restart]     @restart
+  [depends]     @depends
+  [health]      @health
+
   [describe]
     (str "<Service " [@name describe] ">")
 })
 
 (conform Service Showable)
 
+; System is a prototype, not a vat. its service handlers read
+; `system-registry` from the top-level env (defined in
+; services.moof). wave 9.6 promotes System to a live vat-0
+; defserver that OWNS the registry; until then the binding is
+; shared but rebinding is the way to mutate.
+
 (def System {
-  capabilities: #[]                  ; name → FarRef
-  services:     nil                  ; list of Service declarations
+  capabilities: #[]                  ; name → FarRef (legacy mirror, set by rust)
   [typeName]    'System
-  [describe]
-    (str "<System phase 0: shape only; see docs/system.md>")
+
+  [describe] "<System>"
+
+  ; ── service registry reads ──────────────────────────
+
+  [services]
+    [system-registry all]
+
+  [serviceByName: name]
+    [system-registry byName: name]
+
+  [serviceNames]
+    [system-registry names]
+
+  ; wave 9.5 will turn this into a real spawn. until then we
+  ; just report whatever the registry knows. running? 'declared
+  ; only.
+  [serviceStatus: name]
+    (if [system-registry has?: name] 'declared 'unknown)
+
+  ; ── service registry writes (returns a new Registry) ────
+  ;
+  ; [System registerService: s] does NOT mutate — it returns a
+  ; new Registry with `s` added. to make it stick, rebind:
+  ;   (def system-registry [System registerService: MyService])
+  ; wave 9.6's defserver form will replace these with real
+  ; Updates.
+
+  [registerService: service]
+    [system-registry register: service]
+
+  [unregisterService: name]
+    [system-registry unregister: name]
 })
 
 (conform System Showable)

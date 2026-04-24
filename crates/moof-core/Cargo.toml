@@ -13,3 +13,6 @@ serde = { version = "1", features = ["derive"] }
 bincode = "1"
 indexmap = { version = "2", features = ["serde"] }
 blake3 = "1"
+num-bigint = "0.4"
+num-traits = "0.2"
+num-integer = "0.1"

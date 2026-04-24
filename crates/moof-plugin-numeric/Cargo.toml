@@ -10,3 +10,5 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 moof-core = { path = "../moof-core" }
+num-bigint = "0.4"
+num-traits = "0.2"

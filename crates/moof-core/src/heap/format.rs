@@ -213,6 +213,11 @@ impl Heap {
                 format!("\"{s}\"  : String")
             };
         }
+        // bignums participate in the one Integer type; render their
+        // decimal form + the same ": Integer" trailer that i48 gets.
+        if let Some(b) = self.foreign_ref::<crate::heap::BigInt>(Value::nursery(id)) {
+            return format!("{}  : Integer", b.0);
+        }
         if let Some(b) = self.get_bytes(id) {
             return format!("<{} bytes>  : Bytes", b.len());
         }

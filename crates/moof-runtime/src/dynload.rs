@@ -115,11 +115,18 @@ type RustCreateFn = fn() -> Box<dyn CapabilityPlugin>;
 
 /// A dynamically loaded capability plugin.
 /// Supports both Rust ABI (moof_create_plugin) and C ABI (moof_plugin_name + moof_plugin_setup).
+///
+/// **Drop-order invariant**: `inner` must drop BEFORE `_lib`. The
+/// Box<dyn CapabilityPlugin> holds a trait object whose vtable and
+/// destructor live in the dylib's address space — if `_lib` unloads
+/// first, dropping `inner` calls code that's been mmapped away.
+/// Rust drops struct fields in declaration order, so `inner` goes
+/// above `_lib`.
 pub struct DynCapabilityPlugin {
     cap_name: String,
     path: PathBuf,
-    _lib: libloading::Library,
     inner: DynPluginInner,
+    _lib: libloading::Library,
 }
 
 enum DynPluginInner {
@@ -143,8 +150,8 @@ impl DynCapabilityPlugin {
             return Ok(DynCapabilityPlugin {
                 cap_name: name,
                 path: path.to_path_buf(),
-                _lib: lib,
                 inner: DynPluginInner::Rust(plugin),
+                _lib: lib,
             });
         }
 
@@ -164,8 +171,8 @@ impl DynCapabilityPlugin {
             Ok(DynCapabilityPlugin {
                 cap_name: name,
                 path: path.to_path_buf(),
-                _lib: lib,
                 inner: DynPluginInner::C(setup_fn),
+                _lib: lib,
             })
         }
     }
@@ -211,10 +218,22 @@ impl CapabilityPlugin for DynCapabilityPlugin {
 
 type RustCreateTypeFn = fn() -> Box<dyn Plugin>;
 
+/// **Drop-order invariant**: `inner` must drop BEFORE `_lib`. The
+/// Box<dyn Plugin> holds a trait object whose vtable and destructor
+/// live in the dylib — if `_lib` unloads first, dropping `inner`
+/// calls code that's been mmapped away. Rust drops fields in
+/// declaration order, so `inner` goes above `_lib`.
+///
+/// Bigger deal for type plugins than capability plugins: every
+/// heap's `natives` Vec holds Box<dyn Fn> closures whose vtable
+/// also lives in these dylibs. Those closures drop as part of the
+/// vat's heap drop. So the type_plugins Vec MUST outlive every
+/// vat — scheduler.vats is declared first in Scheduler so it
+/// drops first, and type_plugins last.
 pub struct DynTypePlugin {
     type_name: String,
-    _lib: libloading::Library,
     inner: Box<dyn Plugin>,
+    _lib: libloading::Library,
 }
 
 impl DynTypePlugin {
@@ -229,8 +248,8 @@ impl DynTypePlugin {
 
         Ok(DynTypePlugin {
             type_name: name,
-            _lib: lib,
             inner: plugin,
+            _lib: lib,
         })
     }
 }

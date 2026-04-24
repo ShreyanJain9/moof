@@ -85,6 +85,10 @@ impl<'a> Parser<'a> {
             }
 
             Token::Integer(n) => { self.advance(); Ok(Value::integer(n)) }
+            Token::BigInteger(ref s) => {
+                let s = s.clone(); self.advance();
+                self.heap.alloc_integer_from_str(&s)
+            }
             Token::Float(f) => { self.advance(); Ok(Value::float(f)) }
 
             Token::String(ref s) => {

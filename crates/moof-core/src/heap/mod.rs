@@ -16,6 +16,7 @@ mod pair;
 mod text;
 mod bytes;
 mod table;
+mod bigint;
 
 pub use image::HeapImage;
 pub use gc::GcStats;
@@ -23,6 +24,7 @@ pub use pair::Pair;
 pub use text::Text;
 pub use bytes::Bytes;
 pub use table::Table;
+pub use bigint::BigInt;
 
 use crate::object::HeapObject;
 use crate::value::Value;
@@ -164,6 +166,23 @@ pub struct Heap {
 
 pub type NativeFn = Box<dyn Fn(&mut Heap, Value, &[Value]) -> Result<Value, String>>;
 
+// Drop order matters when type-plugin dylibs are in play: every heap
+// object may drop a foreign payload whose vtable lives in a dylib,
+// and every `natives` entry is a Box<dyn Fn> whose destructor code
+// also lives in a dylib. Scheduler keeps the dylibs alive until after
+// all vats drop, so we're safe w.r.t. unload. But we still want to
+// drop in a predictable order in case a foreign destructor reads
+// anything through the heap's other fields.
+impl Drop for Heap {
+    fn drop(&mut self) {
+        self.objects.clear();
+        self.foreign_registry = crate::foreign::ForeignTypeRegistry::new();
+        self.send_cache.clear();
+        self.type_protos.clear();
+        self.natives.clear();
+    }
+}
+
 impl Heap {
     pub fn new() -> Self {
         let mut h = Heap {
@@ -226,6 +245,7 @@ impl Heap {
         h.register_foreign_type::<Text>().expect("register Text");
         h.register_foreign_type::<Bytes>().expect("register Bytes");
         h.register_foreign_type::<Table>().expect("register Table");
+        h.register_foreign_type::<BigInt>().expect("register BigInt");
         pair::PAIR_SYMS.store(pair::PairSyms { car: h.sym_car, cdr: h.sym_cdr });
 
         // allocate the root env's bindings Table first.
@@ -678,6 +698,15 @@ impl Heap {
         ) {
             return sa == sb;
         }
+        // integer equality crosses the i48/BigInt boundary. Small ints
+        // get bit-identical Values so the `a == b` fast path handles
+        // them; the mixed case (one primitive, one foreign) needs a
+        // value-level compare.
+        if self.is_any_integer(a) && self.is_any_integer(b) {
+            if let (Some(ba), Some(bb)) = (self.to_bigint(a), self.to_bigint(b)) {
+                return ba == bb;
+            }
+        }
         false
     }
 
@@ -732,23 +761,26 @@ impl Heap {
     /// `.proto` to match `type_protos[tag]` for its foreign type.
     /// O(heap size) — run once per image load.
     pub fn heal_foreign_protos(&mut self) {
-        use crate::heap::{PROTO_CONS, PROTO_STR, PROTO_BYTES, PROTO_TABLE};
+        use crate::heap::{PROTO_CONS, PROTO_STR, PROTO_BYTES, PROTO_TABLE, PROTO_INT};
         let cons_proto  = self.type_protos[PROTO_CONS];
         let str_proto   = self.type_protos[PROTO_STR];
         let bytes_proto = self.type_protos[PROTO_BYTES];
         let table_proto = self.type_protos[PROTO_TABLE];
+        let int_proto   = self.type_protos[PROTO_INT];
 
-        let pair_tid  = self.foreign_registry.lookup(Pair::type_name());
-        let text_tid  = self.foreign_registry.lookup(Text::type_name());
-        let bytes_tid = self.foreign_registry.lookup(Bytes::type_name());
-        let table_tid = self.foreign_registry.lookup(Table::type_name());
+        let pair_tid   = self.foreign_registry.lookup(Pair::type_name());
+        let text_tid   = self.foreign_registry.lookup(Text::type_name());
+        let bytes_tid  = self.foreign_registry.lookup(Bytes::type_name());
+        let table_tid  = self.foreign_registry.lookup(Table::type_name());
+        let bigint_tid = self.foreign_registry.lookup(BigInt::type_name());
 
         for obj in self.objects.iter_mut() {
             let Some(fd) = &obj.foreign else { continue; };
-            let expected = if Some(fd.type_id) == pair_tid  { Some(cons_proto) }
-                      else if Some(fd.type_id) == text_tid  { Some(str_proto) }
-                      else if Some(fd.type_id) == bytes_tid { Some(bytes_proto) }
-                      else if Some(fd.type_id) == table_tid { Some(table_proto) }
+            let expected = if Some(fd.type_id) == pair_tid    { Some(cons_proto) }
+                      else if Some(fd.type_id) == text_tid    { Some(str_proto) }
+                      else if Some(fd.type_id) == bytes_tid   { Some(bytes_proto) }
+                      else if Some(fd.type_id) == table_tid   { Some(table_proto) }
+                      else if Some(fd.type_id) == bigint_tid  { Some(int_proto) }
                       else { None };
             if let Some(p) = expected {
                 if !p.is_nil() { obj.proto = p; }
@@ -999,6 +1031,65 @@ impl Heap {
     /// when a handler needs owned data to pair with `&mut Heap`.
     pub fn foreign_clone<T: ForeignType>(&self, val: Value) -> Option<T> {
         self.foreign_ref::<T>(val).cloned()
+    }
+
+    // ─────────── Integer = i48 ∪ BigInt ───────────
+    //
+    // moof exposes ONE integer type. Primitives under the i48 threshold
+    // live inside the NaN-boxed Value; bigger magnitudes become a
+    // BigInt foreign object whose proto is type_protos[PROTO_INT] —
+    // same dispatch surface, same `typeName`, same `describe`.
+
+    /// Allocate a Value for any `num_bigint::BigInt`. If the value
+    /// fits in an i48 primitive, returns the tagged i48 Value
+    /// directly (no heap alloc). Otherwise allocates a BigInt foreign
+    /// object with proto = Integer.
+    pub fn alloc_integer(&mut self, n: num_bigint::BigInt) -> Value {
+        use num_traits::ToPrimitive;
+        if let Some(k) = n.to_i64() {
+            if let Some(v) = Value::try_integer(k) {
+                return v;
+            }
+        }
+        let proto = self.type_protos[PROTO_INT];
+        self.alloc_foreign(proto, BigInt(n)).expect("BigInt registered")
+    }
+
+    /// Parse a decimal integer literal into a Value. Returns a
+    /// primitive for small magnitudes, a BigInt foreign object
+    /// for anything that overflows i48.
+    pub fn alloc_integer_from_str(&mut self, s: &str) -> Result<Value, String> {
+        use std::str::FromStr;
+        let n = num_bigint::BigInt::from_str(s)
+            .map_err(|e| format!("bad integer literal '{s}': {e}"))?;
+        Ok(self.alloc_integer(n))
+    }
+
+    /// Read an integer-shaped Value as a `num_bigint::BigInt`,
+    /// regardless of whether it's stored as an i48 primitive or a
+    /// BigInt foreign object.
+    pub fn to_bigint(&self, v: Value) -> Option<num_bigint::BigInt> {
+        if let Some(n) = v.as_integer() {
+            return Some(num_bigint::BigInt::from(n));
+        }
+        self.foreign_ref::<BigInt>(v).map(|b| b.0.clone())
+    }
+
+    /// True if the value is an integer in the unified sense: either
+    /// a primitive i48 or a BigInt foreign object. Float and other
+    /// numeric types return false. Prefer this over `Value::is_integer`
+    /// at any site where a caller would reasonably expect huge
+    /// integers to count.
+    pub fn is_any_integer(&self, v: Value) -> bool {
+        if v.is_integer() { return true; }
+        if let Some(id) = v.as_any_object() {
+            if let Some(fd) = self.get(id).foreign() {
+                if let Some(expected) = self.foreign_registry.lookup(BigInt::type_name()) {
+                    return fd.type_id == expected;
+                }
+            }
+        }
+        false
     }
 
     // ============================================================
