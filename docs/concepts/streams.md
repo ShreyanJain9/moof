@@ -1,245 +1,251 @@
 # streams
 
 **type:** concept
+**specializes:** throughline 1 (contexts), throughline 6 (time)
 
-> unix's real gift wasn't text — it was treating everything as a
-> flow of values. moof keeps that commitment but applies it to
-> typed values at every scale: mailboxes, event queues, rendered
-> frames, log output, sensor data.
-
----
-
-## the pattern
-
-a **stream** is a sequence you consume incrementally. it might be
-finite (a file's contents, a list) or infinite (a clock tick, a
-keystroke event source). you compose over it with transducers,
-you merge streams, you throttle, you window. you don't
-materialize it into a list just to work with it.
-
-this is unix's pipeline taken literally. `cmd1 | cmd2 | cmd3` is
-a sequence of streams with transformations between them. moof's
-version replaces text-bytes with typed values and makes the
-pipeline a composable moof value.
+> a stream is a Monadic context with a **temporal flavor**: a
+> value that yields successor values over time. same shape as
+> Act, Option, Cons, Result — different meaning of "context."
 
 ---
 
-## what's a stream in moof
+## the one idea
 
-a Stream is an object that responds to `next:`:
+if you've read [throughlines.md](../throughlines.md), you
+already know what a stream is.
+
+a stream is a **context**: a value-wrapping-structure satisfying
+the `Monadic` protocol. same shape as Option (presence context),
+Result (success/failure context), Cons (indexed-sequence
+context), Act (cross-vat-pending context).
+
+the flavor: **a stream's context is "more values might arrive
+over time."** bind composes; `(do ...)` sequences; you don't
+need to learn a new vocabulary for it.
 
 ```moof
-(defprotocol Streamable
-  (require (next: k)
-    "Produce the next value. k is a continuation:
-      [k on-value: v]    — here's the next value
-      [k on-end]         — no more values
-      [k on-error: e]    — something went wrong
-     called exactly once when ready."))
+; same do-syntax as every other Monadic context
+(do
+  (click <- canvas-clicks)             ; Stream<Click>
+  (resolved <- (resolve-target click))  ; → Act<Target> or similar
+  (rendered <- (render-target resolved)))
 ```
 
-this is a pull-based stream: the consumer asks, the producer
-yields. push-based streams (with backpressure) are a future
-addition.
-
-**what's a stream**:
-- a Cons list (each cell is one value; next: pulls the cdr).
-- a Range (next: increments).
-- a File's lines (each call reads a line; EOF → on-end).
-- a Clock's ticks (every N ms, on-value).
-- a vat's mailbox (every incoming message).
-- a Canvas's input events (every click, keystroke).
-- a reactive Signal (every emission).
-
-**what's NOT a stream** in the same sense:
-- a Table's entries (it's eager; just iterate).
-- a Set's elements (same — eager collection).
-
-the distinction is **temporal vs spatial** — a stream arrives
-over time; a collection is already there.
+what makes a stream a Stream (capital S) rather than some other
+Monadic: its `then:` returns future-values one-at-a-time as they
+arrive, rather than a single value once.
 
 ---
 
-## streams compose
+## how this specializes the contexts throughline
 
-the real win. same combinators work on any Streamable:
+| context | "the extra structure" | when bind fires |
+|---------|----------------------|-----------------|
+| Option | presence/absence | now, synchronously |
+| Result | success/failure | now, synchronously |
+| Cons | each element in sequence | for every element, now |
+| Act | pending cross-vat computation | once, when resolved |
+| **Stream** | **each value over time** | **every yield, as it arrives** |
+| Update | state-change-with-reply | at scheduler tick |
+
+every row here composes via `Monadic.then:` and uses `(do ...)`.
+the row-differences are operational: when does the inner
+computation fire? with what value? what happens after?
+
+the Monadic protocol is one contract. the rows are six
+specializations. **streams are not a separate abstraction family
+— they're the sixth row.**
+
+---
+
+## what's stream-shaped in moof
+
+anything that produces values over time. the source is different;
+the Monadic semantics are the same:
+
+- **a Cons** — each cell yields its car; the cdr is the "next."
+  also Iterable (read eagerly), also Monadic (bound
+  per-element), also Stream (pulled incrementally).
+- **a Range** — `(range 0 ∞)` is a Stream of integers.
+- **a File's lines** — each call to `next:` reads the next line.
+- **a Clock's ticks** — every N ms, yield the current time.
+- **a vat's mailbox** — every incoming message is a stream
+  element.
+- **a Canvas's input events** — clicks, keystrokes, touches.
+- **a reactive Signal** — every emission yields.
+- **an Act's resolution history** — if you want to inspect when
+  an Act went through states, that trajectory is a stream.
+
+the last one shows why streams and Acts aren't separate
+kingdoms: an Act's *result* is a single Monadic bind; an Act's
+*history* is a stream. they're the same object seen along
+different axes.
+
+---
+
+## what's NOT stream-shaped (as a primary pattern)
+
+- **a Table's entries** — eager, already there. iterate (Iterable),
+  don't stream.
+- **a Set's elements** — same.
+- **a String's chars** — could be streamed if you wanted, but
+  typically you index (Indexable) — they're materialized.
+
+the test: **does the source have an inherent temporal axis?**
+if yes, Stream. if no, Iterable or Indexable.
+
+---
+
+## streams through the other throughlines
+
+**contexts (throughline 1).** covered above: Stream is the
+temporal flavor of Monadic.
+
+**walks (throughline 3).** a stream's `next:` call is a walk: it
+addresses "the next element of this stream" and fetches it. the
+walk happens incrementally across time instead of across a
+spatial graph.
+
+**additive authoring (throughline 4).** streams are immutable
+values — consuming a stream produces a new tail; the old stream
+is still valid. forking a stream at some point gives you two
+branches that evolve independently. no in-place iteration state.
+
+**canonical form (throughline 5).** finite, deterministic
+streams canonicalize the same way lists do: each yielded value
+in order, hashed. infinite/nondeterministic streams don't (they
+can't — their content isn't a fixed value).
+
+**time (throughline 6).** the defining flavor. time is the axis
+a stream lives on.
+
+---
+
+## composition
+
+every Monadic composer works on streams, because streams are
+Monadic:
 
 ```moof
-(def first-10-clicks
-  [canvas-clicks take: 10])
-
-(def warm-prices
-  [[prices filter: |p| [p > 0]] map: |p| [p * 1.1]])
-
-(def idle-state
-  [[keystrokes throttle: 500ms] debounce: 200ms])
-
-(def merged
-  [audio-stream merge: subtitle-stream])
+[stream map: f]           ; transform each yielded value (Iterable+Stream)
+[stream filter: p]        ; drop non-matching yields
+[stream take: 10]         ; finite prefix
+[stream drop: 5]          ; skip first 5
+[stream merge: other]     ; interleave
+[stream zip: other]       ; pair elements
+[stream throttle: 500ms]  ; temporal combinator (stream-specific)
+[stream debounce: 200ms]  ; temporal combinator (stream-specific)
+[stream window: 1s]       ; temporal combinator
 ```
 
-the same `map:`, `filter:`, `take:`, `throttle:`, `debounce:`,
-`merge:` work across every stream source. the transducer-flavored
-story is the backbone.
+the first six work on anything Iterable/Monadic — Cons, Stream,
+Range share them. the last three are temporal specializations:
+they need a time axis. streams have one; Cons doesn't.
 
----
-
-## streams and Iterables
-
-a Cons is both:
-- Iterable (you can `fold:with:` it eagerly — materialize).
-- Streamable (you can `next:` it incrementally — consume).
-
-same value, two protocols. context picks which to use: a
-rendering pipeline wants Streamable (lazy); a sum wants Iterable
-(materialize, fold).
-
-most stream combinators delegate to Iterable when the source is
-finite. when it's infinite, you MUST use streamable semantics or
-you'll never terminate.
-
----
-
-## streams and effects
-
-cross-vat sends are inherently stream-shaped: messages arrive
-over time in a mailbox. moof's mailbox IS a stream, and
-server-vat patterns are stream-processors:
+transducers (`lib/flow/transducer.moof`) are the composable
+pipeline primitive. they compose over Iterable OR Streamable:
 
 ```moof
-(defserver Counter (initial)
-  { value: initial
-    [incr] (update { value: [@value + 1] } @value)
-    [get] @value })
+(def xf (comp [map: f] [filter: p] [take: 10]))
+[stream transduce: xf]      ; Stream<B>
+[list transduce: xf]        ; Cons<B>  (materialized)
 ```
 
-from the outside, the vat processes a stream of incoming
-messages, producing a stream of replies. the defserver form
-hides this — but the scheduler is implementing it.
-
-future direction: expose this explicitly. `[my-vat messages]`
-returns the mailbox as a Streamable. you can inspect the
-backlog, apply filters, process in user code. for now it's
-handled by the scheduler but the mental model is stream-based.
+one pipeline, both temporal and spatial sources.
 
 ---
 
-## backpressure
+## streams and Acts: the deeper connection
 
-today moof's streams are pull-based. the consumer drives; the
-producer yields on demand. this naturally avoids unbounded
-buffering.
+an Act is "a computation pending in time — one value, one
+resolution."
 
-push-based streams (where the producer pushes at its own rate and
-buffers queue up) are a future addition. the right design
-introduces explicit backpressure: the consumer signals "slow
-down" and the producer complies (or drops).
+a Stream is "many values arriving in time — an open series."
 
-reactive signals (`lib/flow/reactive.moof`) are approximately
-push-based but without formal backpressure yet. this is on the
-list to harden when streams-as-first-class gets a wave.
+both live on the time axis. an Act is a stream that yields
+exactly once then ends. a stream of Acts is a computation where
+each element is a pending result. merge a stream-of-Acts with a
+stream-of-ticks and you get a throttled-async-source.
 
----
-
-## streaming and persistence
-
-a persistent stream is just a stream whose producer's state is in
-the image. a log can be a stream. an append-only message history
-is a stream. close moof, reopen, the stream picks up where it
-left off.
-
-this connects with wave 10+ (running-state persistence): vats'
-mailboxes ARE streams, and persisting them is persisting the
-stream's state. reboot resumes consumption.
+the mental model: **an Act is a special case of a stream.** in
+practice the stdlib keeps them distinct types for performance
+and semantic clarity (an Act doesn't have
+backpressure/throttle/merge machinery; adding it would be
+overhead for a single-value case). but the relationship is
+real.
 
 ---
 
-## the canvas as stream consumer
+## mailboxes are streams
 
-the (future) canvas is a huge stream consumer:
+a vat's mailbox is, semantically, a Stream<Message>. the
+scheduler drains one element at a time; each message is a yield;
+`on-end` happens when the vat exits.
 
-- input events (mouse, keyboard) — a stream.
-- frame ticks (60 Hz) — a stream.
-- animations — functions of time, which is itself a stream.
-- updates from subscribed peers — a stream.
-- log messages — a stream.
+today this is implemented inside the scheduler's event loop,
+not exposed as a moof Stream. it SHOULD be exposed — then
+reflective scheduler logic ("watch this vat's incoming messages")
+becomes a normal stream composition.
 
-morphic's historical design had an event loop; moof's version
-has streams as first-class values you can compose. the visual UI
-is a functional composition of these streams, not a callback
-soup.
-
----
-
-## streams and pipelines
-
-moof's `flow/` directory has several stream-adjacent types:
-
-- **Transducer** — composable reducer transformations. apply to
-  any Iterable or Streamable.
-- **Stream** — lazy sequence with a `next:` producer.
-- **Signal** (reactive) — time-varying value, push-based.
-- **Atom** (reactive) — cell you can observe changes on.
-
-per the stdlib doctrine, transducer is the primary PIPELINE
-primitive. streams are the source/sink. signals and atoms are
-the push-based layer.
+this is on the roadmap. when it lands, the scheduler is a moof-
+level stream processor; every debugging tool that works on
+streams works on the scheduler.
 
 ---
 
-## differences from rxjs / reactive-streams / rust iterators
+## server vats process streams
 
-- **unlike rxjs**: moof streams are values (not subjects); they
-  compose by message sends (not method chains on a
-  special observable type).
-- **unlike reactive-streams**: moof's backpressure is pull-based
-  by default; we'll add explicit push-based stream types with
-  backpressure as a separate layer, not a refactor.
-- **unlike rust iterators**: moof streams are first-class moof
-  values, not a zero-cost compile-time abstraction. they're
-  slower than rust iterators but universally composable.
+a defserver is a vat that receives messages (a stream) and
+produces replies (a stream of Updates). the scheduler's loop is:
+
+```
+forever, for each vat with pending work:
+  take the next message from mailbox (stream pull)
+  dispatch it to a handler
+  handler returns a reply / Update / Act
+  send reply on the outbox (stream push)
+  apply Update between messages
+```
+
+this is a transducer over the message stream. `defserver` hides
+the machinery; the reality is a stream processor.
 
 ---
 
-## status
+## pull-based by default; push with backpressure is future
 
-today's moof has:
-- `lib/flow/stream.moof` — Stream type with basic combinators
-- `lib/flow/transducer.moof` — the composable primitive
-- `lib/flow/reactive.moof` — Atom, Signal
-- the stdlib doctrine pins Transducer as the primary pipeline
-  primitive
+today's moof streams are **pull-based**: the consumer asks, the
+producer yields. consumption naturally caps at the consumer's
+rate; no unbounded buffering.
 
-gaps:
-- push-based stream semantics with formal backpressure
-- stream-as-mailbox (exposing a vat's mailbox as a stream
-  value)
-- stream persistence (as part of running-state persistence, wave
-  11+)
-- unified Streamable protocol (today Stream is a type, not a
-  protocol — should be abstracted)
+push-based streams — where the producer emits at its own cadence
+and buffers queue up — exist as reactive Signals (`lib/flow/
+reactive.moof`) but without formal backpressure. formal
+push-with-backpressure is on the roadmap; it'll layer on top of
+the current pull-based primitive, not replace it.
 
 ---
 
 ## what you need to know
 
-- streams are a primitive design pattern: temporal flow of
-  values.
-- anything that produces values over time is stream-shaped:
-  clocks, mailboxes, sensors, log files, canvas events.
-- same combinators (map, filter, take, throttle, merge) work on
-  every stream source.
-- streams compose with transducers (the pipeline primitive).
-- moof's design applies unix's stream-centric composition to
-  typed values, not just text.
-- push-based + backpressure is future work.
+- a stream is a Monadic context. temporal flavor.
+- same composition primitive (Monadic protocol, `(do ...)`,
+  transducers) works on streams as on Acts, Options, Results,
+  Cons.
+- stream-specific operators (`throttle:`, `debounce:`, `merge:`)
+  depend on the time axis; they don't apply to Cons.
+- mailboxes, input events, sensor readings, signals are all
+  stream-shaped.
+- an Act is a degenerate one-yield stream. same family.
 
 ---
 
 ## next
 
-- [effects.md](effects.md) — Act chains are a stream-shaped
-  computation.
-- [vats.md](vats.md) — mailboxes as streams.
-- [../vision/horizons.md](../vision/horizons.md) — how the
-  canvas consumes streams.
+- [../throughlines.md](../throughlines.md) — the contexts
+  pattern this specializes
+- [effects.md](effects.md) — Acts, Updates — sibling flavors of
+  the same pattern
+- [vats.md](vats.md) — mailboxes as stream sources
+- [../laws/stdlib-doctrine.md](../laws/stdlib-doctrine.md) —
+  Monadic, Fallible, Awaitable protocols

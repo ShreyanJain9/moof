@@ -1,9 +1,33 @@
 # messages
 
 **type:** concept
+**specializes:** throughline 3 (walks)
 
 > sending a message is the one operation moof has. function call,
 > arithmetic, slot access, control flow, IO — all message sends.
+> every send is a **walk** through the receiver's prototype
+> chain looking for a handler. dispatch is throughline 3 at its
+> most-used.
+
+---
+
+## the deeper view
+
+every send is structurally a walk (throughline 3): start at the
+receiver, follow the prototype chain, find a handler, execute.
+same move as URL resolution (walk namespace), env lookup (walk
+parent chain), or federation (walk peer graph) — just on a
+different graph.
+
+| walk | from | edges | stopping rule |
+|------|------|-------|---------------|
+| dispatch | receiver | `.proto` | handler found or nil |
+| env lookup | scope | `.parent` | binding found or nil |
+| URL resolve | `/` | `at:` segments | leaf reached or nil |
+
+dispatch is the hot path; it happens on every send. the proto
+chain is short (usually ≤4); the runtime caches by (proto,
+selector). this is moof's engine room.
 
 ---
 
@@ -242,8 +266,11 @@ this uniformity means:
 
 ## next
 
-- [protocols.md](protocols.md) — how we reason about what a
-  receiver can respond to.
-- [vats.md](vats.md) — what happens when a send crosses a vat.
+- [../throughlines.md](../throughlines.md) — walks, the pattern
+  dispatch specializes
+- [protocols.md](protocols.md) — constraints on what receivers
+  respond to (throughline 2)
+- [addressing.md](addressing.md) — walks named by URL
+- [vats.md](vats.md) — what happens when a send crosses a vat
 - [effects.md](effects.md) — how Acts work, cross-vat chains,
-  do-notation.
+  do-notation

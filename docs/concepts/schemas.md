@@ -1,11 +1,32 @@
 # schemas
 
 **type:** concept
+**specializes:** throughline 2 (constraints — slot flavor)
 
-> moof supports both schema-emergent and schema-first workflows.
-> you can build objects ad-hoc and let the shapes coalesce, or
-> declare an explicit shape contract up front. neither mode is
-> "right" — each fits different stages of thought.
+> a schema is a **constraint on a value's slots**: a declarative
+> claim about what data a value carries and in what shape. same
+> pattern as protocols (constraints on handlers), optional types
+> (constraints checked at compile time), capabilities (constraints
+> on reachability) — different phase of check, same machinery.
+> moof supports both schema-emergent (default) and schema-first
+> (opt-in) workflows; neither is forced.
+
+---
+
+## the one idea
+
+a schema declares: **"a value of this shape has these slots,
+with these types, in this arrangement."** the runtime uses the
+declaration at construction time (validate new instances), on
+demand (`[Shape validate: existing]`), or at a boundary (servers
+reject malformed input).
+
+if you've read [throughlines.md](../throughlines.md), this is
+throughline 2 again, **slot flavor**. protocols constrain what
+a value responds to; schemas constrain what a value carries;
+optional types (future) constrain what the compiler can prove;
+capabilities constrain what you can reach. one concept, four
+phases.
 
 ---
 
@@ -161,23 +182,26 @@ migration).
 
 ---
 
-## schemas vs protocols
+## schemas and protocols are siblings
 
-these are different layers:
+both are constraints (throughline 2). different axes:
 
-- **protocol** — contract about HANDLERS (methods). "this
-  value responds to map:, filter:, reduce:." dispatch-level.
-- **schema** — contract about SLOTS (data). "this value has a
-  title slot that's a String." data-level.
+| constraint | claims about | checked |
+|------------|--------------|---------|
+| **protocol** | handlers (methods) | at dispatch; via `conform` |
+| **schema** | slots (data shape) | at construction; on demand |
+| optional static type (future) | handlers + slots + arity | at compile time |
+| capability | reachability | at send time |
 
-a type can have both. `Recipe` conforms to `Showable` (protocol)
-AND has a Shape (schema). these describe different things; they
-don't conflict.
+a type can have multiple claims at once. `Recipe` conforms to
+`Showable` (protocol), has a Shape (schema), might later have a
+typed annotation (optional types). these don't conflict; they
+describe different axes of the same value.
 
-protocols are part of the type system (see
-[protocols.md](protocols.md)). schemas are a data-shape
-contract that sits orthogonally. most stdlib types have
-protocols; schemas are for user-declared data.
+the deep pattern: a constraint is a **declarative assertion
+about a value** that the runtime checks at SOME phase. the
+surface names (protocol / schema / type) describe which axis
+and which phase. the structure is one thing.
 
 ---
 
@@ -246,7 +270,11 @@ until then, you can approximate with:
 
 ## next
 
-- [protocols.md](protocols.md) — the sibling contract system
-  (for handlers).
-- [objects.md](objects.md) — the material schemas describe.
-- [../roadmap.md](../roadmap.md) — when `defshape` lands.
+- [../throughlines.md](../throughlines.md) — the constraints
+  pattern schemas specialize
+- [protocols.md](protocols.md) — the sibling constraint system
+  (handlers instead of slots)
+- [objects.md](objects.md) — the material schemas describe
+- [../roadmap.md](../roadmap.md) — when `defshape` lands
+- [../vision/horizons.md](../vision/horizons.md) — the future
+  optional type layer, which unifies with schemas

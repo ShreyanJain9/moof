@@ -1,11 +1,35 @@
 # vats
 
 **type:** concept
+**specializes:** throughline 3 (walks), throughline 4 (additive),
+                 throughline 5 (canonical form)
 
 > moof's concurrency unit. a vat is a single-threaded actor with
 > its own heap, its own message queue, and no shared memory.
 > everything concurrent is a vat. messages between vats are the
 > only way state crosses a boundary.
+
+---
+
+## how vats touch the throughlines
+
+- **walks (throughline 3).** a FarRef is a named pointer across
+  a vat boundary; sending through it is a walk from sender to
+  target. the URL on the FarRef (`moof:/caps/console`,
+  `moof:/vats/7/objs/42`) names the walk so it survives restart.
+- **additive authoring (throughline 4).** vat state changes
+  only via Updates — atomic, between-message deltas. each
+  state is a snapshot; nothing mutates in place. the vat's
+  history is a sequence of states.
+- **canonical form (throughline 5).** cross-vat message copy is
+  canonical serialization of the args. receiver deserializes
+  into its heap. immutable values dedupe via content hash.
+  FarRefs carry a URL so they round-trip.
+- **streams (context + time).** a vat's mailbox is a Stream of
+  incoming messages; the scheduler is a transducer over it.
+
+these aren't extra abstractions bolted onto vats. they ARE what
+vats are.
 
 ---
 
@@ -252,9 +276,12 @@ defservers. they exist today only in rough shape.
 
 ## next
 
+- [../throughlines.md](../throughlines.md) — walks, additive,
+  canonical form — the patterns vats embody
 - [effects.md](effects.md) — Acts, Updates, do-notation — how
-  cross-vat work composes.
-- [capabilities.md](capabilities.md) — the security layer on top
-  of vats.
+  cross-vat work composes
+- [streams.md](streams.md) — mailboxes as stream sources
+- [capabilities.md](capabilities.md) — the security layer on
+  top of vats (constraints on reachability)
 - [addressing.md](addressing.md) — how vats, services, and
-  capabilities have URLs.
+  capabilities have URLs

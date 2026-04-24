@@ -1,10 +1,45 @@
 # addressing
 
 **type:** concept
+**specializes:** throughline 3 (walks), throughline 5 (canonical form)
 
-> every value in moof has a URL. content-addressed for immutable
-> things; path-addressed for live ones. addressing unifies local
-> lookup, persistence, and federation in one vocabulary.
+> every value in moof has a URL. addressing is the surface of
+> the walks throughline: every identity is a path through some
+> graph of objects. content-addressed URLs walk the hash DAG;
+> path URLs walk the namespace tree; FarRef resolution walks
+> across vat boundaries; federation walks across machines. same
+> pattern, different graphs.
+
+---
+
+## the deeper view
+
+if you've read [throughlines.md](../throughlines.md), addressing
+is the concrete face of throughline 3 (walks). every moof URL
+is a SERIALIZED WALK through some graph:
+
+| URL shape | graph walked | step |
+|-----------|-------------|------|
+| `moof:<hash>` | content-addressed DAG | hash → blob |
+| `moof:/caps/X` | namespace tree | `[table at: segment]` |
+| `moof:/vats/N` | vat registry | vat id → Vat |
+| `moof:/protos/X` | prototype registry | name → proto |
+| `moof:peer/alice/...` | peer federation graph | network hop |
+
+and for comparison, walks that DON'T get their own URLs (yet)
+but are structurally the same:
+
+| walk | graph | step |
+|------|-------|------|
+| message dispatch | proto chain | `obj.proto` |
+| env lookup | env parent chain | `env.parent` |
+| delegation | same as dispatch | `obj.proto` |
+
+URLs name the walks that cross persistence or trust boundaries.
+internal walks (dispatch, env lookup) don't need URLs because
+they never leave the current image/vat. but the structure is
+shared — moof is full of walks, and addressing names some of
+them for durability.
 
 ---
 
@@ -259,8 +294,12 @@ content-addressing doing the dedup.
 
 ## next
 
+- [../throughlines.md](../throughlines.md) — walks + canonical
+  form, the patterns this specializes
 - [persistence.md](persistence.md) — how URLs and content-
-  addressing intertwine with the blob store.
-- [capabilities.md](capabilities.md) — the security model built on
-  URL-carrying FarRefs.
-- [vats.md](vats.md) — what a FarRef really is.
+  addressing intertwine with the blob store
+- [capabilities.md](capabilities.md) — the security model built
+  on URL-carrying FarRefs (reachability as a constraint)
+- [messages.md](messages.md) — dispatch, the unlabeled walk
+  through the proto chain
+- [vats.md](vats.md) — what a FarRef really is

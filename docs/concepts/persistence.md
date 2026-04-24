@@ -1,10 +1,38 @@
 # persistence
 
 **type:** concept
+**specializes:** throughline 5 (canonical form), throughline 6 (time),
+                 throughline 4 (additive)
 
 > the image is moof's defining feature. everything persists by
 > default. close your laptop, reopen, exactly where you were.
-> this doc says how.
+> persistence is canonical form (throughline 5) applied to the
+> whole reachable graph, indexed across time (throughline 6),
+> accreting additively (throughline 4).
+
+---
+
+## the throughlines applied
+
+- **canonical form (throughline 5).** every immutable value has
+  ONE canonical byte form. same content → same hash → same
+  identity, anywhere. persistence IS: walking the reachable
+  graph, canonicalizing each value, storing by hash. load is
+  the reverse: hash → bytes → rebuild.
+- **time (throughline 6).** the blob store accumulates; old
+  hashes stay reachable; snapshots are named points on the
+  history axis. time-travel is cheap because past states
+  aren't overwritten — they're just not current.
+- **additive (throughline 4).** every write is a new blob,
+  a new ref, a new snapshot. mutation is a new value
+  pointing at old ones. the history is a DAG of values added
+  over time; GC (future) collects only what's no longer
+  reachable from ANY retained snapshot.
+
+understanding these three makes persistence obvious. the blob
+store is a content-addressed DAG of canonical values that grows
+monotonically; "loading the image" is walking roots down through
+the DAG.
 
 ---
 
@@ -263,8 +291,10 @@ see [../roadmap.md](../roadmap.md) for the wave 10 plan.
 
 ## next
 
-- [addressing.md](addressing.md) — URLs, paths, how values are
-  named.
-- [objects.md](objects.md) — the material that persists.
-- [../roadmap.md](../roadmap.md) — when wave 10 and running-state
-  persistence land.
+- [../throughlines.md](../throughlines.md) — canonical form +
+  time + additive, the patterns persistence embodies
+- [addressing.md](addressing.md) — URLs, paths, the walks
+  layer above persistence
+- [objects.md](objects.md) — the material that persists
+- [../roadmap.md](../roadmap.md) — when wave 10 and running-
+  state persistence land

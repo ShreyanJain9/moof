@@ -1,10 +1,38 @@
 # capabilities
 
 **type:** concept
+**specializes:** throughline 2 (constraints — reachability flavor),
+                 throughline 3 (walks)
 
-> moof's security model. a reference IS a capability. if you hold
-> a reference to an object, you can send it messages; if you don't,
-> you can't touch it. no ambient authority. no global namespace.
+> moof's security model. a reference IS a capability. holding
+> the FarRef is both the permission AND the mechanism. this is
+> **constraint by construction**: the constraint "you may send
+> messages to X" is expressed as "you reach X in the object
+> graph." if the walk doesn't succeed, the operation doesn't
+> exist.
+
+---
+
+## the deeper view
+
+throughline 2 said a constraint is a declarative claim about a
+value. protocols claim things about handlers; schemas claim
+things about slots; optional types claim things the compiler
+can prove. a **capability** claims something about
+**reachability**: "this sender has a path to this receiver in
+the live reference graph."
+
+the check isn't "is the caller authorized?" — that's the
+permission model, with its central registry of decisions. moof's
+check is "does the walk succeed?" which is a structural question
+(throughline 3). if the walk hits a nil where it expected a
+reference, the operation couldn't have been done. no ACL was
+consulted; no exception was caught. there was simply no path.
+
+this is E language's gift: **constraint and mechanism are the
+same thing.** you don't "have permission to print" — you hold
+the Console FarRef or you don't. holding it IS the permission.
+losing it IS the revocation.
 
 ---
 
@@ -241,8 +269,11 @@ also not implemented. also well-understood.
 
 ## next
 
+- [../throughlines.md](../throughlines.md) — constraints +
+  walks, the patterns capabilities embody
 - [vats.md](vats.md) — the isolation boundary capabilities are
-  built on.
-- [addressing.md](addressing.md) — URLs and the namespace tree.
-- [effects.md](effects.md) — what "doing something" actually
-  looks like when you hold a capability.
+  built on
+- [addressing.md](addressing.md) — URLs and the namespace tree;
+  walks that resolve to live FarRefs
+- [effects.md](effects.md) — what "doing something" looks like
+  when you hold a capability (Acts)

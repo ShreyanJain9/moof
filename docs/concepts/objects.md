@@ -1,9 +1,17 @@
 # objects
 
 **type:** concept
+**role:** the material every throughline operates on
 
 > everything in moof is an object. there is one semantic type —
 > Object. this document says what that means.
+>
+> objects are the material the [throughlines](../throughlines.md)
+> act on. contexts (1) wrap values that are objects. constraints
+> (2) describe objects. walks (3) traverse object graphs.
+> additive authoring (4) adds to objects. canonical form (5) is
+> their byte representation. understanding objects is
+> understanding the substrate.
 
 ---
 
@@ -270,6 +278,9 @@ one coherent surface.
 
 ## next
 
+- [../throughlines.md](../throughlines.md) — the five patterns
+  operating on objects
 - [messages.md](messages.md) — how sending works, dispatch, DNU
-- [protocols.md](protocols.md) — how we describe what objects can do
+- [protocols.md](protocols.md) — constraints on what objects
+  can do
 - [vats.md](vats.md) — where objects live, how they're isolated

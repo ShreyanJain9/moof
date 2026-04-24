@@ -1,10 +1,17 @@
 # authoring
 
 **type:** concept
+**specializes:** throughline 4 (additive authoring)
 
 > the image isn't a product you use; it's a workshop you live in.
 > this doc is about what that means concretely — how the UI, the
 > live editing, the inspector, and the canvas fit together.
+>
+> every authoring gesture is ADDITIVE (throughline 4). nothing
+> overwrites. this is why time-travel is free, live edits are
+> safe, and sharing doesn't break old references. the UX
+> principles in this doc follow from the additive commitment in
+> the substrate.
 
 ---
 
@@ -255,9 +262,11 @@ federation horizon.
 
 ## next
 
+- [../throughlines.md](../throughlines.md) — the additive pattern
+  authoring embodies
 - [../vision/manifesto.md](../vision/manifesto.md) — why we
-  commit to this.
+  commit to this
 - [../vision/horizons.md](../vision/horizons.md) — canvas,
-  agent, federation — what's next.
+  agent, federation — what's next
 - [protocols.md](protocols.md) — how a type says "i render as a
-  card."
+  card" (constraint on handlers)
