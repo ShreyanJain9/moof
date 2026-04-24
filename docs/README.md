@@ -11,24 +11,32 @@ this is the documentation tree. the structure:
 if you have **five minutes**, read [vision/one-page.md](vision/one-page.md).
 it's the pitch in a page.
 
+if you have **twenty minutes**, read
+[throughlines.md](throughlines.md) — five deep patterns that unify
+every concept in moof. read this BEFORE the concept docs and most
+of them will feel obvious.
+
 if you have **an hour**, read these in order:
 1. [vision/manifesto.md](vision/manifesto.md) — what moof is, why
-2. [concepts/objects.md](concepts/objects.md) — the material
-3. [concepts/messages.md](concepts/messages.md) — the one operation
-4. [concepts/vats.md](concepts/vats.md) — concurrency and isolation
-5. [concepts/effects.md](concepts/effects.md) — how things happen
+2. [throughlines.md](throughlines.md) — the five unifying patterns
+3. [concepts/objects.md](concepts/objects.md) — the material
+4. [concepts/messages.md](concepts/messages.md) — the one operation
+5. [concepts/vats.md](concepts/vats.md) — concurrency and isolation
+6. [concepts/effects.md](concepts/effects.md) — how things happen
 
 if you're **contributing**, add after the hour:
-6. [concepts/persistence.md](concepts/persistence.md) — the image
-7. [concepts/capabilities.md](concepts/capabilities.md) — security
-8. [concepts/addressing.md](concepts/addressing.md) — URLs, namespaces
-9. [concepts/protocols.md](concepts/protocols.md) — the type system
-10. [laws/](laws/) — what moof commits to, what PRs get reviewed against
+7. [concepts/persistence.md](concepts/persistence.md) — the image
+8. [concepts/capabilities.md](concepts/capabilities.md) — security
+9. [concepts/addressing.md](concepts/addressing.md) — URLs, namespaces
+10. [concepts/protocols.md](concepts/protocols.md) — the type system
+11. [laws/](laws/) — what moof commits to, what PRs get reviewed against
 
 ## structure
 
 ```
 docs/
+├── throughlines.md  the five patterns that unify every concept
+│
 ├── vision/          why moof exists; what it's trying to be
 │   ├── one-page.md       the pitch in one page
 │   ├── manifesto.md      the long vision, in depth
