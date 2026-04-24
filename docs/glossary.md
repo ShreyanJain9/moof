@@ -23,8 +23,10 @@ the canvas stacks aspects visually.
 **Atom** — a defserver wrapping a single mutable cell of state.
 `[atom get]`, `[atom swap: new]`. see `lib/flow/reactive.moof`.
 
-**Awaitable** — protocol for values that resolve over time. Act
-conforms. Cons doesn't. (from the wave-jubilee Thenable split.)
+**Awaitable** — NOT a separate protocol. `pending?` is a
+Thenable provide with default `false`; Act and Update override
+it while unresolved. an earlier doctrine proposed splitting
+Thenable into Monadic + Fallible + Awaitable — reverted.
 
 ---
 
@@ -110,8 +112,12 @@ applies the delta atomically between server messages.
 fails to find a handler. override it to create proxies, DSLs,
 auto-generators.
 
-**do-notation** — syntactic sugar for chaining Monadic values.
-`(do (x <- expr) body)` is bind. `(do e1 e2)` is sequencing.
+**do-notation** — the universal comprehension syntax. `(do (x
+<- expr) body)` binds through any Thenable; the block's output
+type is inferred from the binding source. `(do (x <- list) ...)`
+returns a list; `(do (x <- stream) ...)` returns a stream; `(do
+(x <- act) ...)` returns an act. `(yield v)` lifts pure values
+into the ambient Thenable via class-side `pure:`.
 
 **drain** — the scheduler operation that processes all pending
 outbox messages and resolves ready Acts. called implicitly by the
@@ -141,8 +147,10 @@ documented in `docs/exemptions.md` with owner and wave target.
 
 ## F
 
-**Fallible** — protocol for values that can fail. required: `ok?`.
-Ok, Err, Some, None conform.
+**Fallible** — NOT a separate protocol. `ok?` and `recover:`
+are Thenable provides with defaults (`true` and `self`); Err,
+None override to express failure. an earlier doctrine proposed
+splitting Thenable; reverted.
 
 **FarRef** — a proxy to an object in another vat. carries
 `__target_vat`, `__target_obj`, `url`. sends through it become
@@ -236,8 +244,11 @@ crash-safe, concurrent readers, mmap-fast.
 message. logs, allows, denies, or transforms. key primitive for
 capability attenuation and revocation. planned.
 
-**Monadic** — protocol for bind-able values. required: `then:`
-and class-side `pure:`. Act, Cons, Option, Result conform.
+**Monadic** — informal synonym for Thenable in moof. the
+Thenable protocol IS what other languages call "Monad": required
+`then:` + class-side `pure:`, with provides for `recover:`,
+`ok?`, `pending?`. earlier doctrine proposed a separate Monadic
+protocol; reverted — there's just Thenable.
 
 **mount** — composes namespaces. `[ns mount: other at: 'prefix]`
 makes `other` accessible under `/prefix/*` in `ns`.
@@ -246,8 +257,11 @@ makes `other` accessible under `/prefix/*` in `ns`.
 
 ## N
 
-**namespace** — a tree of named values, per-vat, plan-9-shaped.
-today mostly represented as nested Tables.
+**namespace** — moof's single universal tree of named objects,
+rooted at `/`, maintained by vat-0. walks of this tree are
+URLs. conventional subtrees (`/caps`, `/vats`, `/services`,
+`/protos`) are vat-0 bindings, not hardcoded special cases —
+users can rebind or extend.
 
 **native** — a rust-implemented handler. indistinguishable at the
 moof level from a moof closure.
@@ -266,7 +280,8 @@ same sense as others; it has no handlers.
 to Object.
 
 **Ok / Err** — Result constructors. `(Ok v)` for success,
-`(Err msg)` for failure. Monadic + Fallible + Showable.
+`(Err msg)` for failure. Thenable + Showable. Err overrides
+`ok?` to `false` so `then:` chains short-circuit.
 
 **Option** — Some/None value type for optional presence.
 
@@ -307,7 +322,8 @@ in rust (`crates/moof-cli/src/shell/repl.rs`).
 **Registry** — object holding the service table. wave 9.4: plain
 proto. wave 9.6+: defserver.
 
-**Result** — Ok/Err sum type. Monadic + Fallible.
+**Result** — Ok/Err sum type. Thenable; Err short-circuits via
+`ok?` default-override.
 
 **reveal** — not yet a formal moof concept; used in halos: "reveal
 this object's halo verbs."
@@ -356,9 +372,14 @@ works as a map and a list simultaneously (Lua-style).
 
 **Text** — the rust struct backing String.
 
-**Thenable** — the old fused protocol with then: + map: + recover:
-+ ok?. being split into Monadic + Fallible + Awaitable per the
-jubilee.
+**Thenable** — moof's universal composition protocol, and the
+contract behind `(do ...)` comprehensions. required: `then:`
+(bind) and class-side `pure:` (lift). provides with defaults:
+`map:`, `recover:` (default `self`), `ok?` (default `true`),
+`pending?` (default `false`). Cons, Option, Result (Ok/Err),
+Act, Update, Stream conform. an earlier doctrine proposed
+splitting into Monadic + Fallible + Awaitable; reverted —
+fused + defaults is the real shape.
 
 **time-travel** — navigating past image states. content-
 addressing enables it; UI exposure pending.
@@ -383,8 +404,12 @@ same point, lookups try each in order.
 server handlers. the scheduler applies the delta between
 messages.
 
-**URL** — moof's universal identifier. content or path-based.
-`moof:<hash>` or `moof:/caps/console` or `moof:/vats/7/objs/42`.
+**URL** — moof's universal permanent reference. a serialized
+walk through the one namespace. `moof:/foo/bar/baz` walks from
+root. shorthand `moof:<hash>` is equivalent to walking the
+content-addressed subtree. federation uses `moof:peer/<id>/...`.
+same scheme; different resolvers at well-known subtrees. a URL
+is a promise — resolution is how it's kept.
 
 ---
 

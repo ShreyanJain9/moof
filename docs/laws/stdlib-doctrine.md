@@ -109,22 +109,31 @@ is deleted. every one is minimal. every one has a clear reason to exist.
 - **provides**: `compose:`, `>>`, `partial:`, `flip`
 - **conformers**: every `<fn>` value implicitly (native-level). target: add Transducer so `[xform (reducer)]` works, any user-defined callable wrapper.
 
-### `Monadic` — bind + unit (NEW — split from Thenable)
-- **require**: `then:` (bind), and class-side `pure:` (lift a value)
-- **provides**: `map:` (fmap, derived from bind + pure)
-- **conformers**: Cons, Option (via Some/None), Result (via Ok/Err), Act, Update. target: anything with a "sequence of effects" flavor.
+### `Thenable` — the universal composition contract
+- **require**: `then:` (bind), and class-side `pure:` (lift a
+  value into this context)
+- **provides**:
+  - `map:` (fmap; derived from bind + pure)
+  - `recover:` (default: return self, i.e. "already fine").
+    Ok/Some/Cons/Act-with-Ok-result use the default; Err/None
+    override.
+  - `ok?` (default: `true`). Err/None override to `false`; Act
+    can defer to its resolved value.
+  - `pending?` (default: `false`). only Act/Update answer `true`
+    while unresolved.
+- **conformers**: Cons, Option (via Some/None), Result (via
+  Ok/Err), Act, Update, Stream. target: every context
+  throughline 1 names.
 
-### `Fallible` — potentially-failed value (NEW — split from Thenable)
-- **require**: `ok?`
-- **provides**: `recover:`, `orElse:`, `valueOrNil`
-- **conformers**: Ok, Err, Some, None, Act (which may resolve to Err).
+**why unified.** "Monadic / Fallible / Awaitable" was a theoretical
+split based on which optional capabilities a type had. in
+practice it meant extra conformances with no user-visible
+benefit. defaults cover the 90% case; overrides handle the rest.
+`(do ...)` works against Thenable — no need to join three
+protocols for one comprehension to run.
 
-### `Awaitable` — not-yet-resolved value (NEW — split from Thenable)
-- **require**: `pending?`
-- **provides**: `resolved?` (= `not pending?`), `wait` (block semantics TBD)
-- **conformers**: Act, Update. that's it — Cons and Option are never pending.
-
-**total: 11 protocols.** Thenable split into three; Reference, Buildable, Interface, Thenable, and Callable's overlap cleaned up.
+**total: 9 protocols.** Thenable kept fused; Reference,
+Buildable, Interface deleted. do-notation is universal.
 
 ---
 
@@ -143,11 +152,16 @@ is deleted. every one is minimal. every one has a clear reason to exist.
   this is a spec-holder for a rust trait. move the spec to
   `docs/interfaces.md`; delete from the stdlib.
 
-### split
+### do NOT split
 
-- **`Thenable`** (`data/act.moof`) into `Monadic` + `Fallible` + `Awaitable`.
-  each one tests a single capability. Cons stops being falsely "Thenable"
-  with a broken `recover:`. Act is all three. Option is Monadic + Fallible.
+an earlier version of this doctrine proposed splitting
+`Thenable` into `Monadic` + `Fallible` + `Awaitable`. that was a
+mistake: it turned one universal protocol into three, required
+every context to declare three conformances, and gained no
+user-visible benefit — every type was still either "Thenable or
+not." the fused shape is correct. sensible defaults for
+`recover:`/`ok?`/`pending?` let Cons be Thenable without
+hand-waving failure or pendingness semantics.
 
 ### widen (add conformers)
 
@@ -173,9 +187,10 @@ is deleted. every one is minimal. every one has a clear reason to exist.
   `Env`. fix (probably needs a `$env`-capturing vau) or delete constructor
   patterns entirely.
 - **`[Query any]`** in `tools/query.moof:52`: inverted. one-line fix.
-- **`Thenable.map:`** on Cons: broken (nil parent). falls out of the
-  Thenable split — Cons becomes Monadic only, and Monadic's `map:` uses
-  `Cons.pure:` directly, not `[self parent]`.
+- **`Thenable.map:`** on Cons: broken (nil parent). fix by
+  rewriting `map:`'s default to use `[self pure:]` directly
+  (each conformer exposes its own `pure:` class-side) rather
+  than walking `[self parent]`.
 
 ---
 
@@ -281,7 +296,7 @@ applying this doctrine to current lib/:
 | `data/indexable.moof` | keep |
 | `data/callable.moof` | keep |
 | `data/range.moof` | keep, ensure conforms Iterable |
-| `data/act.moof` | **move to `kernel/` (or new `effects/`)**, split Thenable |
+| `data/act.moof` | **move to `kernel/` (or new `effects/`)**, keep Thenable fused, fix Cons's `map:` default |
 | `data/option.moof` | keep |
 | `data/builder.moof` | **delete the protocol**; Builder type probably deletable too |
 | `data/set.moof` | keep |

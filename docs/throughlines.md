@@ -23,25 +23,64 @@
 
 **the unifying pattern**
 
-each of these is a **context** — a wrapper around a value that
-carries extra structure. the wrapping determines how you compose
-computations over the wrapped value.
+each is a **context** — a wrapper around a value that carries
+extra structure. the wrapping determines how computations
+compose over the wrapped value.
 
-moof's `Monadic` protocol is the contract for "things you can
-chain computations through." every context above conforms. the
-single syntax for chaining is `(do ...)`:
+moof's `Thenable` protocol is the contract: implement `then:`
+and you compose. every context above is Thenable. the single
+syntax for chaining is `(do ...)`.
+
+**do is the universal comprehension**
+
+this is the key. `(do ...)` doesn't enforce "you must stay in
+one kind of context." it's a comprehension: the block's OUTPUT
+TYPE is inferred from what you bind and what you yield.
 
 ```moof
-(do
-  (user <- [users <- get: 'alice])    ; an Act context
-  (addr <- user.address)               ; a possibly-absent (Option)
-  (valid <- (validate addr))           ; a possibly-failed (Result)
-  [console <- println: valid])         ; another Act
+; bind from a stream → the result is a stream
+(do (x <- canvas-clicks)
+    (yield (str "click at " x)))
+; → Stream<String>
+
+; bind from a list → the result is a list
+(do (x <- (list 1 2 3))
+    (yield [x * 2]))
+; → Cons<Integer> = (2 4 6)
+
+; bind from an Act → the result is an Act
+(do (user <- [users <- get: 'alice])
+    (yield user.name))
+; → Act<String>
+
+; bind from an Option → the result is an Option
+(do (n <- [table at: 'count])
+    (yield [n + 1]))
+; → Option<Integer>
 ```
 
-one notation — `(do ...)` — handles Act chains, Option chains,
-Result chains, Cons comprehensions, Stream pipelines,
-Update-merge sequences. same shape, different flavor.
+`(yield v)` lifts a pure value INTO the ambient context (via
+class-side `pure:`). bare expressions at the end are the
+block's result value directly. the surrounding context is
+determined by the bindings.
+
+this is the **universal comprehension dream** — SQL's `SELECT
+... FROM ... WHERE` (comprehension over tables), haskell's
+list/monad comprehensions, python's generator expressions, all
+collapsed into one syntax that works over Acts, Streams,
+Options, Results, Cons, Updates, and any user-written Thenable.
+
+**mixing kinds**
+
+single-kind-per-block is *not* enforced except where lifting
+requires it. effects in the middle don't care about kind —
+`(do (x <- list) [console <- println: x])` runs a println per
+element and the block produces... whatever the last expression
+produces, lifted if necessary.
+
+when two kinds fundamentally don't lift (binding an Option
+mid-Act-block without explicit promotion), the compiler can ask
+you to be explicit. most of the time it infers.
 
 **why this matters**
 
@@ -52,16 +91,16 @@ most languages have five separate features for these five cases:
   Result::and_then
 - each is its own syntax, its own mental model
 
-moof: **one pattern, five instances.** you learn "value-in-
-context" once. you compose them the same way. you don't
-special-case at every boundary.
+moof: **one comprehension, six instances.** `do` over streams
+returns streams. `do` over Options returns Options. `do` over
+Acts returns Acts. you learn one thing once.
 
 **the corollary**
 
 if you find yourself wanting a new way to compose "a value in
 some ongoing situation" — stop. can the situation be an Act, a
-Result, a Stream, or a custom Monadic? if yes, reuse. if no,
-write a new Monadic conformer, not a new composition syntax.
+Result, a Stream, or a custom Thenable? if yes, reuse. if no,
+write a new Thenable conformer, not a new composition syntax.
 
 the user said: "stop adding parallel abstractions." this is
 why.
@@ -381,7 +420,7 @@ every throughline above includes a **corollary** that boils down
 to: **before adding a new abstraction, check if an existing
 throughline covers it.**
 
-- new composition syntax? first try Monadic.
+- new composition syntax? first try Thenable.
 - new contract kind? first try an existing constraint layer.
 - new addressing scheme? first try an existing graph.
 - new mutation? you meant addition.

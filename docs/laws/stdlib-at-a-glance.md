@@ -9,7 +9,7 @@
 required methods and many derived ones. every type gets generic
 behavior by conforming. no protocol without 3+ conformers.**
 
-## the 11 protocols
+## the 9 protocols
 
 ```
 Showable       show                         → a String for humans
@@ -20,19 +20,25 @@ Numeric        + - * = <                     → arithmetic values
 Iterable       fold:with:                   → walkable sequence
 Indexable      at:, count                   → random-access sequence
 Callable       call:                         → invokable value
-Monadic        then: (+ class-side pure:)   → bind / sequence
-Fallible       ok?                           → can be failed
-Awaitable      pending?                     → resolves async
+Thenable       then: (+ class-side pure:)   → bind / sequence (do-notation)
+                 provides recover:, ok?, pending? with sensible defaults
 ```
 
 every other generic operation belongs inside one of these.
+
+`Thenable` is the universal comprehension contract — `(do ...)`
+over any Thenable returns a value in the SAME Thenable. Cons,
+Option, Result, Act, Update, Stream all conform. recover: / ok?
+/ pending? are provides with defaults; types override as needed.
 
 ## the deletion list
 
 - **`Reference`** (1 conformer) → delete
 - **`Buildable`** (0 conformers) → delete
 - **`Interface`** (0 conformers) → move to docs/
-- **`Thenable`** (fused) → split into Monadic + Fallible + Awaitable
+- **do NOT split Thenable.** earlier doctrine proposed splitting
+  into Monadic + Fallible + Awaitable; reverted. Thenable stays
+  fused with defaulted provides.
 - **`Query`** (duplicates Transducer) → decide: delete or rewrite as sugar
 
 ## the rules of addition
@@ -54,11 +60,11 @@ before you add to `lib/`:
 4.  sequences         Iterable / Indexable
 5.  associations      Table (native + Indexable)
 6.  sets + bags       Set / Bag
-7.  option / result   Option / Result (+ Monadic/Fallible)
+7.  option / result   Option / Result (both Thenable)
 8.  time              (no types yet — owed)
 9.  bytes             native
 10. callables         Callable
-11. concurrency       Act / Update / vat / Thenable-split
+11. concurrency       Act / Update / vat / Thenable
 12. patterns          Pattern matching (fix match-constructor)
 13. pipelines         Transducer (primary) / Stream (lazy)
 14. reactivity        Atom / Signal

@@ -3,7 +3,7 @@
 **type:** concept
 **specializes:** throughline 1 (contexts), throughline 6 (time)
 
-> a stream is a Monadic context with a **temporal flavor**: a
+> a stream is a Thenable context with a **temporal flavor**: a
 > value that yields successor values over time. same shape as
 > Act, Option, Cons, Result — different meaning of "context."
 
@@ -15,7 +15,7 @@ if you've read [throughlines.md](../throughlines.md), you
 already know what a stream is.
 
 a stream is a **context**: a value-wrapping-structure satisfying
-the `Monadic` protocol. same shape as Option (presence context),
+the `Thenable` protocol. same shape as Option (presence context),
 Result (success/failure context), Cons (indexed-sequence
 context), Act (cross-vat-pending context).
 
@@ -24,7 +24,7 @@ over time."** bind composes; `(do ...)` sequences; you don't
 need to learn a new vocabulary for it.
 
 ```moof
-; same do-syntax as every other Monadic context
+; same do-syntax as every other Thenable context
 (do
   (click <- canvas-clicks)             ; Stream<Click>
   (resolved <- (resolve-target click))  ; → Act<Target> or similar
@@ -32,8 +32,9 @@ need to learn a new vocabulary for it.
 ```
 
 what makes a stream a Stream (capital S) rather than some other
-Monadic: its `then:` returns future-values one-at-a-time as they
-arrive, rather than a single value once.
+Thenable: its `then:` returns future-values one-at-a-time as
+they arrive, rather than a single value once. `(do ...)` over a
+stream is a true comprehension — the block returns a Stream.
 
 ---
 
@@ -48,11 +49,11 @@ arrive, rather than a single value once.
 | **Stream** | **each value over time** | **every yield, as it arrives** |
 | Update | state-change-with-reply | at scheduler tick |
 
-every row here composes via `Monadic.then:` and uses `(do ...)`.
+every row here composes via `Thenable.then:` and uses `(do ...)`.
 the row-differences are operational: when does the inner
 computation fire? with what value? what happens after?
 
-the Monadic protocol is one contract. the rows are six
+the Thenable protocol is one contract. the rows are six
 specializations. **streams are not a separate abstraction family
 — they're the sixth row.**
 
@@ -61,10 +62,10 @@ specializations. **streams are not a separate abstraction family
 ## what's stream-shaped in moof
 
 anything that produces values over time. the source is different;
-the Monadic semantics are the same:
+the Thenable semantics are the same:
 
 - **a Cons** — each cell yields its car; the cdr is the "next."
-  also Iterable (read eagerly), also Monadic (bound
+  also Iterable (read eagerly), also Thenable (bound
   per-element), also Stream (pulled incrementally).
 - **a Range** — `(range 0 ∞)` is a Stream of integers.
 - **a File's lines** — each call to `next:` reads the next line.
@@ -77,7 +78,7 @@ the Monadic semantics are the same:
   an Act went through states, that trajectory is a stream.
 
 the last one shows why streams and Acts aren't separate
-kingdoms: an Act's *result* is a single Monadic bind; an Act's
+kingdoms: an Act's *result* is a single Thenable bind; an Act's
 *history* is a stream. they're the same object seen along
 different axes.
 
@@ -99,7 +100,7 @@ if yes, Stream. if no, Iterable or Indexable.
 ## streams through the other throughlines
 
 **contexts (throughline 1).** covered above: Stream is the
-temporal flavor of Monadic.
+temporal flavor of Thenable.
 
 **walks (throughline 3).** a stream's `next:` call is a walk: it
 addresses "the next element of this stream" and fetches it. the
@@ -123,8 +124,8 @@ a stream lives on.
 
 ## composition
 
-every Monadic composer works on streams, because streams are
-Monadic:
+every Thenable composer works on streams, because streams are
+Thenable:
 
 ```moof
 [stream map: f]           ; transform each yielded value (Iterable+Stream)
@@ -138,7 +139,7 @@ Monadic:
 [stream window: 1s]       ; temporal combinator
 ```
 
-the first six work on anything Iterable/Monadic — Cons, Stream,
+the first six work on anything Iterable/Thenable — Cons, Stream,
 Range share them. the last three are temporal specializations:
 they need a time axis. streams have one; Cons doesn't.
 
@@ -228,8 +229,8 @@ the current pull-based primitive, not replace it.
 
 ## what you need to know
 
-- a stream is a Monadic context. temporal flavor.
-- same composition primitive (Monadic protocol, `(do ...)`,
+- a stream is a Thenable context. temporal flavor.
+- same composition primitive (Thenable protocol, `(do ...)`,
   transducers) works on streams as on Acts, Options, Results,
   Cons.
 - stream-specific operators (`throttle:`, `debounce:`, `merge:`)
@@ -248,4 +249,4 @@ the current pull-based primitive, not replace it.
   the same pattern
 - [vats.md](vats.md) — mailboxes as stream sources
 - [../laws/stdlib-doctrine.md](../laws/stdlib-doctrine.md) —
-  Monadic, Fallible, Awaitable protocols
+  Thenable — the universal composition protocol
