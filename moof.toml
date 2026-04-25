@@ -89,6 +89,7 @@ files = [
   "lib/system/system.moof",
   "lib/system/services.moof",
   "lib/system/source.moof",
+  "lib/system/edit.moof",
 ]
 
 [grants]
