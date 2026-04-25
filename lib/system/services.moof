@@ -14,6 +14,10 @@
 ;
 ; wave 9.6 turns this into a live defserver; for now the static
 ; binding is enough to back [System services] and friends.
+;
+; this file is a definition bundle.
+
+(definitions
 
 (def ClockService [Service with:
   { name:        'clock
@@ -69,4 +73,4 @@
                  register: FileService]
                  register: RandomService]
                  register: SystemService]
-                 register: EvaluatorService])
+                 register: EvaluatorService]))

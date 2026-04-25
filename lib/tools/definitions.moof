@@ -409,24 +409,29 @@
 
 (defn %deps-clauses (clauses)
   (if (nil? clauses) nil
-    (let ((head (if (cons? [clauses car]) [[clauses car] car] nil))
-          (rest [[clauses car] cdr]))
-      ; skip strings (docstring) and unrecognized clause shapes
-      (if [head identical: 'include]
-        ; (include Proto) — Proto is a dep
-        [(free-vars [rest car] nil) append:
-          (%deps-clauses [clauses cdr])]
-        (if [head identical: 'require]
-          ; (require (sel params...) "doc"?) — no deps
-          (%deps-clauses [clauses cdr])
-          (if [head identical: 'provide]
-            ; (provide (sel params...) body...) — params + self bind
-            (let ((sig [rest car])
-                  (params (if (cons? sig) [sig cdr] nil))
-                  (body [rest cdr])
-                  (param-syms (%param-syms params)))
-              [(free-vars body (cons 'self param-syms)) append:
-                (%deps-clauses [clauses cdr])])
-            ; unknown clause — fall through to generic
-            [(free-vars [clauses car] nil) append:
-              (%deps-clauses [clauses cdr])]))))))
+    (let ((c [clauses car])
+          (tail [clauses cdr]))
+      ; non-cons clauses (e.g. the docstring) contribute no
+      ; deps and don't have a head/cdr to inspect; skip cleanly.
+      (if (not (cons? c))
+        (%deps-clauses tail)
+        (let ((head [c car])
+              (rest [c cdr]))
+          (if [head identical: 'include]
+            ; (include Proto) — Proto is a dep
+            [(free-vars [rest car] nil) append:
+              (%deps-clauses tail)]
+            (if [head identical: 'require]
+              ; (require (sel params...) "doc"?) — no deps
+              (%deps-clauses tail)
+              (if [head identical: 'provide]
+                ; (provide (sel params...) body...) — params + self bind
+                (let ((sig [rest car])
+                      (params (if (cons? sig) [sig cdr] nil))
+                      (body [rest cdr])
+                      (param-syms (%param-syms params)))
+                  [(free-vars body (cons 'self param-syms)) append:
+                    (%deps-clauses tail)])
+                ; unknown clause — fall through to generic
+                [(free-vars c nil) append:
+                  (%deps-clauses tail)]))))))))

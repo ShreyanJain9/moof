@@ -23,6 +23,12 @@
 ;
 ; every Block implements [render: medium] → a medium-specific
 ; output. 'text is the single medium we ship today.
+;
+; this file is a definition bundle — top-level forms can be
+; written in any order; the loader topologically sorts by
+; free-variable analysis. see docs/concepts/definitions.md.
+
+(definitions
 
 (def Block {
   [typeName] 'Block
@@ -130,4 +136,4 @@
       (str "<Workspace " [@title describe] ">")
   })
 
-(conform Workspace Showable)
+(conform Workspace Showable))

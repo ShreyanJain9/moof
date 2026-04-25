@@ -18,6 +18,10 @@
 ;   [Registry with: { services: (my-table) }]   ; construct
 ;   [my-reg byName: 'clock]                      ; query
 ;   [my-reg all]                                 ; list of services
+;
+; this file is a definition bundle.
+
+(definitions
 
 (def Registry {
   services:    #[]                   ; Table: symbol → Service
@@ -55,4 +59,4 @@
     (str "<Registry " [self count] " services>")
 })
 
-(conform Registry Showable)
+(conform Registry Showable))
