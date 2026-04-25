@@ -166,4 +166,43 @@
       (bundle (defn f () (g))))
     false)
 
+  ; ── Namespace ────────────────────────────────────────
+
+  (test "namespace: empty count"
+    [(Namespace) count]
+    0)
+
+  (test "namespace: empty?"
+    [(Namespace) empty?]
+    true)
+
+  (test "namespace: at:put: + at:"
+    [[(Namespace) at: 'k put: 42] at: 'k]
+    42)
+
+  (test "namespace: has?:"
+    [[(Namespace) at: 'k put: 1] has?: 'k]
+    true)
+
+  (test "namespace: missing key returns nil"
+    [(Namespace) at: 'absent]
+    nil)
+
+  (test "namespace: union prefers other on collision"
+    [[[(Namespace) at: 'k put: 1] union:
+       [(Namespace) at: 'k put: 2]] at: 'k]
+    2)
+
+  (test "namespace: walk: works"
+    [[(Namespace) at: 'foo put: 99] walk: "/foo"]
+    99)
+
+  (test "bundle materialize: count = provides count"
+    [[(bundle (def a 1) (def b 2) (def c 3)) materialize] count]
+    3)
+
+  (test "bundle materialize: at: returns the value"
+    [[(bundle (def k 99)) materialize] at: 'k]
+    99)
+
 ))

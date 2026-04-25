@@ -379,6 +379,78 @@
   [[consumer requires] all: |req| [[provider provides] includes: req]])
 
 ; ───────────────────────────────────────────────────────────────
+; 7. Namespace — a bundle's bindings, captured as a value
+; ───────────────────────────────────────────────────────────────
+;
+; a Namespace is a snapshot of name → value bindings. you make
+; one by materializing a Bundle: apply the bundle, then capture
+; what it produced into a Namespace value.
+;
+; today's semantics are NOT isolated — applying a bundle still
+; rebinds in the global env. the Namespace is a captured view,
+; not a sandbox. real isolation needs a VM-level
+; eval-into-target op so DefGlobal lands in the namespace
+; instead of global. that's the next move; this is the seed.
+;
+; what a Namespace is good for already:
+;   - inspectable: [ns names] / [ns at: 'foo]
+;   - composable: [ns1 union: ns2] (last write wins)
+;   - addressable: [ns walk: "/foo"] (conforms to namespace.moof)
+;   - serializable: it's just slots over a Table, the image holds it.
+
+(def Namespace {
+  bindings: #[]    ; Table { name → value }
+
+  [typeName]      'Namespace
+  [at: name]      [@bindings at: name]
+  [has?: name]    [@bindings contains: name]
+  [names]         [@bindings keys]
+  [count]         [[@bindings keys] count]
+  [empty?]        (eq [self count] 0)
+
+  ; non-destructive: returns a NEW Namespace with the binding added.
+  [at: name put: val]
+    { Namespace bindings: [@bindings at: name put: val] }
+
+  ; non-destructive: merge other into self; other's bindings win on
+  ; collision (last-write-wins).
+  [union: other]
+    [[other names] fold: self with: |ns name|
+      [ns at: name put: [other at: name]]]
+
+  ; walk: from kernel/namespace.moof works for free since we have at:
+  [walk: path] (walk-path self path)
+
+  [describe]
+    (str "<Namespace " [self count] " bindings>")
+  [show] [self describe]
+
+  ; (Namespace) — class-side construction returns an empty Namespace.
+  [call: args]
+    { Namespace bindings: #[] }
+})
+
+(conform Namespace Showable)
+
+; [bundle materialize] — apply this bundle to global, then collect
+; the produced names + their resolved values into a fresh Namespace
+; value. side effects on global remain (defmethods extend protos
+; etc.) — this is the "captured view" version, not isolation.
+;
+; when isolation lands (eval-into-namespace at the VM level), this
+; method's contract stays the same; only the implementation tightens.
+(defmethod Bundle materialize ()
+  (do
+    [self apply: Env]
+    [@provides fold: { Namespace bindings: #[] }
+      with: |ns name| [ns at: name put: (eval name)]]))
+
+; convenience: [ns apply-bundle: b] — materialize b and union the
+; result into self. for stitching multiple bundles into one ns.
+(defmethod Namespace apply-bundle: (b)
+  [self union: [b materialize]])
+
+; ───────────────────────────────────────────────────────────────
 ; 6. (definitions ...) — the order-independent loader form
 ; ───────────────────────────────────────────────────────────────
 ;

@@ -156,6 +156,52 @@ forms, provides, requires — all preserved across image boundaries
 via the existing object serialization (cons cells already
 serialize). bundles are values, and the image holds them.
 
+## Namespace — a bundle's bindings, captured
+
+`[bundle materialize]` produces a `Namespace` value: a
+captured view of the names a bundle bound, mapped to their
+resolved values.
+
+```moof
+(def math (bundle
+  (defn square (x) [x * x])
+  (defn cube (x) [(square x) * x])))
+
+(def math-ns [math materialize])
+[math-ns names]                      ; → (square cube)
+((math-ns at: 'cube) 4)              ; → 64
+[math-ns walk: "/cube"]              ; → the cube fn
+[math-ns union: other-ns]            ; → merged namespace
+```
+
+a Namespace is:
+
+| op                       | meaning                                |
+|--------------------------|----------------------------------------|
+| `(Namespace)`            | empty constructor                      |
+| `[ns at: name]`          | look up a binding, nil if absent       |
+| `[ns at: name put: v]`   | new ns with that binding                |
+| `[ns has?: name]`        | is the name bound?                     |
+| `[ns names]`             | the bound symbols                      |
+| `[ns union: other]`      | merge; other wins on collision         |
+| `[ns walk: "/p"]`        | path walk (inherits walk: from Tables) |
+| `[ns apply-bundle: b]`   | union in another bundle's materialization |
+
+today's caveat: **materialize is not isolated**. applying a
+bundle still rebinds in the global env; the Namespace is a
+captured snapshot, not a sandbox. `defmethod` effects on protos
+also remain global. real isolation needs a VM-level
+`eval-into-target` op so `DefGlobal` lands in the namespace
+instead of global. when that lands, `materialize`'s contract
+stays the same; only the implementation tightens.
+
+what a Namespace is good for already:
+- inspectable: a value you can pass to an Inspector
+- composable: union builds bigger namespaces
+- addressable: walk: + plan-9-shaped paths
+- serializable: it's slots over a Table; the image holds it
+- identity: same content → same content-hash (Table semantics)
+
 ---
 
 ## what counts as a definition
