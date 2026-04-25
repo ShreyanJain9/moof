@@ -81,4 +81,28 @@
     (deps-of '(defprotocol C (include S)))
     (list 'S))
 
+  ; ── do-notation binders ──────────────────────────────
+
+  (test "fv: do arrow-bind shadows name"
+    (free-vars '(do (x <- some-act) [x + 1]) nil)
+    (list 'some-act))
+
+  (test "fv: do nested binds shadow each"
+    [(free-vars '(do (x <- a) (y <- b) [x + y]) nil)
+      sortBy: |s| [s describe]]
+    [(list 'a 'b) sortBy: |s| [s describe]])
+
+  (test "fv: do let-form binds for rest"
+    (free-vars '(do (let x (g 1)) [x + 1]) nil)
+    (list 'g))
+
+  (test "fv: do yield is just an expression"
+    (free-vars '(do (yield (g 1))) nil)
+    (list 'g))
+
+  (test "fv: do sequence mode (no binders)"
+    [(free-vars '(do a b c) nil)
+      sortBy: |s| [s describe]]
+    [(list 'a 'b 'c) sortBy: |s| [s describe]])
+
 ))

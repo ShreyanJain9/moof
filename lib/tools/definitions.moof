@@ -71,7 +71,7 @@
       nil)))
 
 ; dispatch on the head symbol of a cons form. the binders
-; (fn / vau / let) and the data forms (quote / quasiquote)
+; (fn / vau / let / do) and the data forms (quote / quasiquote)
 ; need special handling; everything else falls through to
 ; "walk the head and the cdr."
 (defn %fv-cons (head form bound)
@@ -85,10 +85,12 @@
           (%fv-vau form bound)
           (if [head identical: 'let]
             (%fv-let form bound)
-            ; default: head is a free var if not special, plus
-            ; whatever the cdr references.
-            [(%fv-walk head bound) append:
-              (%fv-walk [form cdr] bound)]))))))
+            (if [head identical: 'do]
+              (%fv-do form bound)
+              ; default: head is a free var if not special, plus
+              ; whatever the cdr references.
+              [(%fv-walk head bound) append:
+                (%fv-walk [form cdr] bound)])))))))
 
 ; (fn (params...) body...) — params bind in body.
 ; variadic form (fn rest body) where rest is a single symbol is
@@ -148,6 +150,41 @@
         [(%fv-quasi head bound) append:
           (%fv-quasi [form cdr] bound)]))
     nil))
+
+; (do form...) — has two modes (see lib/data/act.moof for the
+; runtime desugaring). free-var-wise we care about the binders
+; introduced by the monadic forms:
+;   (x <- expr)    — bind x for the rest of the do; <- is a
+;                    syntactic marker, not a free var
+;   (let x expr)   — flat let-style binding scoped to the rest
+;   (yield expr)   — just an expression
+;   bare expr      — just an expression
+(defn %fv-do (form bound)
+  (%fv-do-body [form cdr] bound))
+
+(defn %fv-do-body (forms bound)
+  (if (nil? forms) nil
+    (let ((head [forms car])
+          (rest [forms cdr]))
+      (if (%do-arrow-bind? head)
+        ; (name <- expr) — name binds for rest
+        (let ((name [head car])
+              (expr [[[head cdr] cdr] car]))
+          [(%fv-walk expr bound) append:
+            (%fv-do-body rest (cons name bound))])
+        (if (%do-let-form? head)
+          ; (let name expr) — flat binding
+          (let ((name [[head cdr] car])
+                (expr [[[head cdr] cdr] car]))
+            [(%fv-walk expr bound) append:
+              (%fv-do-body rest (cons name bound))])
+          (if (%do-yield-form? head)
+            ; (yield expr) — just an expression
+            [(%fv-walk [[head cdr] car] bound) append:
+              (%fv-do-body rest bound)]
+            ; bare expression
+            [(%fv-walk head bound) append:
+              (%fv-do-body rest bound)]))))))
 
 ; ───────────────────────────────────────────────────────────────
 ; 3. produces-of — what a top-level form binds globally
@@ -253,24 +290,29 @@
 
 ; ── Kahn topological sort ─────────────────────────────────────
 ;
-; each record is { form: <ast> produces: <sym|nil> deps: <list> }.
-; kahn pulls out records whose remaining deps are empty (all
-; their producers have already been emitted), records them as
-; ready, and trims those producers' symbols from the rest.
+; each record is
+;   { form, produces, deps (full), internal-deps (filtered),
+;     pending (mutable subset kahn shrinks) }
+; kahn pulls records whose `pending` is empty (all bundle-internal
+; producers have already been emitted), records them as ready,
+; and trims those producers' symbols from each waiting record's
+; `pending`. `internal-deps` survives unchanged — it's the
+; canonical "what does this form need from inside the bundle"
+; for tracing and introspection.
 
 (defn %toposort (records)
   (%kahn records nil))
 
 (defn %kahn (pending out)
   (if (nil? pending) { ok: out }
-    (let ((ready [pending select: |r| (nil? r.deps)])
-          (waiting [pending reject: |r| (nil? r.deps)]))
+    (let ((ready [pending select: |r| (nil? r.pending)])
+          (waiting [pending reject: |r| (nil? r.pending)]))
       (if (nil? ready)
         { cycle: pending out: out }
         (let ((ready-syms [[ready map: |r| r.produces]
                             select: |s| (some? s)])
               (waiting-trimmed [waiting map: |r|
-                [r with: { deps: [r.deps reject: |d|
+                [r with: { pending: [r.pending reject: |d|
                   [ready-syms includes: d]] }]]))
           (%kahn waiting-trimmed [out append: ready]))))))
 
@@ -282,14 +324,19 @@
     (let ((p (produces-of f)))
       (if (some? p) [s add: p] s))])
 
-; build the per-form record, with deps filtered to bundle-internal
-; producers only.
+; build the per-form record. internal-deps and pending start
+; identical; kahn shrinks pending as it emits, leaving internal-deps
+; intact for introspection.
 (defn %analyze-bundle (forms)
   (let ((bundle (%bundle-produces forms)))
-    [forms map: |f| {
-      form: f
-      produces: (produces-of f)
-      deps: [(deps-of f) select: |d| [bundle includes: d]] }]))
+    [forms map: |f|
+      (let ((d (deps-of f))
+            (id [d select: |s| [bundle includes: s]]))
+        { form: f
+          produces: (produces-of f)
+          deps: d
+          internal-deps: id
+          pending: id })]))
 
 ; ── error reporting ───────────────────────────────────────────
 
@@ -313,6 +360,42 @@
     (if (some? sorted.cycle)
       (Err (%describe-cycle sorted.cycle))
       (do
+        [sorted.ok each: |r| (eval r.form $e)]
+        nil)))))
+
+; ───────────────────────────────────────────────────────────────
+; 6. introspection — analyze-bundle and definitions-trace
+; ───────────────────────────────────────────────────────────────
+;
+; (analyze-bundle '(form1 form2 ...)) — pure analysis. takes a
+; LIST of forms (already quoted) and returns a list of
+; { form, produces, deps, internal-deps } records, in source
+; order. useful for "why is my bundle ordered this way?"
+; and for testing the analyzer itself.
+;
+; (definitions-trace ...) — vau form. like definitions, but
+; prints the planned eval order to console before running.
+
+(defn analyze-bundle (forms) (%analyze-bundle forms))
+
+(defn %describe-form-summary (r)
+  (str "  "
+       (if (some? r.produces) [r.produces describe] "<extender>")
+       "  ←  "
+       (if (nil? r.internal-deps) "·"
+         [[r.internal-deps map: |s| [s describe]] join: ", "])))
+
+(def definitions-trace (vau forms $e
+  (let ((records (%analyze-bundle forms))
+        (sorted (%toposort records)))
+    (if (some? sorted.cycle)
+      (do
+        [console println: (%describe-cycle sorted.cycle)]
+        (Err (%describe-cycle sorted.cycle)))
+      (do
+        [console println: "definitions-trace: planned order ↓"]
+        [sorted.ok each: |r|
+          [console println: (%describe-form-summary r)]]
         [sorted.ok each: |r| (eval r.form $e)]
         nil)))))
 
