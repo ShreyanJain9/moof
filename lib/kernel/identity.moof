@@ -80,3 +80,18 @@
   { typeName: [self typeName]
     slots:    [self publicSlots]
     handlers: [self handlerNames] })
+
+; ── source: the canonical authored form ──────────────
+;
+; values authored through a definer (defmethod, defn, etc.)
+; carry their original form as a `:source` slot. [v source]
+; returns it for browse-and-edit. nil for values without an
+; attached source (literals, native handlers, plain runtime
+; objects).
+;
+; this is the smalltalk-style move: every authored thing
+; in the image carries its canonical source. the canvas, the
+; inspector, and an LLM agent all browse the same artifact;
+; editing any of them edits the underlying form.
+
+(defmethod Object source () [self slotAt: 'source])

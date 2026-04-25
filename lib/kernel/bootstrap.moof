@@ -93,13 +93,25 @@
         (body (%seq-body [[args cdr] cdr])))
     (eval `(def ,name (fn ,params ,body)) $e))))
 
+; defmethod attaches a `:source` slot on the handler closure
+; bundling { text, form }: text is the raw source string the
+; user authored (preserving comments, whitespace, etc.); form is
+; the parsed AST as moof data. that lets [handler source] return
+; the canonical authored thing for browse-and-edit.
+;
+; smalltalk-style: the image carries source as a value. the
+; canvas, inspector, repl, and an LLM agent all read the same
+; artifact; editing any surface edits the underlying form.
 (def defmethod (vau args $e
   (let ((proto (eval [args car] $e))
         (selector [[args cdr] car])
         (params [[[args cdr] cdr] car])
         (body (%seq-body [[[args cdr] cdr] cdr]))
-        (handler (eval `(fn ,(cons 'self params) ,body) $e)))
-    [proto handle: selector with: handler])))
+        (handler (eval `(fn ,(cons 'self params) ,body) $e))
+        (source-text [handler __source-text])
+        (source-bundle { form: (cons 'defmethod args) text: source-text })
+        (handler-with-source [handler with: { source: source-bundle }]))
+    [proto handle: selector with: handler-with-source])))
 
 (def alias (vau (proto new-sel existing-sel) $e
   (let ((p (eval proto $e))

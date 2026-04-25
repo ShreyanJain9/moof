@@ -46,11 +46,19 @@ impl Plugin for BlockPlugin {
             Ok(heap.make_closure(code_idx, arity, false, &captures))
         });
 
-        // Block: source — the source text of the form that defined this
-        // closure, or nil if none was recorded. Looks up the closure's
-        // code_idx in the heap's closure_sources parallel table.
-        native(heap, block_id, "source", |heap, receiver, _args| {
-            let (code_idx, _) = heap.as_closure(receiver).ok_or("source: not a closure")?;
+        // Block: __source-text — low-level accessor for the raw source
+        // text of the form that compiled this closure. Returns the
+        // text recorded at parse time, or nil if none.
+        //
+        // The user-facing accessor is [v source], which returns the
+        // canonical authored form (a structured value with `text`
+        // and `form` slots). definers populate that during
+        // installation; this primitive is what they call to get the
+        // text portion. see lib/kernel/bootstrap.moof's defmethod.
+        native(heap, block_id, "__source-text", |heap, receiver, _args| {
+            let Some((code_idx, _)) = heap.as_closure(receiver) else {
+                return Ok(Value::NIL);
+            };
             match heap.closure_source(code_idx) {
                 Some(src) => {
                     let text = src.text.clone();
