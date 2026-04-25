@@ -10,4 +10,5 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 moof-core = { path = "../moof-core" }
+moof-lang = { path = "../moof-lang" }
 indexmap = { version = "2", features = ["serde"] }

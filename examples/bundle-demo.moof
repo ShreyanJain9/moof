@@ -89,7 +89,7 @@
 (defn greet (name) (str "hi, " name "!"))
 [console println: (str "    before: " (greet "moof"))]
 
-[(edit-replace greet "hi" "hello") then: |new-text|
-  (let ((after (greet "moof")))
-    [console println: (str "    after:  " after)]
-    [console println: (str "    new source: " new-text)])]
+(edit-replace greet "hi" "hello")
+[console println: (str "    after:  " (greet "moof"))]
+(let ((s [greet source]))
+  [console println: (str "    new source: " s.text)])

@@ -12,23 +12,22 @@
 ;
 ;   (defn greet (name) (str "hi, " name "!"))
 ;   (greet "moof")          ; → "hi, moof!"
+;   (edit-replace greet "hi" "hello")
+;   (greet "moof")          ; → "hello, moof!"
 ;
-;   [(edit-replace greet "hi" "hello") then: |_|
-;     (greet "moof")]       ; → "hello, moof!"
-;
-; returns an Act because it goes through the `evaluator` capability
-; for parsing. requires `evaluator` granted in the calling vat.
+; synchronous — parsing is `[String parse]`, a pure transform with
+; no capability vat in front. the operation runs in the caller's
+; vat and returns the new source text directly.
 ;
 ; this file is a definition bundle.
 
 (definitions
 
 ; (%reattach-source f new-text) — after evaluating f, look up
-; the symbol it produced and rebind its :source slot to the
-; updated bundle. without this, edit chains would break: the
-; evaluator capability's parse path doesn't carry source through
-; to the eval'd closure, so its :source.text comes out nil and
-; the next edit can't read it.
+; the symbol it produced and rebind its :source slot to carry
+; the new verbatim text. needed because `(eval form)` (no source
+; record) gives the rebound closure a nil :source.text, which
+; would block the next edit from reading anything.
 (defn %reattach-source (f new-text)
   (let ((p (produces-of f)))
     (if (nil? p) nil
@@ -39,31 +38,25 @@
 
 ; (edit-text val text-fn) — pull val's :source.text, hand it to
 ; text-fn (a String → String transform), parse the result, eval
-; every form, and re-attach :source to the rebinds so subsequent
-; edits can keep reading. returns an Act<String> resolving to
-; the new source once the rebind has run.
-;
-; if val has no :source slot, returns an Err immediately.
+; every form, reattach :source. returns the new text on success
+; or { Err message: ... } if val has no :source slot.
 (defn edit-text (val text-fn)
   (let ((src [val source]))
     (if (nil? src) (Err "value has no :source slot")
-      (let ((new-text (text-fn src.text)))
-        [[evaluator parse: new-text] then: |forms|
-          (do
-            [forms each: |f| (eval f)]
-            [forms each: |f| (%reattach-source f new-text)]
-            new-text)]))))
+      (let ((new-text (text-fn src.text))
+            (forms [new-text parse]))
+        [forms each: |f| (eval f)]
+        [forms each: |f| (%reattach-source f new-text)]
+        new-text))))
 
 ; (edit-replace val from to) — substring-replace convenience.
-; returns an Act<String> like edit-text. if `from` doesn't appear
-; in the source, the rebind is a no-op (eval of unchanged source
-; just rebinds the same closure).
+; returns the new source text. if `from` doesn't appear in val's
+; source, the rebind is a no-op.
 (defn edit-replace (val from to)
   (edit-text val |s| [s replace: from with: to]))
 
 ; (redefine val new-source-text) — wholesale source replacement.
 ; for when you've authored a fresh body and want to drop it in.
-; returns an Act<String> resolving to new-source-text.
 ;
 ;   (redefine greet "(defn greet (name) [(name reverse) describe])")
 (defn redefine (val new-source-text)

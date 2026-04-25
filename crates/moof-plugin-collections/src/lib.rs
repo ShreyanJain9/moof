@@ -202,6 +202,23 @@ impl Plugin for CollectionsPlugin {
             Ok(Value::boolean(a < b))
         });
 
+        // [s parse] — parse moof source text into a list of top-level
+        // forms. pure syntactic transform; runs in the caller's vat
+        // (no Act, no capability needed). per-form FormLoc tracking
+        // is recorded so [form __form-text] yields the verbatim slice.
+        native(heap, str_id, "parse", |heap, receiver, _args| {
+            let id = receiver.as_any_object().ok_or("parse: not a string")?;
+            let source = heap.get_string(id).ok_or("parse: not a string")?.to_string();
+            let (tokens, spans) = moof_lang::lang::lexer::tokenize_with_spans(&source)
+                .map_err(|e| format!("parse: lex: {e}"))?;
+            let source_arc: std::sync::Arc<str> = std::sync::Arc::from(source.as_str());
+            let mut parser = moof_lang::lang::parser::Parser::with_spans(
+                &tokens, &spans, source_arc, heap,
+            );
+            let exprs = parser.parse_all().map_err(|e| format!("parse: {e}"))?;
+            Ok(heap.list(&exprs))
+        });
+
         // -- Table prototype --
         let table_proto = heap.make_object(object_proto);
         heap.type_protos[PROTO_TABLE] = table_proto;
