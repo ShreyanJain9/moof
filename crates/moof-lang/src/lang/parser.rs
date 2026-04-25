@@ -284,6 +284,10 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_object_literal(&mut self) -> Result<Value, String> {
+        // capture the LBrace token index up front so we can later
+        // recover the verbatim byte range covering `{ ... }` for
+        // the synthetic :source slot.
+        let lbrace_token_idx = self.pos;
         self.advance(); // {
 
         // superpowered object literals:
@@ -396,6 +400,51 @@ impl<'a> Parser<'a> {
 
                 Token::Eof => return Err("unterminated object literal".into()),
                 ref tok => return Err(format!("expected slot, method, do, or }} in object literal, got {tok:?}")),
+            }
+        }
+
+        // synthesize a :source slot whose value is `{ text: "<verbatim>" }`
+        // — the literal authored bytes between `{` and `}` inclusive.
+        // we build the inner bundle imperatively (not via parse_object_literal),
+        // so source attachment doesn't recurse on the bundle itself.
+        // skipped when the parser wasn't given source-tracking spans
+        // (e.g. internal calls that use Parser::new without with_spans).
+        if self.source.is_some()
+            && !self.spans.is_empty()
+            && lbrace_token_idx < self.spans.len()
+        {
+            // self.pos is now past the closing `}`. the consumed
+            // RBrace is at self.pos - 1, whose byte_end covers it.
+            let rbrace_token_idx = self.pos.saturating_sub(1);
+            if rbrace_token_idx < self.spans.len() {
+                let byte_start = self.spans[lbrace_token_idx].0 as usize;
+                let byte_end = self.spans[rbrace_token_idx].1 as usize;
+                let source_arc = self.source.as_ref().unwrap().clone();
+                if byte_end <= source_arc.len() && byte_start <= byte_end {
+                    let text = &source_arc[byte_start..byte_end];
+                    let text_val = self.heap.alloc_string(text);
+
+                    // build inner bundle AST: (%object-literal Object (text) text-val nil nil)
+                    let object_sym = self.intern("Object");
+                    let text_sym = self.intern("text");
+                    let quoted_text = self.quoted(text_sym);
+                    let inner_names = self.heap.list(&[quoted_text]);
+                    let nil_list = Value::NIL;
+                    let inner_ast = self.heap.list(&[
+                        obj_sym, object_sym, inner_names,
+                        text_val, nil_list, nil_list,
+                    ]);
+
+                    // PREPEND so an explicit user-provided `source:` later
+                    // in the literal wins (slot order = compile-time write
+                    // order; last write wins). this lets defmethod and
+                    // friends pass `{ source: <bundle> }` to with: without
+                    // the parser's auto-injection clobbering it.
+                    let source_sym = self.intern("source");
+                    let quoted_source = self.quoted(source_sym);
+                    slot_names.insert(0, quoted_source);
+                    slot_values.insert(0, inner_ast);
+                }
             }
         }
 
