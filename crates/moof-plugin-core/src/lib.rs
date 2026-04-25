@@ -79,6 +79,23 @@ impl moof_core::Plugin for CorePlugin {
                 handlers: orig_handlers,
                 foreign: orig_foreign,
             });
+
+            // closures install a self-referential `call:` handler at
+            // construction so the VM's `[closure call: args]` unpack
+            // path triggers (handler == recv). cloning copies that
+            // handler verbatim — but it now points at the ORIGINAL,
+            // not the clone, so the unpack path is bypassed and the
+            // original closure ends up invoked with the clone as
+            // self. fix it: if the clone has a `call:` handler that
+            // pointed at the original, rewrite it to point at the
+            // clone. preserves callability of [fn with: { ... }].
+            let new_id = new_obj.as_any_object().unwrap();
+            let call_sym = heap.sym_call;
+            if let Some(h) = heap.get(new_id).handler_get(call_sym) {
+                if h == receiver {
+                    heap.get_mut(new_id).handler_set(call_sym, new_obj);
+                }
+            }
             Ok(new_obj)
         });
 

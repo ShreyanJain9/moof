@@ -87,11 +87,18 @@
     [exprs car]
     `(let ((_ ,[exprs car])) ,(%seq-body [exprs cdr])))))
 
+; defn attaches a `:source` slot to the bound closure, mirroring
+; defmethod. text is the verbatim authored top-level form (via
+; the closure's origin byte range); form is the parsed AST.
 (def defn (vau args $e
   (let ((name [args car])
         (params [[args cdr] car])
-        (body (%seq-body [[args cdr] cdr])))
-    (eval `(def ,name (fn ,params ,body)) $e))))
+        (body (%seq-body [[args cdr] cdr]))
+        (closure (eval `(fn ,params ,body) $e))
+        (source-text [closure __source-text])
+        (source-bundle { form: (cons 'defn args) text: source-text })
+        (closure-with-source [closure with: { source: source-bundle }]))
+    (eval `(def ,name ,closure-with-source) $e))))
 
 ; defmethod attaches a `:source` slot on the handler closure
 ; bundling { text, form }: text is the raw source string the
