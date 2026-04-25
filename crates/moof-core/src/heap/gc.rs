@@ -51,7 +51,7 @@ impl Heap {
         mark_value_id(Value::nursery(self.env), &mut worklist, &mut marked);
 
         // type prototypes
-        for &proto in &self.type_protos {
+        for &proto in self.type_protos.iter() {
             mark_value_id(proto, &mut worklist, &mut marked);
         }
 

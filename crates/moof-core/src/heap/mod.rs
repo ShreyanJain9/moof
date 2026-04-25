@@ -31,27 +31,19 @@ use crate::value::Value;
 use crate::foreign::{ForeignData, ForeignType, ForeignTypeId, ForeignTypeRegistry};
 use crate::symtab::SymbolTable;
 use crate::arena::Arena;
+use crate::protos::ProtoRegistry;
 use indexmap::IndexMap;
 use std::sync::Arc;
 
-// type prototype indices — named constants instead of magic numbers
-pub const PROTO_NIL: usize = 0;
-pub const PROTO_BOOL: usize = 1;
-pub const PROTO_INT: usize = 2;
-pub const PROTO_FLOAT: usize = 3;
-pub const PROTO_SYM: usize = 4;
-pub const PROTO_OBJ: usize = 5;
-pub const PROTO_CONS: usize = 6;
-pub const PROTO_STR: usize = 7;
-pub const PROTO_BYTES: usize = 8;
-pub const PROTO_TABLE: usize = 9;
-pub const PROTO_NUMBER: usize = 10;
-pub const PROTO_CLOSURE: usize = 11;
-pub const PROTO_ERR: usize = 12;
-pub const PROTO_FARREF: usize = 13;
-pub const PROTO_ACT: usize = 14;
-pub const PROTO_UPDATE: usize = 15;
-pub const PROTO_OK: usize = 16;
+// Re-export the prototype indices from their canonical home in
+// `protos` so existing call sites (`use moof_core::heap::PROTO_*`)
+// keep working without the edit.
+pub use crate::protos::{
+    PROTO_NIL, PROTO_BOOL, PROTO_INT, PROTO_FLOAT, PROTO_SYM,
+    PROTO_OBJ, PROTO_CONS, PROTO_STR, PROTO_BYTES, PROTO_TABLE,
+    PROTO_NUMBER, PROTO_CLOSURE, PROTO_ERR, PROTO_FARREF,
+    PROTO_ACT, PROTO_UPDATE, PROTO_OK,
+};
 
 /// What to run in a spawned vat.
 #[derive(Debug)]
@@ -123,7 +115,7 @@ pub struct Heap {
     pub sym_native_idx: u32,
 
     // type prototypes: indexed by PROTO_* constants
-    pub type_protos: Vec<Value>,
+    pub type_protos: ProtoRegistry,
 
     // native handlers, indexed by position. a Native-wrapped
     // closure (register_native's return value) carries its index
@@ -190,7 +182,7 @@ impl Heap {
             sym_message: 0,
             sym_code_idx: 0, sym_arity: 0, sym_is_operative: 0, sym_is_pure: 0,
             sym_native_idx: 0,
-            type_protos: vec![Value::NIL; 17],
+            type_protos: ProtoRegistry::new(),
             natives: Vec::new(),
             send_cache: std::collections::HashMap::new(),
             foreign_registry: ForeignTypeRegistry::new(),
