@@ -105,6 +105,57 @@ materializes a module without polluting the global env.
 cycles surface as `{ Err message: "cycle in definitions ..." }`
 instead of a Bundle, so callers can branch on `[result is: Err]`.
 
+### composition
+
+bundles compose:
+
+```moof
+(def math (bundle
+  (defn square (x) [x * x])
+  (defn cube (x) [(square x) * x])))
+
+(def stats (bundle
+  (defn variance (xs)
+    (let ((m [[xs sum] / [xs count]]))
+      [[xs map: |x| (square [x - m])] sum]))))
+
+[stats requires]               ; → (square)        — needs help
+(bundle-satisfies? math stats) ; → true            — math has it
+
+(def all (bundle-merge math stats))
+[all provides]                 ; → (square cube variance)
+[all requires]                 ; → ()              — internally closed
+```
+
+three combinators:
+
+| op                              | meaning                                      |
+|---------------------------------|----------------------------------------------|
+| `(bundle-merge b1 b2 ...)`      | concatenate forms, re-analyze; cycles → Err  |
+| `(bundle-satisfies? prov cons)` | true iff prov.provides ⊇ cons.requires       |
+| `[b1 equal: b2]`                | structural equality (forms + provides + requires) |
+| `[b content-hash]`              | content-addressed hash; same-content dedupes |
+
+### identity through the image
+
+bundles round-trip through `.moof/store`. save one in run 1:
+
+```moof
+(def my-mod (bundle (defn double (x) [x * 2]) (def base 10)))
+```
+
+restart moof, run 2:
+
+```moof
+[my-mod provides]      ; → (base double)
+[my-mod apply: Env]
+(double 5)             ; → 10
+```
+
+forms, provides, requires — all preserved across image boundaries
+via the existing object serialization (cons cells already
+serialize). bundles are values, and the image holds them.
+
 ---
 
 ## what counts as a definition

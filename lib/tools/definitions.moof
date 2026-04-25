@@ -319,6 +319,19 @@
 
 (conform Bundle Showable)
 
+; structural equality: two bundles are equal iff their forms,
+; provides, and requires all match. since bundles are
+; content-addressed (same content → same hash), this is what
+; users will reach for when comparing.
+(defmethod Bundle equal: (other)
+  (if [self identical: other] true
+    (if (not [other is: Bundle]) false
+      (and [@forms equal: other.forms]
+        (and [@provides equal: other.provides]
+          [@requires equal: other.requires])))))
+
+(conform Bundle Equatable)
+
 ; (bundle-from raw-forms) — analyze, topo-sort, return a Bundle
 ; or { Err message: "cycle ..." }. unlike (definitions ...) this
 ; is a function: takes ALREADY-QUOTED forms. for the convenient
@@ -343,6 +356,27 @@
 ; applying. the result is a value you can introspect, save, or
 ; defer-apply via [b apply: env].
 (def bundle (vau forms $e (bundle-from forms)))
+
+; (bundle-merge b1 b2 ...) — concatenate any number of bundles
+; into one, re-analyzing the combined forms so the result has
+; a fresh dep order, a unified provides set, and a requires set
+; that excludes anything the merged bundle now produces.
+;
+; cycles between merged bundles surface here; you'd see an Err.
+(defn bundle-merge args
+  (let ((all-forms [args fold: nil with: |acc b|
+                     [acc append: b.forms]]))
+    (bundle-from all-forms)))
+
+; (bundle-satisfies? provider consumer) — true iff every symbol
+; the consumer bundle requires is something the provider bundle
+; provides. the foundation of "module signature checking":
+;
+;   (if (bundle-satisfies? math-bundle stats-bundle)
+;     [(bundle-merge math-bundle stats-bundle) apply: Env]
+;     (Err "stats-bundle needs more than math-bundle gives"))
+(defn bundle-satisfies? (provider consumer)
+  [[consumer requires] all: |req| [[provider provides] includes: req]])
 
 ; ───────────────────────────────────────────────────────────────
 ; 6. (definitions ...) — the order-independent loader form

@@ -127,4 +127,43 @@
     [(bundle (defn a () (b)) (defn b () (a))) is: Err]
     true)
 
+  (test "bundle: equal: by structure"
+    [(bundle (def x 1) (def y 2)) equal:
+       (bundle (def x 1) (def y 2))]
+    true)
+
+  (test "bundle: distinct content not equal"
+    [(bundle (def x 1)) equal: (bundle (def x 2))]
+    false)
+
+  (test "bundle: same content, same content-hash"
+    [[(bundle (def x 1) (def y 2)) content-hash]
+       equal:
+       [(bundle (def x 1) (def y 2)) content-hash]]
+    true)
+
+  (test "bundle-merge: provides union"
+    [[(bundle-merge (bundle (def a 1)) (bundle (def b 2))) provides]
+       sortBy: |s| [s describe]]
+    [(list 'a 'b) sortBy: |s| [s describe]])
+
+  (test "bundle-merge: cross-bundle deps satisfied internally"
+    [(bundle-merge
+        (bundle (defn double (x) [x * 2]))
+        (bundle (defn quad (x) [(double x) * 2])))
+       requires]
+    nil)
+
+  (test "bundle-satisfies?: yes when provider has all consumer needs"
+    (bundle-satisfies?
+      (bundle (defn double (x) [x * 2]))
+      (bundle (defn quad (x) [(double x) * 2])))
+    true)
+
+  (test "bundle-satisfies?: no when consumer needs more"
+    (bundle-satisfies?
+      (bundle (def x 1))
+      (bundle (defn f () (g))))
+    false)
+
 ))
