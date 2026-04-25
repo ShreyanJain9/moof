@@ -1,0 +1,95 @@
+; bundle-demo.moof — definitions as values.
+;
+;   moof examples/bundle-demo.moof
+;
+; walks through:
+;   1. order-independent definition with (definitions ...)
+;   2. (bundle ...) — produces a Bundle value, doesn't bind
+;   3. introspection — provides / requires / count
+;   4. composition — bundle-merge, bundle-satisfies?
+;   5. identity — content-hash + structural equal:
+;   6. live edit — edit-replace patches a function in place
+;
+; the source-as-canonical-value thread + definition bundles make
+; modules real: a value that knows its own interface, composes,
+; dedupes by content, persists, and you can edit it live.
+
+[console println: "═══ moof bundle demo ═══\n"]
+
+; ── 1. order-independent loading ──────────────────────────────
+
+[console println: "(1) (definitions ...): order-independent ↓"]
+
+(definitions
+  ; quad references double which references base.
+  ; authored backward; analyzer sorts by free-variable analysis.
+  (defn quad (x) [(double x) * 2])
+  (defn double (x) [x * base])
+  (def base 3))
+
+[console println: (str "    (quad 5) = " (quad 5))]
+
+; ── 2. Bundle as a value ──────────────────────────────────────
+
+[console println: "\n(2) (bundle ...): produces a value, doesn't bind ↓"]
+
+(def math (bundle
+  (defn square (x) [x * x])
+  (defn cube (x) [(square x) * x])))
+
+[console println: (str "    " [math describe])]
+[console println: (str "    provides: " [[math provides] describe])]
+[console println: (str "    requires: " [[math requires] describe])]
+
+; ── 3. composition ────────────────────────────────────────────
+
+[console println: "\n(3) bundles compose ↓"]
+
+(def stats (bundle
+  (defn variance (xs)
+    (let ((m [[xs sum] / [xs count]]))
+      [[xs map: |x| (square [x - m])] sum]))))
+
+[console println: (str "    stats provides: " [[stats provides] describe])]
+[console println: (str "    stats requires: " [[stats requires] describe]
+                       " ← needs help")]
+[console println: (str "    math satisfies stats? "
+                       (bundle-satisfies? math stats))]
+
+(def all (bundle-merge math stats))
+[console println: (str "    " [all describe] " (merged)")]
+[console println: (str "    provides: " [[all provides] describe])]
+[console println: (str "    requires: " [[all requires] describe]
+                       " ← internally closed")]
+
+[all apply: Env]
+[console println: (str "    (variance (list 2 4 4 4 5 5 7 9)) = "
+                       (variance (list 2 4 4 4 5 5 7 9)))]
+
+; ── 4. content-addressed identity ─────────────────────────────
+
+[console println: "\n(4) bundles have content identity ↓"]
+
+(def b1 (bundle (defn d (x) [x * 2]) (def k 10)))
+(def b2 (bundle (defn d (x) [x * 2]) (def k 10)))   ; same content
+(def b3 (bundle (defn d (x) [x * 3]) (def k 10)))   ; different
+
+[console println: (str "    b1 hash: " [b1 content-hash])]
+[console println: (str "    b2 hash: " [b2 content-hash]
+                       " (" (if [[b1 content-hash] equal: [b2 content-hash]]
+                              "matches" "differs") ")")]
+[console println: (str "    b3 hash: " [b3 content-hash])]
+[console println: (str "    b1 equal? b2 → " [b1 equal: b2])]
+[console println: (str "    b1 equal? b3 → " [b1 equal: b3])]
+
+; ── 5. live edit ──────────────────────────────────────────────
+
+[console println: "\n(5) live edit (modify-image, smalltalk-style) ↓"]
+
+(defn greet (name) (str "hi, " name "!"))
+[console println: (str "    before: " (greet "moof"))]
+
+[(edit-replace greet "hi" "hello") then: |new-text|
+  (let ((after (greet "moof")))
+    [console println: (str "    after:  " after)]
+    [console println: (str "    new source: " new-text)])]
