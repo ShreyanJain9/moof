@@ -111,10 +111,15 @@ impl Vat {
         for (form_text, range) in forms {
             // re-tokenize + parse the per-form slice so parse errors
             // point at the right form and extra top-level atoms don't
-            // bleed across.
-            let tokens = moof_lang::lang::lexer::tokenize(&form_text)
+            // bleed across. tokenize_with_spans gives us per-token
+            // byte ranges so the parser can record per-form locations
+            // in heap.form_locations for verbatim source retrieval.
+            let (tokens, spans) = moof_lang::lang::lexer::tokenize_with_spans(&form_text)
                 .map_err(|e| format!("lex: {e}"))?;
-            let mut parser = moof_lang::lang::parser::Parser::new(&tokens, &mut self.heap);
+            let source_arc: std::sync::Arc<str> = std::sync::Arc::from(form_text.as_str());
+            let mut parser = moof_lang::lang::parser::Parser::with_spans(
+                &tokens, &spans, source_arc, &mut self.heap,
+            );
             let exprs = parser.parse_all().map_err(|e| format!("parse: {e}"))?;
 
             let source_record = moof_core::source::ClosureSource {

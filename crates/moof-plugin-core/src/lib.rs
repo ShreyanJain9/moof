@@ -116,6 +116,29 @@ impl moof_core::Plugin for CorePlugin {
             Ok(heap.list(&syms))
         });
 
+        // Object: __form-text — verbatim source text for any
+        // parsed form (cons cell or other heap value), looked up
+        // in heap.form_locations. returns nil if the value
+        // wasn't recorded by the parser (literals, runtime-built
+        // forms, foreign values without a parsed origin).
+        //
+        // populating definers (defmethod, defprotocol's provide,
+        // etc.) call this on subforms to bundle precise verbatim
+        // text — including comments, whitespace, and the user's
+        // bracket choices — into the :source slot.
+        native(heap, obj_id, "__form-text", |heap, receiver, _args| {
+            let Some(id) = receiver.as_any_object() else {
+                return Ok(Value::NIL);
+            };
+            match heap.form_locations.get(&id) {
+                Some(loc) => {
+                    let s = loc.slice().to_string();
+                    Ok(heap.alloc_string(&s))
+                }
+                None => Ok(Value::NIL),
+            }
+        });
+
         // Object: handle:with:
         native(heap, obj_id, "handle:with:", |heap, receiver, args| {
             let id = receiver.as_any_object().ok_or("handle:with: receiver is not a mutable object")?;

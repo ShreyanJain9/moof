@@ -141,11 +141,14 @@ fn eval_and_print(sys: &mut System, vat_id: u32, input: &str) {
     for (form_text, range) in moof_core::source::split_top_level_forms(input) {
         let vat = sys.vat_mut(vat_id);
 
-        let tokens = match moof_lang::lang::lexer::tokenize(&form_text) {
+        let (tokens, spans) = match moof_lang::lang::lexer::tokenize_with_spans(&form_text) {
             Ok(t) => t,
             Err(e) => { eprintln!("  ~ lex: {e}"); continue; }
         };
-        let mut parser = moof_lang::lang::parser::Parser::new(&tokens, &mut vat.heap);
+        let source_arc: std::sync::Arc<str> = std::sync::Arc::from(form_text.as_str());
+        let mut parser = moof_lang::lang::parser::Parser::with_spans(
+            &tokens, &spans, source_arc, &mut vat.heap,
+        );
         let exprs = match parser.parse_all() {
             Ok(e) => e,
             Err(e) => { eprintln!("  ~ parse: {e}"); continue; }

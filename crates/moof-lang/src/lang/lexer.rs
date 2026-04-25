@@ -42,6 +42,10 @@ pub enum Token {
 
 pub struct Lexer {
     chars: Vec<char>,
+    /// Byte offset of each char (parallel to `chars`). Length is
+    /// `chars.len() + 1` — the extra entry at the end is the byte
+    /// length of the input, used as the end-of-input offset.
+    char_byte_offsets: Vec<u32>,
     pos: usize,
     /// true when the character immediately before `pos` was whitespace
     /// (or we are at the start of input)
@@ -50,15 +54,44 @@ pub struct Lexer {
 
 impl Lexer {
     pub fn new(input: &str) -> Self {
+        let chars: Vec<char> = input.chars().collect();
+        let mut char_byte_offsets = Vec::with_capacity(chars.len() + 1);
+        let mut byte = 0u32;
+        for c in &chars {
+            char_byte_offsets.push(byte);
+            byte += c.len_utf8() as u32;
+        }
+        char_byte_offsets.push(byte);
         Lexer {
-            chars: input.chars().collect(),
+            chars,
+            char_byte_offsets,
             pos: 0,
             prev_was_space: true,
         }
     }
 
+    /// Convert a char position to a byte offset. Clamps to the
+    /// end-of-input offset for positions past the last char.
+    fn byte_at(&self, char_pos: usize) -> u32 {
+        if char_pos < self.char_byte_offsets.len() {
+            self.char_byte_offsets[char_pos]
+        } else {
+            *self.char_byte_offsets.last().unwrap_or(&0)
+        }
+    }
+
     pub fn tokenize(&mut self) -> Vec<Token> {
+        self.tokenize_with_spans().0
+    }
+
+    /// Tokenize, returning both the tokens and a parallel Vec of
+    /// (byte_start, byte_end) spans for each token. The parser
+    /// uses spans to record per-form locations on the heap so
+    /// `[v __form-text]` can return verbatim source for any
+    /// parsed sub-form.
+    pub fn tokenize_with_spans(&mut self) -> (Vec<Token>, Vec<(u32, u32)>) {
         let mut tokens = Vec::new();
+        let mut spans: Vec<(u32, u32)> = Vec::new();
         while self.pos < self.chars.len() {
             let c = self.chars[self.pos];
 
@@ -78,6 +111,9 @@ impl Lexer {
                 self.prev_was_space = true;
                 continue;
             }
+
+            // record start position before emitting
+            let start_char = self.pos;
 
             // from here on we will emit a token
             match c {
@@ -127,9 +163,12 @@ impl Lexer {
                 }
             }
 
+            // record span for the just-emitted token
+            spans.push((self.byte_at(start_char), self.byte_at(self.pos)));
+
             self.prev_was_space = false;
         }
-        tokens
+        (tokens, spans)
     }
 
     fn peek_next(&self) -> Option<char> {
@@ -237,6 +276,18 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
     let mut toks = Lexer::new(input).tokenize();
     toks.push(Token::Eof);
     Ok(toks)
+}
+
+/// Tokenize with parallel byte spans. Used by the parser to
+/// record per-form locations for verbatim source retrieval.
+/// Spans is the same length as the returned token vec; the Eof
+/// is paired with a zero-length span at end-of-input.
+pub fn tokenize_with_spans(input: &str) -> Result<(Vec<Token>, Vec<(u32, u32)>), String> {
+    let (mut toks, mut spans) = Lexer::new(input).tokenize_with_spans();
+    let eof_byte = input.len() as u32;
+    toks.push(Token::Eof);
+    spans.push((eof_byte, eof_byte));
+    Ok((toks, spans))
 }
 
 #[cfg(test)]

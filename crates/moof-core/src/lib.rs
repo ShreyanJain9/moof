@@ -35,5 +35,5 @@ pub use symtab::SymbolTable;
 pub use arena::Arena;
 pub use protos::ProtoRegistry;
 pub use plugin::{Plugin, native, int_binop, float_binop, float_unary, fnv1a_64, register_foreign_proto};
-pub use source::{ClosureSource, SourceOrigin, split_top_level_forms};
+pub use source::{ClosureSource, FormLoc, SourceOrigin, split_top_level_forms};
 pub use canonical::{Hash, hash_hex, cycle_placeholder, cycle_placeholder_blob_bytes};

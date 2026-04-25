@@ -48,6 +48,28 @@ impl SourceOrigin {
     }
 }
 
+/// Per-form source location. The parser records one of these for
+/// every cons cell (and other heap-allocated form value) it
+/// produces, keyed by the value's heap id, into `Heap::form_locations`.
+/// The `[v __form-text]` primitive looks the entry up and slices
+/// the source. In-memory only — not persisted across image
+/// loads (sources are re-parsed when files reload).
+#[derive(Clone, Debug)]
+pub struct FormLoc {
+    /// The full source text the form was parsed from. Shared via
+    /// Arc — every form parsed in one parse-session points at the
+    /// same string.
+    pub source: std::sync::Arc<str>,
+    pub byte_start: u32,
+    pub byte_end: u32,
+}
+
+impl FormLoc {
+    pub fn slice(&self) -> &str {
+        &self.source[self.byte_start as usize .. self.byte_end as usize]
+    }
+}
+
 /// Split a moof source string into its top-level forms, each paired
 /// with the byte range it occupied in the original input.
 ///

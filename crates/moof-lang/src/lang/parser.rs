@@ -16,13 +16,32 @@ use moof_core::value::Value;
 
 pub struct Parser<'a> {
     tokens: &'a [Token],
+    /// Parallel to `tokens`: byte (start, end) per token. Empty
+    /// when location tracking is off.
+    spans: &'a [(u32, u32)],
     pos: usize,
     heap: &'a mut Heap,
+    /// Source text, shared across all forms parsed by this
+    /// session. Cloned into `Heap.form_locations` entries so each
+    /// recorded form holds an Arc to the same string.
+    source: Option<std::sync::Arc<str>>,
 }
 
 impl<'a> Parser<'a> {
     pub fn new(tokens: &'a [Token], heap: &'a mut Heap) -> Self {
-        Parser { tokens, pos: 0, heap }
+        Parser { tokens, spans: &[], pos: 0, heap, source: None }
+    }
+
+    /// Build a parser that records per-form byte locations into
+    /// `heap.form_locations`. `spans` must be parallel to `tokens`
+    /// (use `tokenize_with_spans` to get them aligned).
+    pub fn with_spans(
+        tokens: &'a [Token],
+        spans: &'a [(u32, u32)],
+        source: std::sync::Arc<str>,
+        heap: &'a mut Heap,
+    ) -> Self {
+        Parser { tokens, spans, pos: 0, heap, source: Some(source) }
     }
 
     fn peek(&self) -> &Token {
@@ -51,7 +70,34 @@ impl<'a> Parser<'a> {
         self.heap.cons(q, inner)
     }
 
+    /// Record a parsed form's byte range in heap.form_locations.
+    /// Called after parse_expr finishes parsing a form, with the
+    /// token index where the form started.
+    fn record_loc(&mut self, value: Value, start_token_idx: usize) {
+        let Some(source) = self.source.as_ref().cloned() else { return; };
+        if self.spans.is_empty() { return; }
+        let Some(id) = value.as_any_object() else { return; };
+        // bracket the byte range using the first and last token consumed
+        let last_idx = self.pos.saturating_sub(1).min(self.spans.len().saturating_sub(1));
+        if start_token_idx >= self.spans.len() { return; }
+        let byte_start = self.spans[start_token_idx].0;
+        let byte_end = self.spans[last_idx].1;
+        if byte_end < byte_start { return; }
+        self.heap.form_locations.insert(id, moof_core::source::FormLoc {
+            source,
+            byte_start,
+            byte_end,
+        });
+    }
+
     pub fn parse_expr(&mut self) -> Result<Value, String> {
+        let start_token = self.pos;
+        let value = self.parse_expr_inner()?;
+        self.record_loc(value, start_token);
+        Ok(value)
+    }
+
+    fn parse_expr_inner(&mut self) -> Result<Value, String> {
         match self.peek().clone() {
             Token::LParen => self.parse_list(),
             Token::LBracket => self.parse_send(),

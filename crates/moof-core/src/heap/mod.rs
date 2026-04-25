@@ -142,6 +142,14 @@ pub struct Heap {
     /// from an older image, etc.). Accessed by the `source` and
     /// `origin` native handlers on the Block/Closure prototype.
     pub closure_sources: Vec<Option<crate::source::ClosureSource>>,
+
+    /// Per-form source locations. Maps a parsed value's heap id
+    /// (cons cell or other) to its byte range in the source text
+    /// it was parsed from. Populated by the parser; consulted by
+    /// [v __form-text] for verbatim text retrieval. In-memory
+    /// only — not persisted; rebuilt at parse time. Cleaned up
+    /// during GC sweeps.
+    pub form_locations: std::collections::HashMap<u32, crate::source::FormLoc>,
 }
 
 pub type NativeFn = Box<dyn Fn(&mut Heap, Value, &[Value]) -> Result<Value, String>>;
@@ -187,6 +195,7 @@ impl Heap {
             send_cache: std::collections::HashMap::new(),
             foreign_registry: ForeignTypeRegistry::new(),
             closure_sources: Vec::new(),
+            form_locations: std::collections::HashMap::new(),
         };
 
         // intern well-known symbols
@@ -1055,6 +1064,10 @@ impl Heap {
         self.arena.restore(objects);
         self.symbols.restore(symbols);
         self.env = env_id;
+        // form_locations key off heap ids; the restore replaces the
+        // arena wholesale, so any prior entries are now meaningless.
+        // re-parsing repopulates them as files are loaded.
+        self.form_locations.clear();
         self.re_resolve_well_known_syms();
     }
 

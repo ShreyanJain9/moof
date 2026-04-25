@@ -110,6 +110,7 @@ impl Heap {
                 // parent=NIL prevents chain walking into this slot.
                 *self.arena.get_mut(i as u32) = HeapObject::new_empty(Value::NIL);
                 self.arena.push_free(i as u32);
+                self.form_locations.remove(&(i as u32));
                 newly_freed += 1;
             }
         }

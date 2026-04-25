@@ -80,18 +80,21 @@
       (if [[clause car] identical: 'provide]
         ; (provide (sel params...) body...)
         ; the handler closure carries its source bundle — the
-        ; whole (provide ...) clause as :form, with text
-        ; rendered from the form (the parser doesn't track
-        ; per-clause byte ranges inside a defprotocol). so
-        ; [installed-handler source] returns the canonical
-        ; authored thing after conform installs it.
+        ; whole (provide ...) clause as :form, with verbatim
+        ; text sliced from the parser-recorded byte range of
+        ; the clause cons cell (comments + whitespace preserved).
+        ; when __form-text returns nil (e.g. the clause was
+        ; built at runtime rather than parsed), we fall back to
+        ; the re-rendered form via `describe`.
         (let ((sig [[clause cdr] car])
               (sel [sig car])
               (params [sig cdr])
               (body [[clause cdr] cdr])
               (raw-handler (eval (cons 'fn
                         (cons (cons 'self params) body)) env))
-              (source-bundle { form: clause text: [clause describe] })
+              (verbatim [clause __form-text])
+              (source-text (if (nil? verbatim) [clause describe] verbatim))
+              (source-bundle { form: clause text: source-text })
               (handler [raw-handler with: { source: source-bundle }]))
           [acc with: {
             provides: [acc.provides at: sel put: handler]
