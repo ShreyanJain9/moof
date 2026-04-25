@@ -105,4 +105,26 @@
       sortBy: |s| [s describe]]
     [(list 'a 'b 'c) sortBy: |s| [s describe]])
 
+  ; ── Bundle as a value ────────────────────────────────
+
+  (test "bundle: exposes provides"
+    [[(bundle (def x 1) (def y 2)) provides] sortBy: |s| [s describe]]
+    [(list 'x 'y) sortBy: |s| [s describe]])
+
+  (test "bundle: exposes requires"
+    [(bundle (defn quad (n) [(double n) * 2])) requires]
+    (list 'double))
+
+  (test "bundle: count = forms count"
+    [(bundle (def a 1) (def b 2) (def c 3)) count]
+    3)
+
+  (test "bundle: typeName"
+    [(bundle (def a 1)) typeName]
+    'Bundle)
+
+  (test "bundle: cycle returns Err"
+    [(bundle (defn a () (b)) (defn b () (a))) is: Err]
+    true)
+
 ))

@@ -68,6 +68,43 @@ cycles between definitions are reported as errors with the cycle
 spelled out. (mutual recursion uses `fn`-bound captures, not
 top-level cycles, so this is a real problem to flag.)
 
+## Bundle — a definition bundle as a value
+
+`(bundle ...)` is the same machinery as `(definitions ...)` but
+it stops one step earlier — instead of applying the forms it
+returns a **Bundle value** you can pass around, introspect, save
+to the image, or apply later.
+
+```moof
+(def my-mod (bundle
+  (defn quad (x) [(double x) * 2])
+  (defn double (x) [x * base])
+  (def base 10)))
+
+[my-mod typeName]    ; → 'Bundle
+[my-mod count]       ; → 3
+[my-mod provides]    ; → (base double quad)  — declared exports
+[my-mod requires]    ; → ()                   — declared imports
+[my-mod apply: Env]  ; → binds base/double/quad into Env, returns nil
+```
+
+shape:
+
+| slot       | meaning                                           |
+|------------|---------------------------------------------------|
+| `forms`    | the list of definition forms in dependency order  |
+| `provides` | global names the bundle binds                     |
+| `requires` | free symbols the bundle expects from outside      |
+
+a Bundle is the seed for namespace-as-value: a value that knows
+its own interface (what it gives, what it needs) and can be
+applied into any compatible env. once we have first-class
+namespaces (a fresh env you can target), `[bundle apply: ns]`
+materializes a module without polluting the global env.
+
+cycles surface as `{ Err message: "cycle in definitions ..." }`
+instead of a Bundle, so callers can branch on `[result is: Err]`.
+
 ---
 
 ## what counts as a definition

@@ -280,7 +280,72 @@
     [(%deps-clauses clauses) distinct]))
 
 ; ───────────────────────────────────────────────────────────────
-; 5. (definitions ...) — the order-independent loader form
+; 5. Bundle — a first-class value wrapping a sorted form list
+; ───────────────────────────────────────────────────────────────
+;
+; a Bundle is a list of definition forms (in dependency order),
+; carrying its declared interface as data:
+;
+;   :forms      → list of forms, topologically ordered
+;   :provides   → list of global names this bundle binds
+;   :requires   → list of free symbols not produced internally
+;                 (the bundle's "imports" — must already be in
+;                 scope when applied)
+;
+; bundles are values: pass them around, save in the image, send
+; across vats. apply binds them into a target env. this is the
+; seed for namespace-as-value (wave 9 / wave 11).
+
+(def Bundle {
+  forms:    nil
+  provides: nil
+  requires: nil
+
+  [typeName] 'Bundle
+  [count]    (if (nil? @forms) 0 [@forms count])
+  [provides] @provides
+  [requires] @requires
+  [forms]    @forms
+
+  ; apply: env → evaluate each form in env, in dependency order.
+  ; returns nil on success.
+  [apply: env]
+    (do [@forms each: |f| (eval f env)] nil)
+
+  [describe]
+    (str "<Bundle " [@provides count] " provides, "
+         [@requires count] " requires>")
+})
+
+(conform Bundle Showable)
+
+; (bundle-from raw-forms) — analyze, topo-sort, return a Bundle
+; or { Err message: "cycle ..." }. unlike (definitions ...) this
+; is a function: takes ALREADY-QUOTED forms. for the convenient
+; quoted-form-collecting macro use (bundle ...) below.
+(defn bundle-from (raw-forms)
+  (let ((records (%analyze-bundle raw-forms))
+        (sorted (%toposort records)))
+    (if (some? sorted.cycle)
+      (Err (%describe-cycle sorted.cycle))
+      (let ((forms-sorted [sorted.ok map: |r| r.form])
+            (prod-set [sorted.ok fold: (Set) with: |s r|
+                        (if (some? r.produces) [s add: r.produces] s)])
+            (provs [[sorted.ok map: |r| r.produces]
+                     select: |s| (some? s)])
+            (reqs [[sorted.ok fold: (Set) with: |s r|
+                     [r.deps fold: s with: |s2 d|
+                       (if [prod-set includes: d] s2 [s2 add: d])]]
+                    toList]))
+        { Bundle forms: forms-sorted provides: provs requires: reqs }))))
+
+; (bundle form1 form2 ...) — vau that builds a Bundle WITHOUT
+; applying. the result is a value you can introspect, save, or
+; defer-apply via [b apply: env].
+(def bundle (vau forms $e (bundle-from forms)))
+
+; ───────────────────────────────────────────────────────────────
+; 6. (definitions ...) — the order-independent loader form
 ; ───────────────────────────────────────────────────────────────
 ;
 ; analyzes its body forms, builds the dep graph restricted to
@@ -362,14 +427,13 @@
 ; result: nil on success, or { Err message: "cycle in ..." } on
 ; error. moof's error model is values-not-exceptions, so callers
 ; that want strict loading should `[result then:]` or check.
+;
+; under the hood, (definitions ...) just builds a Bundle and
+; applies it. the Bundle value is the canonical shape; this form
+; is the convenience for "make + apply in one breath."
 (def definitions (vau forms $e
-  (let ((records (%analyze-bundle forms))
-        (sorted (%toposort records)))
-    (if (some? sorted.cycle)
-      (Err (%describe-cycle sorted.cycle))
-      (do
-        [sorted.ok each: |r| (eval r.form $e)]
-        nil)))))
+  (let ((b (bundle-from forms)))
+    (if [b is: Err] b [b apply: $e]))))
 
 ; ───────────────────────────────────────────────────────────────
 ; 6. introspection — analyze-bundle and definitions-trace
