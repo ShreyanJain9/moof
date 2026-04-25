@@ -1,0 +1,341 @@
+; definitions.moof — order-independent definition bundles.
+;
+; see docs/concepts/definitions.md for the why and the design.
+;
+; layers (bottom-up):
+;   1. special-form?    — recognize syntax that isn't a free var
+;   2. free-vars        — walk an AST collecting free symbols
+;   3. produces-of      — global names a top-level form binds
+;   4. deps-of          — top-level wrapper around free-vars,
+;                         specialized to known definer shapes
+;   5. (definitions ...) vau — collects forms, topo-sorts, evals
+;
+; everything below `definitions` is reusable analysis tooling and
+; can be exercised standalone.
+
+; ───────────────────────────────────────────────────────────────
+; 1. special forms
+; ───────────────────────────────────────────────────────────────
+;
+; symbols whose role is syntactic, not "look this up at runtime."
+; the list mirrors the compiler's special-form table (see
+; crates/moof-lang/src/lang/compiler.rs). symbols that the
+; compiler ONLY treats as special when "stable" (not rebound)
+; are still listed here — if the user has rebound them, the
+; rebound name is what gets called, but the AST-level pattern
+; still matches the syntactic shape we care about.
+
+(def %special-forms (Set
+  ; always-recognized
+  'quote 'quasiquote 'unquote 'unquote-splicing
+  'send 'def 'vau
+  ; recognized when stable
+  'do 'fn 'lambda 'let 'cons 'eq 'eval 'if
+  ; parser-emitted markers
+  '%object-literal '%table-literal '%dot '%block
+  ; bound by the runtime, not user code
+  'self 'Env))
+
+(defn special-form? (sym) [%special-forms includes: sym])
+
+; ───────────────────────────────────────────────────────────────
+; 2. free-vars — recursive AST walk
+; ───────────────────────────────────────────────────────────────
+;
+; (free-vars form bound) returns a deduped list of symbols that
+; `form` references freely — symbols that would be looked up at
+; runtime, minus everything in `bound` (the symbols introduced
+; by enclosing fn/vau/let), minus special forms.
+;
+; bound is a list of symbols. callers usually pass nil.
+;
+; the walker returns a list with duplicates; the public entry
+; point dedupes via [distinct].
+
+(defn free-vars (form bound)
+  [(%fv-walk form bound) distinct])
+
+(defn %fv-walk (form bound)
+  (if [form is: Symbol]
+    (if (or (special-form? form) (member? form bound))
+      nil
+      (cons form nil))
+    (if (cons? form)
+      (let ((head [form car]))
+        (if [head is: Symbol]
+          (%fv-cons head form bound)
+          ; non-symbol head: walk car + cdr generically.
+          [(%fv-walk head bound) append:
+            (%fv-walk [form cdr] bound)]))
+      ; literal data (string, number, table, ...): no free vars.
+      nil)))
+
+; dispatch on the head symbol of a cons form. the binders
+; (fn / vau / let) and the data forms (quote / quasiquote)
+; need special handling; everything else falls through to
+; "walk the head and the cdr."
+(defn %fv-cons (head form bound)
+  (if [head identical: 'quote]
+    nil
+    (if [head identical: 'quasiquote]
+      (%fv-quasi [[form cdr] car] bound)
+      (if (or [head identical: 'fn] [head identical: 'lambda])
+        (%fv-fn form bound)
+        (if [head identical: 'vau]
+          (%fv-vau form bound)
+          (if [head identical: 'let]
+            (%fv-let form bound)
+            ; default: head is a free var if not special, plus
+            ; whatever the cdr references.
+            [(%fv-walk head bound) append:
+              (%fv-walk [form cdr] bound)]))))))
+
+; (fn (params...) body...) — params bind in body.
+; variadic form (fn rest body) where rest is a single symbol is
+; supported: rest binds in body as a list-valued local.
+(defn %fv-fn (form bound)
+  (let ((params [[form cdr] car])
+        (body [[form cdr] cdr])
+        (param-list (%param-syms params)))
+    (%fv-walk body [param-list append: bound])))
+
+; (vau args $env body...) — args + $env bind in body.
+(defn %fv-vau (form bound)
+  (let ((args [[form cdr] car])
+        (env-name [[[form cdr] cdr] car])
+        (body [[[form cdr] cdr] cdr])
+        (arg-syms (%param-syms args)))
+    (%fv-walk body
+      [(cons env-name arg-syms) append: bound])))
+
+; collect symbols from a parameter form. accepts:
+;   nil            → no params
+;   a single sym   → variadic, the symbol binds the rest list
+;   (a b c)        → list of param symbols
+(defn %param-syms (params)
+  (if (nil? params) nil
+    (if [params is: Symbol] (cons params nil)
+      (if (cons? params)
+        (cons [params car] (%param-syms [params cdr]))
+        nil))))
+
+; (let ((n1 v1) (n2 v2) ...) body...) — names progressively
+; bind; v2 sees n1 in scope, body sees both.
+(defn %fv-let (form bound)
+  (let ((bindings [[form cdr] car])
+        (body [[form cdr] cdr]))
+    (%fv-let-bindings bindings body bound)))
+
+(defn %fv-let-bindings (bindings body bound)
+  (if (nil? bindings)
+    (%fv-walk body bound)
+    (let ((b [bindings car])
+          (name [b car])
+          (val [[b cdr] car]))
+      [(%fv-walk val bound) append:
+        (%fv-let-bindings [bindings cdr] body
+          (cons name bound))])))
+
+; quasiquote walk — symbols inside are data, NOT free, except
+; when wrapped in (unquote x) or (unquote-splicing x), in which
+; case the unquoted expression escapes back to normal mode.
+(defn %fv-quasi (form bound)
+  (if (cons? form)
+    (let ((head [form car]))
+      (if (or [head identical: 'unquote]
+              [head identical: 'unquote-splicing])
+        (%fv-walk [[form cdr] car] bound)
+        [(%fv-quasi head bound) append:
+          (%fv-quasi [form cdr] bound)]))
+    nil))
+
+; ───────────────────────────────────────────────────────────────
+; 3. produces-of — what a top-level form binds globally
+; ───────────────────────────────────────────────────────────────
+;
+; returns the bound symbol, or nil if the form only extends an
+; existing prototype (defmethod / conform / alias).
+
+(defn produces-of (form)
+  (if (not (cons? form)) nil
+    (let ((head [form car]))
+      (if (or [head identical: 'def]
+              (or [head identical: 'defn]
+                  (or [head identical: 'defprotocol]
+                      [head identical: 'defserver])))
+        [[form cdr] car]
+        nil))))
+
+; ───────────────────────────────────────────────────────────────
+; 4. deps-of — symbol dependencies of a top-level form
+; ───────────────────────────────────────────────────────────────
+;
+; returns a deduped list of symbols the form needs in scope to
+; evaluate. specialized per definer shape so the right things
+; are treated as bindings vs. references.
+
+(defn deps-of (form)
+  (if (not (cons? form))
+    (free-vars form nil)
+    (let ((head [form car]))
+      (if [head identical: 'def]          ; (def name expr)
+        (free-vars [[[form cdr] cdr] car] nil)
+        (if [head identical: 'defn]        ; (defn name (params) body...)
+          (%deps-defn form)
+          (if [head identical: 'defmethod] ; (defmethod Proto sel (params) body...)
+            (%deps-defmethod form)
+            (if [head identical: 'defserver]
+              (%deps-defserver form)
+              (if [head identical: 'defprotocol]
+                (%deps-defprotocol form)
+                ; unknown definer or arbitrary expression:
+                ; just take all free vars.
+                (free-vars form nil)))))))))
+
+; (defn name (params) body...): params bind in body, name does NOT
+; bind in body (use fn captures for self-recursion).
+(defn %deps-defn (form)
+  (let ((params [[[form cdr] cdr] car])
+        (body [[[form cdr] cdr] cdr])
+        (param-syms (%param-syms params)))
+    (free-vars body param-syms)))
+
+; (defmethod Proto sel (params) body...): Proto is the receiver
+; symbol (a real dependency), sel is a handler name (data),
+; params + 'self bind in body.
+(defn %deps-defmethod (form)
+  (let ((proto [[form cdr] car])
+        ; sel is data — skip
+        (params [[[[form cdr] cdr] cdr] car])
+        (body [[[[form cdr] cdr] cdr] cdr])
+        (param-syms (%param-syms params))
+        (body-deps (free-vars body (cons 'self param-syms))))
+    [(if [proto is: Symbol] (cons proto nil) (free-vars proto nil))
+      append: body-deps]))
+
+; (defserver name params section1 section2 ... body): sections
+; are docstring / (needs ...) / (inherits ...). body is the last
+; non-section form. extracting "deps" precisely would need to
+; mirror %defserver-parse — for now, take all free vars across
+; all forms with params bound. caps from (needs ...) are still
+; counted as deps (they should be — needs them to exist).
+(defn %deps-defserver (form)
+  (let ((params [[[form cdr] cdr] car])
+        (rest [[[form cdr] cdr] cdr])
+        (param-syms (%param-syms params)))
+    (free-vars rest param-syms)))
+
+; (defprotocol name "doc"? (require ...) (provide ...) (include ...))
+; deps: any included protocols + any free vars in provide bodies.
+; the clause heads (include / require / provide) are syntactic
+; markers, not free vars; signatures inside require contribute
+; nothing; provide bodies bind their params + 'self.
+(defn %deps-defprotocol (form)
+  (let ((clauses [[form cdr] cdr]))
+    [(%deps-clauses clauses) distinct]))
+
+; ───────────────────────────────────────────────────────────────
+; 5. (definitions ...) — the order-independent loader form
+; ───────────────────────────────────────────────────────────────
+;
+; analyzes its body forms, builds the dep graph restricted to
+; symbols any form in the bundle PRODUCES, topologically sorts,
+; and evals each form in dependency order in the caller's env.
+;
+; symbols that are referenced but produced outside the bundle
+; (kernel built-ins, prior `def`s, etc.) are NOT graph edges —
+; they're just resolved at eval time the usual way. if they're
+; missing, eval will surface the error like any other.
+;
+; cycles between bundle definitions are reported with the cycle
+; spelled out, since they're real bugs (mutual recursion goes
+; through fn captures, not top-level redefinition).
+
+; ── Kahn topological sort ─────────────────────────────────────
+;
+; each record is { form: <ast> produces: <sym|nil> deps: <list> }.
+; kahn pulls out records whose remaining deps are empty (all
+; their producers have already been emitted), records them as
+; ready, and trims those producers' symbols from the rest.
+
+(defn %toposort (records)
+  (%kahn records nil))
+
+(defn %kahn (pending out)
+  (if (nil? pending) { ok: out }
+    (let ((ready [pending select: |r| (nil? r.deps)])
+          (waiting [pending reject: |r| (nil? r.deps)]))
+      (if (nil? ready)
+        { cycle: pending out: out }
+        (let ((ready-syms [[ready map: |r| r.produces]
+                            select: |s| (some? s)])
+              (waiting-trimmed [waiting map: |r|
+                [r with: { deps: [r.deps reject: |d|
+                  [ready-syms includes: d]] }]]))
+          (%kahn waiting-trimmed [out append: ready]))))))
+
+; ── analysis stage ────────────────────────────────────────────
+
+; collect every symbol any form in the bundle produces, into a Set.
+(defn %bundle-produces (forms)
+  [forms fold: (Set) with: |s f|
+    (let ((p (produces-of f)))
+      (if (some? p) [s add: p] s))])
+
+; build the per-form record, with deps filtered to bundle-internal
+; producers only.
+(defn %analyze-bundle (forms)
+  (let ((bundle (%bundle-produces forms)))
+    [forms map: |f| {
+      form: f
+      produces: (produces-of f)
+      deps: [(deps-of f) select: |d| [bundle includes: d]] }]))
+
+; ── error reporting ───────────────────────────────────────────
+
+(defn %describe-cycle (records)
+  ; records here are the ones STILL pending after kahn — every
+  ; one is part of a cycle (or transitively waits on one).
+  (str "cycle in definitions involving: "
+       [[records map: |r| (if (some? r.produces)
+                            [r.produces describe]
+                            "<extender>")]
+         join: ", "]))
+
+; ── the form ──────────────────────────────────────────────────
+
+; result: nil on success, or { Err message: "cycle in ..." } on
+; error. moof's error model is values-not-exceptions, so callers
+; that want strict loading should `[result then:]` or check.
+(def definitions (vau forms $e
+  (let ((records (%analyze-bundle forms))
+        (sorted (%toposort records)))
+    (if (some? sorted.cycle)
+      (Err (%describe-cycle sorted.cycle))
+      (do
+        [sorted.ok each: |r| (eval r.form $e)]
+        nil)))))
+
+(defn %deps-clauses (clauses)
+  (if (nil? clauses) nil
+    (let ((head (if (cons? [clauses car]) [[clauses car] car] nil))
+          (rest [[clauses car] cdr]))
+      ; skip strings (docstring) and unrecognized clause shapes
+      (if [head identical: 'include]
+        ; (include Proto) — Proto is a dep
+        [(free-vars [rest car] nil) append:
+          (%deps-clauses [clauses cdr])]
+        (if [head identical: 'require]
+          ; (require (sel params...) "doc"?) — no deps
+          (%deps-clauses [clauses cdr])
+          (if [head identical: 'provide]
+            ; (provide (sel params...) body...) — params + self bind
+            (let ((sig [rest car])
+                  (params (if (cons? sig) [sig cdr] nil))
+                  (body [rest cdr])
+                  (param-syms (%param-syms params)))
+              [(free-vars body (cons 'self param-syms)) append:
+                (%deps-clauses [clauses cdr])])
+            ; unknown clause — fall through to generic
+            [(free-vars [clauses car] nil) append:
+              (%deps-clauses [clauses cdr])]))))))

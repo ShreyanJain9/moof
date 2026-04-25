@@ -78,6 +78,7 @@ files = [
   "lib/tools/query.moof",
   "lib/tools/workspace.moof",
   "lib/tools/test.moof",
+  "lib/tools/definitions.moof",
 
   # system — vat-0 substrate. registry MUST come before
   # services.moof (which uses it) and before system.moof (whose

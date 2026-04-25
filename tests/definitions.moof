@@ -1,0 +1,84 @@
+; definitions.moof — tests for lib/tools/definitions.moof
+;
+; the analyzer is reusable so we can hit it directly without
+; going through (definitions ...). these all return values that
+; the test framework checks, so they're hermetic.
+
+(def definitions-tests (suite "definitions"
+
+  ; ── free-vars: leaf cases ──────────────────────────────
+
+  (test "fv: bare ref"
+    (free-vars 'x nil)
+    (list 'x))
+
+  (test "fv: bound ref"
+    (free-vars 'x (list 'x))
+    nil)
+
+  (test "fv: special form"
+    (free-vars 'if nil)
+    nil)
+
+  ; ── free-vars: structural ─────────────────────────────
+
+  (test "fv: send"
+    (free-vars '[x + 1] nil)
+    (list 'x))
+
+  (test "fv: fn shadows"
+    (free-vars '(fn (x) [(g x) + 1]) nil)
+    (list 'g))
+
+  (test "fv: vau shadows args + env"
+    (free-vars '(vau args $e (g args $e)) nil)
+    (list 'g))
+
+  (test "fv: let progressive"
+    (free-vars '(let ((a 1) (b (g a))) [a + b]) nil)
+    (list 'g))
+
+  (test "fv: quote suppresses"
+    (free-vars '(quote (x y z)) nil)
+    nil)
+
+  (test "fv: quasiquote with unquote escapes"
+    (free-vars '(quasiquote (a b (unquote x))) nil)
+    (list 'x))
+
+  (test "fv: nested fn shadows outer"
+    (free-vars '(fn (x) (fn (x) [x + 1])) nil)
+    nil)
+
+  ; ── produces-of ──────────────────────────────────────
+
+  (test "produces: def" (produces-of '(def foo 42)) 'foo)
+  (test "produces: defn" (produces-of '(defn bar (x) x)) 'bar)
+  (test "produces: defprotocol" (produces-of '(defprotocol P)) 'P)
+  (test "produces: defmethod is extender, not producer"
+    (produces-of '(defmethod Object x () 1))
+    nil)
+  (test "produces: conform is extender, not producer"
+    (produces-of '(conform Foo P))
+    nil)
+
+  ; ── deps-of ──────────────────────────────────────────
+
+  (test "deps: def value"
+    (deps-of '(def quad (fn (x) [(double x) * 2])))
+    (list 'double))
+
+  (test "deps: defn body"
+    (deps-of '(defn quad (x) [(double x) * 2]))
+    (list 'double))
+
+  (test "deps: defmethod treats Proto as a dep"
+    [(deps-of '(defmethod Object foo () (helper self)))
+      sortBy: |s| [s describe]]
+    [(list 'Object 'helper) sortBy: |s| [s describe]])
+
+  (test "deps: defprotocol include"
+    (deps-of '(defprotocol C (include S)))
+    (list 'S))
+
+))
