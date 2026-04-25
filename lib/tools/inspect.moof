@@ -14,149 +14,155 @@
 ; single-medium for now: aspect producers return Strings (text
 ; renderings). a later wave wires this to canvas / HTML / etc
 ; by parameterizing on a `medium` argument.
-
-(def Inspector {
-  [typeName] 'Inspector
-  target:  nil    ; the inspected value
-  aspects: #[]    ; Table { name: producer-fn } where producer-fn = |target| -> String
-
-  ; list the aspect names this inspector offers
-  [aspectNames] [@aspects keys]
-
-  ; render a specific aspect by name (returns String; nil if no such aspect)
-  [render: name]
-    (let ((producer [@aspects at: name]))
-      (if (nil? producer) nil
-        (producer @target)))
-
-  ; the default aspect is the first one declared — fallback for
-  ; renderers that just want "something reasonable."
-  [default]
-    (let ((names [@aspects keys]))
-      (if (nil? names) [@target describe]
-        [self render: [names car]]))
-
-  [describe]
-    (str "<Inspector " [@target typeName] " (" [[@aspects keys] count] " aspects)>")
-
-  [show]  [self describe]
-})
-
-; ══════════════════════════════════════════════════════════
-; helpers for authoring aspect sets
-; ══════════════════════════════════════════════════════════
-
-; aspects: (name fn name fn ...) → Table. keeps the defmethod
-; body concise instead of writing out a full #[...] literal.
-(defn aspects args (aspects-build #[] args))
-
-(defn aspects-build (acc pairs)
-  (if (nil? pairs) acc
-    (aspects-build [acc at: [pairs car] put: [[pairs cdr] car]]
-                   [[pairs cdr] cdr])))
-
-; ══════════════════════════════════════════════════════════
-; Object — the default inspector every value inherits
-; ══════════════════════════════════════════════════════════
 ;
-; three aspects every value has:
-;   describe     — the one-line string form
-;   shape        — typeName + public slots + handlers as data
-;   prototypes   — full delegation chain
+; this file is a definition bundle — top-level forms can be
+; written in any order; the loader topologically sorts by
+; free-variable analysis. see docs/concepts/definitions.md.
 
-(defmethod Object inspect ()
-  { Inspector
-    target:  self
-    aspects: (aspects
-       'describe   |v| [v describe]
-       'shape      |v| [[v shape] describe]
-       'prototypes |v| [[[v prototypes] map: |p| [p typeName]] describe])
+(definitions
+
+  (def Inspector {
+    [typeName] 'Inspector
+    target:  nil    ; the inspected value
+    aspects: #[]    ; Table { name: producer-fn } where producer-fn = |target| -> String
+
+    ; list the aspect names this inspector offers
+    [aspectNames] [@aspects keys]
+
+    ; render a specific aspect by name (returns String; nil if no such aspect)
+    [render: name]
+      (let ((producer [@aspects at: name]))
+        (if (nil? producer) nil
+          (producer @target)))
+
+    ; the default aspect is the first one declared — fallback for
+    ; renderers that just want "something reasonable."
+    [default]
+      (let ((names [@aspects keys]))
+        (if (nil? names) [@target describe]
+          [self render: [names car]]))
+
+    [describe]
+      (str "<Inspector " [@target typeName] " (" [[@aspects keys] count] " aspects)>")
+
+    [show]  [self describe]
   })
 
-; ══════════════════════════════════════════════════════════
-; Cons — list view, in addition to the defaults
-; ══════════════════════════════════════════════════════════
+  ; ══════════════════════════════════════════════════════════
+  ; helpers for authoring aspect sets
+  ; ══════════════════════════════════════════════════════════
 
-(defmethod Cons inspect ()
-  { Inspector
-    target:  self
-    aspects: (aspects
-       'describe |v| [v describe]
-       'list     |v|
-         (str "(" [v count] " elements)\n"
-              [[v map: |x| (str "  " [x describe])] join: "\n"])
-       'summary  |v|
-         (str "Cons: " [v count] " elements, first = " [[v first] describe]))
-  })
+  ; aspects: (name fn name fn ...) → Table. keeps the defmethod
+  ; body concise instead of writing out a full #[...] literal.
+  (defn aspects args (aspects-build #[] args))
 
-; ══════════════════════════════════════════════════════════
-; Table — grid view (key => value rows)
-; ══════════════════════════════════════════════════════════
+  (defn aspects-build (acc pairs)
+    (if (nil? pairs) acc
+      (aspects-build [acc at: [pairs car] put: [[pairs cdr] car]]
+                     [[pairs cdr] cdr])))
 
-(defmethod Table inspect ()
-  { Inspector
-    target:  self
-    aspects: (aspects
-       'describe |v| [v describe]
-       'grid     |v|
-         (let ((seq-rows [[v toList] map: |x| (str "  " [x describe])])
-               (map-rows [[v keys] map: |k|
-                            (str "  " [k describe] " => " [[v at: k] describe])]))
-           (str "seq (" [[v toList] count] "):\n"
-                [seq-rows join: "\n"]
-                "\nmap (" [[v keys] count] "):\n"
-                [map-rows join: "\n"]))
-       'summary  |v|
-         (str "Table: " [[v toList] count] " seq, " [[v keys] count] " keyed"))
-  })
+  ; ══════════════════════════════════════════════════════════
+  ; Object — the default inspector every value inherits
+  ; ══════════════════════════════════════════════════════════
+  ;
+  ; three aspects every value has:
+  ;   describe     — the one-line string form
+  ;   shape        — typeName + public slots + handlers as data
+  ;   prototypes   — full delegation chain
 
-; ══════════════════════════════════════════════════════════
-; Set — list of members + summary
-; ══════════════════════════════════════════════════════════
+  (defmethod Object inspect ()
+    { Inspector
+      target:  self
+      aspects: (aspects
+         'describe   |v| [v describe]
+         'shape      |v| [[v shape] describe]
+         'prototypes |v| [[[v prototypes] map: |p| [p typeName]] describe])
+    })
 
-(defmethod Set inspect ()
-  { Inspector
-    target:  self
-    aspects: (aspects
-       'describe |v| [v describe]
-       'members  |v|
-         (str "{" [v count] " elements}\n"
-              [[[v toList] map: |x| (str "  " [x describe])] join: "\n"])
-       'summary  |v|
-         (str "Set: " [v count] " elements"))
-  })
+  ; ══════════════════════════════════════════════════════════
+  ; Cons — list view, in addition to the defaults
+  ; ══════════════════════════════════════════════════════════
 
-; ══════════════════════════════════════════════════════════
-; Stream — aspects bound by explicit take (infinite-safe)
-; ══════════════════════════════════════════════════════════
+  (defmethod Cons inspect ()
+    { Inspector
+      target:  self
+      aspects: (aspects
+         'describe |v| [v describe]
+         'list     |v|
+           (str "(" [v count] " elements)\n"
+                [[v map: |x| (str "  " [x describe])] join: "\n"])
+         'summary  |v|
+           (str "Cons: " [v count] " elements, first = " [[v first] describe]))
+    })
 
-(defmethod Stream inspect ()
-  { Inspector
-    target:  self
-    aspects: (aspects
-       'describe |v| [v describe]
-       'peek     |v|
-         ; peek the first 5 — destructive on the stream, but safe
-         (str "first 5:\n"
-              [[[v take: 5] map: |x| (str "  " [x describe])] join: "\n"]))
-  })
+  ; ══════════════════════════════════════════════════════════
+  ; Table — grid view (key => value rows)
+  ; ══════════════════════════════════════════════════════════
 
-; ══════════════════════════════════════════════════════════
-; Protocol — the introspection target we dreamed about
-; ══════════════════════════════════════════════════════════
+  (defmethod Table inspect ()
+    { Inspector
+      target:  self
+      aspects: (aspects
+         'describe |v| [v describe]
+         'grid     |v|
+           (let ((seq-rows [[v toList] map: |x| (str "  " [x describe])])
+                 (map-rows [[v keys] map: |k|
+                              (str "  " [k describe] " => " [[v at: k] describe])]))
+             (str "seq (" [[v toList] count] "):\n"
+                  [seq-rows join: "\n"]
+                  "\nmap (" [[v keys] count] "):\n"
+                  [map-rows join: "\n"]))
+         'summary  |v|
+           (str "Table: " [[v toList] count] " seq, " [[v keys] count] " keyed"))
+    })
 
-(defmethod Protocol inspect ()
-  { Inspector
-    target:  self
-    aspects: (aspects
-       'describe    |v| (str "<Protocol " v.name ">")
-       'requires    |v|
-         (let ((reqs v.requires))
-           (if (nil? reqs) "(no required methods)"
-             (str "requires:\n"
-                  [[reqs map: |r| (str "  " [r describe])] join: "\n"])))
-       'doc         |v|
-         (or v.doc "(no docstring)"))
-  })
+  ; ══════════════════════════════════════════════════════════
+  ; Set — list of members + summary
+  ; ══════════════════════════════════════════════════════════
 
-(conform Inspector Showable)
+  (defmethod Set inspect ()
+    { Inspector
+      target:  self
+      aspects: (aspects
+         'describe |v| [v describe]
+         'members  |v|
+           (str "{" [v count] " elements}\n"
+                [[[v toList] map: |x| (str "  " [x describe])] join: "\n"])
+         'summary  |v|
+           (str "Set: " [v count] " elements"))
+    })
+
+  ; ══════════════════════════════════════════════════════════
+  ; Stream — aspects bound by explicit take (infinite-safe)
+  ; ══════════════════════════════════════════════════════════
+
+  (defmethod Stream inspect ()
+    { Inspector
+      target:  self
+      aspects: (aspects
+         'describe |v| [v describe]
+         'peek     |v|
+           ; peek the first 5 — destructive on the stream, but safe
+           (str "first 5:\n"
+                [[[v take: 5] map: |x| (str "  " [x describe])] join: "\n"]))
+    })
+
+  ; ══════════════════════════════════════════════════════════
+  ; Protocol — the introspection target we dreamed about
+  ; ══════════════════════════════════════════════════════════
+
+  (defmethod Protocol inspect ()
+    { Inspector
+      target:  self
+      aspects: (aspects
+         'describe    |v| (str "<Protocol " v.name ">")
+         'requires    |v|
+           (let ((reqs v.requires))
+             (if (nil? reqs) "(no required methods)"
+               (str "requires:\n"
+                    [[reqs map: |r| (str "  " [r describe])] join: "\n"])))
+         'doc         |v|
+           (or v.doc "(no docstring)"))
+    })
+
+  (conform Inspector Showable))

@@ -74,11 +74,13 @@ files = [
   "lib/flow/pattern.moof",
 
   # tools — meta and composition
+  # definitions provides the (definitions ...) bundle form;
+  # everything below this can be authored as a definition bundle.
+  "lib/tools/definitions.moof",
   "lib/tools/inspect.moof",
   "lib/tools/query.moof",
   "lib/tools/workspace.moof",
   "lib/tools/test.moof",
-  "lib/tools/definitions.moof",
 
   # system — vat-0 substrate. registry MUST come before
   # services.moof (which uses it) and before system.moof (whose

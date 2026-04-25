@@ -211,7 +211,15 @@
 ; evaluate. specialized per definer shape so the right things
 ; are treated as bindings vs. references.
 
+; deps-of returns the form's free symbols filtered against its
+; own produces — top-level fns can refer to themselves (late
+; binding via env lookup at call-time), and that's not a cycle.
 (defn deps-of (form)
+  (let ((own (produces-of form))
+        (raw (%deps-of-raw form)))
+    (if (some? own) [raw reject: |s| [s identical: own]] raw)))
+
+(defn %deps-of-raw (form)
   (if (not (cons? form))
     (free-vars form nil)
     (let ((head [form car]))
