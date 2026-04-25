@@ -12,6 +12,12 @@
 ; the REPL drains Acts implicitly, so
 ;   [(report core-tests) then: |s| [console println: s]]
 ; prints the report once all async tests complete.
+;
+; this file is a definition bundle — top-level forms can be
+; written in any order; the loader topologically sorts by
+; free-variable analysis. see docs/concepts/definitions.md.
+
+(definitions
 
 (defn assert (condition msg)
   (if condition { Ok value: msg }
@@ -93,4 +99,4 @@
                           [acc ++ (str "    FAIL: " [r.message describe] "\n")]]))
         (str "\n  " name "\n  "
           [passed describe] " passed, " [failed describe] " failed\n"
-          failures)))))
+          failures))))))

@@ -126,19 +126,59 @@ a correctness bug.
 
 ---
 
+## file-level conversion (the MVP path)
+
+today, a `.moof` file opts in by wrapping its body in a single
+`(definitions ...)` form:
+
+```moof
+; lib/tools/inspect.moof — definition bundle
+
+(definitions
+
+  (def Inspector { ... })
+  (defn aspects args (aspects-build #[] args))
+  (defn aspects-build (acc pairs) ...)
+  (defmethod Object inspect () ...)
+  ...
+  (conform Inspector Showable))
+```
+
+constraints:
+
+- `(definitions ...)` is provided by `lib/tools/definitions.moof`.
+  files that load BEFORE that one (the kernel, lib/data, the
+  imperative parts of lib/tools) cannot use bundle mode yet.
+- the bundle is one form, so the file's whole content lives at
+  one indentation level. comments, whitespace, and section
+  banners still work inline as expected.
+
+bundles confirmed working in tree (all stage 11.0):
+
+- `lib/tools/inspect.moof`
+- `lib/tools/query.moof`
+- `lib/tools/test.moof`
+
 ## what's deliberately not here yet
 
-- **file-level conversion.** `definitions` is a form you opt
-  into. `.moof` files are still imperative sequences. once
-  the form is solid, we'll add a file-level mode that wraps
-  the whole file implicitly.
-- **namespace-as-value.** Wave 9. a bundle becomes a value
-  you can pass around, save to the image, send across vats.
+- **per-file pragma**, e.g. a leading `;; #bundle` comment that
+  the loader recognizes and wraps automatically. saves one
+  level of indentation. the current `(definitions ...)` wrap is
+  a workable substitute until we have enough bundles to justify
+  the loader change.
+- **bundle-mode for early-load files** (kernel + early lib/data).
+  needs a Rust-side analyzer in the loader so bootstrapping
+  doesn't depend on moof-side definitions.moof being loaded
+  first.
+- **namespace-as-value.** Wave 9. a bundle becomes a value you
+  can pass around, save to the image, send across vats.
 - **incremental refresh.** edit one definition; recompile only
   it; rebind, leaving everything else alone. needs the value
   side to be solid first.
-- **mutual recursion across top-level definitions.** today,
-  use `fn` captures. cross-definition cycles are an error.
+- **mutual recursion across top-level definitions.** today, use
+  `fn` captures. top-level cross-definition cycles are an error.
+  self-recursion in a single defn IS allowed (filtered out of
+  deps automatically).
 
 ---
 

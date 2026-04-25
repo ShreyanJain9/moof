@@ -1,5 +1,14 @@
 ; query.moof — declarative queries as first-class values
 ;
+; this file is a definition bundle — top-level forms can be
+; written in any order; the loader topologically sorts by
+; free-variable analysis. see docs/concepts/definitions.md.
+
+(definitions
+
+; ──────────────────────────────────────────────────────────────
+; (original docstring follows)
+;
 ; a Query is a VALUE you assemble by composing primitive steps
 ; (where:, orderBy:, take:, drop:, map:). the Query isn't run
 ; until you ask; it's also inspectable, serializable, and ship-
@@ -118,4 +127,4 @@
                    join: "\n"]))))
   })
 
-(conform Query Showable)
+(conform Query Showable))
