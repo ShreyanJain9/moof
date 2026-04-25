@@ -79,12 +79,20 @@
             { params: params doc: method-doc kind: 'require }] }])
       (if [[clause car] identical: 'provide]
         ; (provide (sel params...) body...)
+        ; the handler closure carries its source bundle — the
+        ; whole (provide ...) clause as :form, with text
+        ; rendered from the form (the parser doesn't track
+        ; per-clause byte ranges inside a defprotocol). so
+        ; [installed-handler source] returns the canonical
+        ; authored thing after conform installs it.
         (let ((sig [[clause cdr] car])
               (sel [sig car])
               (params [sig cdr])
               (body [[clause cdr] cdr])
-              (handler (eval (cons 'fn
-                        (cons (cons 'self params) body)) env)))
+              (raw-handler (eval (cons 'fn
+                        (cons (cons 'self params) body)) env))
+              (source-bundle { form: clause text: [clause describe] })
+              (handler [raw-handler with: { source: source-bundle }]))
           [acc with: {
             provides: [acc.provides at: sel put: handler]
             docs: [acc.docs at: sel put:
