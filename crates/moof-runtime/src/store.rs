@@ -82,7 +82,7 @@ impl Store {
                 arity: d.chunk.arity,
                 num_regs: d.chunk.num_regs,
                 param_names: d.param_names.clone(),
-                is_operative: d.is_operative,
+                is_operative: false,  // legacy slot — always false in new images
                 capture_names: d.capture_names.clone(),
                 capture_parent_regs: d.capture_parent_regs.clone(),
                 capture_local_regs: d.capture_local_regs.clone(),
@@ -147,7 +147,8 @@ pub struct SerializableClosureDesc {
     pub arity: u8,
     pub num_regs: u8,
     pub param_names: Vec<u32>,
-    pub is_operative: bool,
+    #[serde(default)]
+    pub is_operative: bool,  // legacy field, kept for image compat (unused after wave 12)
     pub capture_names: Vec<u32>,
     pub capture_parent_regs: Vec<u8>,
     pub capture_local_regs: Vec<u8>,

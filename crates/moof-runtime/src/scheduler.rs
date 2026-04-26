@@ -557,7 +557,11 @@ impl Scheduler {
 
         let src_desc = &from_vat.vm.closure_descs_ref()[code_idx];
         let src_chunk_arity = src_desc.chunk.arity;
-        let src_is_operative = src_desc.is_operative;
+        // structurally check: was the source closure an applicative?
+        // (has __underlying slot.) we copy that bit so the target heap
+        // builds a structurally-equivalent closure.
+        let src_is_applicative = !from_vat.heap.as_closure(closure_val)
+            .map(|(_, is_op)| is_op).unwrap_or(true);
         let src_desc_base = src_desc.desc_base;
 
         // clone all descs from desc_base onwards
@@ -567,7 +571,7 @@ impl Scheduler {
                 let const_vals: Vec<Value> = d.chunk.constants.iter()
                     .map(|&bits| Value::from_bits(bits))
                     .collect();
-                (d.chunk.clone(), d.param_names.clone(), d.is_operative,
+                (d.chunk.clone(), d.param_names.clone(),
                  d.capture_names.clone(), d.capture_parent_regs.clone(),
                  d.capture_local_regs.clone(), d.capture_values.clone(),
                  d.rest_param_reg, const_vals, d.source.clone())
@@ -593,7 +597,7 @@ impl Scheduler {
         let target_base = self.vat(to_vat_id).vm.closure_descs_ref().len();
         let new_code_idx = target_base + (code_idx - src_desc_base);
 
-        for (mut chunk, param_names, is_op, cap_names, cap_parent, cap_local, cap_vals, rest_reg, const_vals, src) in src_descs {
+        for (mut chunk, param_names, cap_names, cap_parent, cap_local, cap_vals, rest_reg, const_vals, src) in src_descs {
             chunk.constants = const_vals.iter()
                 .map(|v| self.copy_value_across(*v, from_vat_id, to_vat_id).to_bits())
                 .collect();
@@ -609,7 +613,6 @@ impl Scheduler {
             let desc = moof_lang::lang::compiler::ClosureDesc {
                 chunk,
                 param_names,
-                is_operative: is_op,
                 capture_names: cap_names,
                 capture_parent_regs: cap_parent,
                 capture_local_regs: cap_local,
@@ -621,12 +624,16 @@ impl Scheduler {
             self.vat_mut(to_vat_id).vm.add_closure_desc(desc);
         }
 
-        Some(self.vat_mut(to_vat_id).heap.make_closure(
+        let new_closure = self.vat_mut(to_vat_id).heap.make_closure(
             new_code_idx,
             src_chunk_arity,
-            src_is_operative,
             &new_captures,
-        ))
+        );
+        // restore applicative status if the source was wrapped.
+        if src_is_applicative {
+            self.vat_mut(to_vat_id).heap.set_closure_underlying(new_closure, new_closure);
+        }
+        Some(new_closure)
     }
 
     /// Copy a value from one vat's heap to another.

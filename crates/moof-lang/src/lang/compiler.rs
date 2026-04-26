@@ -10,7 +10,6 @@ use moof_core::value::Value;
 pub struct ClosureDesc {
     pub chunk: Chunk,
     pub param_names: Vec<u32>,
-    pub is_operative: bool,
     pub capture_names: Vec<u32>,
     pub capture_parent_regs: Vec<u8>,  // which parent registers to read
     pub capture_local_regs: Vec<u8>,   // which local registers to write captures into
@@ -371,7 +370,6 @@ impl<'a> Compiler<'a> {
                     let desc = ClosureDesc {
                         chunk,
                         param_names: param_syms,
-                        is_operative: true,
                         capture_names,
                         capture_parent_regs,
                         capture_local_regs,
@@ -385,14 +383,22 @@ impl<'a> Compiler<'a> {
                 }
 
                 "fn" | "lambda" if stable => {
-                    // (fn (params...) body...) → compile body as a sub-chunk, emit MakeClosure
+                    // (fn (params...) body...) → compile as a vau body,
+                    // then wrap. semantically equivalent to:
+                    //   (wrap (vau (params...) $_ body...))
+                    //
+                    // uniform call protocol: every closure has $env (or
+                    // synthesized $_ for fn) at the LAST positional slot,
+                    // filled from heap.env at call time (push_closure_frame).
+                    // applicative-vs-operative is a STRUCTURAL property:
+                    // fn output has __underlying set; vau output doesn't.
                     let items = self.heap.list_to_vec(expr);
                     if items.len() < 3 {
                         return Err("fn: need params and body".into());
                     }
                     // extract param names (with optional rest param)
                     let (positional, rest_param) = self.heap.extract_params(items[1]);
-                    let arity = positional.len() as u8;
+                    let arity = (positional.len() + 1) as u8;  // +1 for synthesized $_
 
                     let mut sub = Compiler::new(self.heap, "<fn>");
                     sub.parent_locals = self.build_sub_parent_locals();
@@ -402,6 +408,10 @@ impl<'a> Compiler<'a> {
                         let reg = sub.alloc_reg();
                         sub.locals.push((sym, reg));
                     }
+                    // synthesize $_ at the trailing env-param slot.
+                    let dollar_under_sym = self.heap.sym_dollar_under;
+                    let env_reg = sub.alloc_reg();
+                    sub.locals.push((dollar_under_sym, env_reg));
                     // rest param gets its own register (filled by VM)
                     let rest_reg = if let Some(rest_sym) = rest_param {
                         let reg = sub.alloc_reg();
@@ -447,10 +457,13 @@ impl<'a> Compiler<'a> {
                     }
                     self.closure_descs.extend(sub_descs);
 
+                    // include the synthesized $_ in param_names so the
+                    // per-call env binding pairs up with arity correctly.
+                    let mut param_names_with_env = positional;
+                    param_names_with_env.push(dollar_under_sym);
                     let desc = ClosureDesc {
                         chunk,
-                        param_names: positional,
-                        is_operative: false,
+                        param_names: param_names_with_env,
                         capture_names,
                         capture_parent_regs,
                         capture_local_regs,
@@ -459,8 +472,16 @@ impl<'a> Compiler<'a> {
                     };
                     let idx = self.closure_descs.len();
                     self.closure_descs.push(desc);
-                    // emit MakeClosure with index
+                    // emit MakeClosure into a temporary, then Op::Wrap
+                    // installs `__underlying = self` on the result. fn
+                    // closures need the wrap marker so compile-time call
+                    // sites see `has-underlying` and emit eval'd-args
+                    // dispatch (otherwise callers would pass raw forms,
+                    // which fn bodies can't use as values).
                     self.chunk.emit(Op::MakeClosure, dst, (idx >> 8) as u8, idx as u8);
+                    // wrap reads src from the second operand. since we
+                    // wrap the closure we just made (in `dst`), src == dst.
+                    self.chunk.emit(Op::Wrap, dst, dst, 0);
 
                     return Ok(());
                 }
@@ -920,26 +941,12 @@ impl<'a> Compiler<'a> {
         let func_const = self.add_sym_const(operative_sym);
         self.chunk.emit(Op::GetGlobal, func_reg, (func_const >> 8) as u8, func_const as u8);
 
-        // `$e` is the caller's actual env. push_closure_frame for the
-        // caller has already allocated a per-call env holding params +
-        // captures as bindings, so name lookups inside (eval form $e)
-        // walk the chain and find caller-locals naturally — Kernel-pure.
-        let env_reg = self.alloc_reg();
-        self.chunk.emit(Op::CurrentEnv, env_reg, 0, 0);
-
-        // call the operative with (args-list, env)
-        // operative's params are (user-params... $env)
-        // we pass: the args list as first param, env as second
-        // the operative body destructures from the args list
-        // ... actually, the operative expects individual params, not a list.
-        // let's pass the args as individual values (quoted) + env as last
-
-        // build a cons list: (ast-arg1 ast-arg2 ... env)
-        // operative params destructure from this list
+        // build the args list — raw AST forms, no env appended.
+        // every closure (operative or applicative) has $env at its last
+        // positional slot, filled by push_closure_frame from the
+        // caller's heap.env at call time. uniform call protocol.
         let list_reg = self.alloc_reg();
         self.chunk.emit(Op::LoadNil, list_reg, 0, 0);
-        // env is last element
-        self.chunk.emit(Op::Cons, list_reg, env_reg, list_reg);
         // args in reverse order (so they end up in correct list order).
         // reuse ONE scratch register across iterations — a fresh alloc
         // per arg would overflow the u8 register space for operatives

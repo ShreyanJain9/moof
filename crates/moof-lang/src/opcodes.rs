@@ -42,6 +42,12 @@ pub enum Op {
                          // emitted by the operative call site so `$e` is
                          // the caller's actual env, not a slot-snapshot.
     Eval         = 0x70, // dst, src, _  — compile and execute src as AST, result in dst
+    Wrap         = 0x71, // dst, src, _  — make-applicative on src (a closure),
+                         // result in dst. installs `__underlying = src` on a
+                         // copy of src. fn fast-path emits MakeClosure (vau)
+                         // then Wrap to produce an applicative. user-facing
+                         // wrap (in moof prelude) calls __make-applicative
+                         // which is the same primitive.
     // Deprecated/removed in current runtime semantics.
     // Kept for bytecode compatibility auditing only; VM rejects them.
     TryCatch     = 0x80,
@@ -78,6 +84,7 @@ impl Op {
             0x61 => Some(Op::DefGlobal),
             0x62 => Some(Op::CurrentEnv),
             0x70 => Some(Op::Eval),
+            0x71 => Some(Op::Wrap),
             0x80 => Some(Op::TryCatch),
             0x81 => Some(Op::Throw),
             _ => None,

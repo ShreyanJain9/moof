@@ -30,20 +30,46 @@ impl Plugin for BlockPlugin {
             Ok(Value::boolean(heap.closure_is_pure(receiver)))
         });
 
-        // Block: operative? — true if this closure is an operative (fexpr)
+        // Block: operative? — structural: true iff this closure has no
+        // `__underlying` slot (i.e. it's not wrapping a target).
+        // as_closure returns (code_idx, is_operative) where is_operative
+        // is derived as `!has_underlying`.
         native(heap, block_id, "operative?", |heap, receiver, _args| {
-            let (_, is_op) = heap.as_closure(receiver).ok_or("operative?: not a closure")?;
-            Ok(Value::boolean(is_op))
+            let (_, is_operative) = heap.as_closure(receiver).ok_or("operative?: not a closure")?;
+            Ok(Value::boolean(is_operative))
         });
 
-        // Block: wrap — convert operative to applicative (Kernel's wrap).
-        // [operative wrap] => applicative (same code, args evaluated by caller).
-        // Produces a new closure General with is_operative=false.
-        native(heap, block_id, "wrap", |heap, receiver, _args| {
-            let (code_idx, _) = heap.as_closure(receiver).ok_or("wrap: not a closure")?;
+        // Block: applicative? — true iff this closure has __underlying
+        // (it's a wrap output around some other combiner).
+        native(heap, block_id, "applicative?", |heap, receiver, _args| {
+            let (_, is_operative) = heap.as_closure(receiver).ok_or("applicative?: not a closure")?;
+            Ok(Value::boolean(!is_operative))
+        });
+
+        // Block: __make-applicative — Kernel's wrap, structural form.
+        //   target.__make-applicative => closure with __underlying = target
+        // shares target's bytecode/captures/arity, just adds the marker
+        // slot. compile-time call sites query has-__underlying to decide
+        // whether to eval args before passing. moof-level (def wrap …)
+        // in the prelude is the user-facing form; this is the one-line
+        // primitive that does the slot construction.
+        //
+        // wrap-of-wrap stacks: the new wrap-output's __underlying points
+        // at the previous wrap-output, and unwrap walks the chain.
+        native(heap, block_id, "__make-applicative", |heap, receiver, _args| {
+            let (code_idx, _) = heap.as_closure(receiver).ok_or("__make-applicative: not a closure")?;
             let arity = heap.closure_arity(receiver).unwrap_or(0);
             let captures = heap.closure_captures(receiver);
-            Ok(heap.make_closure(code_idx, arity, false, &captures))
+            let new_closure = heap.make_closure(code_idx, arity, &captures);
+            heap.set_closure_underlying(new_closure, receiver);
+            Ok(new_closure)
+        });
+
+        // Block: unwrap — return the target this applicative wraps,
+        // or self if it's already an operative. inverse of wrap.
+        native(heap, block_id, "unwrap", |heap, receiver, _args| {
+            let underlying = heap.closure_underlying(receiver);
+            if underlying.is_nil() { Ok(receiver) } else { Ok(underlying) }
         });
 
         // Block: __source-text — low-level accessor for the raw source

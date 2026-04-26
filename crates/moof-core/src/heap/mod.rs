@@ -110,9 +110,18 @@ pub struct Heap {
     // dispatch.
     pub sym_code_idx: u32,
     pub sym_arity: u32,
-    pub sym_is_operative: u32,
+    /// Structural marker: when present on a closure, the closure is an
+    /// applicative wrapping `value-of-this-slot` (a vau). Absent =>
+    /// operative (raw forms + env). Replaces the old `is_operative`
+    /// bool. Compile-time call sites query `as_closure(val).has_underlying`
+    /// to decide raw-args vs eval'd-args dispatch. `unwrap` reads it.
+    pub sym_underlying: u32,
     pub sym_is_pure: u32,
     pub sym_scope: u32,
+    /// Synthesized "ignore the env" param name used by the fn fast-path.
+    /// Every closure's last positional is its env binding; for fn-style
+    /// closures the body never reads it, so we name it $_ as a marker.
+    pub sym_dollar_under: u32,
     /// "Lexical scope" pointer — separate from `env`. The reading
     /// scope (heap.env) is what GetGlobal walks; the lexical scope
     /// is what new closures capture as their `:__scope` at
@@ -199,7 +208,8 @@ impl Heap {
             sym_parent: 0, sym_describe: 0, sym_dnu: 0,
             sym_length: 0, sym_at: 0, sym_at_put: 0,
             sym_message: 0,
-            sym_code_idx: 0, sym_arity: 0, sym_is_operative: 0, sym_is_pure: 0, sym_scope: 0,
+            sym_code_idx: 0, sym_arity: 0, sym_underlying: 0, sym_is_pure: 0, sym_scope: 0,
+            sym_dollar_under: 0,
             lexical_scope: 0,
             sym_native_idx: 0,
             type_protos: ProtoRegistry::new(),
@@ -227,9 +237,10 @@ impl Heap {
         h.sym_message = h.intern("message");
         h.sym_code_idx = h.intern("code_idx");
         h.sym_arity = h.intern("arity");
-        h.sym_is_operative = h.intern("is_operative");
+        h.sym_underlying = h.intern("__underlying");
         h.sym_is_pure = h.intern("is_pure");
         h.sym_scope = h.intern("__scope");
+        h.sym_dollar_under = h.intern("$_");
         h.sym_native_idx = h.intern("native_idx");
         let bindings_sym = h.intern("bindings");
 
@@ -651,17 +662,20 @@ impl Heap {
 
         let code_idx_sym = self.sym_code_idx;
         let arity_sym    = self.sym_arity;
-        let is_op_sym    = self.sym_is_operative;
         let is_pure_sym  = self.sym_is_pure;
         let native_sym   = self.sym_native_idx;
         let name_sym_s   = self.intern("native-name");
         let name_val     = self.alloc_string(name);
 
-        let names  = vec![code_idx_sym, arity_sym, is_op_sym, is_pure_sym, native_sym, name_sym_s];
+        // natives don't carry __underlying — they're "operative-shaped"
+        // at the closure level, but actually invoked via the rust fn
+        // path (heap.as_native). callers that send to natives should
+        // be passing eval'd values; the native handler treats them as
+        // values, not forms.
+        let names  = vec![code_idx_sym, arity_sym, is_pure_sym, native_sym, name_sym_s];
         let values = vec![
             Value::integer(-1),              // code_idx sentinel (natives don't use bytecode)
             Value::integer(arity as i64),    // arity from selector or explicit
-            Value::boolean(false),           // not operative
             Value::boolean(true),            // native handlers are pure-ish by default
             Value::integer(idx as i64),      // native_idx → natives[idx]
             name_val,                        // native-name for describe
@@ -733,11 +747,15 @@ impl Heap {
     }
 
     /// Create a closure object: a General with PROTO_CLOSURE proto plus
-    /// metadata slots (code_idx / arity / is_operative / is_pure) and
-    /// captures as regular named slots. Metadata occupies slot indices
-    /// 0..4; captures follow starting at CLOSURE_FIXED_SLOTS. A `call:`
-    /// handler pointing to self is installed so dispatch finds it.
-    pub fn make_closure(&mut self, code_idx: usize, arity: u8, is_operative: bool, captures: &[(u32, Value)]) -> Value {
+    /// metadata slots (code_idx / arity / is_pure / __scope) and captures
+    /// as regular named slots. A `call:` handler pointing to self is
+    /// installed so dispatch finds it.
+    ///
+    /// All closures created via this path are OPERATIVES — they have no
+    /// `__underlying` slot. To make an applicative, call `wrap` (or
+    /// `make_applicative`) which installs `__underlying` pointing at
+    /// the wrapped target.
+    pub fn make_closure(&mut self, code_idx: usize, arity: u8, captures: &[(u32, Value)]) -> Value {
         let proto = self.type_protos.get(PROTO_CLOSURE).copied()
             .unwrap_or_else(|| self.type_protos[PROTO_OBJ]);
 
@@ -750,7 +768,6 @@ impl Heap {
 
         let code_idx_sym = self.intern("code_idx");
         let arity_sym = self.intern("arity");
-        let is_op_sym = self.intern("is_operative");
         let is_pure_sym = self.intern("is_pure");
         let scope_sym = self.intern("__scope");
 
@@ -772,11 +789,10 @@ impl Heap {
         // env that defn temporarily swaps into.
         let scope_val = Value::nursery(self.lexical_scope);
 
-        let mut names: Vec<u32> = Vec::with_capacity(5 + captures.len());
-        let mut values: Vec<Value> = Vec::with_capacity(5 + captures.len());
+        let mut names: Vec<u32> = Vec::with_capacity(4 + captures.len());
+        let mut values: Vec<Value> = Vec::with_capacity(4 + captures.len());
         names.push(code_idx_sym);  values.push(Value::integer(code_idx as i64));
         names.push(arity_sym);     values.push(Value::integer(arity as i64));
-        names.push(is_op_sym);     values.push(Value::boolean(is_operative));
         names.push(is_pure_sym);   values.push(Value::boolean(is_pure));
         names.push(scope_sym);     values.push(scope_val);
         for (sym, val) in captures {
@@ -848,10 +864,16 @@ impl Heap {
         self.closure_sources.get(code_idx).and_then(|o| o.as_ref())
     }
 
-    /// Check if a value is a closure object. Returns (code_idx,
-    /// is_operative) if so. Detection is proto-based + looks up
-    /// metadata slots by NAME (not index) so canonical serialization's
-    /// slot-sort doesn't break round-trip.
+    /// Check if a value is a closure object. Returns
+    /// `(code_idx, is_operative)` if so — the bool is derived
+    /// structurally as "no `__underlying` slot." Operatives have no
+    /// underlying; applicatives (wrap output) do. Compile-time call
+    /// sites use this bool to decide raw-args vs eval'd-args dispatch:
+    /// is_operative=true → compile_operative_call (raw forms),
+    /// is_operative=false → compile_call (eval'd values).
+    /// Detection is proto-based + looks up metadata slots by NAME
+    /// (not index) so canonical serialization's slot-sort doesn't
+    /// break round-trip.
     pub fn as_closure(&self, val: Value) -> Option<(usize, bool)> {
         let id = val.as_any_object()?;
         let obj = self.get(id);
@@ -862,17 +884,35 @@ impl Heap {
         // a sentinel code_idx of -1 and are NOT real bytecode closures.
         let code_idx_raw = obj.slot_get(self.sym_code_idx)?.as_integer()?;
         if code_idx_raw < 0 { return None; }
-        let is_op = obj.slot_get(self.sym_is_operative)
-            .map(|v| v.is_true()).unwrap_or(false);
-        Some((code_idx_raw as usize, is_op))
+        let is_operative = obj.slot_get(self.sym_underlying).is_none();
+        Some((code_idx_raw as usize, is_operative))
     }
 
-    /// Names of the 4 metadata slots on every closure. Used to
+    /// Read a closure's `__underlying` slot — the wrapped combiner if
+    /// this closure is an applicative, or NIL if it's an operative.
+    /// `unwrap` exposes this to userland.
+    pub fn closure_underlying(&self, val: Value) -> Value {
+        val.as_any_object()
+            .and_then(|id| self.get(id).slot_get(self.sym_underlying))
+            .unwrap_or(Value::NIL)
+    }
+
+    /// Set a closure's `__underlying` slot, marking it as applicative
+    /// wrapping `target`. Used by the `wrap` primitive and the fn
+    /// fast-path's MakeClosure-then-Wrap sequence.
+    pub fn set_closure_underlying(&mut self, closure: Value, target: Value) {
+        if let Some(id) = closure.as_any_object() {
+            let sym = self.sym_underlying;
+            self.get_mut(id).slot_set(sym, target);
+        }
+    }
+
+    /// Names of the metadata slots on every closure. Used to
     /// distinguish captures from metadata when walking slots.
     fn is_closure_metadata_slot(&self, sym: u32) -> bool {
         sym == self.sym_code_idx
             || sym == self.sym_arity
-            || sym == self.sym_is_operative
+            || sym == self.sym_underlying
             || sym == self.sym_is_pure
             || sym == self.sym_scope
     }
@@ -1190,6 +1230,13 @@ impl Heap {
         self.sym_length         = self.symbols.find("length").unwrap_or(0);
         self.sym_at             = self.symbols.find("at:").unwrap_or(0);
         self.sym_at_put         = self.symbols.find("at:put:").unwrap_or(0);
+        self.sym_code_idx       = self.symbols.find("code_idx").unwrap_or(0);
+        self.sym_arity          = self.symbols.find("arity").unwrap_or(0);
+        self.sym_underlying     = get_or_intern(&mut self.symbols, "__underlying");
+        self.sym_is_pure        = self.symbols.find("is_pure").unwrap_or(0);
+        self.sym_scope          = self.symbols.find("__scope").unwrap_or(0);
+        self.sym_dollar_under   = get_or_intern(&mut self.symbols, "$_");
+        self.sym_native_idx     = self.symbols.find("native_idx").unwrap_or(0);
         // message is special — interned eagerly because some paths
         // access it before image load runs.
         self.sym_message        = get_or_intern(&mut self.symbols, "message");

@@ -835,7 +835,7 @@ fn decode_general_into(
 //     u8 num_regs
 //     u32 name-len + name utf8
 //     u32 n-param-names + [utf8 each]                (symbols by name)
-//     u8 is_operative
+//     u8 _legacy_is_operative (always 0; dispatch is now structural via __underlying)
 //     u32 n-cap-names + [utf8 each]
 //     u32 n-cap-parent + [u8 each]
 //     u32 n-cap-local + [u8 each]
@@ -885,7 +885,10 @@ fn encode_desc_with(heap: &Heap, d: &ClosureDesc, table: &HashTable, out: &mut V
         out.extend_from_slice(n);
     }
 
-    out.push(d.is_operative as u8);
+    // legacy is_operative byte — always 0 in new images. left in the
+    // wire format so older readers don't choke on layout shift; new
+    // dispatch is structural via __underlying on the closure object.
+    out.push(0u8);
 
     out.extend_from_slice(&(d.capture_names.len() as u32).to_be_bytes());
     for &sym in &d.capture_names {
@@ -977,8 +980,10 @@ fn decode_desc(
         param_names.push(heap.intern(&n));
     }
 
+    // legacy is_operative byte — read and discard. dispatch is now
+    // structural via __underlying on the heap closure object.
     if *offset >= bytes.len() { return Err("truncated is_operative".into()); }
-    let is_operative = bytes[*offset] != 0; *offset += 1;
+    let _legacy_is_op = bytes[*offset] != 0; *offset += 1;
 
     let n_cap = read_u32(bytes, offset)? as usize;
     let mut capture_names = Vec::with_capacity(n_cap);
@@ -1041,7 +1046,6 @@ fn decode_desc(
     Ok(ClosureDesc {
         chunk,
         param_names,
-        is_operative,
         capture_names,
         capture_parent_regs,
         capture_local_regs,
@@ -1283,7 +1287,6 @@ mod tests {
         let desc = ClosureDesc {
             chunk,
             param_names: vec![sym_x, sym_y],
-            is_operative: false,
             capture_names: vec![sym_z],
             capture_parent_regs: vec![3],
             capture_local_regs: vec![5],
@@ -1316,7 +1319,6 @@ mod tests {
         assert_eq!(d.param_names.len(), 2);
         assert_eq!(fresh.symbol_name(d.param_names[0]), "x");
         assert_eq!(fresh.symbol_name(d.param_names[1]), "y");
-        assert_eq!(d.is_operative, false);
         assert_eq!(d.capture_parent_regs, vec![3]);
         assert_eq!(d.capture_local_regs, vec![5]);
         assert_eq!(d.capture_values.len(), 1);

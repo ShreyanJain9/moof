@@ -35,12 +35,22 @@
     ifTrue: (eval then $e)
     ifFalse: (eval else $e)]))
 
+; wrap — Kernel's wrap. takes a combiner (typically a vau), returns
+; a new closure with `__underlying` set to that combiner. structural
+; marker: compile-time call sites query has-__underlying to decide
+; raw-args vs eval'd-args dispatch. wrap-of-wrap stacks (each layer
+; nests __underlying). the one-line primitive `__make-applicative`
+; on Block does the slot construction; this vau just routes the
+; argument and sends.
+(def wrap (vau (target-form) $e
+  [(eval target-form $e) __make-applicative]))
+
 ; fn — create an applicative closure (args evaluated before body runs).
 ; this is Kernel's "wrap": take a vau, return an applicative.
 ; the compiler fast-path handles actual closure creation with capture
 ; analysis. this definition is the semantic spec.
 (def fn (vau (params body) $e
-  [(eval `(vau ,params $_ ,body) $e) wrap]))
+  (wrap (eval `(vau ,params $_ ,body) $e))))
 
 ; cons — the compiler emits the Cons opcode, but semantically
 ; it's a function that builds a pair.
