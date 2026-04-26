@@ -307,16 +307,16 @@
   [requires] @requires
   [forms]    @forms
 
-  ; apply → evaluate each form in the vat's current scope (defs
-  ; bind in the runtime's root env). returns nil. this is the
-  ; default case — most callers want to apply a bundle into "here."
+  ; apply → evaluate each form in the vat's current scope.
+  ; returns nil. this is the default case.
   [apply]
     (do [@forms each: |f| (eval f)] nil)
 
-  ; apply: target → evaluate each form, then copy the produced
-  ; bindings into target (a fresh Env). today defs still land
-  ; globally first (the runtime has no eval-into-target yet); we
-  ; populate target by reading the bindings back. returns target.
+  ; apply: target → evaluate each form, then copy each produced
+  ; binding into target. NOT real isolation (defs still land in
+  ; the current scope first; we capture them after). real isolation
+  ; would require closures-carry-env; see docs/concepts/vaus.md.
+  ; returns target.
   [apply: target]
     (do
       [@forms each: |f| (eval f)]

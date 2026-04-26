@@ -691,7 +691,24 @@ impl VM {
                         continue;
                     }
 
-                    // temporarily inject env slots as bindings
+                    // env_val behavior: inject the slots into the
+                    // current heap.env's bindings table, run, restore.
+                    // this preserves the existing semantics moof
+                    // depends on: vau bodies' `$e` is a slot-snapshot,
+                    // and do-notation/defmethod/defserver rely on
+                    // those locals being visible as globals during
+                    // eval.
+                    //
+                    // why we don't SWAP heap.env here for real Envs:
+                    // closures created during eval still resolve free
+                    // globals via heap.env at call time. if heap.env
+                    // is swapped to target during apply, but the
+                    // closure is later called from outside target,
+                    // its GetGlobals point at the wrong scope. real
+                    // isolation requires closures to carry their
+                    // lexical scope — a separate architectural move
+                    // (closures-carry-env). until then, inject is the
+                    // semantics that's actually correct end-to-end.
                     let mut saved_values: Vec<(u32, Option<Value>)> = Vec::new();
                     if let Some(env_id) = env_val.as_any_object() {
                         let slot_names = heap.get(env_id).slot_names();
@@ -707,9 +724,7 @@ impl VM {
                     let compile_result = match crate::lang::compiler::Compiler::compile_toplevel(heap, ast) {
                         Ok(r) => r,
                         Err(e) => {
-                            // compiler error → Err value
                             let err = heap.make_error(&format!("eval compile: {e}"));
-                            // restore bindings before returning
                             for (name, old_val) in saved_values {
                                 match old_val {
                                     Some(v) => { heap.env_def(name, v); }
@@ -725,7 +740,6 @@ impl VM {
                         Err(e) => heap.make_error(&e),
                     };
 
-                    // restore bindings
                     for (name, old_val) in saved_values {
                         match old_val {
                             Some(v) => { heap.env_def(name, v); }
