@@ -433,6 +433,31 @@ impl Heap {
         self.alloc_val(HeapObject::new_general(proto, slot_names, slot_values))
     }
 
+    /// Allocate a real Env value: a General whose proto is the Env
+    /// prototype and whose two user-facing slots are `parent` (the
+    /// fallback scope) and `bindings` (a fresh Table populated from
+    /// the supplied name→value pairs). Closure invocation uses this
+    /// to build a per-call env holding the call's params + captures,
+    /// so names live in env (Kernel-style) and `(eval form $e)`
+    /// resolves them through the env chain.
+    pub fn make_env(&mut self, parent: Value, names: Vec<u32>, values: Vec<Value>) -> Value {
+        debug_assert_eq!(names.len(), values.len(), "make_env: name/value length mismatch");
+        let proto = self.type_protos.get(PROTO_ENV).copied().unwrap_or(Value::NIL);
+        let bindings_sym = self.symbols.find("bindings").expect("`bindings` symbol must exist");
+        let bindings = {
+            let mut map = indexmap::IndexMap::new();
+            for (n, v) in names.into_iter().zip(values.into_iter()) {
+                map.insert(Value::symbol(n), v);
+            }
+            self.alloc_table(Vec::new(), map)
+        };
+        self.make_object_with_slots(
+            proto,
+            vec![self.sym_parent, bindings_sym],
+            vec![parent, bindings],
+        )
+    }
+
     /// Create an Err value with a message string.
     pub fn make_error(&mut self, msg: &str) -> Value {
         let msg_val = self.alloc_string(msg);

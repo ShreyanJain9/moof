@@ -498,9 +498,15 @@
 ; under the hood, (definitions ...) just builds a Bundle and
 ; applies it. the Bundle value is the canonical shape; this form
 ; is the convenience for "make + apply in one breath."
+;
+; we apply with `$e` as the target — kernel-pure semantics put
+; locals in the call env, so [b apply] (which is an applicative)
+; would land defs in apply's per-call env, not the caller's.
+; passing the caller's env explicitly puts the new bindings where
+; the user wrote `(definitions …)`.
 (def definitions (vau forms $e
   (let ((b (bundle-from forms)))
-    (if [b is: Err] b [b apply]))))
+    (if [b is: Err] b [b apply: $e]))))
 
 ; ───────────────────────────────────────────────────────────────
 ; 6. introspection — analyze-bundle and definitions-trace

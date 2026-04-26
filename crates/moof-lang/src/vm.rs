@@ -125,11 +125,36 @@ impl VM {
         let rest_reg = self.closure_descs[code_idx].rest_param_reg;
         let is_operative = self.closure_descs[code_idx].is_operative;
         let arity = chunk.arity as usize;
+        let param_names = self.closure_descs[code_idx].param_names.clone();
+        let capture_names = self.closure_descs[code_idx].capture_names.clone();
 
         // read captures from the heap closure object
         let captures_from_obj = heap.closure_captures(closure_val);
 
         let mut regs = vec![Value::NIL; chunk.num_regs as usize + 16];
+
+        // Track (name, value) pairs for the per-call env that the
+        // body's (eval form $e) will see. Operatives skip the env build
+        // entirely — they're macros and `$e` is the CALLER's env, not
+        // their own.
+        let mut env_names: Vec<u32> = Vec::new();
+        let mut env_values: Vec<Value> = Vec::new();
+
+        // rest_param symbol (if any) — needed to bind it in the env
+        // alongside positional params.
+        let rest_sym: Option<u32> = rest_reg.and_then(|rr| {
+            // locate the rest_sym by scanning param_names + the trailing
+            // entry: extract_params may have placed it AFTER the
+            // positionals, but param_names only stores positionals + $env
+            // for operatives. simpler to recover it from compiler-side
+            // bookkeeping — but we don't currently expose that. fall
+            // back to looking up by position in regs.
+            let _ = rr;
+            None  // we'll bind rest by register-only for now; eval'd
+                  // code in the body that names the rest param is rare,
+                  // and the bytecode reads the rest param via GetLocal.
+        });
+        let _ = rest_sym;
 
         if is_operative && rest_reg.is_some() && arity > 0 {
             // operative with rest param: $env is last positional, gets last arg (env).
@@ -162,6 +187,17 @@ impl VM {
                 let rest_args: Vec<Value> = unpacked.iter().skip(arity).copied().collect();
                 regs[rest_r as usize] = heap.list(&rest_args);
             }
+            // applicative: pair param NAMES with values for the env.
+            // (operatives don't take this branch; they pass through above
+            // and don't get a fresh env.)
+            if !is_operative {
+                for (i, &name) in param_names.iter().enumerate().take(arity) {
+                    if i < unpacked.len() {
+                        env_names.push(name);
+                        env_values.push(unpacked[i]);
+                    }
+                }
+            }
         }
         // load captured values into their compiler-assigned registers
         for (i, (_, val)) in captures_from_obj.iter().enumerate() {
@@ -171,25 +207,38 @@ impl VM {
                     regs[reg] = *val;
                 }
             }
+            // mirror captures into the env so eval'd code can resolve
+            // them by name.
+            if !is_operative && i < capture_names.len() {
+                env_names.push(capture_names[i]);
+                env_values.push(*val);
+            }
         }
 
-        // Closures-carry-env: applicatives swap heap.env (read scope)
-        // AND heap.lexical_scope (where new closures capture) to the
-        // closure's :__scope. OPERATIVES (vaus) DO NOT swap — they're
-        // macros and need the caller's scope visible during their
-        // nested (eval ... $e) calls.
+        // Closures-carry-env, Kernel-style.
+        //
+        // Applicative invocation builds a fresh per-call env: parent =
+        // closure.scope, bindings = positional params + captures. that
+        // env becomes heap.env for the body, so name lookups inside
+        // (eval form $e) walk param-locals → captures → outer scope
+        // → ... up to vat root, the way Kernel does.
+        //
+        // Operatives don't allocate. they're macros; $e is CALLER's
+        // env (passed as the last positional via Op::CurrentEnv), and
+        // the body's compiled bytecode never walks env for its own
+        // params — only to splice things into the eval'd form.
         let (saved_env, saved_lex) = if !is_operative {
             if let Some(cid) = closure_val.as_any_object() {
                 let scope_sym = heap.sym_scope;
-                if let Some(scope_val) = heap.get(cid).slot_get(scope_sym) {
-                    if let Some(scope_id) = scope_val.as_any_object() {
-                        let p_env = heap.env;
-                        let p_lex = heap.lexical_scope;
-                        heap.env = scope_id;
-                        heap.lexical_scope = scope_id;
-                        (Some(p_env), Some(p_lex))
-                    } else { (None, None) }
-                } else { (None, None) }
+                let scope_val = heap.get(cid).slot_get(scope_sym).unwrap_or(Value::NIL);
+                let new_env = heap.make_env(scope_val, env_names, env_values);
+                let new_env_id = new_env.as_any_object()
+                    .ok_or("push_closure_frame: make_env returned non-object")?;
+                let p_env = heap.env;
+                let p_lex = heap.lexical_scope;
+                heap.env = new_env_id;
+                heap.lexical_scope = new_env_id;
+                (Some(p_env), Some(p_lex))
             } else { (None, None) }
         } else { (None, None) };
 
@@ -437,7 +486,15 @@ impl VM {
                         let rest_reg = self.closure_descs[code_idx].rest_param_reg;
                         let is_operative = self.closure_descs[code_idx].is_operative;
                         let arity = chunk.arity as usize;
+                        let param_names = self.closure_descs[code_idx].param_names.clone();
+                        let capture_names = self.closure_descs[code_idx].capture_names.clone();
                         let captures_from_obj = heap.closure_captures(handler);
+
+                        // mirror push_closure_frame: build a per-call env
+                        // for applicatives so name lookups inside (eval ...)
+                        // walk param-locals → captures → outer scope.
+                        let mut env_names: Vec<u32> = Vec::new();
+                        let mut env_values: Vec<Value> = Vec::new();
 
                         let f = self.frames.last_mut().unwrap();
                         // reuse the frame: reset everything
@@ -476,6 +533,14 @@ impl VM {
                                 let rest_args: Vec<Value> = unpacked.iter().skip(arity).copied().collect();
                                 f.regs[rest_r as usize] = heap.list(&rest_args);
                             }
+                            if !is_operative {
+                                for (i, &name) in param_names.iter().enumerate().take(arity) {
+                                    if i < unpacked.len() {
+                                        env_names.push(name);
+                                        env_values.push(unpacked[i]);
+                                    }
+                                }
+                            }
                         }
                         for (i, (_, val)) in captures_from_obj.iter().enumerate() {
                             if i < capture_local_regs.len() {
@@ -484,21 +549,44 @@ impl VM {
                                     f.regs[reg] = *val;
                                 }
                             }
+                            if !is_operative && i < capture_names.len() {
+                                env_names.push(capture_names[i]);
+                                env_values.push(*val);
+                            }
                         }
-                        // closures-carry-env: applicative tail-call swaps
-                        // heap.env AND heap.lexical_scope to the new
-                        // closure's :__scope. operatives leave them.
-                        // saved_env/saved_lex on the frame are NOT
-                        // updated — they stay pointing at what was
-                        // active before the FIRST call into this frame.
+                        // closures-carry-env, Kernel-style: applicative
+                        // tail-call allocates a fresh per-call env (parent =
+                        // closure.scope, bindings = params + captures) and
+                        // makes it the active heap.env / lexical_scope.
+                        // operatives don't allocate. saved_env/saved_lex
+                        // on the frame stay at what was active before the
+                        // FIRST call into this frame.
                         if !is_operative {
                             if let Some(cid) = handler.as_any_object() {
                                 let scope_sym = heap.sym_scope;
-                                if let Some(scope_val) = heap.get(cid).slot_get(scope_sym) {
-                                    if let Some(scope_id) = scope_val.as_any_object() {
-                                        heap.env = scope_id;
-                                        heap.lexical_scope = scope_id;
+                                let scope_val = heap.get(cid).slot_get(scope_sym).unwrap_or(Value::NIL);
+                                let new_env = heap.make_env(scope_val, env_names, env_values);
+                                if let Some(new_env_id) = new_env.as_any_object() {
+                                    // The replacing call (applicative) is about
+                                    // to change heap.env. If the frame had no
+                                    // saved_env (operative tail-calling an
+                                    // applicative), the eventual Return would
+                                    // leak the per-call env into the caller —
+                                    // it'd see heap.env still pointing at the
+                                    // dead per-call env, with subsequent
+                                    // GetGlobal/DefGlobal landing in the wrong
+                                    // place. Capture current heap.env now so
+                                    // Return restores correctly. If saved_env
+                                    // is already Some(_), keep it — it points
+                                    // at the outermost env to restore to, and
+                                    // a tail-call chain shouldn't disturb that.
+                                    let f = self.frames.last_mut().unwrap();
+                                    if f.saved_env.is_none() {
+                                        f.saved_env = Some(heap.env);
+                                        f.saved_lex = Some(heap.lexical_scope);
                                     }
+                                    heap.env = new_env_id;
+                                    heap.lexical_scope = new_env_id;
                                 }
                             }
                         }
@@ -739,6 +827,11 @@ impl VM {
                     heap.env_def(name_sym, val);
                 }
 
+                Op::CurrentEnv => {
+                    let f = self.frames.last_mut().unwrap();
+                    f.regs[a as usize] = Value::nursery(heap.env);
+                }
+
                 Op::Eval => {
                     let ast = self.frames.last().unwrap().regs[b as usize];
                     let env_val = if c != 0 { self.frames.last().unwrap().regs[c as usize] } else { Value::NIL };
@@ -769,7 +862,7 @@ impl VM {
                     let saved_env = heap.env;
                     let saved_lex = heap.lexical_scope;
                     let mut swapped = false;
-                    let mut saved_target_parent: Option<(u32, Value)> = None;
+                    let saved_target_parent: Option<(u32, Value)> = None;
                     let mut saved_values: Vec<(u32, Option<Value>)> = Vec::new();
                     if let Some(env_id) = env_val.as_any_object() {
                         let bind_sym = heap.find_symbol("bindings");
@@ -779,20 +872,18 @@ impl VM {
                             .map(|bid| heap.is_table(Value::nursery(bid)))
                             .unwrap_or(false);
                         if is_real_env {
-                            // chain target.parent to outer scope so reads
-                            // can still resolve outer names. restore on exit.
-                            let par_sym = heap.intern("parent");
-                            let prior_parent = heap.get(env_id)
-                                .slot_get(par_sym).unwrap_or(Value::NIL);
-                            saved_target_parent = Some((env_id, prior_parent));
-                            heap.get_mut(env_id).slot_set(par_sym, Value::nursery(saved_env));
+                            // Just swap. Don't mutate target.parent —
+                            // its real chain is what defines the lookup
+                            // path. (a previous design transiently
+                            // re-chained target.parent = caller's env
+                            // to make "outer names visible during eval"
+                            // work, but that creates a cycle whenever
+                            // target is an ancestor of caller's env —
+                            // e.g. (eval form vat-root) from inside a
+                            // nested call. with locals-in-env, the
+                            // closure's natural scope chain reaches
+                            // outer names without the patch.)
                             heap.env = env_id;
-                            // user-explicit env: also update lexical_scope
-                            // so closures created during this eval capture
-                            // the target as their :__scope. (vau-style
-                            // INJECT path below leaves lexical_scope alone
-                            // — closures there capture the OUTER scope,
-                            // not the operative-locals snapshot.)
                             heap.lexical_scope = env_id;
                             swapped = true;
                         } else {

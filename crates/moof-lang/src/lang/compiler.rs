@@ -920,32 +920,12 @@ impl<'a> Compiler<'a> {
         let func_const = self.add_sym_const(operative_sym);
         self.chunk.emit(Op::GetGlobal, func_reg, (func_const >> 8) as u8, func_const as u8);
 
-        // capture the current local environment as a heap object
+        // `$e` is the caller's actual env. push_closure_frame for the
+        // caller has already allocated a per-call env holding params +
+        // captures as bindings, so name lookups inside (eval form $e)
+        // walk the chain and find caller-locals naturally — Kernel-pure.
         let env_reg = self.alloc_reg();
-        let locals_snapshot: Vec<(u32, u8)> = self.locals.clone();
-        if locals_snapshot.is_empty() {
-            self.chunk.emit(Op::LoadNil, env_reg, 0, 0);
-        } else {
-            let parent_reg = self.alloc_reg();
-            let obj_sym = self.heap.find_symbol("Object").unwrap_or(0);
-            let obj_const = self.add_sym_const(obj_sym);
-            self.chunk.emit(Op::GetGlobal, parent_reg, (obj_const >> 8) as u8, obj_const as u8);
-            let nslots = locals_snapshot.len();
-            let mut val_regs = Vec::new();
-            for &(_, reg) in &locals_snapshot {
-                let r = self.alloc_reg();
-                self.chunk.emit(Op::Move, r, reg, 0);
-                val_regs.push(r);
-            }
-            self.chunk.emit(Op::MakeObj, env_reg, parent_reg, nslots as u8);
-            for (i, &(sym, _)) in locals_snapshot.iter().enumerate() {
-                let name_const = self.add_sym_const(sym);
-                self.chunk.code.push((name_const >> 8) as u8);
-                self.chunk.code.push(name_const as u8);
-                self.chunk.code.push(val_regs[i]);
-                self.chunk.code.push(0);
-            }
-        }
+        self.chunk.emit(Op::CurrentEnv, env_reg, 0, 0);
 
         // call the operative with (args-list, env)
         // operative's params are (user-params... $env)

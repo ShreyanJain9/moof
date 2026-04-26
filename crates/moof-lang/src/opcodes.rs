@@ -38,6 +38,9 @@ pub enum Op {
     MakeTable    = 0x52, // dst, nseq, nmap — followed by register lists
     GetGlobal    = 0x60, // dst, name_hi, name_lo  (name is symbol constant index)
     DefGlobal    = 0x61, // name_hi, name_lo, src  (bind name to register value)
+    CurrentEnv   = 0x62, // dst, _, _  — load Value::nursery(heap.env) into dst.
+                         // emitted by the operative call site so `$e` is
+                         // the caller's actual env, not a slot-snapshot.
     Eval         = 0x70, // dst, src, _  — compile and execute src as AST, result in dst
     // Deprecated/removed in current runtime semantics.
     // Kept for bytecode compatibility auditing only; VM rejects them.
@@ -73,6 +76,7 @@ impl Op {
             0x52 => Some(Op::MakeTable),
             0x60 => Some(Op::GetGlobal),
             0x61 => Some(Op::DefGlobal),
+            0x62 => Some(Op::CurrentEnv),
             0x70 => Some(Op::Eval),
             0x80 => Some(Op::TryCatch),
             0x81 => Some(Op::Throw),
