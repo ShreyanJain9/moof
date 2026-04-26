@@ -62,7 +62,7 @@
 [console println: (str "    requires: " [[all requires] describe]
                        " ← internally closed")]
 
-[all apply: Env]
+[all apply]
 [console println: (str "    (variance (list 2 4 4 4 5 5 7 9)) = "
                        (variance (list 2 4 4 4 5 5 7 9)))]
 

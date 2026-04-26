@@ -94,7 +94,7 @@
     ; But we're in a fn, so we can eval it directly... actually the head
     ; is already a prototype value if the caller looked it up. Since
     ; patterns are raw AST, the head is a Symbol. Look up in the env.
-    (let ((proto (eval proto-ref Env)))
+    (let ((proto (eval proto-ref)))
       (if (nil? proto) (match-fail "unknown prototype")
         (if [val is: proto]
           (match-constructor-args arg-pats val proto)

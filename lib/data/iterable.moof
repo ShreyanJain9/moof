@@ -60,8 +60,8 @@
   ; ── aggregation ──────────────────────────────────────
 
   (provide (sum)     [self fold: 0 with: |a x| [a + x]])
-  (provide (product) [self fold: 1 with: |a x| [a * x]])
-  (provide (count)   [self fold: 0 with: |a _| [a + 1]])
+  (provide (product) [self fold: 1 with: |a x| [a * x]]) 
+  (provide (count)   [self fold: 0 with: |a _| [a + 1]]) ; simple reducer based methods 
 
   (provide (count: f)
     [self fold: 0 with: |a x| (if (f x) [a + 1] a)])

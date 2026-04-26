@@ -181,9 +181,14 @@ mutates the bindings table. plus the usual namespace ops:
 [Env]                           ; the global env (singleton)
 ```
 
-`Env` is bound to the global env value (where vat 0's user
-defs live). `[Env new]` constructs a fresh empty env; `[Env new:
-parent]` constructs one with a parent for lexical fallback.
+`Env` is the **prototype** — the Type, like Object/Cons/Set/etc.
+`[Env new]` and `[Env new: parent]` are class-side constructors;
+`(defmethod Env x ...)` adds methods to the type. there is **no
+user-facing name for "the global env"** — top-level defs land in
+the runtime's current scope implicitly, and `[bundle apply]` (no
+arg) targets that scope. eliminating the singleton's name makes
+"what scope is this binding going into?" a real question to
+think about, instead of a silent default.
 
 **`[bundle materialize]`** returns an Env populated with the
 bundle's bindings:

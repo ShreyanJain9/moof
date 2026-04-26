@@ -100,9 +100,11 @@ impl Plugin for BlockPlugin {
         let block_sym = heap.intern("Block");
         heap.env_def(block_sym, block_proto);
 
-        // -- Root environment: expose the actual env object as 'Env' --
-        let env_sym = heap.intern("Env");
-        heap.env_def(env_sym, Value::nursery(heap.env));
+        // (Env binding is owned by plugin-core, which binds it to
+        // the env PROTOTYPE — not to the vat's root scope value.
+        // there's no user-facing name for the singleton anymore;
+        // top-level defs land in the runtime's current scope
+        // implicitly, and Bundle.apply targets it without a name.)
     }
 }
 

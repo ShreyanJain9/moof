@@ -595,10 +595,14 @@ impl moof_core::Plugin for CorePlugin {
         let number_s = heap.intern("Number");
         heap.env_def(number_s, number_proto);
 
-        // expose the root environment object as 'Env'. its proto is
-        // env_proto (set above), so [Env at: 'foo] now works.
+        // bind `Env` to the env PROTOTYPE (the Type), not to the
+        // vat's root scope value. matches Object/Cons/Set/etc. —
+        // the name refers to the type, defmethod Env x works.
+        // there's no user-facing name for the vat's root scope;
+        // top-level defs land in it implicitly via the runtime,
+        // and Bundle.apply (no arg) targets it.
         let env_sym = heap.intern("Env");
-        heap.env_def(env_sym, Value::nursery(heap.env));
+        heap.env_def(env_sym, env_proto);
     }
 }
 

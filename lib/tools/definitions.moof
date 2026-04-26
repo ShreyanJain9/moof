@@ -307,19 +307,20 @@
   [requires] @requires
   [forms]    @forms
 
-  ; apply: target → evaluate each form in target, in dependency
-  ; order. if target is the global Env (or any other env), the
-  ; defs land in global today (real isolation needs VM work).
-  ; for fresh-env targets, we additionally copy each produced
-  ; binding into the target so it becomes a usable namespace.
-  ; returns target.
+  ; apply → evaluate each form in the vat's current scope (defs
+  ; bind in the runtime's root env). returns nil. this is the
+  ; default case — most callers want to apply a bundle into "here."
+  [apply]
+    (do [@forms each: |f| (eval f)] nil)
+
+  ; apply: target → evaluate each form, then copy the produced
+  ; bindings into target (a fresh Env). today defs still land
+  ; globally first (the runtime has no eval-into-target yet); we
+  ; populate target by reading the bindings back. returns target.
   [apply: target]
     (do
-      [@forms each: |f| (eval f target)]
-      (if (and [[target typeName] identical: 'Env]
-               (not [target identical: Env]))
-        [@provides each: |n| [target bind: n to: (eval n)]]
-        nil)
+      [@forms each: |f| (eval f)]
+      [@provides each: |n| [target bind: n to: (eval n)]]
       target)
 
   [describe]
@@ -383,7 +384,7 @@
 ; provides. the foundation of "module signature checking":
 ;
 ;   (if (bundle-satisfies? math-bundle stats-bundle)
-;     [(bundle-merge math-bundle stats-bundle) apply: Env]
+;     [(bundle-merge math-bundle stats-bundle) apply]
 ;     (Err "stats-bundle needs more than math-bundle gives"))
 (defn bundle-satisfies? (provider consumer)
   [[consumer requires] all: |req| [[provider provides] includes: req]])
@@ -502,7 +503,7 @@
 ; is the convenience for "make + apply in one breath."
 (def definitions (vau forms $e
   (let ((b (bundle-from forms)))
-    (if [b is: Err] b [b apply: $e]))))
+    (if [b is: Err] b [b apply]))))
 
 ; ───────────────────────────────────────────────────────────────
 ; 6. introspection — analyze-bundle and definitions-trace
