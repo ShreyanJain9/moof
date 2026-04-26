@@ -15,10 +15,10 @@
 ; across-vats-able. think SQL but as data you can pass around.
 ;
 ;   (def recent-vegetarian
-;     [[[[[from recipes]
-;         where: |r| [r isVegetarian]]
-;         orderBy: |r| [r modifiedAt]]
-;         take: 10]])
+;     (~> [from recipes]
+;         [_ where: |r| [r isVegetarian]]
+;         [_ orderBy: |r| [r modifiedAt]]
+;         [_ take: 10]))
 ;
 ;   [recent-vegetarian run]        → resolved result
 ;   [recent-vegetarian inspect]    → Inspector with 'steps / 'explain aspects
@@ -116,7 +116,9 @@
          (str "source: " [q.source describe])
        'result   |q|
          (str "result (" [[q run] count] " rows):\n"
-              [[[q run] map: |x| (str "  " [x describe])] join: "\n"])
+              (~> [q run]
+                  [_ map: |x| (str "  " [x describe])]
+                  [_ join: "\n"]))
        'explain  |q|
          (let ((steps q.steps))
            (str "from " [q.source typeName] "\n"

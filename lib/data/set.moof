@@ -47,12 +47,16 @@
     [[other toList] fold: self with: |s x| [s add: x]]
 
   [intersection: other]
-    [[[self toList] select: |x| [other includes: x]]
-      fold: { Set items: #[] } with: |s x| [s add: x]]
+    (~> self
+        [_ toList]
+        [_ select: |x| [other includes: x]]
+        [_ fold: { Set items: #[] } with: |s x| [s add: x]])
 
   [difference: other]
-    [[[self toList] reject: |x| [other includes: x]]
-      fold: { Set items: #[] } with: |s x| [s add: x]]
+    (~> self
+        [_ toList]
+        [_ reject: |x| [other includes: x]]
+        [_ fold: { Set items: #[] } with: |s x| [s add: x]])
 
   [subset?: other]
     [[self toList] all: |x| [other includes: x]]

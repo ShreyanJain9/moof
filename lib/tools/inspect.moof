@@ -76,7 +76,10 @@
       aspects: (aspects
          'describe   |v| [v describe]
          'shape      |v| [[v shape] describe]
-         'prototypes |v| [[[v prototypes] map: |p| [p typeName]] describe])
+         'prototypes |v| (~> v
+                              [_ prototypes]
+                              [_ map: |p| [p typeName]]
+                              [_ describe]))
     })
 
   ; ══════════════════════════════════════════════════════════
@@ -127,7 +130,10 @@
          'describe |v| [v describe]
          'members  |v|
            (str "{" [v count] " elements}\n"
-                [[[v toList] map: |x| (str "  " [x describe])] join: "\n"])
+                (~> v
+                    [_ toList]
+                    [_ map: |x| (str "  " [x describe])]
+                    [_ join: "\n"]))
          'summary  |v|
            (str "Set: " [v count] " elements"))
     })
@@ -144,7 +150,10 @@
          'peek     |v|
            ; peek the first 5 — destructive on the stream, but safe
            (str "first 5:\n"
-                [[[v take: 5] map: |x| (str "  " [x describe])] join: "\n"]))
+                (~> v
+                    [_ take: 5]
+                    [_ map: |x| (str "  " [x describe])]
+                    [_ join: "\n"])))
     })
 
   ; ══════════════════════════════════════════════════════════

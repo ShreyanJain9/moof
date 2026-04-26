@@ -64,13 +64,14 @@
 ; the initial registry. every vat gets this same populated
 ; binding at bootstrap; the repl can rebind after startup.
 ;
-; #[] is an empty Table; to populate we chain at:put: calls.
-; folding register: through a list of services would also work
-; but the chained form is more readable at declaration time.
+; thread each register: through Registry — top-down reads as a
+; pipeline of "register this, then this, then this …" rather than
+; the deeply-nested bracket form it'd otherwise be.
 (def system-registry
-  [[[[[[Registry register: ClockService]
-                 register: ConsoleService]
-                 register: FileService]
-                 register: RandomService]
-                 register: SystemService]
-                 register: EvaluatorService]))
+  (~> Registry
+      [_ register: ClockService]
+      [_ register: ConsoleService]
+      [_ register: FileService]
+      [_ register: RandomService]
+      [_ register: SystemService]
+      [_ register: EvaluatorService])))

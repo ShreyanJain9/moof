@@ -1,14 +1,52 @@
 ; threading.moof — thread-first functional pipelining.
 ;
-;   (~> 5 double inc)            ; → (inc (double 5)) = 11
+; ~> threads a value through a series of steps. each step is one of:
 ;
-; ~> is a vau so the fn forms aren't pre-evaluated — they're
-; resolved at each step and called via standard dispatch.
+;   • a CALLABLE (symbol bound to a fn, or a |x| block)
+;       → invoked with the threaded value as its single argument:
+;         (~> 5 double)              ⇒ (double 5)
+;         (~> 5 |n| [n * 2])         ⇒ (((fn (n) [n * 2])) 5) = 10
+;
+;   • a FORM containing the `_` placeholder
+;       → `_` is substituted with the threaded value, then eval'd:
+;         (~> 5 [_ * 3])             ⇒ [5 * 3] = 15
+;         (~> coll [_ map: |x| ...]) ⇒ [coll map: |x| ...]
+;         (~> 5 (max _ 10))          ⇒ (max 5 10)
+;         (~> "hi" (str "<" _ ">"))  ⇒ (str "<" "hi" ">") = "<hi>"
+;
+; the `_` form is the universal escape hatch: it works for message
+; sends, multi-arg fns, infix-style ops, anywhere — wherever you'd
+; normally write the threaded value, write `_` instead.
+;
+; rationale for not auto-inserting (clojure-style `(-> x (f a b))`
+; ⇒ `(f x a b)`): moof's send forms `[recv sel: arg]` desugar to
+; `(send recv 'sel arg)`, where recv is in position 1 — auto-inserting
+; would slot the threaded value at the head index, breaking sends.
+; explicit `_` gives one consistent rule.
 
-(defn %thread-first (val fn-forms env)
-  (if (nil? fn-forms) val
-    (let ((f (eval [fn-forms car] env)))
-      (%thread-first (f val) [fn-forms cdr] env))))
+(defn %~>-has-_ (form)
+  (if (eq form '_) true
+    (if (cons? form)
+      (if (%~>-has-_ [form car]) true
+        (%~>-has-_ [form cdr]))
+      false)))
+
+(defn %~>-substitute (form val)
+  (if (eq form '_)
+    (cons 'quote (cons val nil))
+    (if (cons? form)
+      (cons (%~>-substitute [form car] val)
+            (%~>-substitute [form cdr] val))
+      form)))
+
+(defn %~>-step (val step env)
+  (if (%~>-has-_ step)
+    (eval (%~>-substitute step val) env)
+    ((eval step env) val)))
+
+(defn %~>-fold (val steps env)
+  (if (nil? steps) val
+    (%~>-fold (%~>-step val [steps car] env) [steps cdr] env)))
 
 (def ~> (vau args $e
-  (%thread-first (eval [args car] $e) [args cdr] $e)))
+  (%~>-fold (eval [args car] $e) [args cdr] $e)))
