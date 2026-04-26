@@ -26,6 +26,12 @@ struct Frame {
     constants: Vec<u64>,
     desc_base: usize,
     result_reg: u8,     // register in CALLER's frame to store result
+    /// On entry to this frame, the previous heap.env was saved here
+    /// so the frame's scope (the closure's `:scope`) could become the
+    /// active scope for the body's GetGlobal / DefGlobal lookups.
+    /// On Return, restore heap.env from this. Some(_) iff the entry
+    /// did swap; closures that don't carry a scope leave it None.
+    saved_env: Option<u32>,
 }
 
 pub struct VM {
@@ -73,6 +79,7 @@ impl VM {
             constants: chunk.constants.clone(),
             desc_base: self.current_desc_base(),
             result_reg: 0,
+            saved_env: None,
         });
         // swap regs in (avoid clone)
         std::mem::swap(&mut self.frames.last_mut().unwrap().regs, &mut regs);
@@ -160,6 +167,26 @@ impl VM {
             }
         }
 
+        // Closures-carry-env: applicatives swap heap.env to their
+        // :__scope so free names resolve in the closure's defining
+        // scope. OPERATIVES (vaus) DO NOT swap — they're macros, and
+        // their semantics is "manipulate the caller's scope via $e."
+        // swapping for operatives would hide the caller's scope from
+        // the vau's nested (eval ... $e) calls, defeating do-notation,
+        // defmethod, defserver, etc.
+        let saved_env = if !is_operative {
+            if let Some(cid) = closure_val.as_any_object() {
+                let scope_sym = heap.sym_scope;
+                if let Some(scope_val) = heap.get(cid).slot_get(scope_sym) {
+                    if let Some(scope_id) = scope_val.as_any_object() {
+                        let prior = heap.env;
+                        heap.env = scope_id;
+                        Some(prior)
+                    } else { None }
+                } else { None }
+            } else { None }
+        } else { None };
+
         self.frames.push(Frame {
             regs,
             pc: 0,
@@ -167,6 +194,7 @@ impl VM {
             constants: chunk.constants.clone(),
             desc_base: closure_desc_base,
             result_reg,
+            saved_env,
         });
         Ok(())
     }
@@ -231,7 +259,11 @@ impl VM {
                 Op::Return => {
                     let val = f.regs[a as usize];
                     let result_reg = f.result_reg;
+                    let saved_env = f.saved_env;
                     self.frames.pop();
+                    // closures-carry-env: restore the heap.env that was
+                    // active before this closure's body started.
+                    if let Some(prior) = saved_env { heap.env = prior; }
                     if self.frames.len() <= base_depth {
                         // returned from the frame we were called to run
                         return Ok(val);
@@ -440,6 +472,23 @@ impl VM {
                                 let reg = capture_local_regs[i] as usize;
                                 if reg < f.regs.len() {
                                     f.regs[reg] = *val;
+                                }
+                            }
+                        }
+                        // closures-carry-env: applicative tail-call swaps
+                        // heap.env to the new closure's :__scope.
+                        // operatives (vaus) leave heap.env alone — same
+                        // reasoning as push_closure_frame.
+                        // saved_env on the frame is NOT updated — it
+                        // stays pointing at the heap.env that was active
+                        // before the FIRST call into this frame slot.
+                        if !is_operative {
+                            if let Some(cid) = handler.as_any_object() {
+                                let scope_sym = heap.sym_scope;
+                                if let Some(scope_val) = heap.get(cid).slot_get(scope_sym) {
+                                    if let Some(scope_id) = scope_val.as_any_object() {
+                                        heap.env = scope_id;
+                                    }
                                 }
                             }
                         }
@@ -691,33 +740,52 @@ impl VM {
                         continue;
                     }
 
-                    // env_val behavior: inject the slots into the
-                    // current heap.env's bindings table, run, restore.
-                    // this preserves the existing semantics moof
-                    // depends on: vau bodies' `$e` is a slot-snapshot,
-                    // and do-notation/defmethod/defserver rely on
-                    // those locals being visible as globals during
-                    // eval.
+                    // env_val handling has two shapes:
                     //
-                    // why we don't SWAP heap.env here for real Envs:
-                    // closures created during eval still resolve free
-                    // globals via heap.env at call time. if heap.env
-                    // is swapped to target during apply, but the
-                    // closure is later called from outside target,
-                    // its GetGlobals point at the wrong scope. real
-                    // isolation requires closures to carry their
-                    // lexical scope — a separate architectural move
-                    // (closures-carry-env). until then, inject is the
-                    // semantics that's actually correct end-to-end.
+                    //   REAL ENV (has `bindings` slot pointing at a
+                    //   Table) → SWAP heap.env. defs land in target.
+                    //   closures created during the eval carry target
+                    //   as their :__scope and look up free names in
+                    //   target's chain at call time, regardless of
+                    //   where they're invoked from. real isolation
+                    //   for [bundle apply: target].
+                    //
+                    //   SLOT-SNAPSHOT (no bindings table) → INJECT.
+                    //   copy slots into the current heap.env's
+                    //   bindings, run, restore. used by vau bodies
+                    //   where `$e` carries caller locals that should
+                    //   be visible as globals during eval (do-notation,
+                    //   defmethod, defserver, etc.).
+                    let saved_env = heap.env;
+                    let mut swapped = false;
+                    let mut saved_target_parent: Option<(u32, Value)> = None;
                     let mut saved_values: Vec<(u32, Option<Value>)> = Vec::new();
                     if let Some(env_id) = env_val.as_any_object() {
-                        let slot_names = heap.get(env_id).slot_names();
-                        let slot_vals: Vec<Value> = slot_names.iter()
-                            .map(|&n| heap.get(env_id).slot_get(n).unwrap_or(Value::NIL))
-                            .collect();
-                        for (&name, &val) in slot_names.iter().zip(slot_vals.iter()) {
-                            saved_values.push((name, heap.env_get(name)));
-                            heap.env_def(name, val);
+                        let bind_sym = heap.find_symbol("bindings");
+                        let is_real_env = bind_sym
+                            .and_then(|s| heap.get(env_id).slot_get(s))
+                            .and_then(|b| b.as_any_object())
+                            .map(|bid| heap.is_table(Value::nursery(bid)))
+                            .unwrap_or(false);
+                        if is_real_env {
+                            // chain target.parent to outer scope so reads
+                            // can still resolve outer names. restore on exit.
+                            let par_sym = heap.intern("parent");
+                            let prior_parent = heap.get(env_id)
+                                .slot_get(par_sym).unwrap_or(Value::NIL);
+                            saved_target_parent = Some((env_id, prior_parent));
+                            heap.get_mut(env_id).slot_set(par_sym, Value::nursery(saved_env));
+                            heap.env = env_id;
+                            swapped = true;
+                        } else {
+                            let slot_names = heap.get(env_id).slot_names();
+                            let slot_vals: Vec<Value> = slot_names.iter()
+                                .map(|&n| heap.get(env_id).slot_get(n).unwrap_or(Value::NIL))
+                                .collect();
+                            for (&name, &val) in slot_names.iter().zip(slot_vals.iter()) {
+                                saved_values.push((name, heap.env_get(name)));
+                                heap.env_def(name, val);
+                            }
                         }
                     }
 
@@ -725,6 +793,11 @@ impl VM {
                         Ok(r) => r,
                         Err(e) => {
                             let err = heap.make_error(&format!("eval compile: {e}"));
+                            if swapped { heap.env = saved_env; }
+                            if let Some((env_id, prior)) = saved_target_parent {
+                                let par_sym = heap.intern("parent");
+                                heap.get_mut(env_id).slot_set(par_sym, prior);
+                            }
                             for (name, old_val) in saved_values {
                                 match old_val {
                                     Some(v) => { heap.env_def(name, v); }
@@ -740,6 +813,11 @@ impl VM {
                         Err(e) => heap.make_error(&e),
                     };
 
+                    if swapped { heap.env = saved_env; }
+                    if let Some((env_id, prior)) = saved_target_parent {
+                        let par_sym = heap.intern("parent");
+                        heap.get_mut(env_id).slot_set(par_sym, prior);
+                    }
                     for (name, old_val) in saved_values {
                         match old_val {
                             Some(v) => { heap.env_def(name, v); }
@@ -918,6 +996,7 @@ impl VM {
             constants: chunk.constants.clone(),
             desc_base: base_idx,
             result_reg: 0,
+            saved_env: None,
         });
         self.run(heap)
     }

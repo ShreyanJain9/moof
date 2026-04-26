@@ -296,10 +296,17 @@ impl Heap {
         let obj = self.get(obj_id);
         let proto_bytes = self.canonical_value_bytes_in(obj.proto, visited);
 
-        // slots: sort by symbol name utf8
+        // slots: sort by symbol name utf8. SKIP `__`-prefixed names —
+        // the moof convention for "internal, not part of public
+        // identity." closures' `:__scope` is the load-bearing example:
+        // it back-references the lexical env the closure was created
+        // in, which transitively pulls in vat-wide state. excluding
+        // these from canonical bytes keeps content-hash/equal: focused
+        // on the actual structural content.
         let mut slot_entries: Vec<(String, Value)> = obj.slot_names.iter()
             .zip(obj.slot_values.iter())
             .map(|(&sym, &v)| (self.symbol_name(sym).to_string(), v))
+            .filter(|(name, _)| !name.starts_with("__"))
             .collect();
         slot_entries.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
 

@@ -112,6 +112,7 @@ pub struct Heap {
     pub sym_arity: u32,
     pub sym_is_operative: u32,
     pub sym_is_pure: u32,
+    pub sym_scope: u32,
     pub sym_native_idx: u32,
 
     // type prototypes: indexed by PROTO_* constants
@@ -188,7 +189,7 @@ impl Heap {
             sym_parent: 0, sym_describe: 0, sym_dnu: 0,
             sym_length: 0, sym_at: 0, sym_at_put: 0,
             sym_message: 0,
-            sym_code_idx: 0, sym_arity: 0, sym_is_operative: 0, sym_is_pure: 0,
+            sym_code_idx: 0, sym_arity: 0, sym_is_operative: 0, sym_is_pure: 0, sym_scope: 0,
             sym_native_idx: 0,
             type_protos: ProtoRegistry::new(),
             natives: Vec::new(),
@@ -217,6 +218,7 @@ impl Heap {
         h.sym_arity = h.intern("arity");
         h.sym_is_operative = h.intern("is_operative");
         h.sym_is_pure = h.intern("is_pure");
+        h.sym_scope = h.intern("__scope");
         h.sym_native_idx = h.intern("native_idx");
         let bindings_sym = h.intern("bindings");
 
@@ -713,13 +715,25 @@ impl Heap {
         let arity_sym = self.intern("arity");
         let is_op_sym = self.intern("is_operative");
         let is_pure_sym = self.intern("is_pure");
+        let scope_sym = self.intern("__scope");
 
-        let mut names: Vec<u32> = Vec::with_capacity(4 + captures.len());
-        let mut values: Vec<Value> = Vec::with_capacity(4 + captures.len());
+        // Capture the lexical scope (current heap.env) so this
+        // closure resolves free globals via its OWN scope chain at
+        // call time, not the caller's. This is "closures-carry-env":
+        // the standard lisp/scheme commitment that lets [bundle
+        // apply: target] do real isolation — defs in target's
+        // forms produce closures whose later GetGlobals walk
+        // target.bindings (and target.parent's chain) regardless
+        // of where they're invoked from.
+        let scope_val = Value::nursery(self.env);
+
+        let mut names: Vec<u32> = Vec::with_capacity(5 + captures.len());
+        let mut values: Vec<Value> = Vec::with_capacity(5 + captures.len());
         names.push(code_idx_sym);  values.push(Value::integer(code_idx as i64));
         names.push(arity_sym);     values.push(Value::integer(arity as i64));
         names.push(is_op_sym);     values.push(Value::boolean(is_operative));
         names.push(is_pure_sym);   values.push(Value::boolean(is_pure));
+        names.push(scope_sym);     values.push(scope_val);
         for (sym, val) in captures {
             names.push(*sym);
             values.push(*val);
@@ -815,6 +829,7 @@ impl Heap {
             || sym == self.sym_arity
             || sym == self.sym_is_operative
             || sym == self.sym_is_pure
+            || sym == self.sym_scope
     }
 
     pub fn closure_captures(&self, val: Value) -> Vec<(u32, Value)> {

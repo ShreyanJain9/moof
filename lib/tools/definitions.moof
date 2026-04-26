@@ -312,16 +312,13 @@
   [apply]
     (do [@forms each: |f| (eval f)] nil)
 
-  ; apply: target → evaluate each form, then copy each produced
-  ; binding into target. NOT real isolation (defs still land in
-  ; the current scope first; we capture them after). real isolation
-  ; would require closures-carry-env; see docs/concepts/vaus.md.
-  ; returns target.
+  ; apply: target → evaluate each form INTO target. real
+  ; isolation: defs land in target.bindings, not in the current
+  ; scope. closures created here carry target as their :__scope,
+  ; so when invoked anywhere they look up free names through
+  ; target's chain. enabled by closures-carry-env (wave 11.7).
   [apply: target]
-    (do
-      [@forms each: |f| (eval f)]
-      [@provides each: |n| [target bind: n to: (eval n)]]
-      target)
+    (do [@forms each: |f| (eval f target)] target)
 
   [describe]
     (str "<Bundle " [@provides count] " provides, "
