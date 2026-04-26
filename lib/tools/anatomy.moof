@@ -1,0 +1,60 @@
+; anatomy.moof — magnifying glass for callables.
+;
+; given any closure (operative or applicative), `(anatomy f)`
+; returns a structured record describing its shape:
+;
+;   { kind: 'operative arity: 3 source: "(vau (x y) $e …)" }
+;
+;   { kind: 'applicative arity: 3
+;     underlying: { kind: 'operative arity: 3 source: "…" }
+;     source: "(fn (x y) [x + y])" }
+;
+; for wrap-of-wrap chains, `underlying` recurses. the chain
+; bottoms at the operative — `unwrap` of an operative returns
+; itself, so we test with operative? before recursing.
+;
+; companion `(anatomy-depth f)` returns the wrap-chain depth
+; (0 for a bare operative, 1 for fn-of-vau, 2 for wrap-of-fn,
+; etc) — useful for kernel-pedantry: in a true Kernel runtime
+; with phase 4's stacking semantics, each wrap layer adds an
+; eval pass, so depth matches pass count.
+;
+; this is a definition bundle.
+
+(definitions
+
+  ; (anatomy f) — structured introspection of a callable.
+  (defn anatomy (f)
+    (if [f operative?]
+      { kind: 'operative
+        arity: [f arity]
+        source: (%anatomy-source f) }
+      { kind: 'applicative
+        arity: [f arity]
+        underlying: (anatomy [f unwrap])
+        source: (%anatomy-source f) }))
+
+  ; helper: pull source.text if present, else nil. closures created
+  ; by Op::Wrap don't carry source separately from the underlying
+  ; (they share the same code_idx) so applicatives and their
+  ; underlying often share a source string.
+  (defn %anatomy-source (f)
+    (let ((src [f source]))
+      (if (nil? src) nil src.text)))
+
+  ; (anatomy-depth f) — how deep does the wrap chain go?
+  ; 0 = bare operative; 1 = fn-of-vau (the typical case); n =
+  ; n levels of wrap-on-top-of-wrap.
+  (defn anatomy-depth (f)
+    (if [f operative?] 0
+      [(anatomy-depth [f unwrap]) + 1]))
+
+  ; (anatomy-chain f) — list of arities walking the unwrap chain
+  ; from outermost to bottom. for a fn-of-vau, returns (N N) where
+  ; N is the arity. for wrap-of-fn, (N N N). lets you spot at-a-
+  ; glance whether someone over-wrapped a closure.
+  (defn anatomy-chain (f)
+    (if [f operative?] (list [f arity])
+      (cons [f arity] (anatomy-chain [f unwrap]))))
+
+)

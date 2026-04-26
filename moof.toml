@@ -78,6 +78,7 @@ files = [
   # everything below this can be authored as a definition bundle.
   "lib/tools/definitions.moof",
   "lib/tools/inspect.moof",
+  "lib/tools/anatomy.moof",
   "lib/tools/query.moof",
   "lib/tools/workspace.moof",
   "lib/tools/test.moof",
