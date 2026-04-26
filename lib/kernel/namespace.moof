@@ -48,3 +48,8 @@
 ; URL-aware walk: take a URL value, use its path.
 (defmethod Table walkTo: (url)
   [self walk: url.path])
+
+; Env IS a namespace value — see plugin-core for native walk:
+; / walkTo: handlers on the env prototype. defmethod can't add
+; them here because `Env` is bound to the global env singleton,
+; not its prototype; methods must go on the proto natively.

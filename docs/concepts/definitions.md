@@ -156,51 +156,63 @@ forms, provides, requires — all preserved across image boundaries
 via the existing object serialization (cons cells already
 serialize). bundles are values, and the image holds them.
 
-## Namespace — a bundle's bindings, captured
+## Env — the namespace value
 
-`[bundle materialize]` produces a `Namespace` value: a
-captured view of the names a bundle bound, mapped to their
-resolved values.
+moof's namespace type is **Env**. there isn't a separate
+"Namespace" type — namespace, environment, the global scope
+that VM lookups walk, and the value `[bundle materialize]`
+produces are all the same shape: an Env. one type, many roles.
+
+an Env is an Object with two slots: `parent` (the outer scope,
+or nil at the root) and `bindings` (a Table mapping symbol →
+value). `at:` walks the parent chain on miss. `bind:to:`
+mutates the bindings table. plus the usual namespace ops:
+
+```moof
+(def fresh [Env new])
+[fresh bind: 'k to: 42]
+[fresh at: 'k]                  ; → 42
+[fresh has?: 'k]                ; → true
+[fresh names]                   ; → (k)
+[fresh count]                   ; → 1
+[fresh walk: "/k"]              ; → 42
+[fresh union: other-env]        ; merge other's bindings in
+[Env new: fresh]                ; child env, falls through to fresh
+[Env]                           ; the global env (singleton)
+```
+
+`Env` is bound to the global env value (where vat 0's user
+defs live). `[Env new]` constructs a fresh empty env; `[Env new:
+parent]` constructs one with a parent for lexical fallback.
+
+**`[bundle materialize]`** returns an Env populated with the
+bundle's bindings:
 
 ```moof
 (def math (bundle
   (defn square (x) [x * x])
   (defn cube (x) [(square x) * x])))
 
-(def math-ns [math materialize])
-[math-ns names]                      ; → (square cube)
-((math-ns at: 'cube) 4)              ; → 64
-[math-ns walk: "/cube"]              ; → the cube fn
-[math-ns union: other-ns]            ; → merged namespace
+(def math-env [math materialize])
+[math-env typeName]              ; → 'Env
+[math-env names]                 ; → (square cube)
+((math-env at: 'cube) 4)         ; → 64
+[math-env walk: "/cube"]         ; → the cube fn
 ```
 
-a Namespace is:
-
-| op                       | meaning                                |
-|--------------------------|----------------------------------------|
-| `(Namespace)`            | empty constructor                      |
-| `[ns at: name]`          | look up a binding, nil if absent       |
-| `[ns at: name put: v]`   | new ns with that binding                |
-| `[ns has?: name]`        | is the name bound?                     |
-| `[ns names]`             | the bound symbols                      |
-| `[ns union: other]`      | merge; other wins on collision         |
-| `[ns walk: "/p"]`        | path walk (inherits walk: from Tables) |
-| `[ns apply-bundle: b]`   | union in another bundle's materialization |
-
 today's caveat: **materialize is not isolated**. applying a
-bundle still rebinds in the global env; the Namespace is a
-captured snapshot, not a sandbox. `defmethod` effects on protos
-also remain global. real isolation needs a VM-level
-`eval-into-target` op so `DefGlobal` lands in the namespace
-instead of global. when that lands, `materialize`'s contract
-stays the same; only the implementation tightens.
+bundle still rebinds in the global env first; the fresh env is
+populated by reading those globals back. real isolation needs
+a VM-level `eval-into-target` op so `DefGlobal` lands in a
+specific env instead of global. when that lands, materialize's
+contract stays the same; only the implementation tightens.
 
-what a Namespace is good for already:
-- inspectable: a value you can pass to an Inspector
-- composable: union builds bigger namespaces
-- addressable: walk: + plan-9-shaped paths
-- serializable: it's slots over a Table; the image holds it
-- identity: same content → same content-hash (Table semantics)
+an Env is:
+- inspectable: name → value bindings, queryable
+- composable: `[a union: b]` merges
+- addressable: `at:` and `walk:` (plan-9 shaped)
+- context-linked: `parent` chains for lexical fallback
+- serializable: it's an Object with a Table; the image holds it
 
 ---
 

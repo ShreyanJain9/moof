@@ -42,7 +42,7 @@ pub use crate::protos::{
     PROTO_NIL, PROTO_BOOL, PROTO_INT, PROTO_FLOAT, PROTO_SYM,
     PROTO_OBJ, PROTO_CONS, PROTO_STR, PROTO_BYTES, PROTO_TABLE,
     PROTO_NUMBER, PROTO_CLOSURE, PROTO_ERR, PROTO_FARREF,
-    PROTO_ACT, PROTO_UPDATE, PROTO_OK,
+    PROTO_ACT, PROTO_UPDATE, PROTO_OK, PROTO_ENV,
 };
 
 /// What to run in a spawned vat.
@@ -358,6 +358,19 @@ impl Heap {
         }
     }
 
+    /// Bind a name in a specific env value's bindings table. Like
+    /// env_def but targets any env, not just self.env. Returns true
+    /// on success, false if the value isn't an env-shaped object
+    /// (no `bindings` slot, or bindings isn't a Table).
+    pub fn bind_in_env(&mut self, env_val: Value, sym: u32, val: Value) -> bool {
+        let Some(env_id) = env_val.as_any_object() else { return false; };
+        let Some(bid) = self.env_bindings_id(env_id) else { return false; };
+        if let Some(t) = self.foreign_payload_mut::<Table>(Value::nursery(bid)) {
+            t.map.insert(Value::symbol(sym), val);
+            true
+        } else { false }
+    }
+
     pub fn env_remove(&mut self, sym: u32) {
         if let Some(bid) = self.env_bindings_id(self.env) {
             if let Some(t) = self.foreign_payload_mut::<Table>(Value::nursery(bid)) {
@@ -453,6 +466,13 @@ impl Heap {
         let proto = self.type_protos.get(PROTO_BYTES).copied().unwrap_or(Value::NIL);
         self.alloc_foreign(proto, Bytes(data))
             .expect("Bytes foreign type must be registered")
+    }
+
+    /// Allocate an empty Table — no seq, no map. Convenience for
+    /// callers (especially plugins) that don't want to take an
+    /// indexmap dependency just to build a fresh Table.
+    pub fn alloc_empty_table(&mut self) -> Value {
+        self.alloc_table(Vec::new(), indexmap::IndexMap::new())
     }
 
     pub fn alloc_table_seq(&mut self, items: Vec<Value>) -> Value {

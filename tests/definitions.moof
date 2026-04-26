@@ -166,36 +166,46 @@
       (bundle (defn f () (g))))
     false)
 
-  ; ── Namespace ────────────────────────────────────────
+  ; ── Env (the namespace type) ─────────────────────────
 
-  (test "namespace: empty count"
-    [(Namespace) count]
+  (test "env: [Env new] is empty"
+    [[Env new] count]
     0)
 
-  (test "namespace: empty?"
-    [(Namespace) empty?]
-    true)
-
-  (test "namespace: at:put: + at:"
-    [[(Namespace) at: 'k put: 42] at: 'k]
+  (test "env: bind:to: + at:"
+    (let ((e [Env new]))
+      [e bind: 'k to: 42]
+      [e at: 'k])
     42)
 
-  (test "namespace: has?:"
-    [[(Namespace) at: 'k put: 1] has?: 'k]
+  (test "env: has?: after bind"
+    (let ((e [Env new]))
+      [e bind: 'k to: 1]
+      [e has?: 'k])
     true)
 
-  (test "namespace: missing key returns nil"
-    [(Namespace) at: 'absent]
+  (test "env: missing key returns nil"
+    [[Env new] at: 'absent]
     nil)
 
-  (test "namespace: union prefers other on collision"
-    [[[(Namespace) at: 'k put: 1] union:
-       [(Namespace) at: 'k put: 2]] at: 'k]
+  (test "env: parent fallback"
+    (let ((p [Env new]))
+      [p bind: 'shared to: "from-parent"]
+      (let ((c [Env new: p]))
+        [c at: 'shared]))
+    "from-parent")
+
+  (test "env: child shadows parent"
+    (let ((p [Env new]))
+      [p bind: 'k to: 1]
+      (let ((c [Env new: p]))
+        [c bind: 'k to: 2]
+        [c at: 'k]))
     2)
 
-  (test "namespace: walk: works"
-    [[(Namespace) at: 'foo put: 99] walk: "/foo"]
-    99)
+  (test "env: typeName"
+    [[Env new] typeName]
+    'Env)
 
   (test "bundle materialize: count = provides count"
     [[(bundle (def a 1) (def b 2) (def c 3)) materialize] count]

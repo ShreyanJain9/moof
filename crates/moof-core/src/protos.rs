@@ -37,10 +37,11 @@ pub const PROTO_FARREF: usize = 13;
 pub const PROTO_ACT: usize = 14;
 pub const PROTO_UPDATE: usize = 15;
 pub const PROTO_OK: usize = 16;
+pub const PROTO_ENV: usize = 17;
 
 /// Total number of indexed prototype slots. Grows as new built-in
 /// types land.
-pub const NUM_BUILTIN_PROTOS: usize = 17;
+pub const NUM_BUILTIN_PROTOS: usize = 18;
 
 /// The prototype registry. A Vec<Value> indexed by PROTO_*
 /// constants, with named accessors for eventual

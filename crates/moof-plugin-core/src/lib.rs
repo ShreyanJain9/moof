@@ -359,6 +359,230 @@ impl moof_core::Plugin for CorePlugin {
             Ok(Value::integer(moof_core::fnv1a_64(&bits) as i64))
         });
 
+        // -- Env prototype (context-linked namespace) --
+        //
+        // Every env is an Object with two slots: `parent` (the outer
+        // scope, or nil at the root) and `bindings` (a Table holding
+        // name → value). Closures' captures are slots on the closure
+        // itself, not in an env; closures still walk env.parent for
+        // free-variable lookup. Env is the value-shape of "the
+        // namespace tree" — what `addressing.md` calls a node walked
+        // via `at:`.
+        let env_proto = heap.make_object(object_proto);
+        heap.type_protos[PROTO_ENV] = env_proto;
+        let env_proto_id = env_proto.as_any_object().unwrap();
+
+        // [env at: name] — binding lookup, walking the parent chain.
+        // returns nil if not bound. lets `[Env at: 'foo]` work and
+        // makes envs walkable via plain at: / walk:.
+        native(heap, env_proto_id, "at:", |heap, receiver, args| {
+            let env_id = receiver.as_any_object().ok_or("at:: not an env")?;
+            let key = args.first().copied().ok_or("at:: needs a name")?;
+            let sym = key.as_symbol()
+                .or_else(|| {
+                    key.as_any_object()
+                        .and_then(|id| heap.get_string(id).map(|s| s.to_string()))
+                        .and_then(|s| heap.find_symbol(&s))
+                })
+                .ok_or("at:: name must be a symbol or string")?;
+            let mut cur = env_id;
+            loop {
+                let bind_sym = heap.find_symbol("bindings");
+                let par_sym  = heap.find_symbol("parent");
+                let bindings = bind_sym
+                    .and_then(|s| heap.get(cur).slot_get(s))
+                    .unwrap_or(Value::NIL);
+                if let Some(bid) = bindings.as_any_object() {
+                    if let Some(t) = heap.foreign_ref::<Table>(Value::nursery(bid)) {
+                        if let Some(v) = t.map.get(&Value::symbol(sym)).copied() {
+                            return Ok(v);
+                        }
+                    }
+                }
+                let parent = par_sym
+                    .and_then(|s| heap.get(cur).slot_get(s))
+                    .unwrap_or(Value::NIL);
+                let Some(next) = parent.as_any_object() else { return Ok(Value::NIL); };
+                cur = next;
+            }
+        });
+
+        // [env has?: name] — true iff name is bound somewhere in the
+        // scope chain. mirrors at: but returns Bool.
+        native(heap, env_proto_id, "has?:", |heap, receiver, args| {
+            let env_id = receiver.as_any_object().ok_or("has?:: not an env")?;
+            let key = args.first().copied().ok_or("has?:: needs a name")?;
+            let sym = key.as_symbol()
+                .or_else(|| {
+                    key.as_any_object()
+                        .and_then(|id| heap.get_string(id).map(|s| s.to_string()))
+                        .and_then(|s| heap.find_symbol(&s))
+                })
+                .ok_or("has?:: name must be a symbol or string")?;
+            let mut cur = env_id;
+            loop {
+                let bind_sym = heap.find_symbol("bindings");
+                let par_sym  = heap.find_symbol("parent");
+                let bindings = bind_sym
+                    .and_then(|s| heap.get(cur).slot_get(s))
+                    .unwrap_or(Value::NIL);
+                if let Some(bid) = bindings.as_any_object() {
+                    if let Some(t) = heap.foreign_ref::<Table>(Value::nursery(bid)) {
+                        if t.map.contains_key(&Value::symbol(sym)) {
+                            return Ok(Value::TRUE);
+                        }
+                    }
+                }
+                let parent = par_sym
+                    .and_then(|s| heap.get(cur).slot_get(s))
+                    .unwrap_or(Value::NIL);
+                let Some(next) = parent.as_any_object() else { return Ok(Value::FALSE); };
+                cur = next;
+            }
+        });
+
+        // [env names] — symbols bound directly in THIS env (not the
+        // parent chain). use [env at:] to traverse parents.
+        native(heap, env_proto_id, "names", |heap, receiver, _args| {
+            let env_id = receiver.as_any_object().ok_or("names: not an env")?;
+            let bind_sym = heap.find_symbol("bindings").ok_or("names: env has no bindings table")?;
+            let bindings = heap.get(env_id).slot_get(bind_sym).unwrap_or(Value::NIL);
+            let bid = bindings.as_any_object().ok_or("names: bindings slot empty")?;
+            let t = heap.foreign_ref::<Table>(Value::nursery(bid))
+                .ok_or("names: bindings is not a Table")?;
+            let keys: Vec<Value> = t.map.keys().copied().collect();
+            Ok(heap.list(&keys))
+        });
+
+        // [env count] — number of locally-bound names.
+        native(heap, env_proto_id, "count", |heap, receiver, _args| {
+            let env_id = receiver.as_any_object().ok_or("count: not an env")?;
+            let bind_sym = heap.find_symbol("bindings").ok_or("count: env has no bindings")?;
+            let bindings = heap.get(env_id).slot_get(bind_sym).unwrap_or(Value::NIL);
+            let bid = bindings.as_any_object().ok_or("count: bindings empty")?;
+            let t = heap.foreign_ref::<Table>(Value::nursery(bid))
+                .ok_or("count: bindings is not a Table")?;
+            Ok(Value::integer(t.map.len() as i64))
+        });
+
+        // [env typeName] — 'Env
+        let env_typename_sym = heap.intern("Env");
+        native(heap, env_proto_id, "typeName", move |_heap, _r, _a| {
+            Ok(Value::symbol(env_typename_sym))
+        });
+
+        // [env describe] — short shape summary
+        native(heap, env_proto_id, "describe", |heap, receiver, _args| {
+            let env_id = receiver.as_any_object().ok_or("describe: not an env")?;
+            let bind_sym = heap.find_symbol("bindings");
+            let count = bind_sym
+                .and_then(|s| heap.get(env_id).slot_get(s))
+                .and_then(|b| b.as_any_object())
+                .and_then(|bid| heap.foreign_ref::<Table>(Value::nursery(bid)))
+                .map(|t| t.map.len())
+                .unwrap_or(0);
+            Ok(heap.alloc_string(&format!("<Env {count} bindings>")))
+        });
+
+        // [Env new] — construct a fresh empty Env with no parent.
+        // optional argument: the parent env (so [Env new: outer]
+        // builds an env whose `at:` falls through to outer).
+        // bindings live in a fresh Table, mutable like the root env's.
+        native(heap, env_proto_id, "new", |heap, _r, _args| {
+            let bindings = heap.alloc_empty_table();
+            let par_sym = heap.intern("parent");
+            let bind_sym = heap.intern("bindings");
+            let proto = heap.type_protos[PROTO_ENV];
+            Ok(heap.make_object_with_slots(
+                proto,
+                vec![par_sym, bind_sym],
+                vec![Value::NIL, bindings],
+            ))
+        });
+        native(heap, env_proto_id, "new:", |heap, _r, args| {
+            let parent = args.first().copied().unwrap_or(Value::NIL);
+            let bindings = heap.alloc_empty_table();
+            let par_sym = heap.intern("parent");
+            let bind_sym = heap.intern("bindings");
+            let proto = heap.type_protos[PROTO_ENV];
+            Ok(heap.make_object_with_slots(
+                proto,
+                vec![par_sym, bind_sym],
+                vec![parent, bindings],
+            ))
+        });
+
+        // [env bind: name to: val] — set a binding in THIS env's
+        // bindings table. mutates the env (matching env_def
+        // semantics). returns self so chains work.
+        native(heap, env_proto_id, "bind:to:", |heap, receiver, args| {
+            let key = args.first().copied().ok_or("bind:to:: needs a name")?;
+            let val = args.get(1).copied().unwrap_or(Value::NIL);
+            let sym = key.as_symbol().ok_or("bind:to:: name must be a symbol")?;
+            if !heap.bind_in_env(receiver, sym, val) {
+                return Err("bind:to:: not an env (no bindings table)".into());
+            }
+            Ok(receiver)
+        });
+
+        // [env union: other] — copy every binding from other's
+        // bindings table (just its own, not its parents) into self.
+        // mutates self; returns self. last write wins on collision.
+        native(heap, env_proto_id, "union:", |heap, receiver, args| {
+            let other = args.first().copied().ok_or("union:: needs an env")?;
+            let other_id = other.as_any_object().ok_or("union:: arg not an env")?;
+            let bind_sym = heap.intern("bindings");
+            let other_bindings = heap.get(other_id).slot_get(bind_sym).unwrap_or(Value::NIL);
+            let other_bid = other_bindings.as_any_object()
+                .ok_or("union:: other has no bindings")?;
+            // collect (name, value) pairs from other
+            let pairs: Vec<(u32, Value)> = {
+                let t = heap.foreign_ref::<Table>(Value::nursery(other_bid))
+                    .ok_or("union:: other.bindings not a Table")?;
+                t.map.iter()
+                    .filter_map(|(k, v)| k.as_symbol().map(|s| (s, *v)))
+                    .collect()
+            };
+            for (sym, val) in pairs {
+                heap.bind_in_env(receiver, sym, val);
+            }
+            Ok(receiver)
+        });
+
+        // [env walk: path] — plan-9 walk over the env tree. handles
+        // leading slash; nil on miss. uses dispatch::lookup_handler +
+        // call_native to send `at:` at each step, so any proto with
+        // an `at:` handler participates.
+        // can't use defmethod from moof because `Env` is bound to
+        // the global env singleton, not the proto.
+        native(heap, env_proto_id, "walk:", |heap, receiver, args| {
+            let path_val = args.first().copied().ok_or("walk:: needs a path")?;
+            let path_id = path_val.as_any_object().ok_or("walk:: path must be a string")?;
+            let path = heap.get_string(path_id).ok_or("walk:: path must be a string")?.to_string();
+            let stripped = path.strip_prefix('/').unwrap_or(&path);
+            let at_sym = heap.sym_at;
+            let mut cur = receiver;
+            for seg in stripped.split('/') {
+                if seg.is_empty() { continue; }
+                let sym = heap.intern(seg);
+                // dispatch [cur at: sym]
+                let (handler, _) = moof_core::dispatch::lookup_handler(heap, cur, at_sym)?;
+                if handler.is_nil() { return Ok(Value::NIL); }
+                if !moof_core::dispatch::is_native(heap, handler) {
+                    return Ok(Value::NIL);  // would need full VM dispatch for moof handlers
+                }
+                let result = moof_core::dispatch::call_native(
+                    heap, handler, cur, &[Value::symbol(sym)],
+                ).unwrap_or(Value::NIL);
+                if result.is_nil() { return Ok(Value::NIL); }
+                cur = result;
+            }
+            Ok(cur)
+        });
+
+        // root env is now an Env-shaped value. fix its proto.
+        heap.get_mut(heap.env).set_proto(env_proto);
+
         // -- Register all prototypes as globals --
         let obj_sym = heap.intern("Object");
         heap.env_def(obj_sym, object_proto);
@@ -371,7 +595,8 @@ impl moof_core::Plugin for CorePlugin {
         let number_s = heap.intern("Number");
         heap.env_def(number_s, number_proto);
 
-        // expose the root environment object as 'Env'
+        // expose the root environment object as 'Env'. its proto is
+        // env_proto (set above), so [Env at: 'foo] now works.
         let env_sym = heap.intern("Env");
         heap.env_def(env_sym, Value::nursery(heap.env));
     }
