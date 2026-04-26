@@ -102,3 +102,14 @@
 ; walk: and walkTo: on Env work via the same walk-path helper.
 (defmethod Env walk: (path) (walk-path self path))
 (defmethod Env walkTo: (url) [self walk: url.path])
+
+; ($here) — return the env at the call site. operatives get this
+; for free as $e, but applicatives and top-level user code don't,
+; so we expose the same access via a 0-arg vau. typical use is
+; `[bundle apply: ($here)]` to splat a runtime-built bundle into
+; the caller's scope, or `(eval form ($here))` to thread an
+; explicit env target through a normal call chain. ($here) at
+; top-level returns vat root; inside a defn body returns that
+; defn's per-call env (which is rarely useful — defns can't
+; reach their own caller's env in kernel-pure semantics).
+(def $here (vau () $e $e))

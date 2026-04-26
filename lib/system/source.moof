@@ -56,9 +56,21 @@
 ;   [reload: "lib/system/source.moof"]
 ;
 ; returns an Act that resolves to nil when reload is complete.
+;
+; reload: is a vau, not a defn, so the eval'd forms land in
+; the caller's env ($e) — without that, defs would land in
+; reload:'s per-call env and disappear when reload: returns.
+; the path arg is still evaluated normally via (eval ... $e).
 ; ───────────────────────────────────────────────────────────
 
-(defn reload: (path)
+; (%reload-into env path) — applicative helper that does the
+; actual file → image work, with env as the explicit eval target.
+; reload: (the user-facing form) is a vau that captures $e and
+; calls this helper.
+(defn %reload-into (env path)
   (do (src   <- [file read: path])
       (forms <- [evaluator parse: src])
-      [forms each: |f| (eval f)])))
+      [forms each: |f| (eval f env)]))
+
+(def reload: (vau (path-form) $e
+  (%reload-into $e (eval path-form $e)))))

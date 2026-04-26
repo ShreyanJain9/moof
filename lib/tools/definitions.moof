@@ -307,10 +307,16 @@
   [requires] @requires
   [forms]    @forms
 
-  ; apply → evaluate each form in the vat's current scope.
-  ; returns nil. this is the default case.
+  ; apply → no longer supported as a no-target form. kernel-pure
+  ; semantics put defs in heap.env at the moment of eval, and an
+  ; applicative defmethod can't reach back to its caller's env.
+  ; pick one of:
+  ;   [b apply: ($here)]      defs land in caller's scope
+  ;   [b apply: [Env new]]    defs land in a fresh env (returned)
+  ;   [b materialize]         shorthand for the fresh-env case
+  ;   (definitions ...)       source-time bundle + apply in caller
   [apply]
-    (do [@forms each: |f| (eval f)] nil)
+    (Err "[bundle apply] requires a target env. use [b apply: ($here)] for caller's scope, [b apply: [Env new]] for a fresh env, or [b materialize] for the materialize shorthand.")
 
   ; apply: target → evaluate each form INTO target. real
   ; isolation: defs land in target.bindings, not in the current

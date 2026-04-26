@@ -23,41 +23,60 @@
 
 (definitions
 
-; (%reattach-source f new-text) — after evaluating f, look up
-; the symbol it produced and rebind its :source slot to carry
+; (%reattach-source f new-text env) — after evaluating f, look
+; up the symbol it produced and rebind its :source slot to carry
 ; the new verbatim text. needed because `(eval form)` (no source
 ; record) gives the rebound closure a nil :source.text, which
-; would block the next edit from reading anything.
-(defn %reattach-source (f new-text)
+; would block the next edit from reading anything. env is where
+; the rebind lands — same env the form was originally eval'd in.
+(defn %reattach-source (f new-text env)
   (let ((p (produces-of f)))
     (if (nil? p) nil
-      (let ((current (eval p)))
+      (let ((current (eval p env)))
         (if (nil? current) nil
           (eval `(def ,p
-            ,[current with: { source: { form: f text: new-text } }])))))))
+            ,[current with: { source: { form: f text: new-text } }])
+            env))))))
 
-; (edit-text val text-fn) — pull val's :source.text, hand it to
-; text-fn (a String → String transform), parse the result, eval
-; every form, reattach :source. returns the new text on success
-; or { Err message: ... } if val has no :source slot.
-(defn edit-text (val text-fn)
+; (%edit-text-impl val text-fn env) — pull val's :source.text,
+; hand it to text-fn (a String → String transform), parse the
+; result, eval every form into env, reattach :source. returns
+; the new text on success or { Err message: ... } if val has
+; no :source slot.
+(defn %edit-text-impl (val text-fn env)
   (let ((src [val source]))
     (if (nil? src) (Err "value has no :source slot")
       (let ((new-text (text-fn src.text))
             (forms [new-text parse]))
-        [forms each: |f| (eval f)]
-        [forms each: |f| (%reattach-source f new-text)]
+        [forms each: |f| (eval f env)]
+        [forms each: |f| (%reattach-source f new-text env)]
         new-text))))
+
+; ── public entry points ─────────────────────────────────────
+;
+; (edit-text val text-fn) / (edit-replace val from to) / (redefine
+; val new-text). all vaus, so they can capture the caller's env
+; ($e) and thread it through to the eval calls in
+; %edit-text-impl. without that the rebound defs would land in
+; the helper's per-call env and disappear when it returns.
+
+(def edit-text (vau (val-form text-fn-form) $e
+  (%edit-text-impl (eval val-form $e) (eval text-fn-form $e) $e)))
 
 ; (edit-replace val from to) — substring-replace convenience.
 ; returns the new source text. if `from` doesn't appear in val's
 ; source, the rebind is a no-op.
-(defn edit-replace (val from to)
-  (edit-text val |s| [s replace: from with: to]))
+(def edit-replace (vau (val-form from-form to-form) $e
+  (let ((val  (eval val-form $e))
+        (from (eval from-form $e))
+        (to   (eval to-form $e)))
+    (%edit-text-impl val |s| [s replace: from with: to] $e))))
 
 ; (redefine val new-source-text) — wholesale source replacement.
 ; for when you've authored a fresh body and want to drop it in.
 ;
 ;   (redefine greet "(defn greet (name) [(name reverse) describe])")
-(defn redefine (val new-source-text)
-  (edit-text val |_| new-source-text)))
+(def redefine (vau (val-form new-text-form) $e
+  (let ((val      (eval val-form $e))
+        (new-text (eval new-text-form $e)))
+    (%edit-text-impl val |_| new-text $e)))))
