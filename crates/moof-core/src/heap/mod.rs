@@ -113,6 +113,16 @@ pub struct Heap {
     pub sym_is_operative: u32,
     pub sym_is_pure: u32,
     pub sym_scope: u32,
+    /// "Lexical scope" pointer — separate from `env`. The reading
+    /// scope (heap.env) is what GetGlobal walks; the lexical scope
+    /// is what new closures capture as their `:__scope` at
+    /// MakeClosure time. They're equal except during a real-env
+    /// `Op::Eval`, which sets heap.env to the swapped target while
+    /// keeping lexical_scope pinned at the OUTER scope. that lets a
+    /// vau-eval (where target is an operative-locals env) produce
+    /// closures whose lexical scope is the CALLER's scope, not the
+    /// transient operative env.
+    pub lexical_scope: u32,
     pub sym_native_idx: u32,
 
     // type prototypes: indexed by PROTO_* constants
@@ -190,6 +200,7 @@ impl Heap {
             sym_length: 0, sym_at: 0, sym_at_put: 0,
             sym_message: 0,
             sym_code_idx: 0, sym_arity: 0, sym_is_operative: 0, sym_is_pure: 0, sym_scope: 0,
+            lexical_scope: 0,
             sym_native_idx: 0,
             type_protos: ProtoRegistry::new(),
             natives: Vec::new(),
@@ -248,6 +259,7 @@ impl Heap {
             vec![h.sym_parent, bindings_sym],        // real user-facing slots
             vec![Value::NIL, bindings_table],        // parent scope (nil = root), bindings table
         ));
+        h.lexical_scope = h.env;
 
         h
     }
@@ -725,7 +737,15 @@ impl Heap {
         // forms produce closures whose later GetGlobals walk
         // target.bindings (and target.parent's chain) regardless
         // of where they're invoked from.
-        let scope_val = Value::nursery(self.env);
+        // Lexical scope, NOT current heap.env. They differ during
+        // a real-env Op::Eval: heap.env points at the swap target
+        // (where reads happen), while lexical_scope stays at the
+        // outer scope (where new closures should "live"). That's
+        // what makes (defn outer () (defn inner () 7)) put `inner`
+        // in vat root: the inner-defn's nested fn captures the
+        // outer-fn's lexical scope, not the transient operative
+        // env that defn temporarily swaps into.
+        let scope_val = Value::nursery(self.lexical_scope);
 
         let mut names: Vec<u32> = Vec::with_capacity(5 + captures.len());
         let mut values: Vec<Value> = Vec::with_capacity(5 + captures.len());
@@ -1099,6 +1119,11 @@ impl Heap {
         self.arena.restore(objects);
         self.symbols.restore(symbols);
         self.env = env_id;
+        // lexical_scope tracks env at boot. on image load, env_id
+        // changes (new arena layout); lex must follow or new closures
+        // would capture the stale pre-load env id, and free-var
+        // resolution at the value level would break.
+        self.lexical_scope = env_id;
         // form_locations key off heap ids; the restore replaces the
         // arena wholesale, so any prior entries are now meaningless.
         // re-parsing repopulates them as files are loaded.

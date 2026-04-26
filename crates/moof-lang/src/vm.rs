@@ -32,6 +32,11 @@ struct Frame {
     /// On Return, restore heap.env from this. Some(_) iff the entry
     /// did swap; closures that don't carry a scope leave it None.
     saved_env: Option<u32>,
+    /// Companion of saved_env for the lexical-scope pointer.
+    /// push_closure_frame sets heap.lexical_scope = closure.scope
+    /// (so closures created inside the body inherit the body's
+    /// lexical context). Restored on Return.
+    saved_lex: Option<u32>,
 }
 
 pub struct VM {
@@ -80,6 +85,7 @@ impl VM {
             desc_base: self.current_desc_base(),
             result_reg: 0,
             saved_env: None,
+            saved_lex: None,
         });
         // swap regs in (avoid clone)
         std::mem::swap(&mut self.frames.last_mut().unwrap().regs, &mut regs);
@@ -167,25 +173,25 @@ impl VM {
             }
         }
 
-        // Closures-carry-env: applicatives swap heap.env to their
-        // :__scope so free names resolve in the closure's defining
-        // scope. OPERATIVES (vaus) DO NOT swap — they're macros, and
-        // their semantics is "manipulate the caller's scope via $e."
-        // swapping for operatives would hide the caller's scope from
-        // the vau's nested (eval ... $e) calls, defeating do-notation,
-        // defmethod, defserver, etc.
-        let saved_env = if !is_operative {
+        // Closures-carry-env: applicatives swap heap.env (read scope)
+        // AND heap.lexical_scope (where new closures capture) to the
+        // closure's :__scope. OPERATIVES (vaus) DO NOT swap — they're
+        // macros and need the caller's scope visible during their
+        // nested (eval ... $e) calls.
+        let (saved_env, saved_lex) = if !is_operative {
             if let Some(cid) = closure_val.as_any_object() {
                 let scope_sym = heap.sym_scope;
                 if let Some(scope_val) = heap.get(cid).slot_get(scope_sym) {
                     if let Some(scope_id) = scope_val.as_any_object() {
-                        let prior = heap.env;
+                        let p_env = heap.env;
+                        let p_lex = heap.lexical_scope;
                         heap.env = scope_id;
-                        Some(prior)
-                    } else { None }
-                } else { None }
-            } else { None }
-        } else { None };
+                        heap.lexical_scope = scope_id;
+                        (Some(p_env), Some(p_lex))
+                    } else { (None, None) }
+                } else { (None, None) }
+            } else { (None, None) }
+        } else { (None, None) };
 
         self.frames.push(Frame {
             regs,
@@ -195,6 +201,7 @@ impl VM {
             desc_base: closure_desc_base,
             result_reg,
             saved_env,
+            saved_lex,
         });
         Ok(())
     }
@@ -260,10 +267,13 @@ impl VM {
                     let val = f.regs[a as usize];
                     let result_reg = f.result_reg;
                     let saved_env = f.saved_env;
+                    let saved_lex = f.saved_lex;
                     self.frames.pop();
-                    // closures-carry-env: restore the heap.env that was
-                    // active before this closure's body started.
+                    // closures-carry-env: restore the heap.env and
+                    // lexical_scope that were active before this
+                    // closure's body started.
                     if let Some(prior) = saved_env { heap.env = prior; }
+                    if let Some(prior) = saved_lex { heap.lexical_scope = prior; }
                     if self.frames.len() <= base_depth {
                         // returned from the frame we were called to run
                         return Ok(val);
@@ -476,18 +486,18 @@ impl VM {
                             }
                         }
                         // closures-carry-env: applicative tail-call swaps
-                        // heap.env to the new closure's :__scope.
-                        // operatives (vaus) leave heap.env alone — same
-                        // reasoning as push_closure_frame.
-                        // saved_env on the frame is NOT updated — it
-                        // stays pointing at the heap.env that was active
-                        // before the FIRST call into this frame slot.
+                        // heap.env AND heap.lexical_scope to the new
+                        // closure's :__scope. operatives leave them.
+                        // saved_env/saved_lex on the frame are NOT
+                        // updated — they stay pointing at what was
+                        // active before the FIRST call into this frame.
                         if !is_operative {
                             if let Some(cid) = handler.as_any_object() {
                                 let scope_sym = heap.sym_scope;
                                 if let Some(scope_val) = heap.get(cid).slot_get(scope_sym) {
                                     if let Some(scope_id) = scope_val.as_any_object() {
                                         heap.env = scope_id;
+                                        heap.lexical_scope = scope_id;
                                     }
                                 }
                             }
@@ -757,6 +767,7 @@ impl VM {
                     //   be visible as globals during eval (do-notation,
                     //   defmethod, defserver, etc.).
                     let saved_env = heap.env;
+                    let saved_lex = heap.lexical_scope;
                     let mut swapped = false;
                     let mut saved_target_parent: Option<(u32, Value)> = None;
                     let mut saved_values: Vec<(u32, Option<Value>)> = Vec::new();
@@ -776,6 +787,13 @@ impl VM {
                             saved_target_parent = Some((env_id, prior_parent));
                             heap.get_mut(env_id).slot_set(par_sym, Value::nursery(saved_env));
                             heap.env = env_id;
+                            // user-explicit env: also update lexical_scope
+                            // so closures created during this eval capture
+                            // the target as their :__scope. (vau-style
+                            // INJECT path below leaves lexical_scope alone
+                            // — closures there capture the OUTER scope,
+                            // not the operative-locals snapshot.)
+                            heap.lexical_scope = env_id;
                             swapped = true;
                         } else {
                             let slot_names = heap.get(env_id).slot_names();
@@ -793,7 +811,10 @@ impl VM {
                         Ok(r) => r,
                         Err(e) => {
                             let err = heap.make_error(&format!("eval compile: {e}"));
-                            if swapped { heap.env = saved_env; }
+                            if swapped {
+                                heap.env = saved_env;
+                                heap.lexical_scope = saved_lex;
+                            }
                             if let Some((env_id, prior)) = saved_target_parent {
                                 let par_sym = heap.intern("parent");
                                 heap.get_mut(env_id).slot_set(par_sym, prior);
@@ -813,7 +834,10 @@ impl VM {
                         Err(e) => heap.make_error(&e),
                     };
 
-                    if swapped { heap.env = saved_env; }
+                    if swapped {
+                        heap.env = saved_env;
+                        heap.lexical_scope = saved_lex;
+                    }
                     if let Some((env_id, prior)) = saved_target_parent {
                         let par_sym = heap.intern("parent");
                         heap.get_mut(env_id).slot_set(par_sym, prior);
@@ -997,6 +1021,7 @@ impl VM {
             desc_base: base_idx,
             result_reg: 0,
             saved_env: None,
+            saved_lex: None,
         });
         self.run(heap)
     }
