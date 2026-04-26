@@ -249,7 +249,155 @@ modified files (unstaged on master):
   emits `Op::CurrentEnv` instead of `Op::MakeObj` for `$e`
 - `lib/tools/definitions.moof` — `(definitions …)` uses `[b apply: $e]`
 
-next steps for whoever picks this up:
+## phase 4 — kernel-pure wrap-of-wrap stacking (DEFERRED)
+
+phase 3 (commit `1e1b60f`) shipped the structural rewrite: `is_operative`
+is gone, replaced by an `__underlying` slot on the closure object.
+applicatives are operatives that *have* an `__underlying`. wrap is
+moof. dispatch is uniform. but there's a kernel-pedantry gap:
+**wrap-of-wrap doesn't actually stack.** in mine, `(w2 sym)` returns
+the symbol foo (one eval pass through the chain). in true Kernel,
+each wrap layer adds a real eval pass — `(w2 sym)` should resolve sym
+to symbol-foo, then resolve symbol-foo through env to foo's binding,
+giving "deep" if `foo → "deep"` is bound.
+
+the test:
+
+```moof
+(def foo "deep")
+(def sym 'foo)
+(def v (vau (a) $e a))
+(def w1 (wrap v))
+(def w2 (wrap w1))
+[(w2 sym) describe]   ; mine: "foo"   kernel: "deep"
+```
+
+i tried to land it as phase 4 and broke things. concrete attempts +
+what i learned, so the next session doesn't repeat the dead ends:
+
+**attempt path A: caller-passes-raw-forms + dispatch-time eval.**
+
+- compile_call emits `LoadConst`-of-form for each arg (no caller-side
+  evaluation). same wire shape as compile_operative_call.
+- Op::Send and Op::TailCall, when handler has `__underlying` AND
+  selector is `call:`, run an `unwrap_and_eval` loop: for each layer
+  of `__underlying`, Op::Eval each arg-form against caller's env,
+  then recurse on the underlying.
+- need a helper `eval_form_in(heap, form, env_id)` that mirrors the
+  real-env path of Op::Eval (compile_toplevel + eval_result, with
+  heap.env temporarily swapped).
+
+what worked: the canonical `(w2 sym) → "deep"` test. wrap-of-wrap
+genuinely stacked at runtime.
+
+what broke:
+
+1. **bootstrap panic** "result_reg=8 caller_regs.len()=2". eval_form_in's
+   `eval_result` can leave stray frames on the stack if the run errors
+   mid-execution. fixed by adding a `while self.frames.len() >
+   saved_depth { self.frames.pop(); }` guard at the end of
+   eval_form_in. that one's solved; pattern is right.
+2. **bundle silently fails to bind** `(def b (bundle …))` — `b`
+   ends up unbound at top-level. when bundle's body invokes
+   `(bundle-from forms)` via tail-call, the wrap-layer Op::Eval
+   evaluates `forms` (a symbol referring to a runtime-bound list).
+   the eval recursively resolves through env. bundle-from is itself
+   wrap-of-vau, so its dispatch wraps another eval pass. somewhere
+   in the chain heap.env or the frame state desyncs from what the
+   caller (compile_def's chunk) expects. didn't isolate the exact
+   step before bailing.
+3. **let-locals aren't reachable via env.** `(let ((x …)) (some-fn x))`
+   — caller passes raw form `x` (a symbol). wrap-layer eval looks
+   up `x` in heap.env. `x` is a register-local, not an env entry.
+   fails. partial fix attempted: `compile_let` emits `Op::DefGlobal`
+   alongside the register-bind so let-bindings land in heap.env too.
+   that closes the symbol-resolution gap but adds shadowing
+   weirdness — inner-let bindings overwrite outer's env entry, no
+   restore on exit. needs full lexical scope-restore (per-let
+   sub-env with parent = current env, swap heap.env, restore on
+   exit) or a different mechanism.
+
+**attempt path B: caller-pre-evals + dispatch re-evaluates.**
+
+- compile_call stays as it is today (pre-evaluates each arg).
+- dispatcher's unwrap_and_eval still runs `Op::Eval` per arg.
+- on values, Op::Eval's behavior:
+  - numbers, strings, lists-of-numbers, etc. — self-evaluating, no-op.
+  - symbol values — look up in env (semantic surprise, breaks
+    `(my-fn 'foo)` where foo is bound).
+  - cons-cell-as-data values (e.g. `(list 1 2 3)` returns a cons
+    chain) — Op::Eval treats the cons as a *combination* and tries
+    to dispatch its head as a function. catastrophic for any code
+    that passes lists as data through fn-defined functions.
+
+so path B is a non-starter as designed: re-evaluating eval'd values
+is not idempotent for two common cases (symbols and cons cells).
+
+**the actually-clean fix: quote-protected pre-eval (path C).**
+
+- compile_call evaluates each arg as today (compile_expr) AND wraps
+  the result in `(quote V)` at runtime via a new opcode `Op::Quote`
+  (or compose two cons calls). caller passes `(quote V)` cons cells
+  to the call's args list.
+- wrap-layer Op::Eval evaluates `(quote V)` → V. for any V, that's
+  a fast `LoadConst` path in compile_toplevel — already
+  recognized as a quote special form.
+- chain semantics: outer wrap unquotes to V. recurses on underlying
+  with V. underlying's wrap layer Op::Evals V (treated as form):
+  - non-symbol value → self-evaluates. idempotent. matches kernel.
+  - symbol value → looks up. THIS is the kernel double-eval.
+  - cons-cell value → evaluates as combination. THIS is the kernel
+    double-eval pattern for explicitly-quoted forms (passing form
+    AS data, then having an eval consume it).
+
+  for typical code (numbers, structs, etc.) → idempotent on the
+  recursive layers, no surprise. for symbol/cons args → kernel
+  semantics, which is what we want.
+
+cost per applicative call: one cons-pair allocation per arg + one
+fast Op::Eval (compile-and-run of `(quote V)`) per arg per wrap
+layer. fn-defined functions are 1-frame (the underlying vau frame);
+the wrap layer is just a dispatcher loop, not an actual frame.
+
+implementation:
+
+- new `Op::Quote dst, src, _` opcode. handler: `let v = regs[src];
+  let inner = heap.cons(v, NIL); regs[dst] = heap.cons(Value::symbol(sym_quote), inner);`
+- new `sym_quote: u32` field on Heap, pre-interned.
+- compile_call: after `compile_expr(items[i], arg_reg)`, emit
+  `Op::Quote arg_reg, arg_reg, 0`. (in-place wrap.)
+- compile_send (the `[recv method: arg]` path): same treatment for
+  consistency. method dispatch is also via wrap-of-vau closures, so
+  args need quote-protection for kernel-correct evaluation.
+  alternative: keep methods pre-eval'd-no-quote and accept the gap
+  for method dispatch. less work; ~99% of method args are non-symbol
+  non-cons values.
+- runtime dispatch: keep `unwrap_and_eval` from phase 4 attempt A
+  (the loop + eval_form_in helper). frame-cleanup hygiene matters
+  — leave the `while frames.len() > saved_depth { pop }` guard in
+  eval_form_in.
+
+the test: `(w2 sym) → "deep"` should pass without breaking
+bundle-demo / repro cases / assertions. that's the canary.
+
+**don't try path A in isolation again** without the quote protection.
+i confirmed it breaks bundle-demo. the (forms is a runtime list of
+forms) case is not edge-y — bundle's whole reason for being is
+"forms passed as data to be eval'd later," and a wrap-layer eval that
+treats data lists as combinations breaks that contract.
+
+**also worth considering for next session:**
+
+- whether `(let ((x v)) ...)` should put x in env or stay register-only.
+  with quote-protection (path C), x doesn't need to be in env: the
+  caller pre-evals to V and quote-wraps; symbol-form `x` never
+  reaches the wrap layer. let-locals can stay register-only. ✓
+- whether method dispatch should also do quote-wrap. consistency
+  argument: yes. minimum-disruption argument: skip and document the
+  rare-symbol-arg edge case.
+
+## (historical) — pre-phase-4 next steps
+
 1. **(eval form …) audit.** rg every `(eval ` in lib/ and triage
    each call site for "where should this def land?" — defs are now
    local-by-default (matches Kernel), so anywhere old code expected
