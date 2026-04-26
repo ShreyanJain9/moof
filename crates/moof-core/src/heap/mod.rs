@@ -113,10 +113,6 @@ pub struct Heap {
     pub sym_is_operative: u32,
     pub sym_is_pure: u32,
     pub sym_scope: u32,
-    /// Synthesized "ignore the env" param name used by the fn fast-path.
-    /// Every closure's last positional is its env binding; for fn-style
-    /// closures the body never reads it, so we name it $_ as a marker.
-    pub sym_dollar_under: u32,
     /// "Lexical scope" pointer — separate from `env`. The reading
     /// scope (heap.env) is what GetGlobal walks; the lexical scope
     /// is what new closures capture as their `:__scope` at
@@ -204,7 +200,6 @@ impl Heap {
             sym_length: 0, sym_at: 0, sym_at_put: 0,
             sym_message: 0,
             sym_code_idx: 0, sym_arity: 0, sym_is_operative: 0, sym_is_pure: 0, sym_scope: 0,
-            sym_dollar_under: 0,
             lexical_scope: 0,
             sym_native_idx: 0,
             type_protos: ProtoRegistry::new(),
@@ -235,7 +230,6 @@ impl Heap {
         h.sym_is_operative = h.intern("is_operative");
         h.sym_is_pure = h.intern("is_pure");
         h.sym_scope = h.intern("__scope");
-        h.sym_dollar_under = h.intern("$_");
         h.sym_native_idx = h.intern("native_idx");
         let bindings_sym = h.intern("bindings");
 
@@ -1199,7 +1193,6 @@ impl Heap {
         // message is special — interned eagerly because some paths
         // access it before image load runs.
         self.sym_message        = get_or_intern(&mut self.symbols, "message");
-        self.sym_dollar_under   = get_or_intern(&mut self.symbols, "$_");
     }
 }
 
