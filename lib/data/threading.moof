@@ -1,0 +1,14 @@
+; threading.moof — thread-first functional pipelining.
+;
+;   (~> 5 double inc)            ; → (inc (double 5)) = 11
+;
+; ~> is a vau so the fn forms aren't pre-evaluated — they're
+; resolved at each step and called via standard dispatch.
+
+(defn %thread-first (val fn-forms env)
+  (if (nil? fn-forms) val
+    (let ((f (eval [fn-forms car] env)))
+      (%thread-first (f val) [fn-forms cdr] env))))
+
+(def ~> (vau args $e
+  (%thread-first (eval [args car] $e) [args cdr] $e)))

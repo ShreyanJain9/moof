@@ -1,0 +1,59 @@
+; profiling.moof — observability primitives for fn-shaped values.
+;
+;   (time expr)       ; runs expr, prints elapsed wall-clock ms
+;   (trace fn)        ; returns fn′ that logs entry + return on every call
+;
+; both rely on the standard `clock` and `console` capabilities in the
+; ambient vat. they're vaus where appropriate so the wrapped form/fn
+; isn't pre-evaluated; the timing/log boundary lands at the right spot.
+
+; helper: short label for a closure. uses source.text up to the
+; first newline if available; otherwise <fn>.
+(defn %trace-label (target)
+  (let ((src [target source]))
+    (if (nil? src) "<fn>"
+      (let ((text src.text)
+            (newline-idx [text indexOf: "\n"]))
+        (if (nil? newline-idx) text
+          [text substring: 0 to: newline-idx])))))
+
+; (trace fn) — returns a wrapped applicative that logs every call.
+; entry log lists the args, exit log shows the return value.
+; the original closure's source (if any) is used as the label.
+;
+;   (def double (fn (n) [n * 2]))
+;   (def double′ (trace double))
+;   (double′ 21)
+;   ; [trace] double called with (21)
+;   ; [trace] double returned 42
+;
+; trace works by capturing the target as a value and constructing
+; a new variadic fn that delegates via apply. uses multi-statement
+; body (each Send returns an Act, queued for the next scheduler
+; drain) rather than do-notation chaining — that's because
+; do-notation generates inner fn closures whose free-variable
+; capture analysis doesn't pick up the variadic `args` rest param
+; (vau-capture-limit). fire-and-forget prints are fine for tracing.
+(defn trace (target)
+  (let ((label (%trace-label target)))
+    (fn args
+      [console println:
+        (str "[trace] " label " called with " [args describe])]
+      (let ((result (apply target args)))
+        [console println:
+          (str "[trace] " label " returned " [result describe])]
+        result))))
+
+; (time expr) — evaluate expr, print wall-clock ms before returning.
+; expr is unevaluated (vau); evaluation happens between the start /
+; end clock reads. note: expr returning an Act will report timing
+; relative to the Act's CONSTRUCTION, not its resolution. for
+; full-resolution timing of an Act-producing form, await first:
+;   (time (do (v <- (do-expensive-thing)) v))
+(def time (vau (expr) $e
+  (do (start <- [clock millis])
+      (let ((result (eval expr $e)))
+        (do (end   <- [clock millis])
+            (_     <- [console println:
+                       (str "[time] " [end - start] " ms")])
+            result)))))
