@@ -49,7 +49,56 @@
 (defmethod Table walkTo: (url)
   [self walk: url.path])
 
-; Env IS a namespace value — see plugin-core for native walk:
-; / walkTo: handlers on the env prototype. defmethod can't add
-; them here because `Env` is bound to the global env singleton,
-; not its prototype; methods must go on the proto natively.
+; ───────────────────────────────────────────────────────────
+; Env protocol — moof-side definitions for the namespace type.
+; ───────────────────────────────────────────────────────────
+;
+; an env is an Object with two slots: `parent` (the outer scope
+; or nil) and `bindings` (a Table mapping symbol → value).
+; nearly every operation is moof-defined here; only `bind:to:`
+; stays as a native (it mutates the Table, which moof can't do
+; directly — Tables are immutable from moof's side).
+
+; lookup, walking the parent chain on miss.
+(defmethod Env at: (name)
+  (if [@bindings contains: name]
+    [@bindings at: name]
+    (let ((p @parent))
+      (if (nil? p) nil [p at: name]))))
+
+; true iff the name is bound somewhere in the chain.
+(defmethod Env has?: (name)
+  (if [@bindings contains: name] true
+    (let ((p @parent))
+      (if (nil? p) false [p has?: name]))))
+
+; symbols bound directly in THIS env (not parents).
+(defmethod Env names () [@bindings keys])
+
+(defmethod Env count () [[@bindings keys] count])
+(defmethod Env empty? () (eq [self count] 0))
+
+(defmethod Env typeName () 'Env)
+(defmethod Env describe ()
+  (str "<Env " [self count] " bindings>"))
+(defmethod Env show () [self describe])
+
+; class-side constructors. `[Env new]` builds an empty env;
+; `[Env new: parent]` builds one with a parent for fallback.
+; `{ Env parent: ... bindings: ... }` makes an Object whose
+; proto is Env, so it inherits all the methods above.
+(defmethod Env new ()
+  { Env parent: nil bindings: #[] })
+
+(defmethod Env new: (parent)
+  { Env parent: parent bindings: #[] })
+
+; merge other's bindings into self. mutates self via bind:to:
+; (the one native that survives). returns self.
+(defmethod Env union: (other)
+  [[other names] each: |n| [self bind: n to: [other at: n]]]
+  self)
+
+; walk: and walkTo: on Env work via the same walk-path helper.
+(defmethod Env walk: (path) (walk-path self path))
+(defmethod Env walkTo: (url) [self walk: url.path])
