@@ -1,0 +1,110 @@
+; wrap-demo.moof — operative, applicative, wrap, unwrap.
+;
+; phase 3 (commit 1e1b60f) made wrap structural: an applicative is
+; an operative plus a `__underlying` slot pointing at the wrapped
+; combiner. is_operative is gone — the bool was replaced by a
+; structural property of the closure object.
+;
+; this file demonstrates the new model end-to-end. run it:
+;   moof examples/wrap-demo.moof
+;
+; — or evaluate piece by piece in the REPL.
+
+[console println: "═══ moof wrap demo ═══\n"]
+
+; ── 1. vau is the primitive ──────────────────────────────────
+
+[console println: "(1) vau — the primitive operative ↓"]
+
+; (vau (params) $env body) creates an OPERATIVE closure. the body
+; receives its operands as raw forms (no caller-side eval) plus the
+; caller's environment as $env. operatives are how you build
+; macros, control flow, special forms.
+;
+; here's a vau that returns its arg as a raw form:
+(def quote-it (vau (form) $e form))
+
+[console println: (str "  quote-it is operative? " [quote-it operative?])]
+[console println: (str "  quote-it is applicative? " [quote-it applicative?])]
+[console println: (str "  (quote-it (1 2 3)) describes as: "
+                       [(quote-it (1 2 3)) describe])]
+; the form (1 2 3) wasn't evaluated — it's returned as a raw cons.
+
+; ── 2. fn is wrap-of-vau ────────────────────────────────────
+
+[console println: "\n(2) fn — applicative, sugar for (wrap (vau …)) ↓"]
+
+; (fn (params) body) is the applicative shape. semantically equal to
+; `(wrap (vau (params) $_ body))` — and that IS the bootstrap spec
+; (lib/kernel/bootstrap.moof). the compiler fast-paths fn for speed.
+
+(def double (fn (n) [n * 2]))
+
+[console println: (str "  double is operative? " [double operative?])]
+[console println: (str "  double is applicative? " [double applicative?])]
+[console println: (str "  (double 21) = " (double 21))]
+
+; ── 3. wrap and unwrap explicitly ───────────────────────────
+
+[console println: "\n(3) wrap / unwrap — structural ↓"]
+
+; wrap promotes a vau into an applicative. unwrap retrieves the
+; underlying combiner. for an operative, unwrap returns self
+; (no-op).
+
+(def adder-vau (vau (a b) $e
+  [(eval a $e) + (eval b $e)]))
+
+(def adder-fn (wrap adder-vau))
+
+[console println: (str "  adder-vau operative? "    [adder-vau operative?])]
+[console println: (str "  adder-fn  applicative? "  [adder-fn  applicative?])]
+[console println: (str "  (unwrap adder-fn) is the original vau? "
+                       [[adder-fn unwrap] identical: adder-vau])]
+[console println: (str "  (unwrap adder-vau) is identity? "
+                       [[adder-vau unwrap] identical: adder-vau])]
+
+; ── 4. they compute the same answer ─────────────────────────
+
+[console println: "\n(4) operative vs applicative — same result, different journey ↓"]
+
+; calling the operative passes RAW FORMS:
+;   (adder-vau 3 [4 + 5])  → body sees 3 and [4 + 5] as forms.
+;     body eval's each in $e, returns 12.
+; calling the applicative pre-eval's args:
+;   (adder-fn 3 [4 + 5])   → caller eval's 3 and [4 + 5] → 3 and 9.
+;     body's eval of 3 and 9 is mostly idempotent for non-symbol
+;     values; gets 12.
+;
+; same number, different protocol. structural model means we can
+; inspect the difference at any time.
+
+[console println: (str "  (adder-vau 3 [4 + 5]) = " (adder-vau 3 [4 + 5]))]
+[console println: (str "  (adder-fn  3 [4 + 5]) = " (adder-fn  3 [4 + 5]))]
+
+; ── 5. operatives let you build new control flow ───────────
+
+[console println: "\n(5) operatives — homemade special forms ↓"]
+
+; (when test body) — a moof-defined macro-style operator.
+; it doesn't evaluate body unless test is true.
+(def my-when (vau (test body) $e
+  (if (eval test $e)
+    (eval body $e)
+    nil)))
+
+[console println: (str "  (my-when true 'yes) → "
+                       [(my-when true 'yes) describe])]
+[console println: (str "  (my-when false (would-error-if-evaluated)) → "
+                       [(my-when false (would-error-if-evaluated)) describe])]
+; the second one didn't even try to eval (would-error-…) — operative
+; semantics make that safe. there's no "is would-error-… defined?"
+; check because the form was never reduced.
+
+; ── 6. closing thought ──────────────────────────────────────
+
+[console println: "\nstructural wrap means you can:"]
+[console println: "  - tell operatives from applicatives at runtime"]
+[console println: "  - take applicatives apart with unwrap"]
+[console println: "  - build new operatives in moof and pass them as values"]
+[console println: "all without a flag bit anywhere in the runtime."]
