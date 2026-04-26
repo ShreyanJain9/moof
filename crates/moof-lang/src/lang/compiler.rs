@@ -386,13 +386,18 @@ impl<'a> Compiler<'a> {
 
                 "fn" | "lambda" if stable => {
                     // (fn (params...) body...) → compile body as a sub-chunk, emit MakeClosure
+                    //
+                    // Uniform call protocol: every closure (fn or vau) has $env
+                    // as its last positional. fn doesn't reference it (we synthesize
+                    // $_ for the slot), but the runtime's push_closure_frame fills
+                    // it from heap.env unconditionally — same packing path as vau.
                     let items = self.heap.list_to_vec(expr);
                     if items.len() < 3 {
                         return Err("fn: need params and body".into());
                     }
                     // extract param names (with optional rest param)
                     let (positional, rest_param) = self.heap.extract_params(items[1]);
-                    let arity = positional.len() as u8;
+                    let arity = (positional.len() + 1) as u8;  // +1 for synthesized $_
 
                     let mut sub = Compiler::new(self.heap, "<fn>");
                     sub.parent_locals = self.build_sub_parent_locals();
@@ -402,6 +407,14 @@ impl<'a> Compiler<'a> {
                         let reg = sub.alloc_reg();
                         sub.locals.push((sym, reg));
                     }
+                    // synthesize $_ as the trailing env param. fn body never
+                    // references it; it just occupies the canonical "last
+                    // positional = env" slot so push_closure_frame can write
+                    // heap.env there uniformly. $_ is pre-interned at heap
+                    // setup so we don't need a mutable heap borrow here.
+                    let dollar_under_sym = self.heap.sym_dollar_under;
+                    let env_reg = sub.alloc_reg();
+                    sub.locals.push((dollar_under_sym, env_reg));
                     // rest param gets its own register (filled by VM)
                     let rest_reg = if let Some(rest_sym) = rest_param {
                         let reg = sub.alloc_reg();
@@ -447,9 +460,13 @@ impl<'a> Compiler<'a> {
                     }
                     self.closure_descs.extend(sub_descs);
 
+                    // include the synthesized $_ in param_names so the
+                    // per-call env binding pairs up with arity correctly.
+                    let mut param_names_with_env = positional;
+                    param_names_with_env.push(dollar_under_sym);
                     let desc = ClosureDesc {
                         chunk,
-                        param_names: positional,
+                        param_names: param_names_with_env,
                         is_operative: false,
                         capture_names,
                         capture_parent_regs,
@@ -920,26 +937,13 @@ impl<'a> Compiler<'a> {
         let func_const = self.add_sym_const(operative_sym);
         self.chunk.emit(Op::GetGlobal, func_reg, (func_const >> 8) as u8, func_const as u8);
 
-        // `$e` is the caller's actual env. push_closure_frame for the
-        // caller has already allocated a per-call env holding params +
-        // captures as bindings, so name lookups inside (eval form $e)
-        // walk the chain and find caller-locals naturally — Kernel-pure.
-        let env_reg = self.alloc_reg();
-        self.chunk.emit(Op::CurrentEnv, env_reg, 0, 0);
-
-        // call the operative with (args-list, env)
-        // operative's params are (user-params... $env)
-        // we pass: the args list as first param, env as second
-        // the operative body destructures from the args list
-        // ... actually, the operative expects individual params, not a list.
-        // let's pass the args as individual values (quoted) + env as last
-
-        // build a cons list: (ast-arg1 ast-arg2 ... env)
-        // operative params destructure from this list
+        // build the args list — raw AST forms, no env appended.
+        // every closure (operative or applicative) has $env as its
+        // last positional, filled by push_closure_frame from the
+        // caller's heap.env at call time. we don't put env in the
+        // wire-level args list at all. uniform call protocol.
         let list_reg = self.alloc_reg();
         self.chunk.emit(Op::LoadNil, list_reg, 0, 0);
-        // env is last element
-        self.chunk.emit(Op::Cons, list_reg, env_reg, list_reg);
         // args in reverse order (so they end up in correct list order).
         // reuse ONE scratch register across iterations — a fresh alloc
         // per arg would overflow the u8 register space for operatives
