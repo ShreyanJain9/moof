@@ -12,3 +12,13 @@ crate-type = ["lib"]
 moof-core = { path = "../moof-core" }
 serde = { version = "1", features = ["derive"] }
 indexmap = { version = "2", features = ["serde"] }
+
+# JIT backend — Cranelift. Tier-0 ground truth: produces native
+# machine code from our bytecode at runtime. Smaller and faster to
+# compile-time-compile than LLVM; perf is ~70% of LLVM-O2 for our
+# workloads which is plenty for a baseline JIT. See crates/moof-lang/
+# src/jit/ for the bring-up.
+cranelift = "0.119"
+cranelift-jit = "0.119"
+cranelift-module = "0.119"
+cranelift-native = "0.119"

@@ -16,6 +16,7 @@
 pub mod opcodes;
 pub mod vm;
 pub mod lang;
+pub mod jit;
 
 pub use opcodes::{Chunk, Op};
 pub use vm::{VM, RunResult};
