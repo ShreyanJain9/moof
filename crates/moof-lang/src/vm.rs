@@ -364,6 +364,39 @@ impl VM {
                     let send_args: &[Value] = &send_args_buf[..n];
                     f.pc += 5;
 
+                    // Inline fixnum fast paths. For the common case of
+                    // `[int + int]`, `[int < int]`, etc., skip the full
+                    // dispatch (proto-cache lookup + native call +
+                    // result-marshalling) and do the op right here.
+                    // Both operands must be inline i48 fixnums; on any
+                    // mismatch (BigInt, Float, non-int) we fall through
+                    // to the regular Send path. This is the hottest
+                    // path in arithmetic-heavy code (conway's neighbor
+                    // count is ~70% Send-on-int).
+                    if n == 1 {
+                        let a_val = recv;
+                        let b_val = send_args[0];
+                        if let (Some(x), Some(y)) = (a_val.as_integer(), b_val.as_integer()) {
+                            // try the op; if it overflows, fall through
+                            // to the dispatch path (which promotes to
+                            // BigInt).
+                            let fast: Option<Value> =
+                                if      sel_sym == heap.sym_plus  { x.checked_add(y).map(Value::integer) }
+                                else if sel_sym == heap.sym_minus { x.checked_sub(y).map(Value::integer) }
+                                else if sel_sym == heap.sym_mul   { x.checked_mul(y).map(Value::integer) }
+                                else if sel_sym == heap.sym_lt    { Some(Value::boolean(x <  y)) }
+                                else if sel_sym == heap.sym_le    { Some(Value::boolean(x <= y)) }
+                                else if sel_sym == heap.sym_gt    { Some(Value::boolean(x >  y)) }
+                                else if sel_sym == heap.sym_ge    { Some(Value::boolean(x >= y)) }
+                                else if sel_sym == heap.sym_eq_op { Some(Value::boolean(x == y)) }
+                                else { None };
+                            if let Some(result) = fast {
+                                self.frames.last_mut().unwrap().regs[dst as usize] = result;
+                                continue;
+                            }
+                        }
+                    }
+
                     // look up handler
                     let lookup = dispatch::lookup_handler(heap, recv, sel_sym);
                     let (handler, _) = match lookup {

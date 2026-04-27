@@ -104,6 +104,20 @@ pub struct Heap {
     pub sym_at_put: u32,
     pub sym_message: u32,     // message — Error slot
 
+    // Pre-interned arithmetic / comparison selectors. The VM's Op::Send
+    // checks against these on the hot path so an `[i + 1]` between
+    // two fixnums skips the proto-cache lookup + native dispatch
+    // entirely.
+    pub sym_plus: u32,
+    pub sym_minus: u32,
+    pub sym_mul: u32,
+    pub sym_lt: u32,
+    pub sym_le: u32,
+    pub sym_gt: u32,
+    pub sym_ge: u32,
+    pub sym_eq_op: u32,
+    pub sym_count: u32,
+
     // closure slot symbols — metadata lives on every closure under
     // these names. looked up by symbol (NOT by index) so canonical
     // serialization's slot-sort can reorder them without breaking
@@ -208,6 +222,9 @@ impl Heap {
             sym_parent: 0, sym_describe: 0, sym_dnu: 0,
             sym_length: 0, sym_at: 0, sym_at_put: 0,
             sym_message: 0,
+            sym_plus: 0, sym_minus: 0, sym_mul: 0,
+            sym_lt: 0, sym_le: 0, sym_gt: 0, sym_ge: 0, sym_eq_op: 0,
+            sym_count: 0,
             sym_code_idx: 0, sym_arity: 0, sym_underlying: 0, sym_is_pure: 0, sym_scope: 0,
             sym_dollar_under: 0,
             lexical_scope: 0,
@@ -235,6 +252,15 @@ impl Heap {
         h.sym_at = h.intern("at:");
         h.sym_at_put = h.intern("at:put:");
         h.sym_message = h.intern("message");
+        h.sym_plus = h.intern("+");
+        h.sym_minus = h.intern("-");
+        h.sym_mul = h.intern("*");
+        h.sym_lt = h.intern("<");
+        h.sym_le = h.intern("<=");
+        h.sym_gt = h.intern(">");
+        h.sym_ge = h.intern(">=");
+        h.sym_eq_op = h.intern("=");
+        h.sym_count = h.intern("count");
         h.sym_code_idx = h.intern("code_idx");
         h.sym_arity = h.intern("arity");
         h.sym_underlying = h.intern("__underlying");
