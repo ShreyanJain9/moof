@@ -24,20 +24,29 @@
 ; would slot the threaded value at the head index, breaking sends.
 ; explicit `_` gives one consistent rule.
 
+; a nested (~> ...) opens its own _-scope, so we don't peek inside it
+; — same idea as quasiquote not unquoting through nested quasiquote.
+(defn %~>-opaque? (form)
+  (if (cons? form)
+    (eq [form car] '~>)
+    false))
+
 (defn %~>-has-_ (form)
   (if (eq form '_) true
-    (if (cons? form)
-      (if (%~>-has-_ [form car]) true
-        (%~>-has-_ [form cdr]))
-      false)))
+    (if (%~>-opaque? form) false
+      (if (cons? form)
+        (if (%~>-has-_ [form car]) true
+          (%~>-has-_ [form cdr]))
+        false))))
 
 (defn %~>-substitute (form val)
   (if (eq form '_)
     (cons 'quote (cons val nil))
-    (if (cons? form)
-      (cons (%~>-substitute [form car] val)
-            (%~>-substitute [form cdr] val))
-      form)))
+    (if (%~>-opaque? form) form
+      (if (cons? form)
+        (cons (%~>-substitute [form car] val)
+              (%~>-substitute [form cdr] val))
+        form))))
 
 (defn %~>-step (val step env)
   (if (%~>-has-_ step)
