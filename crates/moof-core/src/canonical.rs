@@ -70,9 +70,38 @@ impl Heap {
     pub fn reachable_objects(&self, val: Value) -> std::collections::HashSet<u32> {
         let mut seen = std::collections::HashSet::new();
         let mut worklist: Vec<u32> = Vec::new();
-        if let Some(id) = val.as_any_object() { worklist.push(id); }
+        if let Some(id) = val.as_any_object() {
+            if !crate::heap::is_virtual_env_id(id) { worklist.push(id); }
+            else {
+                // walk through the cell's outgoing refs WITHOUT
+                // adding the virtual id itself (it's not an arena
+                // object and the blobstore can't serialize it).
+                let idx = crate::heap::frame_env_idx(id);
+                if let Some(cell) = self.envs.get(idx) {
+                    if let Some(pid) = cell.parent.as_any_object() { worklist.push(pid); }
+                    for v in &cell.values {
+                        if let Some(sid) = v.as_any_object() { worklist.push(sid); }
+                    }
+                }
+            }
+        }
         while let Some(id) = worklist.pop() {
             if !seen.insert(id) { continue; }
+            // Virtual env cells aren't in the arena. Trace through
+            // their bindings + parent so anything reachable via env
+            // chain stays alive — but DON'T add the virtual id to
+            // `seen` (the blobstore can't serialize it).
+            if crate::heap::is_virtual_env_id(id) {
+                seen.remove(&id);
+                let idx = crate::heap::frame_env_idx(id);
+                if let Some(cell) = self.envs.get(idx) {
+                    if let Some(pid) = cell.parent.as_any_object() { worklist.push(pid); }
+                    for v in &cell.values {
+                        if let Some(sid) = v.as_any_object() { worklist.push(sid); }
+                    }
+                }
+                continue;
+            }
             let obj = self.get(id);
             if let Some(pid) = obj.proto.as_any_object() { worklist.push(pid); }
             for v in &obj.slot_values {

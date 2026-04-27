@@ -232,7 +232,11 @@ impl System {
         let store = BlobStore::open(Path::new(store_path))
             .map_err(|e| format!("open blobstore: {e}"))?;
         let vat = self.scheduler.vat(vat_id);
-        let env_val = Value::nursery(vat.heap.env);
+        // Save from the persistent root, not from heap.env which may
+        // be a transient virtual cell mid-execution. (This shouldn't
+        // matter at script-end, but defensive: timer-driven scripts
+        // can leave heap.env pointed at a per-call cell.)
+        let env_val = Value::nursery(vat.heap.root_env);
         store.save_snapshot(
             &vat.heap,
             env_val,

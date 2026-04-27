@@ -200,6 +200,13 @@ pub struct Heap {
     /// directly.
     pub envs: Vec<EnvCell>,
 
+    /// The vat's persistent root environment — set once at heap init,
+    /// never reassigned. `heap.env` may swap to per-call virtual cells
+    /// during execution; `root_env` is the stable handle to the
+    /// always-real, always-persisted root that everything chains back
+    /// to. Image save uses this; lookup paths use `heap.env`.
+    pub root_env: u32,
+
     /// Pending timer-driven Act resolutions. Each entry: (act_id,
     /// due_monotonic_nanos). The scheduler's drain loop scans these
     /// across all vats; when a due time has passed, the act is
@@ -291,6 +298,7 @@ impl Heap {
             closure_sources: Vec::new(),
             form_locations: std::collections::HashMap::new(),
             envs: Vec::new(),
+            root_env: 0,
             timers: Vec::new(),
         };
 
@@ -352,6 +360,7 @@ impl Heap {
             vec![Value::NIL, bindings_table],
         ));
         h.lexical_scope = h.env;
+        h.root_env = h.env;
 
         h
     }
