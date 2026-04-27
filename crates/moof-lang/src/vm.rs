@@ -25,14 +25,32 @@ struct Frame {
     pc: usize,
     /// Shared bytecode + constant pool. Holding an Arc here means
     /// push_closure_frame is one refcount bump per call instead of
-    /// cloning a few hundred bytes of code/constants — huge win
-    /// in tight recursion (conway's hot loop pushes thousands of
-    /// frames per generation).
+    /// cloning a few hundred bytes of code/constants.
     chunk: Arc<Chunk>,
     desc_base: usize,
     result_reg: u8,
     saved_env: Option<u32>,
     saved_lex: Option<u32>,
+
+    /// Lazy per-call env. Some(_) only when the closure was pushed
+    /// down the fast path (compile-time `needs_env = false`): nothing
+    /// in the body would observe a heap-materialized env, so we
+    /// stashed the data needed to build one and skipped the
+    /// allocation. `materialize_current_frame` reifies it on demand —
+    /// triggered when a callee is a vau (whose `$e` must be a real
+    /// env) or any opcode the static analysis missed.
+    ///
+    /// $env stays *semantically* an object; the heap allocation just
+    /// gets postponed until something looks at it.
+    lazy_env: Option<LazyEnvData>,
+}
+
+struct LazyEnvData {
+    /// closure.scope at the call site — parent for the materialized env.
+    scope_val: Value,
+    /// (name, value) pairs as make_env wants them: params (with the
+    /// trailing $env binding) followed by captures.
+    bindings: Vec<(u32, Value)>,
 }
 
 pub struct VM {
@@ -82,6 +100,7 @@ impl VM {
             result_reg: 0,
             saved_env: None,
             saved_lex: None,
+            lazy_env: None,
         });
         self.run(heap)
     }
@@ -121,26 +140,17 @@ impl VM {
         let arity = chunk.arity as usize;
         let param_names = Arc::clone(&self.closure_descs[code_idx].param_names);
         let capture_names = Arc::clone(&self.closure_descs[code_idx].capture_names);
+        let needs_env = self.closure_descs[code_idx].needs_env;
 
-        // read captures from the heap closure object
         let captures_from_obj = heap.closure_captures(closure_val);
 
         let mut regs = vec![Value::NIL; chunk.num_regs as usize + 16];
 
-        // Uniform call protocol — every closure (operative or applicative)
-        // has $env (or synthesized $_) at its LAST positional slot. push
-        // fills it from heap.env at call time, NOT from the wire-level
-        // args list. positional[0..arity-1] come from `unpacked`; rest_reg
-        // (if present) captures unpacked beyond the declared positional
-        // count. caller-side compile_call passes eval'd values; caller-
-        // side compile_operative_call passes raw forms. neither includes
-        // env in the list.
-        let mut env_names: Vec<u32> = Vec::new();
-        let mut env_values: Vec<Value> = Vec::new();
-
         let n_before_env = arity.saturating_sub(1);
         let env_val = Value::nursery(heap.env);
 
+        // params + captures into registers (compile-time-resolved
+        // accesses don't depend on the env being heap-materialized).
         for i in 0..n_before_env.min(unpacked.len()) {
             regs[i] = unpacked[i];
         }
@@ -151,54 +161,62 @@ impl VM {
             let rest_args: Vec<Value> = unpacked.iter().skip(n_before_env).copied().collect();
             regs[rest_r as usize] = heap.list(&rest_args);
         }
-
-        // Pair param names with values for the per-call env. Includes
-        // the trailing $env / $_ binding so closures can look it up by
-        // name from eval'd code as well as via the register.
-        for (i, &name) in param_names.iter().enumerate().take(arity) {
-            if i < n_before_env && i < unpacked.len() {
-                env_names.push(name);
-                env_values.push(unpacked[i]);
-            } else if i == n_before_env {
-                env_names.push(name);
-                env_values.push(env_val);
-            }
-        }
-
-        // load captured values into their compiler-assigned registers
-        // and mirror them into env-names so eval'd code resolves
-        // captures by name.
         for (i, (_, val)) in captures_from_obj.iter().enumerate() {
             if i < capture_local_regs.len() {
                 let reg = capture_local_regs[i] as usize;
-                if reg < regs.len() {
-                    regs[reg] = *val;
-                }
-            }
-            if i < capture_names.len() {
-                env_names.push(capture_names[i]);
-                env_values.push(*val);
+                if reg < regs.len() { regs[reg] = *val; }
             }
         }
 
-        // Closures-carry-env, Kernel-style. Always allocate a per-call
-        // env (parent = closure.scope, bindings = positional params +
-        // captures + $env). heap.env / lexical_scope swap to the new
-        // env for the body; saved on the frame so Op::Return restores.
-        // Both operatives and applicatives now follow this single path
-        // so name lookups inside (eval form $e) work uniformly.
-        let (saved_env, saved_lex) = if let Some(cid) = closure_val.as_any_object() {
-            let scope_sym = heap.sym_scope;
-            let scope_val = heap.get(cid).slot_get(scope_sym).unwrap_or(Value::NIL);
-            let new_env = heap.make_env(scope_val, env_names, env_values);
-            let new_env_id = new_env.as_any_object()
-                .ok_or("push_closure_frame: make_env returned non-object")?;
-            let p_env = heap.env;
-            let p_lex = heap.lexical_scope;
-            heap.env = new_env_id;
-            heap.lexical_scope = new_env_id;
-            (Some(p_env), Some(p_lex))
-        } else { (None, None) };
+        // Build the (name, value) pairs that *would* go into a real
+        // env. Used eagerly (slow path) or stashed as lazy data (fast
+        // path).
+        let mut bindings: Vec<(u32, Value)> = Vec::with_capacity(param_names.len() + capture_names.len());
+        for (i, &name) in param_names.iter().enumerate().take(arity) {
+            if i < n_before_env && i < unpacked.len() {
+                bindings.push((name, unpacked[i]));
+            } else if i == n_before_env {
+                bindings.push((name, env_val));
+            }
+        }
+        for (i, (_, val)) in captures_from_obj.iter().enumerate() {
+            if i < capture_names.len() {
+                bindings.push((capture_names[i], *val));
+            }
+        }
+
+        let scope_val = closure_val.as_any_object()
+            .and_then(|cid| heap.get(cid).slot_get(heap.sym_scope))
+            .unwrap_or(Value::NIL);
+
+        let (saved_env, saved_lex, lazy_env) = if closure_val.as_any_object().is_some() {
+            if needs_env {
+                // Slow path: materialize immediately. The body has
+                // Eval / CurrentEnv / DefGlobal / MakeClosure and will
+                // observe heap.env.
+                let new_env = heap.make_env(scope_val, bindings.iter().map(|(n,_)|*n).collect(), bindings.iter().map(|(_,v)|*v).collect());
+                let new_env_id = new_env.as_any_object()
+                    .ok_or("push_closure_frame: make_env returned non-object")?;
+                let p_env = heap.env;
+                let p_lex = heap.lexical_scope;
+                heap.env = new_env_id;
+                heap.lexical_scope = new_env_id;
+                (Some(p_env), Some(p_lex), None)
+            } else {
+                // Fast path: skip make_env. heap.env points at the
+                // closure's static :scope so GetGlobal still walks
+                // chains to the root namespace. Stash bindings in
+                // `lazy_env` so we can materialize on demand if a
+                // callee turns out to need them (e.g. a vau reading
+                // $e for `eval`).
+                let target = scope_val.as_any_object().unwrap_or(heap.env);
+                let p_env = heap.env;
+                let p_lex = heap.lexical_scope;
+                heap.env = target;
+                heap.lexical_scope = target;
+                (Some(p_env), Some(p_lex), Some(LazyEnvData { scope_val, bindings }))
+            }
+        } else { (None, None, None) };
 
         self.frames.push(Frame {
             regs,
@@ -208,8 +226,30 @@ impl VM {
             result_reg,
             saved_env,
             saved_lex,
+            lazy_env,
         });
         Ok(())
+    }
+
+    /// If the topmost frame deferred its env allocation, build the
+    /// real env now. heap.env / lexical_scope swap to it. Subsequent
+    /// reads of $env see the materialized value.
+    fn materialize_current_frame(&mut self, heap: &mut Heap) {
+        let f = match self.frames.last_mut() {
+            Some(f) => f,
+            None => return,
+        };
+        let lazy = match f.lazy_env.take() {
+            Some(l) => l,
+            None => return,
+        };
+        let names: Vec<u32> = lazy.bindings.iter().map(|(n,_)|*n).collect();
+        let vals: Vec<Value> = lazy.bindings.iter().map(|(_,v)|*v).collect();
+        let new_env = heap.make_env(lazy.scope_val, names, vals);
+        if let Some(new_env_id) = new_env.as_any_object() {
+            heap.env = new_env_id;
+            heap.lexical_scope = new_env_id;
+        }
     }
 
     /// The ONE opcode loop. Reads from the current (top) frame.
@@ -356,7 +396,15 @@ impl VM {
                             dispatch::call_native(heap, handler, recv, &send_args)?
                         };
                         self.frames.last_mut().unwrap().regs[dst as usize] = result;
-                    } else if let Some((code_idx, _)) = heap.as_closure(handler) {
+                    } else if let Some((code_idx, is_operative)) = heap.as_closure(handler) {
+                        // If the callee is a vau, its $e will be set
+                        // from the *caller's* heap.env. Make sure the
+                        // caller has a real per-call env before we
+                        // hand it off — otherwise the vau body's
+                        // (eval form $e) walks the wrong chain.
+                        if is_operative {
+                            self.materialize_current_frame(heap);
+                        }
                         let unpacked = unpacked_for_call.unwrap_or_else(|| {
                             let mut full = Vec::with_capacity(1 + send_args.len());
                             full.push(recv);
@@ -416,13 +464,13 @@ impl VM {
                         // native: call directly, store result, then the Return after will pop
                         let result = dispatch::call_native(heap, handler, recv, &send_args)?;
                         self.frames.last_mut().unwrap().regs[dst as usize] = result;
-                    } else if let Some((code_idx, _)) = heap.as_closure(handler) {
-                        // Closure tail call: REPLACE current frame. Build
-                        // the args Vec directly — no intermediate cons
-                        // chain. This is the difference between infinite
-                        // tail recursion allocating bounded memory
-                        // (GC'd) vs. the ~10k cons pairs per scheduler
-                        // turn that dominated allocation before.
+                    } else if let Some((code_idx, is_operative)) = heap.as_closure(handler) {
+                        // tail call to a vau: caller's heap.env will
+                        // become the vau's $e. Materialize first so $e
+                        // resolves caller's locals by name.
+                        if is_operative {
+                            self.materialize_current_frame(heap);
+                        }
                         let unpacked: Vec<Value> =
                             if sel_sym == heap.sym_call && handler == recv {
                                 let arg_list = send_args.first().copied().unwrap_or(Value::NIL);
@@ -433,7 +481,6 @@ impl VM {
                                 full.extend_from_slice(&send_args);
                                 full
                             };
-                        // build new frame contents
                         if code_idx >= self.closure_descs.len() {
                             return Err(format!("tail_call: code_idx {} out of bounds", code_idx));
                         }
@@ -444,23 +491,16 @@ impl VM {
                         let arity = chunk.arity as usize;
                         let param_names = Arc::clone(&self.closure_descs[code_idx].param_names);
                         let capture_names = Arc::clone(&self.closure_descs[code_idx].capture_names);
+                        let needs_env = self.closure_descs[code_idx].needs_env;
                         let captures_from_obj = heap.closure_captures(handler);
 
-                        // uniform call protocol — see push_closure_frame for
-                        // commentary. last positional = $env / $_ from
-                        // heap.env at call time. rest gets unpacked extras.
-                        let mut env_names: Vec<u32> = Vec::new();
-                        let mut env_values: Vec<Value> = Vec::new();
-
                         let f = self.frames.last_mut().unwrap();
-                        // reuse the frame: reset everything. swap in the
-                        // new chunk Arc — old one drops via the assignment.
                         f.regs.clear();
                         f.regs.resize(chunk.num_regs as usize + 16, Value::NIL);
                         f.pc = 0;
                         f.chunk = chunk;
                         f.desc_base = closure_desc_base;
-                        // result_reg stays the same (we're replacing, not pushing)
+                        f.lazy_env = None;
 
                         let n_before_env = arity.saturating_sub(1);
                         let env_val = Value::nursery(heap.env);
@@ -475,49 +515,56 @@ impl VM {
                             let rest_args: Vec<Value> = unpacked.iter().skip(n_before_env).copied().collect();
                             f.regs[rest_r as usize] = heap.list(&rest_args);
                         }
-                        for (i, &name) in param_names.iter().enumerate().take(arity) {
-                            if i < n_before_env && i < unpacked.len() {
-                                env_names.push(name);
-                                env_values.push(unpacked[i]);
-                            } else if i == n_before_env {
-                                env_names.push(name);
-                                env_values.push(env_val);
-                            }
-                        }
                         for (i, (_, val)) in captures_from_obj.iter().enumerate() {
                             if i < capture_local_regs.len() {
                                 let reg = capture_local_regs[i] as usize;
-                                if reg < f.regs.len() {
-                                    f.regs[reg] = *val;
-                                }
-                            }
-                            if i < capture_names.len() {
-                                env_names.push(capture_names[i]);
-                                env_values.push(*val);
+                                if reg < f.regs.len() { f.regs[reg] = *val; }
                             }
                         }
-                        // closures-carry-env: tail-call allocates a fresh
-                        // per-call env. saved_env on the frame is captured
-                        // if not already set — so the eventual Return
-                        // restores to the heap.env that was active BEFORE
-                        // this whole tail-call chain started. (the phase-1
-                        // fix that closed the top-level (bundle …) silent
-                        // fail.)
+
+                        let mut bindings: Vec<(u32, Value)> = Vec::with_capacity(param_names.len() + capture_names.len());
+                        for (i, &name) in param_names.iter().enumerate().take(arity) {
+                            if i < n_before_env && i < unpacked.len() {
+                                bindings.push((name, unpacked[i]));
+                            } else if i == n_before_env {
+                                bindings.push((name, env_val));
+                            }
+                        }
+                        for (i, (_, val)) in captures_from_obj.iter().enumerate() {
+                            if i < capture_names.len() {
+                                bindings.push((capture_names[i], *val));
+                            }
+                        }
+
                         if let Some(cid) = handler.as_any_object() {
                             let scope_sym = heap.sym_scope;
                             let scope_val = heap.get(cid).slot_get(scope_sym).unwrap_or(Value::NIL);
-                            let new_env = heap.make_env(scope_val, env_names, env_values);
-                            if let Some(new_env_id) = new_env.as_any_object() {
+
+                            if needs_env {
+                                let names: Vec<u32> = bindings.iter().map(|(n,_)|*n).collect();
+                                let vals: Vec<Value> = bindings.iter().map(|(_,v)|*v).collect();
+                                let new_env = heap.make_env(scope_val, names, vals);
+                                if let Some(new_env_id) = new_env.as_any_object() {
+                                    let f = self.frames.last_mut().unwrap();
+                                    if f.saved_env.is_none() {
+                                        f.saved_env = Some(heap.env);
+                                        f.saved_lex = Some(heap.lexical_scope);
+                                    }
+                                    heap.env = new_env_id;
+                                    heap.lexical_scope = new_env_id;
+                                }
+                            } else {
+                                let target = scope_val.as_any_object().unwrap_or(heap.env);
                                 let f = self.frames.last_mut().unwrap();
                                 if f.saved_env.is_none() {
                                     f.saved_env = Some(heap.env);
                                     f.saved_lex = Some(heap.lexical_scope);
                                 }
-                                heap.env = new_env_id;
-                                heap.lexical_scope = new_env_id;
+                                heap.env = target;
+                                heap.lexical_scope = target;
+                                f.lazy_env = Some(LazyEnvData { scope_val, bindings });
                             }
                         }
-                        // continue loop — will execute the new frame's code
                     } else {
                         return Err(format!("handler is not callable"));
                     }
@@ -960,7 +1007,10 @@ impl VM {
                 Ok(val) => return Ok(val),
                 Err(msg) => return Ok(heap.make_error(&msg)),
             }
-        } else if let Some((code_idx, _)) = heap.as_closure(handler) {
+        } else if let Some((code_idx, is_operative)) = heap.as_closure(handler) {
+            if is_operative {
+                self.materialize_current_frame(heap);
+            }
             let unpacked: Vec<Value> =
                 if selector == heap.sym_call && handler == receiver {
                     let arg_list = args.first().copied().unwrap_or(Value::NIL);
@@ -1058,6 +1108,7 @@ impl VM {
             result_reg: 0,
             saved_env: None,
             saved_lex: None,
+            lazy_env: None,
         });
         self.run(heap)
     }

@@ -22,6 +22,29 @@ pub struct ClosureDesc {
     pub desc_base: usize,
     pub rest_param_reg: Option<u8>,
     pub source: Option<moof_core::source::ClosureSource>,
+
+    /// True iff the body needs a per-call heap-allocated env. False
+    /// for the common case (a closure that only uses local registers,
+    /// captures, and Send dispatch — e.g. conway's cell-at and
+    /// friends).
+    ///
+    /// $env is *semantically* always an object — eval, $_ as a value,
+    /// def-inside-body, and inner closures that need lexical access
+    /// to this body's per-call frame all see a real env. We just
+    /// elide the heap allocation when nothing in the body would
+    /// observe it: `heap.env`/`heap.lexical_scope` swap to the
+    /// closure's static `:scope` instead, which is enough for plain
+    /// `Op::GetGlobal` to walk to the root namespace.
+    ///
+    /// Conservative analysis at compile time: any of `Op::Eval`,
+    /// `Op::CurrentEnv`, `Op::DefGlobal`, or `Op::MakeClosure` in
+    /// the body marks `needs_env = true`. (MakeClosure is currently
+    /// pessimistic — the inner closure captures `lexical_scope` as
+    /// its own `:scope`, and we don't yet do the bottom-up flow
+    /// analysis to know whether the inner closure actually needs the
+    /// outer's per-call env in its parent chain. Refining this is
+    /// future work.)
+    pub needs_env: bool,
 }
 
 pub struct CompileResult {
@@ -439,6 +462,7 @@ impl<'a> Compiler<'a> {
                     }
                     self.closure_descs.extend(sub_descs);
 
+                    let needs_env = chunk.body_needs_env();
                     let desc = ClosureDesc {
                         chunk,
                         param_names: Arc::new(param_syms),
@@ -447,6 +471,7 @@ impl<'a> Compiler<'a> {
                         capture_local_regs: Arc::new(capture_local_regs),
                         capture_values: Vec::new(), desc_base: 0, rest_param_reg: rest_reg,
                         source: self.source.clone(),
+                        needs_env,
                     };
                     let idx = self.closure_descs.len();
                     self.closure_descs.push(desc);
@@ -543,6 +568,7 @@ impl<'a> Compiler<'a> {
                     // per-call env binding pairs up with arity correctly.
                     let mut param_names_with_env = positional;
                     param_names_with_env.push(dollar_under_sym);
+                    let needs_env = chunk.body_needs_env();
                     let desc = ClosureDesc {
                         chunk,
                         param_names: Arc::new(param_names_with_env),
@@ -551,6 +577,7 @@ impl<'a> Compiler<'a> {
                         capture_local_regs: Arc::new(capture_local_regs),
                         capture_values: Vec::new(), desc_base: 0, rest_param_reg: rest_reg,
                         source: self.source.clone(),
+                        needs_env,
                     };
                     let idx = self.closure_descs.len();
                     self.closure_descs.push(desc);

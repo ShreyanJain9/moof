@@ -1075,6 +1075,7 @@ fn decode_desc(
     let mut chunk = Chunk::new(name, arity, num_regs);
     chunk.code = code;
     chunk.constants = constants;
+    let needs_env = chunk.body_needs_env();
 
     Ok(ClosureDesc {
         chunk: std::sync::Arc::new(chunk),
@@ -1086,6 +1087,7 @@ fn decode_desc(
         desc_base,
         rest_param_reg,
         source,
+        needs_env,
     })
 }
 
@@ -1326,6 +1328,7 @@ mod tests {
             capture_values: vec![captured_list],
             desc_base: 0,
             rest_param_reg: Some(7),
+            needs_env: false,
             source: Some(moof_core::source::ClosureSource {
                 text: "(defn foo ...)".to_string(),
                 origin: moof_core::source::SourceOrigin {

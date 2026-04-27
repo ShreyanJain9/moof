@@ -156,6 +156,29 @@ impl Chunk {
     ///
     /// we cap jump-chasing at 4 hops so we never loop and never spend
     /// too long inspecting any single Send.
+    /// Scan the body for opcodes that require a real per-call heap
+    /// env: `Eval`, `CurrentEnv`, `DefGlobal`, `MakeClosure`. (See the
+    /// `needs_env` field on `ClosureDesc` for the rationale.)
+    /// `GetGlobal` is intentionally NOT in this set: it walks
+    /// `heap.env` for symbol resolution, but pointing `heap.env` at
+    /// the closure's static `:scope` is already enough — no per-call
+    /// allocation needed.
+    pub fn body_needs_env(&self) -> bool {
+        let code = &self.code;
+        let mut pc = 0;
+        while pc + 3 < code.len() {
+            if let Some(op) = Op::from_u8(code[pc]) {
+                match op {
+                    Op::Eval | Op::CurrentEnv | Op::DefGlobal | Op::MakeClosure => return true,
+                    Op::Send | Op::TailCall => { pc += 9; continue; }
+                    _ => {}
+                }
+            }
+            pc += 4;
+        }
+        false
+    }
+
     pub fn optimize_tail_calls(&mut self) {
         let code_len = self.code.len();
         let mut pc = 0;

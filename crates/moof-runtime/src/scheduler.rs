@@ -613,6 +613,7 @@ impl Scheduler {
                 self.vat_mut(to_vat_id).heap.register_closure_source(target_idx, s);
             }
 
+            let needs_env = chunk.body_needs_env();
             let desc = moof_lang::lang::compiler::ClosureDesc {
                 chunk: std::sync::Arc::new(chunk),
                 param_names,
@@ -623,6 +624,7 @@ impl Scheduler {
                 desc_base: target_base,
                 rest_param_reg: rest_reg,
                 source: src,
+                needs_env,
             };
             self.vat_mut(to_vat_id).vm.add_closure_desc(desc);
         }
