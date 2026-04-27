@@ -91,7 +91,7 @@ impl Heap {
 
         // virtual frame-env cells — these aren't HeapObjects but they
         // hold heap-id Values that need to keep their targets alive.
-        for cell in &self.frame_envs {
+        for cell in &self.envs {
             mark_value_id(cell.parent, &mut worklist, &mut marked);
             for &v in &cell.values {
                 mark_value_id(v, &mut worklist, &mut marked);

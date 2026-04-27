@@ -185,27 +185,35 @@ pub struct Heap {
     /// during GC sweeps.
     pub form_locations: std::collections::HashMap<u32, crate::source::FormLoc>,
 
-    /// Frame-env cells: a side arena of lightweight envs that don't
-    /// allocate a HeapObject. Used by the VM when materializing a
-    /// per-call env "lazily" — instead of building a full
-    /// `make_env_inline` HeapObject, push a cell here and address it
-    /// via a virtual env id (top u32 bit set). `env_get` / `env_def`
-    /// recognize the virtual shape and walk this side arena directly.
-    /// Lifetimes match the call stack: pushed at materialization,
-    /// popped on frame return.
-    pub frame_envs: Vec<FrameEnvCell>,
+    /// The single arena for all environment cells. Every env in the
+    /// VM — per-call frame envs, persistent moof-constructed envs,
+    /// the vat root — lives here. moof code sees envs as objects
+    /// (you can `(eval form env)` into them, walk their parent
+    /// chain, query bindings) but the underlying representation is
+    /// always a flat `EnvCell`: no HeapObject, no proto, no
+    /// slot_names/values machinery, no Table layer for bindings.
+    ///
+    /// Cells are addressed by virtual env ids (`FRAME_ENV_BIT | idx`)
+    /// that look like ordinary object ids to everything except the
+    /// env codepaths (env_get / env_def / dispatch on Env proto),
+    /// which special-case the FRAME_ENV_BIT and walk this arena
+    /// directly.
+    pub envs: Vec<EnvCell>,
 }
 
-/// A lightweight per-call env. Stored in `Heap::frame_envs`, addressed
-/// via a virtual env id (`FRAME_ENV_BIT | idx`). No HeapObject, no
-/// proto, no slot_names/values — just the bindings and the parent.
-/// Roughly half the per-allocation cost of `make_env_inline`.
+/// A live environment. Single representation for all env shapes —
+/// per-call frames, moof-constructed namespaces, workspace bindings,
+/// the vat root. Bindings are name/value pairs in declaration order;
+/// `parent` links into the lexical scope chain (NIL terminates).
 #[derive(Debug, Clone)]
-pub struct FrameEnvCell {
+pub struct EnvCell {
     pub names: Vec<u32>,
     pub values: Vec<Value>,
     pub parent: Value,
 }
+
+// keep the old name as an alias for in-flight callers
+pub type FrameEnvCell = EnvCell;
 
 /// Top u32 bit reserved for "virtual env id" — heap arena indices
 /// will never reach this far in practice.
@@ -263,7 +271,7 @@ impl Heap {
             foreign_registry: ForeignTypeRegistry::new(),
             closure_sources: Vec::new(),
             form_locations: std::collections::HashMap::new(),
-            frame_envs: Vec::new(),
+            envs: Vec::new(),
         };
 
         // intern well-known symbols
@@ -382,7 +390,7 @@ impl Heap {
         // walk the scope chain via the `parent` slot — NOT the proto chain.
         // Three env shapes are supported transparently:
         //   1. virtual cell: id has FRAME_ENV_BIT set; bindings live in
-        //      `self.frame_envs[idx]`. Cheapest — no HeapObject at all.
+        //      `self.envs[idx]`. Cheapest — no HeapObject at all.
         //   2. table-backed: env has a `bindings` slot pointing at a Table.
         //      Used by moof-side env construction (workspace, namespace).
         //   3. inline-backed: env has no `bindings` slot; the bindings ARE
@@ -393,7 +401,7 @@ impl Heap {
             // shape 1: virtual cell
             if is_virtual_env_id(cur) {
                 let idx = frame_env_idx(cur);
-                if let Some(cell) = self.frame_envs.get(idx) {
+                if let Some(cell) = self.envs.get(idx) {
                     for (i, &n) in cell.names.iter().enumerate() {
                         if n == sym { return Some(cell.values[i]); }
                     }
@@ -464,7 +472,7 @@ impl Heap {
         // virtual cell: write into the side arena.
         if is_virtual_env_id(self.env) {
             let idx = frame_env_idx(self.env);
-            if let Some(cell) = self.frame_envs.get_mut(idx) {
+            if let Some(cell) = self.envs.get_mut(idx) {
                 if let Some(i) = cell.names.iter().position(|n| *n == sym) {
                     cell.values[i] = val;
                 } else {
@@ -495,7 +503,7 @@ impl Heap {
         // virtual cell: write into the side arena.
         if is_virtual_env_id(env_id) {
             let idx = frame_env_idx(env_id);
-            if let Some(cell) = self.frame_envs.get_mut(idx) {
+            if let Some(cell) = self.envs.get_mut(idx) {
                 if let Some(i) = cell.names.iter().position(|n| *n == sym) {
                     cell.values[i] = val;
                 } else {
@@ -516,7 +524,7 @@ impl Heap {
     pub fn env_remove(&mut self, sym: u32) {
         if is_virtual_env_id(self.env) {
             let idx = frame_env_idx(self.env);
-            if let Some(cell) = self.frame_envs.get_mut(idx) {
+            if let Some(cell) = self.envs.get_mut(idx) {
                 if let Some(i) = cell.names.iter().position(|n| *n == sym) {
                     cell.names.remove(i);
                     cell.values.remove(i);
@@ -578,41 +586,31 @@ impl Heap {
     /// to build a per-call env holding the call's params + captures,
     /// so names live in env (Kernel-style) and `(eval form $e)`
     /// resolves them through the env chain.
+    /// Allocate a new env cell in `self.envs` and return its virtual
+    /// id (FRAME_ENV_BIT-tagged Value::nursery). Works for any env
+    /// the VM constructs internally — per-call frames, closure
+    /// scopes, materialized vau envs. moof-side `{ Env parent: ...
+    /// bindings: ... }` still constructs HeapObject envs through the
+    /// MakeObj path; env_get/env_def transparently handle both shapes
+    /// while we migrate.
     pub fn make_env(&mut self, parent: Value, names: Vec<u32>, values: Vec<Value>) -> Value {
         debug_assert_eq!(names.len(), values.len(), "make_env: name/value length mismatch");
-        let proto = self.type_protos.get(PROTO_ENV).copied().unwrap_or(Value::NIL);
-        let bindings_sym = self.symbols.find("bindings").expect("`bindings` symbol must exist");
-        let bindings = {
-            let mut map = indexmap::IndexMap::new();
-            for (n, v) in names.into_iter().zip(values.into_iter()) {
-                map.insert(Value::symbol(n), v);
-            }
-            self.alloc_table(Vec::new(), map)
-        };
-        self.make_object_with_slots(
-            proto,
-            vec![self.sym_parent, bindings_sym],
-            vec![parent, bindings],
-        )
+        let idx = self.envs.len();
+        self.envs.push(EnvCell { names, values, parent });
+        Value::nursery(virtual_env_id(idx))
     }
 
-    /// Light-weight env: bindings stored DIRECTLY as object slots
-    /// (after the `parent` slot) instead of going through a Table.
-    /// Saves one HeapObject alloc + an IndexMap build per call,
-    /// at the cost of O(n) lookup vs hashmap lookup. For per-call
-    /// envs (small N, ~3-10 bindings) this is faster overall.
-    /// `env_get` / `env_def` recognize this shape transparently.
+    /// Same as `make_env` but takes the bindings as a single (name,
+    /// value) Vec — slightly more convenient for callers that
+    /// already have them in that shape (e.g. `materialize_current_frame`).
     pub fn make_env_inline(&mut self, parent: Value, bindings: Vec<(u32, Value)>) -> Value {
-        let proto = self.type_protos.get(PROTO_ENV).copied().unwrap_or(Value::NIL);
-        let mut names = Vec::with_capacity(1 + bindings.len());
-        let mut values = Vec::with_capacity(1 + bindings.len());
-        names.push(self.sym_parent);
-        values.push(parent);
+        let mut names = Vec::with_capacity(bindings.len());
+        let mut values = Vec::with_capacity(bindings.len());
         for (n, v) in bindings {
             names.push(n);
             values.push(v);
         }
-        self.make_object_with_slots(proto, names, values)
+        self.make_env(parent, names, values)
     }
 
     /// Create an Err value with a message string.

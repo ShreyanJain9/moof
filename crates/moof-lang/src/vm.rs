@@ -291,7 +291,7 @@ impl VM {
             Some(l) => l,
             None => return,
         };
-        // Push a virtual env cell into heap.frame_envs and point
+        // Push a virtual env cell into heap.envs and point
         // heap.env at its sentinel id (high u32 bit set). NO HeapObject
         // is allocated — the env exists *only* as a heap-side cell of
         // (names, values, parent). env_get / env_def recognize the
@@ -307,19 +307,13 @@ impl VM {
         // is a small memory overhead; for those that do, it's the
         // correct behavior. A future refinement could promote the
         // cell to a real HeapObject only if escape is detected.
-        let mut names = Vec::with_capacity(lazy.bindings.len());
-        let mut values = Vec::with_capacity(lazy.bindings.len());
-        for (n, v) in lazy.bindings {
-            names.push(n);
-            values.push(v);
+        // make_env_inline already pushes to heap.envs and returns a
+        // virtual env id — no need to inline it here.
+        let new_env = heap.make_env_inline(lazy.scope_val, lazy.bindings);
+        if let Some(id) = new_env.as_any_object() {
+            heap.env = id;
+            heap.lexical_scope = id;
         }
-        let idx = heap.frame_envs.len();
-        heap.frame_envs.push(moof_core::heap::FrameEnvCell {
-            names, values, parent: lazy.scope_val,
-        });
-        let id = moof_core::heap::virtual_env_id(idx);
-        heap.env = id;
-        heap.lexical_scope = id;
     }
 
     /// The ONE opcode loop. Reads from the current (top) frame.
