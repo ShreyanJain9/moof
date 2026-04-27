@@ -243,9 +243,11 @@ impl VM {
             Some(l) => l,
             None => return,
         };
-        let names: Vec<u32> = lazy.bindings.iter().map(|(n,_)|*n).collect();
-        let vals: Vec<Value> = lazy.bindings.iter().map(|(_,v)|*v).collect();
-        let new_env = heap.make_env(lazy.scope_val, names, vals);
+        // make_env_inline stashes bindings DIRECTLY on the env's
+        // HeapObject (one alloc) instead of going through a Table
+        // foreign payload (two allocs + indexmap insert per binding).
+        // env_get understands both shapes — semantics preserved.
+        let new_env = heap.make_env_inline(lazy.scope_val, lazy.bindings);
         if let Some(new_env_id) = new_env.as_any_object() {
             heap.env = new_env_id;
             heap.lexical_scope = new_env_id;

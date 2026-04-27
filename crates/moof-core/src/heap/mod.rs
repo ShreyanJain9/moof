@@ -325,12 +325,27 @@ impl Heap {
 
     pub fn env_get(&self, sym: u32) -> Option<Value> {
         // walk the scope chain via the `parent` slot — NOT the proto chain.
+        // Two env shapes are supported transparently:
+        //   1. table-backed: env has a `bindings` slot pointing at a Table.
+        //   2. inline-backed: env has no `bindings` slot; the bindings ARE
+        //      the env's slots (skipping the reserved `parent` slot).
+        // The inline shape, built by `make_env_inline`, is what
+        // VM-internal per-call materialization uses — one HeapObject
+        // allocation instead of two (env + Table) and no IndexMap insert.
         let mut cur = self.env;
         loop {
             if let Some(bid) = self.env_bindings_id(cur) {
                 if let Some(t) = self.foreign_ref::<Table>(Value::nursery(bid)) {
                     if let Some(v) = t.map.get(&Value::symbol(sym)).copied() {
                         return Some(v);
+                    }
+                }
+            } else {
+                // inline-backed env: walk slots directly (skip parent).
+                let obj = self.get(cur);
+                for (i, &n) in obj.slot_names.iter().enumerate() {
+                    if n == sym && n != self.sym_parent {
+                        return Some(obj.slot_values[i]);
                     }
                 }
             }
@@ -377,9 +392,14 @@ impl Heap {
 
     pub fn env_def(&mut self, sym: u32, val: Value) {
         if let Some(bid) = self.env_bindings_id(self.env) {
+            // table-backed: insert into the Table.
             if let Some(t) = self.foreign_payload_mut::<Table>(Value::nursery(bid)) {
                 t.map.insert(Value::symbol(sym), val);
             }
+        } else {
+            // inline-backed (per-call materialized env): slot_set.
+            let env_id = self.env;
+            self.get_mut(env_id).slot_set(sym, val);
         }
     }
 
@@ -467,6 +487,25 @@ impl Heap {
             vec![self.sym_parent, bindings_sym],
             vec![parent, bindings],
         )
+    }
+
+    /// Light-weight env: bindings stored DIRECTLY as object slots
+    /// (after the `parent` slot) instead of going through a Table.
+    /// Saves one HeapObject alloc + an IndexMap build per call,
+    /// at the cost of O(n) lookup vs hashmap lookup. For per-call
+    /// envs (small N, ~3-10 bindings) this is faster overall.
+    /// `env_get` / `env_def` recognize this shape transparently.
+    pub fn make_env_inline(&mut self, parent: Value, bindings: Vec<(u32, Value)>) -> Value {
+        let proto = self.type_protos.get(PROTO_ENV).copied().unwrap_or(Value::NIL);
+        let mut names = Vec::with_capacity(1 + bindings.len());
+        let mut values = Vec::with_capacity(1 + bindings.len());
+        names.push(self.sym_parent);
+        values.push(parent);
+        for (n, v) in bindings {
+            names.push(n);
+            values.push(v);
+        }
+        self.make_object_with_slots(proto, names, values)
     }
 
     /// Create an Err value with a message string.
