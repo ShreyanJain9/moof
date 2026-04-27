@@ -97,7 +97,7 @@
 
 ; (animate grid) — single arg. count + total are private to the
 ; tail-recursive helper; the caller just hands in a Grid.
-(defn animate (grid) (%anim grid 24 24))
+(defn animate (grid n) (%anim grid n n))
 
 (defn %anim (grid n total)
   (if [n <= 0] grid
@@ -125,4 +125,4 @@
   ________________________
   ________________________))
 
-(animate glider)
+(animate glider 35)
