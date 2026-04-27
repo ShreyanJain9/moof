@@ -64,10 +64,7 @@ pub fn resolve_type_plugins(
             None => raw_spec.clone(),
         };
         match dynload::DynTypePlugin::load(Path::new(&path_string)) {
-            Ok(plugin) => {
-                eprintln!("  loaded type plugin '{}' from {path_string}", plugin.name());
-                plugins.push(Box::new(plugin));
-            }
+            Ok(plugin) => plugins.push(Box::new(plugin)),
             Err(e) => eprintln!("  ~ type plugin '{name}' failed to load: {e}"),
         }
     }

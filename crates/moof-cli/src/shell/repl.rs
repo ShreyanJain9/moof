@@ -30,10 +30,10 @@ pub fn run() {
 fn load_manifest() -> Manifest {
     match Path::new(MANIFEST_PATH).exists() {
         true => match Manifest::load(Path::new(MANIFEST_PATH)) {
-            Ok(m) => { eprintln!("  manifest: {MANIFEST_PATH}"); m }
+            Ok(m) => m,
             Err(e) => { eprintln!("  ~ manifest error: {e}, using defaults"); Manifest::default() }
         },
-        false => { eprintln!("  no manifest, using defaults"); Manifest::default() }
+        false => Manifest::default(),
     }
 }
 

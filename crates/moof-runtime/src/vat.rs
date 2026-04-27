@@ -76,9 +76,9 @@ impl Vat {
     pub fn load_bootstrap_files(&mut self, paths: &[&str]) {
         for path in paths {
             if let Ok(source) = std::fs::read_to_string(path) {
-                match self.eval_source(&source) {
-                    Ok(_) => eprintln!("  loaded {path}"),
-                    Err(e) => { eprintln!("  ~ error in {path}: {e}"); return; }
+                if let Err(e) = self.eval_source(&source) {
+                    eprintln!("  ~ error in {path}: {e}");
+                    return;
                 }
             }
         }

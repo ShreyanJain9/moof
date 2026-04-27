@@ -83,7 +83,6 @@ impl System {
             match plugins::resolve_capability(spec) {
                 Ok(cap) => {
                     let cap_name = cap.name().to_string();
-                    eprintln!("  loaded capability '{}' from {spec}", cap_name);
                     // move the Box into the scheduler — it owns the
                     // plugin's dylib, which the cap vat's natives
                     // reference. see Scheduler::spawn_capability docs.
@@ -97,10 +96,12 @@ impl System {
             }
         }
 
+        // Validate that declared sources exist; warn loudly if not.
+        // The actual loading happens later in spawn_vat. We don't
+        // print per-file load lines on startup — query the System
+        // server from moof to inspect what's loaded.
         for source_path in &manifest.sources.files {
-            if Path::new(source_path).exists() {
-                eprintln!("  loaded {source_path}");
-            } else {
+            if !Path::new(source_path).exists() {
                 eprintln!("  ~ source not found: {source_path}");
             }
         }
@@ -159,8 +160,7 @@ impl System {
         // ones. User state from previous sessions returns.
         let id = self.scheduler.spawn_vat();
         match self.try_load_into(id) {
-            Ok(true) => eprintln!("  image loaded into vat {id}"),
-            Ok(false) => {}  // fresh image or missing; bootstrap-only state
+            Ok(_) => {}  // silent on success, fresh, or missing image
             Err(e) => eprintln!("  ~ image load failed: {e} (continuing with bootstrap)"),
         }
         self.grant_internal(id, cap_names, label);
@@ -357,9 +357,7 @@ impl System {
                 patched += 1;
             }
         }
-        if patched > 0 {
-            eprintln!("  re-resolved {patched} FarRefs via URL");
-        }
+        let _ = patched;  // count kept for future inspection; not printed
     }
 
     // ─────────── mirror state into the `system` capability ───────────
