@@ -67,6 +67,64 @@ pub struct Jit {
 /// Function pointer for a compiled chunk.
 pub type JittedChunk = extern "C" fn(*mut u64, *const u64) -> i64;
 
+/// Well-known symbol IDs needed at JIT compile time. The JIT
+/// specializes Op::Send when the selector matches one of these —
+/// it can produce inline integer arithmetic + comparisons that
+/// skip the dispatch loop entirely.
+#[derive(Debug, Clone, Copy)]
+pub struct OpSyms {
+    pub plus: u32,
+    pub minus: u32,
+    pub mul: u32,
+    pub lt: u32,
+    pub le: u32,
+    pub gt: u32,
+    pub ge: u32,
+    pub eq_op: u32,
+}
+
+impl OpSyms {
+    pub fn from_heap(heap: &moof_core::heap::Heap) -> Self {
+        OpSyms {
+            plus: heap.sym_plus, minus: heap.sym_minus, mul: heap.sym_mul,
+            lt: heap.sym_lt, le: heap.sym_le, gt: heap.sym_gt, ge: heap.sym_ge,
+            eq_op: heap.sym_eq_op,
+        }
+    }
+}
+
+// Value bit-layout constants — duplicated here for codegen; keep in
+// sync with moof_core::value.
+#[allow(dead_code)]
+const QNAN_BITS: u64       = 0x7FF8_0000_0000_0000;
+const TAG_INT_PATTERN: u64 = 0x7FFB_0000_0000_0000;  // QNAN | (3 << 48)
+const TAG_MASK: u64        = 0x7FFF_0000_0000_0000;
+const PAYLOAD_MASK: u64    = 0x0000_FFFF_FFFF_FFFF;
+const I48_MIN: i64         = -(1i64 << 47);
+const I48_MAX: i64         = (1i64 << 47) - 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Arith { Add, Sub, Mul }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SendKind {
+    Cmp(IntCC),
+    Arith(Arith),
+    Other,
+}
+
+fn classify_send(sel_sym: u32, ops: &OpSyms) -> SendKind {
+    if      sel_sym == ops.plus  { SendKind::Arith(Arith::Add) }
+    else if sel_sym == ops.minus { SendKind::Arith(Arith::Sub) }
+    else if sel_sym == ops.mul   { SendKind::Arith(Arith::Mul) }
+    else if sel_sym == ops.lt    { SendKind::Cmp(IntCC::SignedLessThan) }
+    else if sel_sym == ops.le    { SendKind::Cmp(IntCC::SignedLessThanOrEqual) }
+    else if sel_sym == ops.gt    { SendKind::Cmp(IntCC::SignedGreaterThan) }
+    else if sel_sym == ops.ge    { SendKind::Cmp(IntCC::SignedGreaterThanOrEqual) }
+    else if sel_sym == ops.eq_op { SendKind::Cmp(IntCC::Equal) }
+    else { SendKind::Other }
+}
+
 impl Jit {
     pub fn new() -> Result<Self, String> {
         let mut flag_builder = settings::builder();
@@ -97,7 +155,7 @@ impl Jit {
     /// so each one gets its own Cranelift Block; second pass emits IR
     /// per opcode. Opcodes the JIT can't yet lower terminate the
     /// current block with `return deopt_pc`.
-    pub fn compile_chunk(&mut self, chunk: std::sync::Arc<Chunk>) -> Result<JittedChunk, String> {
+    pub fn compile_chunk(&mut self, chunk: std::sync::Arc<Chunk>, op_syms: OpSyms) -> Result<JittedChunk, String> {
         self.module.clear_context(&mut self.ctx);
 
         let ptr_ty = self.module.target_config().pointer_type();
@@ -273,6 +331,140 @@ impl Jit {
                         pc = next_pc;
                         continue;
                     }
+                    Op::Send => {
+                        // Try the integer fast path. The selector and
+                        // operand registers are baked in at compile
+                        // time. If recv & arg are inline integers, do
+                        // the op natively; otherwise return the deopt
+                        // PC so the interpreter takes over.
+                        //
+                        // Only nargs == 1 is lowered (the generic
+                        // fixnum binop shape). Other shapes deopt.
+                        let sel_lo = c;
+                        if pc + 4 >= code.len() {
+                            // can't read sel_hi/nargs/a0 — deopt.
+                            let deopt = builder.ins().iconst(types::I64, pc as i64);
+                            builder.ins().return_(&[deopt]);
+                            current_block_started = false;
+                            pc = next_pc;
+                            continue;
+                        }
+                        let sel_hi = code[pc + 4];
+                        let nargs = code[pc + 5];
+                        let a0 = code[pc + 6];
+                        let sel_idx = ((sel_hi as usize) << 8) | (sel_lo as usize);
+
+                        // Resolve the selector to a sym_id at compile
+                        // time. The constants slice holds Value bits.
+                        let sel_sym = if sel_idx < chunk.constants.len() {
+                            let bits = chunk.constants[sel_idx];
+                            // payload = sym_id (low 32 bits of the
+                            // PAYLOAD_MASK region for a symbol).
+                            (bits & 0xFFFF_FFFF) as u32
+                        } else {
+                            // bad index — let the interp handle it.
+                            let deopt = builder.ins().iconst(types::I64, pc as i64);
+                            builder.ins().return_(&[deopt]);
+                            current_block_started = false;
+                            pc = next_pc;
+                            continue;
+                        };
+
+                        let send_kind = classify_send(sel_sym, &op_syms);
+                        if nargs != 1 || send_kind == SendKind::Other {
+                            let deopt = builder.ins().iconst(types::I64, pc as i64);
+                            builder.ins().return_(&[deopt]);
+                            current_block_started = false;
+                            pc = next_pc;
+                            continue;
+                        }
+
+                        // Compile the fast path. Branch target is
+                        // either next_pc (success) or a freshly-made
+                        // local deopt block.
+                        let fall = *blocks.get(&next_pc)
+                            .ok_or_else(|| format!("send fallthrough {next_pc} not a block"))?;
+                        let deopt_blk = builder.create_block();
+                        let pack_blk  = builder.create_block();
+
+                        // load both operands
+                        let recv = builder.ins().load(
+                            types::I64, MemFlags::trusted(), regs_ptr,
+                            (b as i32) * 8,
+                        );
+                        let arg = builder.ins().load(
+                            types::I64, MemFlags::trusted(), regs_ptr,
+                            (a0 as i32) * 8,
+                        );
+                        // both must be inline integers.
+                        let mask = builder.ins().iconst(types::I64, TAG_MASK as i64);
+                        let int_pat = builder.ins().iconst(types::I64, TAG_INT_PATTERN as i64);
+                        let recv_t = builder.ins().band(recv, mask);
+                        let arg_t  = builder.ins().band(arg, mask);
+                        let recv_is_int = builder.ins().icmp(IntCC::Equal, recv_t, int_pat);
+                        let arg_is_int  = builder.ins().icmp(IntCC::Equal, arg_t, int_pat);
+                        let both_int = builder.ins().band(recv_is_int, arg_is_int);
+
+                        // sign-extend i48 payload to i64.
+                        let payload_mask = builder.ins().iconst(types::I64, PAYLOAD_MASK as i64);
+                        let recv_pl = builder.ins().band(recv, payload_mask);
+                        let arg_pl  = builder.ins().band(arg, payload_mask);
+                        let sixteen = builder.ins().iconst(types::I8, 16);
+                        let recv_shifted = builder.ins().ishl(recv_pl, sixteen);
+                        let recv_i64 = builder.ins().sshr(recv_shifted, sixteen);
+                        let arg_shifted = builder.ins().ishl(arg_pl, sixteen);
+                        let arg_i64 = builder.ins().sshr(arg_shifted, sixteen);
+
+                        match send_kind {
+                            SendKind::Cmp(cc) => {
+                                builder.ins().brif(both_int, pack_blk, &[], deopt_blk, &[]);
+                                builder.switch_to_block(pack_blk);
+                                let cmp = builder.ins().icmp(cc, recv_i64, arg_i64);
+                                let true_bits = builder.ins().iconst(
+                                    types::I64, Value::TRUE.to_bits() as i64);
+                                let false_bits = builder.ins().iconst(
+                                    types::I64, Value::FALSE.to_bits() as i64);
+                                let result = builder.ins().select(cmp, true_bits, false_bits);
+                                builder.ins().store(MemFlags::trusted(), result, regs_ptr,
+                                    (a as i32) * 8);
+                                builder.ins().jump(fall, &[]);
+                            }
+                            SendKind::Arith(ar) => {
+                                // compute, then check overflow vs i48.
+                                let raw = match ar {
+                                    Arith::Add => builder.ins().iadd(recv_i64, arg_i64),
+                                    Arith::Sub => builder.ins().isub(recv_i64, arg_i64),
+                                    Arith::Mul => builder.ins().imul(recv_i64, arg_i64),
+                                };
+                                let i48_min = builder.ins().iconst(types::I64, I48_MIN);
+                                let i48_max = builder.ins().iconst(types::I64, I48_MAX);
+                                let lo_ok = builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, raw, i48_min);
+                                let hi_ok = builder.ins().icmp(IntCC::SignedLessThanOrEqual, raw, i48_max);
+                                let in_range = builder.ins().band(lo_ok, hi_ok);
+                                let all_ok = builder.ins().band(both_int, in_range);
+                                builder.ins().brif(all_ok, pack_blk, &[], deopt_blk, &[]);
+                                builder.switch_to_block(pack_blk);
+                                let payload_mask2 = builder.ins().iconst(types::I64, PAYLOAD_MASK as i64);
+                                let payload = builder.ins().band(raw, payload_mask2);
+                                let tag_bits = builder.ins().iconst(types::I64, TAG_INT_PATTERN as i64);
+                                let packed = builder.ins().bor(tag_bits, payload);
+                                builder.ins().store(MemFlags::trusted(), packed, regs_ptr,
+                                    (a as i32) * 8);
+                                builder.ins().jump(fall, &[]);
+                            }
+                            SendKind::Other => unreachable!(),
+                        }
+                        builder.seal_block(pack_blk);
+
+                        builder.switch_to_block(deopt_blk);
+                        let deopt = builder.ins().iconst(types::I64, pc as i64);
+                        builder.ins().return_(&[deopt]);
+                        builder.seal_block(deopt_blk);
+
+                        current_block_started = false;
+                        pc = next_pc;
+                        continue;
+                    }
                     _ => {
                         // unsupported (yet): deopt at this PC.
                         let deopt = builder.ins().iconst(types::I64, pc as i64);
@@ -331,8 +523,9 @@ fn op_byte_len(op: Op) -> usize {
 }
 
 /// First pass: identify every PC that should start a Cranelift block.
-/// Includes PC 0, all branch targets, and all PCs immediately after
-/// branches (fall-through start).
+/// Includes PC 0, all branch targets, all PCs after branches, and
+/// all PCs after Send (which we lower with an in-band branch into a
+/// deopt arm + fall-through into the next op).
 fn collect_block_starts(code: &[u8]) -> Vec<usize> {
     let mut starts: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
     starts.insert(0);
@@ -359,6 +552,11 @@ fn collect_block_starts(code: &[u8]) -> Vec<usize> {
                     let offset = i16::from_be_bytes([b, c]) as isize;
                     let target = (pc + 4) as isize + offset;
                     starts.insert(target as usize);
+                    starts.insert(next_pc);
+                }
+                Op::Send => {
+                    // post-Send is a fall-through block (the lowered
+                    // fast path branches to it on success).
                     starts.insert(next_pc);
                 }
                 _ => {}
@@ -389,6 +587,11 @@ mod tests {
         (status, regs)
     }
 
+    fn dummy_op_syms() -> OpSyms {
+        // Tests that don't exercise Send don't care about these.
+        OpSyms { plus: 0, minus: 0, mul: 0, lt: 0, le: 0, gt: 0, ge: 0, eq_op: 0 }
+    }
+
     fn make_chunk(code: Vec<u8>, constants: Vec<u64>, num_regs: u8) -> std::sync::Arc<Chunk> {
         let mut c = Chunk::new("test", 0, num_regs);
         c.code = code;
@@ -405,7 +608,7 @@ mod tests {
         ];
         let chunk = make_chunk(code, vec![], 1);
         let mut jit = Jit::new().unwrap();
-        let f = jit.compile_chunk(chunk).unwrap();
+        let f = jit.compile_chunk(chunk, dummy_op_syms()).unwrap();
         let (status, regs) = run(f, vec![0; 4], vec![]);
         assert_eq!(status, -1, "ok");
         assert_eq!(Value::from_bits(regs[0]).as_integer(), Some(42));
@@ -420,7 +623,7 @@ mod tests {
         ];
         let chunk = make_chunk(code, vec![], 1);
         let mut jit = Jit::new().unwrap();
-        let f = jit.compile_chunk(chunk).unwrap();
+        let f = jit.compile_chunk(chunk, dummy_op_syms()).unwrap();
         let (status, regs) = run(f, vec![0; 4], vec![]);
         assert_eq!(status, -1);
         assert!(Value::from_bits(regs[0]).is_nil());
@@ -436,7 +639,7 @@ mod tests {
         let chunk = make_chunk(code, vec![], 1);
         let constants = vec![Value::integer(99).to_bits()];
         let mut jit = Jit::new().unwrap();
-        let f = jit.compile_chunk(chunk).unwrap();
+        let f = jit.compile_chunk(chunk, dummy_op_syms()).unwrap();
         let (status, regs) = run(f, vec![0; 4], constants);
         assert_eq!(status, -1);
         assert_eq!(Value::from_bits(regs[0]).as_integer(), Some(99));
@@ -452,7 +655,7 @@ mod tests {
         ];
         let chunk = make_chunk(code, vec![], 2);
         let mut jit = Jit::new().unwrap();
-        let f = jit.compile_chunk(chunk).unwrap();
+        let f = jit.compile_chunk(chunk, dummy_op_syms()).unwrap();
         let (status, regs) = run(f, vec![0; 4], vec![]);
         assert_eq!(status, -1);
         assert_eq!(Value::from_bits(regs[0]).as_integer(), Some(7));
@@ -482,7 +685,7 @@ mod tests {
         ];
         let chunk = make_chunk(code, vec![], 2);
         let mut jit = Jit::new().unwrap();
-        let f = jit.compile_chunk(chunk).unwrap();
+        let f = jit.compile_chunk(chunk, dummy_op_syms()).unwrap();
         let (status, regs) = run(f, vec![0; 4], vec![]);
         assert_eq!(status, -1);
         assert_eq!(Value::from_bits(regs[0]).as_integer(), Some(1));
@@ -511,27 +714,95 @@ mod tests {
         ];
         let chunk = make_chunk(code, vec![], 2);
         let mut jit = Jit::new().unwrap();
-        let f = jit.compile_chunk(chunk).unwrap();
+        let f = jit.compile_chunk(chunk, dummy_op_syms()).unwrap();
         let (status, regs) = run(f, vec![0; 4], vec![]);
         assert_eq!(status, -1);
         assert_eq!(Value::from_bits(regs[0]).as_integer(), Some(99));
     }
 
-    /// Unsupported op (Send) → deopt with the offending PC.
+    /// Unsupported op (Send with unknown selector) → deopt.
     #[test]
     fn jit_deopt_on_send() {
+        // Send with a selector that doesn't match a fast op → deopt.
         let code = vec![
-            Op::LoadInt as u8, 0, 0, 7,             // 0: regs[0] = 7
-            Op::Send as u8,    0, 0, 0,             // 4: deopt here
-            0, 0, 0, 0, 0,                          //    (5 send trailing bytes)
-            Op::Return as u8,  0, 0, 0,             // 13: never reached
+            Op::LoadInt as u8, 0, 0, 7,             // 0
+            Op::Send as u8,    0, 0, 0,             // 4: send recv=0 sel_const=0
+            0, 1, 0, 0, 0,                          //    sel_hi=0, nargs=1, a0=0
+            Op::Return as u8,  0, 0, 0,
         ];
-        let chunk = make_chunk(code, vec![], 2);
+        // selector const 0 = sym_id 99 (some random sym, NOT in our fast set).
+        let constants = vec![Value::symbol(99).to_bits()];
+        let chunk = make_chunk(code, constants, 2);
         let mut jit = Jit::new().unwrap();
-        let f = jit.compile_chunk(chunk).unwrap();
+        let f = jit.compile_chunk(chunk, dummy_op_syms()).unwrap();
         let (status, regs) = run(f, vec![0; 4], vec![]);
         assert_eq!(status, 4, "deopt PC should point at the Send");
-        // regs[0] was set before the deopt
         assert_eq!(Value::from_bits(regs[0]).as_integer(), Some(7));
+    }
+
+    /// Send with `+` selector and two int operands — runs the fast
+    /// path inline, no deopt.
+    #[test]
+    fn jit_send_int_add() {
+        let plus_sym = 42u32;  // pretend "+" is interned at id 42
+        let code = vec![
+            Op::LoadInt as u8, 0, 0, 5,             // 0:  regs[0] = 5
+            Op::LoadInt as u8, 1, 0, 7,             // 4:  regs[1] = 7
+            Op::Send as u8,    2, 0, 0,             // 8:  regs[2] = recv(=regs[0]) + arg(=regs[1])
+            0, 1, 1, 0, 0,                          //     sel_hi=0 nargs=1 a0=1
+            Op::Return as u8,  2, 0, 0,             // 17: return regs[2]
+        ];
+        let constants = vec![Value::symbol(plus_sym).to_bits()];
+        let chunk = make_chunk(code, constants, 4);
+        let mut jit = Jit::new().unwrap();
+        let mut ops = dummy_op_syms();
+        ops.plus = plus_sym;
+        let f = jit.compile_chunk(chunk, ops).unwrap();
+        let (status, regs) = run(f, vec![0; 8], vec![]);
+        assert_eq!(status, -1, "should run to completion in JIT");
+        assert_eq!(Value::from_bits(regs[0]).as_integer(), Some(12));
+    }
+
+    /// Send with `<` selector — produces a Bool result.
+    #[test]
+    fn jit_send_int_lt() {
+        let lt_sym = 17u32;
+        let code = vec![
+            Op::LoadInt as u8, 0, 0, 3,
+            Op::LoadInt as u8, 1, 0, 5,
+            Op::Send as u8,    2, 0, 0,             // regs[2] = (3 < 5)
+            0, 1, 1, 0, 0,
+            Op::Return as u8,  2, 0, 0,
+        ];
+        let constants = vec![Value::symbol(lt_sym).to_bits()];
+        let chunk = make_chunk(code, constants, 4);
+        let mut jit = Jit::new().unwrap();
+        let mut ops = dummy_op_syms();
+        ops.lt = lt_sym;
+        let f = jit.compile_chunk(chunk, ops).unwrap();
+        let (status, regs) = run(f, vec![0; 8], vec![]);
+        assert_eq!(status, -1);
+        assert!(Value::from_bits(regs[0]).is_truthy());
+    }
+
+    /// Send fast path with non-int operand — deopts.
+    #[test]
+    fn jit_send_int_add_deopts_on_non_int() {
+        let plus_sym = 42u32;
+        let code = vec![
+            Op::LoadNil as u8, 0, 0, 0,             // recv = NIL (not int)
+            Op::LoadInt as u8, 1, 0, 7,
+            Op::Send as u8,    2, 0, 0,
+            0, 1, 1, 0, 0,
+            Op::Return as u8,  2, 0, 0,
+        ];
+        let constants = vec![Value::symbol(plus_sym).to_bits()];
+        let chunk = make_chunk(code, constants, 4);
+        let mut jit = Jit::new().unwrap();
+        let mut ops = dummy_op_syms();
+        ops.plus = plus_sym;
+        let f = jit.compile_chunk(chunk, ops).unwrap();
+        let (status, _regs) = run(f, vec![0; 8], vec![]);
+        assert_eq!(status, 8, "deopt at the Send PC (recv was NIL, not int)");
     }
 }

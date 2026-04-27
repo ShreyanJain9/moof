@@ -175,8 +175,9 @@ impl VM {
         if !attempted {
             self.closure_descs[code_idx].jit_attempted.set(true);
             let chunk_for_jit = Arc::clone(&chunk);
+            let op_syms = crate::jit::OpSyms::from_heap(heap);
             let compiled = if let Some(jit) = self.jit_mut() {
-                jit.compile_chunk(chunk_for_jit).ok()
+                jit.compile_chunk(chunk_for_jit, op_syms).ok()
             } else { None };
             if let Some(fn_ptr) = compiled {
                 self.closure_descs[code_idx].jit_code.set(Some(fn_ptr));
@@ -649,8 +650,9 @@ impl VM {
                         if !attempted {
                             self.closure_descs[code_idx].jit_attempted.set(true);
                             let chunk_for_jit = Arc::clone(&chunk);
+                            let op_syms = crate::jit::OpSyms::from_heap(heap);
                             let compiled = if let Some(jit) = self.jit_mut() {
-                                jit.compile_chunk(chunk_for_jit).ok()
+                                jit.compile_chunk(chunk_for_jit, op_syms).ok()
                             } else { None };
                             if let Some(fn_ptr) = compiled {
                                 self.closure_descs[code_idx].jit_code.set(Some(fn_ptr));
