@@ -350,10 +350,16 @@ impl VM {
 
                     let nargs = f.chunk.code[f.pc + 1] as usize;
                     let arg_start = f.pc + 2;
-                    let mut send_args = Vec::with_capacity(nargs);
-                    for i in 0..nargs.min(3) {
-                        send_args.push(f.regs[f.chunk.code[arg_start + i] as usize]);
+                    // nargs is bounded to 3 by the bytecode format
+                    // (bigger calls go through `call:` with an arg
+                    // list). Stack-buffer + slice avoids a Vec
+                    // allocation per Send.
+                    let mut send_args_buf = [Value::NIL; 3];
+                    let n = nargs.min(3);
+                    for i in 0..n {
+                        send_args_buf[i] = f.regs[f.chunk.code[arg_start + i] as usize];
                     }
+                    let send_args: &[Value] = &send_args_buf[..n];
                     f.pc += 5;
 
                     // look up handler
@@ -437,10 +443,16 @@ impl VM {
 
                     let nargs = f.chunk.code[f.pc + 1] as usize;
                     let arg_start = f.pc + 2;
-                    let mut send_args = Vec::with_capacity(nargs);
-                    for i in 0..nargs.min(3) {
-                        send_args.push(f.regs[f.chunk.code[arg_start + i] as usize]);
+                    // nargs is bounded to 3 by the bytecode format
+                    // (bigger calls go through `call:` with an arg
+                    // list). Stack-buffer + slice avoids a Vec
+                    // allocation per Send.
+                    let mut send_args_buf = [Value::NIL; 3];
+                    let n = nargs.min(3);
+                    for i in 0..n {
+                        send_args_buf[i] = f.regs[f.chunk.code[arg_start + i] as usize];
                     }
+                    let send_args: &[Value] = &send_args_buf[..n];
                     f.pc += 5;
 
                     let lookup = dispatch::lookup_handler(heap, recv, sel_sym);
