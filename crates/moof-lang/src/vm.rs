@@ -168,9 +168,13 @@ impl VM {
         let capture_names = Arc::clone(&self.closure_descs[code_idx].capture_names);
         let needs_env = self.closure_descs[code_idx].needs_env;
 
-        // JIT entry: lazily compile this chunk on first call. Cell
-        // mutation doesn't require &mut self; the actual compile
-        // step does (jit_mut), so we drop other refs before calling.
+        // JIT entry: lazily compile this chunk on first call.
+        // Always-try; the JIT lowers what it can and deopts on the
+        // rest. Compile cost is one-shot per closure (cheap), the
+        // per-call entry+deopt for closures that bail immediately
+        // is also cheap (one cell read + one function call). The
+        // big wins come from closures that DO stay in JIT — even
+        // a partial prefix saves dispatch loop iterations.
         let attempted = self.closure_descs[code_idx].jit_attempted.get();
         if !attempted {
             self.closure_descs[code_idx].jit_attempted.set(true);
@@ -352,7 +356,11 @@ impl VM {
                     // f.chunk). regs and constants are slices we own.
                     let regs_ptr = f.regs.as_mut_ptr() as *mut u64;
                     let consts_ptr = f.chunk.constants.as_ptr();
+                    let heap_ptr = heap as *mut Heap as *mut std::ffi::c_void;
+                    let _guard = crate::jit::JitContextGuard::enter(heap_ptr);
                     let status = jit_fn(regs_ptr, consts_ptr);
+                    drop(_guard);
+                    let f = self.frames.last_mut().unwrap();
                     if status < 0 {
                         // ok — return regs[0] up the stack.
                         let val = f.regs[0];
@@ -645,7 +653,7 @@ impl VM {
                         let capture_names = Arc::clone(&self.closure_descs[code_idx].capture_names);
                         let needs_env = self.closure_descs[code_idx].needs_env;
 
-                        // JIT entry: same lazy compile as push_closure_frame.
+                        // JIT entry: always-try lazy compile.
                         let attempted = self.closure_descs[code_idx].jit_attempted.get();
                         if !attempted {
                             self.closure_descs[code_idx].jit_attempted.set(true);

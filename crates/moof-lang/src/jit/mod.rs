@@ -62,6 +62,8 @@ pub struct Jit {
     /// constants pointer stays valid for the lifetime of the JIT.
     /// Indexed in compile order; not used for execution.
     chunks: Vec<std::sync::Arc<Chunk>>,
+    helper_cons: cranelift_module::FuncId,
+    helper_get_global: cranelift_module::FuncId,
 }
 
 /// Function pointer for a compiled chunk.
@@ -91,6 +93,44 @@ impl OpSyms {
             eq_op: heap.sym_eq_op,
         }
     }
+}
+
+// ─── thread-local context for JIT helpers ───
+//
+// JIT'd code calls back into rust for ops that need heap access
+// (Cons → heap.cons, GetGlobal → heap.env_get). Helpers read the
+// active Heap pointer from this TLS, which the run loop sets via
+// JitContextGuard before invoking jitted code.
+thread_local! {
+    static JIT_HEAP: std::cell::Cell<*mut std::ffi::c_void> = const { std::cell::Cell::new(std::ptr::null_mut()) };
+}
+
+pub struct JitContextGuard {
+    prev: *mut std::ffi::c_void,
+}
+
+impl JitContextGuard {
+    pub fn enter(heap: *mut std::ffi::c_void) -> Self {
+        Self { prev: JIT_HEAP.with(|c| c.replace(heap)) }
+    }
+}
+
+impl Drop for JitContextGuard {
+    fn drop(&mut self) { JIT_HEAP.with(|c| c.set(self.prev)); }
+}
+
+extern "C" fn jit_cons(car: u64, cdr: u64) -> u64 {
+    let heap_ptr = JIT_HEAP.with(|c| c.get()) as *mut moof_core::heap::Heap;
+    if heap_ptr.is_null() { return Value::NIL.to_bits(); }
+    let heap = unsafe { &mut *heap_ptr };
+    heap.cons(Value::from_bits(car), Value::from_bits(cdr)).to_bits()
+}
+
+extern "C" fn jit_get_global(sym_id: u32) -> u64 {
+    let heap_ptr = JIT_HEAP.with(|c| c.get()) as *mut moof_core::heap::Heap;
+    if heap_ptr.is_null() { return Value::NIL.to_bits(); }
+    let heap = unsafe { &*heap_ptr };
+    heap.env_get(sym_id).map(|v| v.to_bits()).unwrap_or(Value::NIL.to_bits())
 }
 
 // Value bit-layout constants — duplicated here for codegen; keep in
@@ -125,6 +165,65 @@ fn classify_send(sel_sym: u32, ops: &OpSyms) -> SendKind {
     else { SendKind::Other }
 }
 
+/// Predicate: is JIT'ing this chunk worth the compile cost?
+/// True iff the body contains no op that would deopt MID-body (and
+/// thus run the rest of the body in the interpreter, defeating the
+/// JIT). Tail-position deopts (TailCall, terminal Send to a
+/// non-fast handler) are fine — the interpreter handles them, and
+/// the next frame-entry pc=0 re-enters JIT.
+///
+/// Concretely: Send with a non-fast-path selector mid-body, Cons,
+/// MakeClosure, Eval, GetGlobal, etc. all reject the chunk. We're
+/// being conservative: false negatives just mean the chunk runs in
+/// the interpreter (no perf regression, no JIT compile cost).
+pub fn can_jit_chunk(chunk: &Chunk, op_syms: &OpSyms) -> bool {
+    let code = &chunk.code;
+    let mut pc = 0;
+    while pc + 3 < code.len() {
+        let op_byte = code[pc];
+        let op = match Op::from_u8(op_byte) {
+            Some(o) => o,
+            None => return false,
+        };
+        let next_pc = match op {
+            Op::Send | Op::TailCall => pc + 9,
+            _ => pc + 4,
+        };
+        match op {
+            Op::LoadConst | Op::LoadNil | Op::LoadTrue | Op::LoadFalse
+            | Op::LoadInt | Op::Move | Op::Eq | Op::Return
+            | Op::Jump | Op::JumpIfFalse | Op::JumpIfTrue => {}
+            // TailCall always deopts in our codegen, but it's a
+            // tail-position op — the interp handles it then re-enters
+            // JIT at the new frame's pc=0. So bodies with TailCall
+            // ARE worth JIT'ing.
+            Op::TailCall => {}
+            Op::Send => {
+                // Need nargs == 1 and selector in the fast set.
+                // Otherwise the Send would deopt mid-body and lose
+                // all subsequent JIT benefit for this frame.
+                if pc + 5 >= code.len() { return false; }
+                let sel_lo = code[pc + 3];
+                let sel_hi = code[pc + 4];
+                let nargs = code[pc + 5];
+                if nargs != 1 { return false; }
+                let sel_idx = ((sel_hi as usize) << 8) | (sel_lo as usize);
+                if sel_idx >= chunk.constants.len() { return false; }
+                let sel_sym = (chunk.constants[sel_idx] & 0xFFFF_FFFF) as u32;
+                if classify_send(sel_sym, op_syms) == SendKind::Other {
+                    return false;
+                }
+            }
+            // Anything else (MakeClosure, Eval, GetGlobal, DefGlobal,
+            // CurrentEnv, Cons, Wrap, Call, MakeTable, …): keep the
+            // body in the interpreter.
+            _ => return false,
+        }
+        pc = next_pc;
+    }
+    true
+}
+
 impl Jit {
     pub fn new() -> Result<Self, String> {
         let mut flag_builder = settings::builder();
@@ -136,16 +235,38 @@ impl Jit {
             .map_err(|e| format!("isa builder: {e}"))?;
         let isa = isa_builder.finish(settings::Flags::new(flag_builder))
             .map_err(|e| format!("isa finish: {e}"))?;
-        let builder = JITBuilder::with_isa(
+        let mut builder = JITBuilder::with_isa(
             isa,
             cranelift_module::default_libcall_names(),
         );
-        let module = JITModule::new(builder);
+        builder.symbol("jit_cons", jit_cons as *const u8);
+        builder.symbol("jit_get_global", jit_get_global as *const u8);
+
+        let mut module = JITModule::new(builder);
+
+        // Pre-declare helper signatures.
+        let mut cons_sig = module.make_signature();
+        cons_sig.params.push(AbiParam::new(types::I64));
+        cons_sig.params.push(AbiParam::new(types::I64));
+        cons_sig.returns.push(AbiParam::new(types::I64));
+        let helper_cons = module.declare_function(
+            "jit_cons", Linkage::Import, &cons_sig,
+        ).map_err(|e| format!("declare cons: {e}"))?;
+
+        let mut gg_sig = module.make_signature();
+        gg_sig.params.push(AbiParam::new(types::I32));
+        gg_sig.returns.push(AbiParam::new(types::I64));
+        let helper_get_global = module.declare_function(
+            "jit_get_global", Linkage::Import, &gg_sig,
+        ).map_err(|e| format!("declare get_global: {e}"))?;
+
         Ok(Jit {
             builder_ctx: FunctionBuilderContext::new(),
             ctx: module.make_context(),
             module,
             chunks: Vec::new(),
+            helper_cons,
+            helper_get_global,
         })
     }
 
@@ -464,6 +585,62 @@ impl Jit {
                         current_block_started = false;
                         pc = next_pc;
                         continue;
+                    }
+                    Op::Eq => {
+                        // Bit equality on Value: I64 icmp.eq.
+                        let lhs = builder.ins().load(
+                            types::I64, MemFlags::trusted(), regs_ptr,
+                            (b as i32) * 8,
+                        );
+                        let rhs = builder.ins().load(
+                            types::I64, MemFlags::trusted(), regs_ptr,
+                            (c as i32) * 8,
+                        );
+                        let cmp = builder.ins().icmp(IntCC::Equal, lhs, rhs);
+                        let true_bits = builder.ins().iconst(
+                            types::I64, Value::TRUE.to_bits() as i64);
+                        let false_bits = builder.ins().iconst(
+                            types::I64, Value::FALSE.to_bits() as i64);
+                        let result = builder.ins().select(cmp, true_bits, false_bits);
+                        builder.ins().store(MemFlags::trusted(), result, regs_ptr,
+                            (a as i32) * 8);
+                    }
+                    Op::Cons => {
+                        // helper call to heap.cons (TLS picks up active heap).
+                        let car = builder.ins().load(
+                            types::I64, MemFlags::trusted(), regs_ptr,
+                            (b as i32) * 8,
+                        );
+                        let cdr = builder.ins().load(
+                            types::I64, MemFlags::trusted(), regs_ptr,
+                            (c as i32) * 8,
+                        );
+                        let local = self.module.declare_func_in_func(
+                            self.helper_cons, builder.func);
+                        let call = builder.ins().call(local, &[car, cdr]);
+                        let result = builder.inst_results(call)[0];
+                        builder.ins().store(MemFlags::trusted(), result, regs_ptr,
+                            (a as i32) * 8);
+                    }
+                    Op::GetGlobal => {
+                        // sym index in [b, c] (16-bit BE).
+                        let idx = u16::from_be_bytes([b, c]) as usize;
+                        if idx >= chunk.constants.len() {
+                            let deopt = builder.ins().iconst(types::I64, pc as i64);
+                            builder.ins().return_(&[deopt]);
+                            current_block_started = false;
+                            pc = next_pc;
+                            continue;
+                        }
+                        // constants[idx] is Value::symbol bits; sym_id = low 32.
+                        let sym_id = (chunk.constants[idx] & 0xFFFF_FFFF) as u32;
+                        let sym_const = builder.ins().iconst(types::I32, sym_id as i64);
+                        let local = self.module.declare_func_in_func(
+                            self.helper_get_global, builder.func);
+                        let call = builder.ins().call(local, &[sym_const]);
+                        let result = builder.inst_results(call)[0];
+                        builder.ins().store(MemFlags::trusted(), result, regs_ptr,
+                            (a as i32) * 8);
                     }
                     _ => {
                         // unsupported (yet): deopt at this PC.
