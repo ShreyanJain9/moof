@@ -297,9 +297,15 @@ impl System {
         }
         vat.vm.set_closure_descs(descs);
 
-        // install env.
+        // install env. The loaded env IS the new persistent root —
+        // it carries everything the user has defined across runs.
+        // root_env tracks this so save_image and any other "where's
+        // the persistent state" lookups consult it (heap.env may
+        // swap to per-call virtual cells during execution).
         if let Some(env_id) = snap.env.as_any_object() {
             vat.heap.env = env_id;
+            vat.heap.root_env = env_id;
+            vat.heap.lexical_scope = env_id;
         }
 
         // drop the fresh-session send-cache. keys from bootstrap

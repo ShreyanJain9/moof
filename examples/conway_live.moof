@@ -29,13 +29,13 @@
 
   ; safe cell read — out-of-bounds returns 0 (the standard
   ; "infinite empty universe" convention for finite grids).
-  [at:and: i j]
+  [at: i and: j]
     (if (or [i < 0] [i >= @height]) 0
       (if (or [j < 0] [j >= @width]) 0
         [[@cells at: i] at: j]))
 
   ; eight-neighbor count for cell (i, j).
-  [neighbors:and: i j]
+  [neighbors: i and: j]
     (~> %offsets
         [_ map: |off| [self at: [i + [off at: 0]] and: [j + [off at: 1]]]]
         [_ fold: 0 with: |acc v| [acc + v]])
@@ -70,21 +70,21 @@
     (if (eq n 3) 1 0)))
 
 ; ─────────────────────────── grid-art ───────────────────────────
-; (grid-art "..#." "...#" ".###" "....") — vau-macro that takes
-; ASCII rows ("#" = live, anything else = dead) and produces a
-; Grid. All rows must be the same length.
+; (grid-art _ _ o _ _) — vau-macro that takes ASCII rows AS BARE
+; SYMBOLS, no string delimiters. "o" cells are alive, anything
+; else (including "_") is dead. all rows must be the same length.
 ;
-; vau gets the rows as raw forms; we eval each in the caller's env
-; so string variables would also work as inputs. each char becomes
-; a 1 or 0; the rows become a Table-of-Tables.
+; vau power: the rows come in as raw forms (symbols), so we read
+; each symbol's name as a character source. no quoting, no eval —
+; the macro consumes the literal token text directly.
 
 (def grid-art (vau rows $e
-  (let ((row-strs   [rows map: |r| (eval r $e)])
-        (row-cells  [row-strs map: |s|
-                       [[s chars] map: |c| (if [c equal: "#"] 1 0)]]))
+  (let ((row-chars  [rows map: |r| [[r describe] chars]])
+        (row-cells  [row-chars map: |cs|
+                       [cs map: |c| (if [c equal: "o"] 1 0)]]))
     { Grid
-      width:  (if (nil? row-strs) 0 [[row-strs car] length])
-      height: [row-strs count]
+      width:  (if (nil? row-chars) 0 [[row-chars car] count])
+      height: [row-chars count]
       cells:  row-cells })))
 
 ; ──────────────────────── animation loop ─────────────────────────
@@ -95,28 +95,34 @@
 
 (defn sleep (ms) [clock sleep: ms])
 
-(defn animate (grid n total)
+; (animate grid) — single arg. count + total are private to the
+; tail-recursive helper; the caller just hands in a Grid.
+(defn animate (grid) (%anim grid 24 24))
+
+(defn %anim (grid n total)
   (if [n <= 0] grid
     (do (_ <- [console println: (str "── gen " [total - n] " ──────")])
         (_ <- [console println: [grid render]])
         (_ <- (sleep 150))
-        (animate [grid step] [n - 1] total))))
+        (%anim [grid step] [n - 1] total))))
 
 ; ───────────────────────── initial state ─────────────────────────
-; a glider in the top-left of a 24×12 field.
+; a glider in the top-left of a 24×12 field. bare symbols, no
+; string delimiters — the (grid-art …) macro reads the token text
+; directly. "o" is alive, "_" (or any other char) is dead.
 
 (def glider (grid-art
-  "........................"
-  "..#....................."
-  "...#...................."
-  ".###...................."
-  "........................"
-  "........................"
-  "........................"
-  "........................"
-  "........................"
-  "........................"
-  "........................"
-  "........................"))
+  ________________________
+  __o_____________________
+  ___o____________________
+  _ooo____________________
+  ________________________
+  ________________________
+  ________________________
+  ________________________
+  ________________________
+  ________________________
+  ________________________
+  ________________________))
 
-(animate glider 24 24)
+(animate glider)
