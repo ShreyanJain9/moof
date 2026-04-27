@@ -43,6 +43,14 @@ struct Frame {
     /// $env stays *semantically* an object; the heap allocation just
     /// gets postponed until something looks at it.
     lazy_env: Option<LazyEnvData>,
+
+    /// JIT'd entry for this frame's chunk, copied from
+    /// ClosureDesc::jit_code at frame-push time. The run loop checks
+    /// this once when `pc == 0` and runs native code instead of the
+    /// opcode dispatch when present. On deopt (status >= 0) the
+    /// interpreter resumes from the deopt PC; on completion (status
+    /// = -1) we treat it like an Op::Return.
+    jit_code: Option<crate::jit::JittedChunk>,
 }
 
 struct LazyEnvData {
@@ -63,6 +71,12 @@ pub struct VM {
     /// runtime macro expansion (vau operatives) inherit the outer
     /// form's source. Push on eval_result_with_source, pop at end.
     active_sources: Vec<Option<moof_core::source::ClosureSource>>,
+    /// Lazy-init Cranelift JIT. Created on first call to a chunk
+    /// the JIT can lower; reused for the rest of the session. The
+    /// JIT module owns the produced machine code, so it must
+    /// outlive every fn pointer stashed on a ClosureDesc — and
+    /// since both live on the VM, that's automatic.
+    jit: Option<crate::jit::Jit>,
 }
 
 impl VM {
@@ -72,7 +86,18 @@ impl VM {
             closure_descs: Vec::new(),
             fuel: 0,
             active_sources: Vec::new(),
+            jit: None,
         }
+    }
+
+    fn jit_mut(&mut self) -> Option<&mut crate::jit::Jit> {
+        if self.jit.is_none() {
+            match crate::jit::Jit::new() {
+                Ok(j) => self.jit = Some(j),
+                Err(_) => return None,
+            }
+        }
+        self.jit.as_mut()
     }
 
     pub fn add_closure_desc(&mut self, desc: ClosureDesc) {
@@ -101,6 +126,7 @@ impl VM {
             saved_env: None,
             saved_lex: None,
             lazy_env: None,
+            jit_code: None,
         });
         self.run(heap)
     }
@@ -141,6 +167,22 @@ impl VM {
         let param_names = Arc::clone(&self.closure_descs[code_idx].param_names);
         let capture_names = Arc::clone(&self.closure_descs[code_idx].capture_names);
         let needs_env = self.closure_descs[code_idx].needs_env;
+
+        // JIT entry: lazily compile this chunk on first call. Cell
+        // mutation doesn't require &mut self; the actual compile
+        // step does (jit_mut), so we drop other refs before calling.
+        let attempted = self.closure_descs[code_idx].jit_attempted.get();
+        if !attempted {
+            self.closure_descs[code_idx].jit_attempted.set(true);
+            let chunk_for_jit = Arc::clone(&chunk);
+            let compiled = if let Some(jit) = self.jit_mut() {
+                jit.compile_chunk(chunk_for_jit).ok()
+            } else { None };
+            if let Some(fn_ptr) = compiled {
+                self.closure_descs[code_idx].jit_code.set(Some(fn_ptr));
+            }
+        }
+        let jit_code = self.closure_descs[code_idx].jit_code.get();
 
         let captures_from_obj = heap.closure_captures(closure_val);
 
@@ -226,6 +268,7 @@ impl VM {
             result_reg,
             saved_env,
             saved_lex,
+            jit_code,
             lazy_env,
         });
         Ok(())
@@ -293,6 +336,47 @@ impl VM {
             }
             let f = self.frames.last_mut().unwrap();
             let pc = f.pc;
+
+            // JIT entry: at frame entry (pc=0), if there's native
+            // code for this chunk, run it. Status convention:
+            //   -1   → ran to completion; regs[0] holds the result.
+            //          Treat like Op::Return on register 0.
+            //   >=0  → deopt at this PC; resume the interpreter from
+            //          here. The native code already updated regs[]
+            //          for everything before the deopt.
+            if pc == 0 {
+                if let Some(jit_fn) = f.jit_code {
+                    // SAFETY: jit_fn was produced by Jit::compile_chunk
+                    // for this exact chunk (held alive by the Arc on
+                    // f.chunk). regs and constants are slices we own.
+                    let regs_ptr = f.regs.as_mut_ptr() as *mut u64;
+                    let consts_ptr = f.chunk.constants.as_ptr();
+                    let status = jit_fn(regs_ptr, consts_ptr);
+                    if status < 0 {
+                        // ok — return regs[0] up the stack.
+                        let val = f.regs[0];
+                        let result_reg = f.result_reg;
+                        let saved_env = f.saved_env;
+                        let saved_lex = f.saved_lex;
+                        self.frames.pop();
+                        if let Some(prior) = saved_env { heap.env = prior; }
+                        if let Some(prior) = saved_lex { heap.lexical_scope = prior; }
+                        if self.frames.len() <= base_depth {
+                            return Ok(val);
+                        }
+                        self.frames.last_mut().unwrap().regs[result_reg as usize] = val;
+                        continue;
+                    } else {
+                        // deopt — resume interpreter at this PC.
+                        f.pc = status as usize;
+                        // clear jit_code so we don't re-enter the JIT
+                        // every iteration (we only want it as a
+                        // one-shot at frame entry).
+                        f.jit_code = None;
+                        continue;
+                    }
+                }
+            }
 
             if pc + 3 >= f.chunk.code.len() {
                 // end of code without Return — return regs[0]
@@ -559,6 +643,21 @@ impl VM {
                         let param_names = Arc::clone(&self.closure_descs[code_idx].param_names);
                         let capture_names = Arc::clone(&self.closure_descs[code_idx].capture_names);
                         let needs_env = self.closure_descs[code_idx].needs_env;
+
+                        // JIT entry: same lazy compile as push_closure_frame.
+                        let attempted = self.closure_descs[code_idx].jit_attempted.get();
+                        if !attempted {
+                            self.closure_descs[code_idx].jit_attempted.set(true);
+                            let chunk_for_jit = Arc::clone(&chunk);
+                            let compiled = if let Some(jit) = self.jit_mut() {
+                                jit.compile_chunk(chunk_for_jit).ok()
+                            } else { None };
+                            if let Some(fn_ptr) = compiled {
+                                self.closure_descs[code_idx].jit_code.set(Some(fn_ptr));
+                            }
+                        }
+                        let jit_code = self.closure_descs[code_idx].jit_code.get();
+
                         let captures_from_obj = heap.closure_captures(handler);
 
                         let f = self.frames.last_mut().unwrap();
@@ -568,6 +667,7 @@ impl VM {
                         f.chunk = chunk;
                         f.desc_base = closure_desc_base;
                         f.lazy_env = None;
+                        f.jit_code = jit_code;
 
                         let n_before_env = arity.saturating_sub(1);
                         let env_val = Value::nursery(heap.env);
@@ -1179,6 +1279,7 @@ impl VM {
             saved_env: None,
             saved_lex: None,
             lazy_env: None,
+            jit_code: None,
         });
         self.run(heap)
     }

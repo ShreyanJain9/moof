@@ -625,6 +625,8 @@ impl Scheduler {
                 rest_param_reg: rest_reg,
                 source: src,
                 needs_env,
+                jit_code: std::cell::Cell::new(None),
+                jit_attempted: std::cell::Cell::new(false),
             };
             self.vat_mut(to_vat_id).vm.add_closure_desc(desc);
         }

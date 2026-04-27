@@ -45,6 +45,20 @@ pub struct ClosureDesc {
     /// outer's per-call env in its parent chain. Refining this is
     /// future work.)
     pub needs_env: bool,
+
+    /// JIT'd native code for this chunk's body, if compiled. Filled
+    /// lazily on first call by the VM (see jit::Jit / push_closure_frame).
+    /// `None` means we either haven't compiled yet, or compilation
+    /// failed/wasn't profitable. Wrapped in Cell for interior
+    /// mutability — ClosureDesc is shared by Arc-y means but the
+    /// JIT pointer is set once-and-only-once, never read by multiple
+    /// threads in current single-threaded VMs.
+    pub jit_code: std::cell::Cell<Option<crate::jit::JittedChunk>>,
+
+    /// Have we attempted to JIT this chunk? Set true after the first
+    /// compile attempt to avoid repeatedly trying chunks we couldn't
+    /// or shouldn't JIT.
+    pub jit_attempted: std::cell::Cell<bool>,
 }
 
 pub struct CompileResult {
@@ -472,6 +486,8 @@ impl<'a> Compiler<'a> {
                         capture_values: Vec::new(), desc_base: 0, rest_param_reg: rest_reg,
                         source: self.source.clone(),
                         needs_env,
+                        jit_code: std::cell::Cell::new(None),
+                        jit_attempted: std::cell::Cell::new(false),
                     };
                     let idx = self.closure_descs.len();
                     self.closure_descs.push(desc);
@@ -578,6 +594,8 @@ impl<'a> Compiler<'a> {
                         capture_values: Vec::new(), desc_base: 0, rest_param_reg: rest_reg,
                         source: self.source.clone(),
                         needs_env,
+                        jit_code: std::cell::Cell::new(None),
+                        jit_attempted: std::cell::Cell::new(false),
                     };
                     let idx = self.closure_descs.len();
                     self.closure_descs.push(desc);

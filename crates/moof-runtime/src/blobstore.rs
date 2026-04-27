@@ -1088,6 +1088,8 @@ fn decode_desc(
         rest_param_reg,
         source,
         needs_env,
+        jit_code: std::cell::Cell::new(None),
+        jit_attempted: std::cell::Cell::new(false),
     })
 }
 
@@ -1329,6 +1331,8 @@ mod tests {
             desc_base: 0,
             rest_param_reg: Some(7),
             needs_env: false,
+            jit_code: std::cell::Cell::new(None),
+            jit_attempted: std::cell::Cell::new(false),
             source: Some(moof_core::source::ClosureSource {
                 text: "(defn foo ...)".to_string(),
                 origin: moof_core::source::SourceOrigin {
