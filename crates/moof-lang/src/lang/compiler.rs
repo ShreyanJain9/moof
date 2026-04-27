@@ -84,11 +84,48 @@ impl<'a> Compiler<'a> {
 
     fn alloc_reg(&mut self) -> u8 {
         let r = self.next_reg;
+        // u8 register space — overflow used to silently wrap, producing
+        // wrong bytecode. (list (list 0 0 …) …) with ~300 deeply-nested
+        // scratch regs hit this. fail loudly instead. real fix is to
+        // reuse scratch via free_scratch_above; this catches anything
+        // we missed.
+        if self.next_reg == 255 {
+            panic!("compiler: out of registers (>255 live in one chunk). \
+                    use let-bindings to break up large nested expressions.");
+        }
         self.next_reg += 1;
         if self.next_reg > self.chunk.num_regs {
             self.chunk.num_regs = self.next_reg;
         }
         r
+    }
+
+    /// Snapshot next_reg so a caller can release scratch later.
+    fn scratch_mark(&self) -> u8 { self.next_reg }
+
+    /// Reclaim scratch regs allocated above `mark`, BUT preserve any
+    /// regs that were given out to live locals or lazy captures during
+    /// the sub-compile. find_local creates captures on demand and stores
+    /// their reg in self.locals, so naively releasing would clobber them
+    /// with later scratch. we walk locals/captures and pin next_reg to
+    /// the highest live slot.
+    fn scratch_release(&mut self, mark: u8) {
+        if self.next_reg <= mark { return; }
+        // floor is the lowest reg we can reuse: never below `mark`
+        // (caller's regs live at < mark and must stay), and never
+        // overlapping a capture reg that find_local lazily allocated
+        // during the sub-compile (those are in self.locals/captures
+        // at >= mark).
+        let mut floor = mark;
+        for (_, r) in &self.locals {
+            if *r >= mark && *r >= floor { floor = r.saturating_add(1); }
+        }
+        for (_, _, lr) in &self.captures {
+            if *lr >= mark && *lr >= floor { floor = lr.saturating_add(1); }
+        }
+        if self.next_reg > floor {
+            self.next_reg = floor;
+        }
     }
 
     fn find_local(&mut self, sym_id: u32) -> Option<u8> {
@@ -109,6 +146,32 @@ impl<'a> Compiler<'a> {
             return Some(local_reg);
         }
         None
+    }
+
+    /// Eagerly create a capture slot for every entry in parent_locals,
+    /// before any body code is compiled. Reserving these regs upfront
+    /// (right above the params/env/rest-param slots) prevents later
+    /// scratch alloc from coinciding with a capture target — a real
+    /// hazard once `scratch_release` reclaims regs above a mark, since
+    /// `find_local`'s lazy capture would otherwise drop the capture
+    /// into a slot the bytecode has already used as scratch (and will
+    /// continue to use, clobbering the captured value).
+    ///
+    /// Trade-off: closures over-capture parent locals that the body
+    /// never references. Cost is one byte per unused parent local in
+    /// MakeClosure + one frame reg. Acceptable.
+    fn precapture_parent_locals(&mut self) {
+        for i in 0..self.parent_locals.len() {
+            let (sym, parent_reg) = self.parent_locals[i];
+            // skip already-captured (e.g. via build_sub_parent_locals
+            // forcing entries into self while building a child's
+            // parent_locals — see callers).
+            if self.captures.iter().any(|(s, _, _)| *s == sym) { continue; }
+            if self.locals.iter().any(|(s, _)| *s == sym) { continue; }
+            let local_reg = self.alloc_reg();
+            self.captures.push((sym, parent_reg, local_reg));
+            self.locals.push((sym, local_reg));
+        }
     }
 
     /// Build parent_locals for a sub-compiler. Includes both this compiler's
@@ -338,6 +401,8 @@ impl<'a> Compiler<'a> {
                         sub.locals.push((rest_sym, reg));
                         Some(reg)
                     } else { None };
+                    // EAGER pre-capture (see fn fast-path comment).
+                    sub.precapture_parent_locals();
                     let body_dst = sub.alloc_reg();
                     if items.len() == 4 {
                         sub.compile_expr(items[3], body_dst)?;
@@ -418,6 +483,12 @@ impl<'a> Compiler<'a> {
                         sub.locals.push((rest_sym, reg));
                         Some(reg)
                     } else { None };
+                    // EAGER pre-capture: reserve regs for every parent_local
+                    // upfront, so capture slots can never collide with later
+                    // scratch reuse (scratch_release reuses regs above the
+                    // mark, and lazy find_local would otherwise place a fresh
+                    // capture into a slot already burned as scratch).
+                    sub.precapture_parent_locals();
                     let body_dst = sub.alloc_reg();
                     // if multiple body exprs, wrap in do
                     if items.len() == 3 {
@@ -969,21 +1040,27 @@ impl<'a> Compiler<'a> {
         let items = self.heap.list_to_vec(expr);
         if items.is_empty() { return Err("empty call".into()); }
 
+        let mark = self.scratch_mark();
         let recv_reg = self.alloc_reg();
         self.compile_expr(items[0], recv_reg)?;
 
-        // build the args list as a cons chain
+        // build the args list as a cons chain. each arg's scratch is
+        // released after Cons folds it in, since the arg value now
+        // lives in `list_reg`.
         let list_reg = self.alloc_reg();
         self.chunk.emit(Op::LoadNil, list_reg, 0, 0);
         for i in (1..items.len()).rev() {
+            let arg_mark = self.scratch_mark();
             let arg_reg = self.alloc_reg();
             self.compile_expr(items[i], arg_reg)?;
             self.chunk.emit(Op::Cons, list_reg, arg_reg, list_reg);
+            self.scratch_release(arg_mark);
         }
 
         // emit SEND recv, call:, (the list)
         let call_const = self.add_sym_const(self.heap.sym_call);
         self.emit_send(Op::Send, dst, recv_reg, call_const, 1, list_reg, 0, 0);
+        self.scratch_release(mark);
         Ok(())
     }
 

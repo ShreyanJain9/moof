@@ -1,0 +1,134 @@
+; conway.moof — Conway's Game of Life in moof.
+;
+;   moof examples/conway.moof
+;
+; renders a glider for 24 generations on a 12×24 grid. uses ~>
+; everywhere chains run more than two deep, and structures the
+; rules + neighbor-count as fold-over-offsets — the APL-flavored
+; reading of "for each of these eight relative positions, get the
+; cell, then sum."
+;
+; the GRID is a list of rows; each row is a list of 0 / 1 cells.
+; everything is purely functional — step produces a NEW grid, no
+; mutation. between generations the script println's each frame;
+; in a real terminal that gives you flip-book animation.
+
+; ── helpers: index-aware list iteration ────────────────────────
+
+; (with-index xs f)  ⇒  (f x[0] 0) (f x[1] 1) … as a new list.
+; moof's [coll map: block] passes only the value; we want the
+; index too, so this helper threads (i, val) → result. used twice
+; nested below to walk a 2D grid.
+(defn with-index (xs f)
+  (%wi-loop xs f 0))
+
+(defn %wi-loop (xs f i)
+  (if (nil? xs) nil
+    (cons (f [xs car] i)
+          (%wi-loop [xs cdr] f [i + 1]))))
+
+; ── grid access ────────────────────────────────────────────────
+
+; (cell-at grid i j)  ⇒  0 / 1, or 0 if (i, j) is out of bounds.
+; returning 0 outside the bounds is the standard "infinite-but-
+; empty universe" convention for finite grids.
+;
+; written as nested if's instead of (or …) because `or` is a vau,
+; and its eval-against-caller's-env can't see let-locals like `row`
+; — moof's let-bindings are register-only, not env entries. (the
+; phase 4 work would close that gap.)
+(defn cell-at (grid i j)
+  (if [i < 0] 0
+    (if [i >= [grid count]] 0
+      (let ((row [grid at: i]))
+        (if [j < 0] 0
+          (if [j >= [row count]] 0
+            [row at: j]))))))
+
+; the eight relative offsets to a cell's neighbors.
+(def %offsets
+  (list (list -1 -1) (list -1  0) (list -1  1)
+        (list  0 -1)              (list  0  1)
+        (list  1 -1) (list  1  0) (list  1  1)))
+
+; (neighbor-count grid i j)  ⇒  number of live neighbors.
+; APL flavor: map cell-at over the eight offsets, then sum-fold.
+; reads top-down as one pipeline.
+(defn neighbor-count (grid i j)
+  (~> %offsets
+      [_ map: |off|
+        (cell-at grid
+                 [i + [off at: 0]]
+                 [j + [off at: 1]])]
+      [_ fold: 0 with: |acc v| [acc + v]]))
+
+; ── the rules ──────────────────────────────────────────────────
+
+; (next-cell alive? n)  ⇒  the next-generation value of a cell.
+;   live + 2-or-3 neighbors → live
+;   dead + exactly 3        → live (birth)
+;   else                    → dead
+(defn next-cell (alive? n)
+  (if (eq alive? 1)
+    (if (eq n 2) 1
+      (if (eq n 3) 1 0))
+    (if (eq n 3) 1 0)))
+
+; ── step: grid → grid ──────────────────────────────────────────
+
+; doubly-nested with-index walks the whole grid; for each cell we
+; ask "is this alive next gen?" and build a new row, then a new
+; grid. pure function — no mutation.
+(defn step (grid)
+  (with-index grid |row i|
+    (with-index row |cell j|
+      (next-cell cell (neighbor-count grid i j)))))
+
+; ── render: grid → String ──────────────────────────────────────
+
+; live cells become █, dead cells ·  — chosen so the grid reads
+; densely; spaces would shrink/blur the shape during the print.
+(defn render (grid)
+  (~> grid
+      [_ map: |row|
+        (~> row
+            [_ map: |c| (if (eq c 1) "█" "·")]
+            [_ join: ""])]
+      [_ join: "\n"]))
+
+; ── animation loop ─────────────────────────────────────────────
+
+; (run grid generations)  steps the grid `generations` times,
+; printing each frame with a header. recursion is moof's iteration
+; — no while loop required.
+(defn run (grid generations)
+  (%run-loop grid generations 0))
+
+(defn %run-loop (grid total i)
+  (if [i >= total] grid
+    ((fn ()
+      [console println: (str "── gen " i " ──────────────────")]
+      [console println: (render grid)]
+      (%run-loop (step grid) total [i + 1])))))
+
+; ── initial state: a glider in the top-left ────────────────────
+
+; the glider — Conway's iconic 5-cell pattern that translates
+; diagonally every 4 steps. parked at (1, 1) so it has room to
+; drift down-right across the field.
+(def glider
+  (list (list 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (list 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (list 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (list 0 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (list 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (list 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (list 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (list 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (list 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (list 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (list 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (list 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)))
+
+; main: run the simulation
+(run glider 24)
