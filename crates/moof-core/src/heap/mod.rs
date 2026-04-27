@@ -494,6 +494,27 @@ impl Heap {
             .expect("Pair foreign type must be registered")
     }
 
+    /// Allocate a Pair with placeholder NIL/NIL slots. Crate-internal
+    /// escape hatch for the blobstore: when decoding a cyclic blob
+    /// graph, we need to allocate a Pair, insert it into the memo,
+    /// THEN decode car/cdr (which may transitively reference this
+    /// same Pair). Returns the new Pair value; pair_set_fields
+    /// fills it in afterwards.
+    pub fn cons_uninit(&mut self) -> Value {
+        self.cons(Value::NIL, Value::NIL)
+    }
+
+    /// Set the car/cdr of an already-allocated Pair. Pairs are
+    /// otherwise immutable from moof's side — this is just for
+    /// blobstore decode (see `cons_uninit`). Silently no-ops if
+    /// `val` isn't actually a Pair.
+    pub fn pair_set_fields(&mut self, val: Value, car: Value, cdr: Value) {
+        if let Some(p) = self.foreign_payload_mut::<Pair>(val) {
+            p.car = car;
+            p.cdr = cdr;
+        }
+    }
+
     /// If `id` is a cons-pair General, return (car, cdr). This is
     /// the replacement for the old `HeapObject::Pair(a, b)` match —
     /// post-wave-5.1 pairs don't have a dedicated enum variant.

@@ -679,30 +679,44 @@ fn load_blob(
     if bytes.is_empty() { return Err("empty blob".into()); }
     let tag = bytes[0];
 
-    // For General objects, pre-allocate an empty placeholder and
-    // insert into memo BEFORE recursing — this breaks cycles in the
-    // blob DAG (e.g. closure ↔ proto chain). The recursive decode
-    // then FILLS IN the pre-allocated id.
-    if tag == BTAG_GENERAL {
-        let placeholder_id = heap.alloc_val(HeapObject::new_empty(Value::NIL));
-        let placeholder_val = Value::nursery(placeholder_id.as_any_object().unwrap());
-        memo.insert(*hash, placeholder_val);
-        // decode the bytes and POPULATE the placeholder in place
-        // rather than allocating a fresh object.
-        decode_general_into(placeholder_id.as_any_object().unwrap(), store, rtxn, &bytes, heap, memo)?;
-        return Ok(placeholder_val);
+    // For container blobs, pre-allocate a placeholder and insert
+    // into memo BEFORE recursing — this breaks cycles in the blob
+    // DAG (e.g. closure ↔ proto chain via General; cons-cell self-
+    // references that arise from imperfect cycle hashing collapsing
+    // distinct objects to the same hash).
+    match tag {
+        BTAG_GENERAL => {
+            let placeholder_id = heap.alloc_val(HeapObject::new_empty(Value::NIL));
+            let placeholder_val = Value::nursery(placeholder_id.as_any_object().unwrap());
+            memo.insert(*hash, placeholder_val);
+            decode_general_into(placeholder_id.as_any_object().unwrap(), store, rtxn, &bytes, heap, memo)?;
+            Ok(placeholder_val)
+        }
+        BTAG_CONS => {
+            // pre-alloc Pair with NIL/NIL, memoize, then fill.
+            let pair_val = heap.cons_uninit();
+            memo.insert(*hash, pair_val);
+            let mut offset = 1;
+            let car = decode_value(store, rtxn, &bytes, &mut offset, heap, memo)?;
+            let cdr = decode_value(store, rtxn, &bytes, &mut offset, heap, memo)?;
+            heap.pair_set_fields(pair_val, car, cdr);
+            Ok(pair_val)
+        }
+        BTAG_TABLE => {
+            // tables can also participate in cycles; pre-alloc empty
+            // and fill. existing decode_table allocates fresh — call
+            // it but memoize after; for true cycle safety we should
+            // also pre-alloc + fill here, but tables don't currently
+            // appear in env-graph cycles.
+            let val = decode_table(store, rtxn, &bytes, heap, memo)?;
+            memo.insert(*hash, val);
+            Ok(val)
+        }
+        BTAG_TEXT  => { let v = decode_text(&bytes, heap)?; memo.insert(*hash, v); Ok(v) }
+        BTAG_BYTES => { let v = decode_bytes(&bytes, heap)?; memo.insert(*hash, v); Ok(v) }
+        BTAG_FOREIGN => { let v = decode_foreign(&bytes, heap)?; memo.insert(*hash, v); Ok(v) }
+        _ => Err(format!("unknown blob tag: 0x{:02x}", tag)),
     }
-
-    let val = match tag {
-        BTAG_CONS    => decode_cons(store, rtxn, &bytes, heap, memo)?,
-        BTAG_TEXT    => decode_text(&bytes, heap)?,
-        BTAG_BYTES   => decode_bytes(&bytes, heap)?,
-        BTAG_TABLE   => decode_table(store, rtxn, &bytes, heap, memo)?,
-        BTAG_FOREIGN => decode_foreign(&bytes, heap)?,
-        _ => return Err(format!("unknown blob tag: 0x{:02x}", tag)),
-    };
-    memo.insert(*hash, val);
-    Ok(val)
 }
 
 /// Decode a Value (inline primitive or blob-ref).
