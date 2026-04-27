@@ -28,9 +28,15 @@ pub fn lookup_handler(heap: &mut Heap, receiver: Value, selector: u32) -> Result
     // Fast path: instance has its own handler installed directly (object
     // literals with [sel] handlers, closures, etc.). Never cached — each
     // instance would be its own key.
+    //
+    // Virtual env cells have no instance handlers (they live outside
+    // the heap arena), so skip this check for them — heap.get on a
+    // virtual id panics. They go straight through the proto chain.
     if let Some(id) = receiver.as_any_object() {
-        if let Some(handler) = heap.get(id).handler_get(selector) {
-            return Ok((handler, receiver));
+        if !crate::heap::is_virtual_env_id(id) {
+            if let Some(handler) = heap.get(id).handler_get(selector) {
+                return Ok((handler, receiver));
+            }
         }
     }
 

@@ -319,19 +319,17 @@ impl Heap {
         h.register_foreign_type::<BigInt>().expect("register BigInt");
         pair::PAIR_SYMS.store(pair::PairSyms { car: h.sym_car, cdr: h.sym_cdr });
 
-        // allocate the root env's bindings Table first.
+        // Root env stays a HeapObject for now — moof type plugins
+        // (CorePlugin in particular) set its proto at registration
+        // time, which requires real HeapObject machinery. The vat
+        // root is a stable, single-allocation cost. Per-call envs
+        // and scope captures DO go through virtual cells via
+        // make_env. env_get / env_def transparently handle both.
         let bindings_table = h.alloc_table(Vec::new(), IndexMap::new());
-
-        // root env: just a General. `parent` here is a real slot —
-        // the scope chain for variable lookup, which env_get walks.
-        // Not the VM proto — that's the `proto` field (fixed up to
-        // the Env prototype once the plugin registers it, or stays
-        // whatever we set here as the default Object proto later).
-        // `bindings` holds the actual name→value mappings.
         h.env = h.alloc(HeapObject::new_general(
-            Value::NIL,                              // proto (set later)
-            vec![h.sym_parent, bindings_sym],        // real user-facing slots
-            vec![Value::NIL, bindings_table],        // parent scope (nil = root), bindings table
+            Value::NIL,
+            vec![h.sym_parent, bindings_sym],
+            vec![Value::NIL, bindings_table],
         ));
         h.lexical_scope = h.env;
 
@@ -1114,6 +1112,11 @@ impl Heap {
     /// Get the prototype for any value (including primitives and optimized types).
     pub fn prototype_of(&self, val: Value) -> Value {
         if let Some(id) = val.as_any_object() {
+            // Virtual env cells aren't in the arena — they have a
+            // single canonical proto: the Env type.
+            if is_virtual_env_id(id) {
+                return self.type_protos.get(PROTO_ENV).copied().unwrap_or(Value::NIL);
+            }
             return self.get(id).proto;
         }
         let tag = val.type_tag() as usize;
@@ -1200,7 +1203,38 @@ impl Heap {
     /// User-facing slot read: consults both the real slots vec AND
     /// the foreign payload's virtual-slot hook (if any). Pair's
     /// car/cdr, Vec3's x/y/z, etc. flow through this.
+    ///
+    /// Virtual env cells expose `parent`, `bindings`, and any of
+    /// their bound names as slots — `[env @parent]`, `[env @x]`
+    /// etc. work uniformly with HeapObject envs. `bindings` lazily
+    /// builds a Table view on demand (only when moof code asks).
     pub fn slot_of(&self, id: u32, name: u32) -> Option<Value> {
+        if is_virtual_env_id(id) {
+            let cell = self.envs.get(frame_env_idx(id))?;
+            // canonical env slots
+            if name == self.sym_parent { return Some(cell.parent); }
+            if let Some(b) = self.symbols.find("bindings") {
+                if name == b {
+                    // construct a Table view: { name → val } for the
+                    // cell's direct bindings. Lazy + read-only — moof
+                    // code shouldn't mutate (use bind:to: instead).
+                    let mut map = indexmap::IndexMap::new();
+                    for (i, &n) in cell.names.iter().enumerate() {
+                        map.insert(Value::symbol(n), cell.values[i]);
+                    }
+                    // can't allocate from &self; return None for now —
+                    // callers that need the Table go through the
+                    // mutable env_bindings_view path.
+                    let _ = map;
+                    return None;
+                }
+            }
+            // direct lookup — a binding by that name?
+            for (i, &n) in cell.names.iter().enumerate() {
+                if n == name { return Some(cell.values[i]); }
+            }
+            return None;
+        }
         let obj = self.get(id);
         if let Some(v) = obj.slot_get(name) { return Some(v); }
         if let Some(fd) = obj.foreign() {
