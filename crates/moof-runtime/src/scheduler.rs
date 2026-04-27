@@ -14,6 +14,15 @@ use moof_core::value::Value;
 use crate::vat::{Vat, Message};
 use crate::capability::CapabilityPlugin;
 
+/// Process-monotonic nanos. Same epoch as `clock monotonic`. Used
+/// by the timer wheel to compare against TimerEntry due times.
+pub fn now_monotonic_ns() -> u128 {
+    use std::time::Instant;
+    use std::sync::OnceLock;
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_nanos()
+}
+
 /// Merge two delta objects: base slots + override slots → new object.
 fn merge_deltas(heap: &mut Heap, base: Value, overrides: Value) -> Value {
     let base_id = match base.as_any_object() {
@@ -298,7 +307,36 @@ impl Scheduler {
         for _ in 0..100_000 {  // safety bound
             let mut did_work = false;
 
-            // 0. process ready Acts (continuations on already-resolved Acts)
+            // 0a. fire any due timers — registered by `clock sleep:`
+            // and similar. each fired timer marks its act ready, so
+            // the next pass through this loop picks it up via the
+            // ready_acts machinery.
+            let now_ns = now_monotonic_ns();
+            let mut next_timer: Option<u128> = None;
+            for vat in &mut self.vats {
+                let mut i = 0;
+                while i < vat.heap.timers.len() {
+                    if vat.heap.timers[i].due_ns <= now_ns {
+                        let act_id = vat.heap.timers.swap_remove(i).act_id;
+                        // mark act ready with a NIL result; the
+                        // existing ready_acts pass will fire the
+                        // continuation.
+                        let result_sym = vat.heap.intern("__result");
+                        let state_sym = vat.heap.intern("__state");
+                        let resolved_sym = vat.heap.intern("resolved");
+                        vat.heap.get_mut(act_id).slot_set(result_sym, Value::NIL);
+                        vat.heap.get_mut(act_id).slot_set(state_sym, Value::symbol(resolved_sym));
+                        vat.heap.ready_acts.push(act_id);
+                        did_work = true;
+                    } else {
+                        let due = vat.heap.timers[i].due_ns;
+                        next_timer = Some(next_timer.map_or(due, |t| t.min(due)));
+                        i += 1;
+                    }
+                }
+            }
+
+            // 0b. process ready Acts (continuations on already-resolved Acts)
             let mut ready: Vec<(u32, u32)> = Vec::new();  // (vat_id, act_id)
             for vat in &mut self.vats {
                 for act_id in vat.heap.ready_acts.drain(..) {
@@ -522,7 +560,22 @@ impl Scheduler {
                 self.resolve_act(res.vat_id, res.act_id, res.result, res.is_error);
             }
 
-            if !did_work { break; }
+            if !did_work {
+                // No active work, but if there are pending timers,
+                // park until the earliest one. Without this we'd
+                // leave the drain loop with timers still unfired —
+                // continuations would never run. Cap the wait so a
+                // wildly-future timer doesn't hang the scheduler.
+                if let Some(due) = next_timer {
+                    let now = now_monotonic_ns();
+                    if due > now {
+                        let wait_ns = (due - now).min(1_000_000_000); // 1s cap
+                        std::thread::sleep(std::time::Duration::from_nanos(wait_ns as u64));
+                    }
+                    continue;
+                }
+                break;
+            }
         }
     }
 

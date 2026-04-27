@@ -199,6 +199,25 @@ pub struct Heap {
     /// which special-case the FRAME_ENV_BIT and walk this arena
     /// directly.
     pub envs: Vec<EnvCell>,
+
+    /// Pending timer-driven Act resolutions. Each entry: (act_id,
+    /// due_monotonic_nanos). The scheduler's drain loop scans these
+    /// across all vats; when a due time has passed, the act is
+    /// resolved with NIL (which fires its continuation chain). This
+    /// is the substrate for `(sleep ms)` and any other "wake me
+    /// later" pattern — the vat doesn't block, the continuation
+    /// runs as a fresh dispatch when the timer fires, and other
+    /// messages can interleave in between.
+    pub timers: Vec<TimerEntry>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TimerEntry {
+    pub act_id: u32,
+    /// monotonic-nanos timestamp when this timer fires. Compared
+    /// against the same clock the `clock monotonic` selector
+    /// returns, so the units match end-to-end.
+    pub due_ns: u128,
 }
 
 /// A live environment. Single representation for all env shapes —
@@ -272,6 +291,7 @@ impl Heap {
             closure_sources: Vec::new(),
             form_locations: std::collections::HashMap::new(),
             envs: Vec::new(),
+            timers: Vec::new(),
         };
 
         // intern well-known symbols

@@ -1,0 +1,87 @@
+; conway_live.moof — Conway's Life as an animated CLI display.
+;
+;   moof examples/conway_live.moof
+;
+; same simulation as examples/conway.moof, but each frame is
+; printed with a sleep between them so the glider visibly moves
+; instead of all 24 generations dumping at once. demonstrates
+; the vat-as-process model: the animation loop yields control to
+; the scheduler at every (sleep), the clock cap holds the
+; continuation across time, and the user vat resumes when the
+; timer fires — without ever blocking.
+
+(defn with-index (xs f)
+  (%wi-loop xs f 0))
+
+(defn %wi-loop (xs f i)
+  (if (nil? xs) nil
+    (cons (f [xs car] i)
+          (%wi-loop [xs cdr] f [i + 1]))))
+
+(defn cell-at (grid i j)
+  (if [i < 0] 0
+    (if [i >= [grid count]] 0
+      (let ((row [grid at: i]))
+        (if [j < 0] 0
+          (if [j >= [row count]] 0
+            [row at: j]))))))
+
+(def %offsets
+  (list (list -1 -1) (list -1  0) (list -1  1)
+        (list  0 -1)              (list  0  1)
+        (list  1 -1) (list  1  0) (list  1  1)))
+
+(defn neighbor-count (grid i j)
+  (~> %offsets
+      [_ map: |off|
+        (cell-at grid [i + [off at: 0]] [j + [off at: 1]])]
+      [_ fold: 0 with: |acc v| [acc + v]]))
+
+(defn next-cell (alive? n)
+  (if (eq alive? 1)
+    (if (eq n 2) 1 (if (eq n 3) 1 0))
+    (if (eq n 3) 1 0)))
+
+(defn step (grid)
+  (with-index grid |row i|
+    (with-index row |cell j|
+      (next-cell cell (neighbor-count grid i j)))))
+
+(defn render (grid)
+  (~> grid
+      [_ map: |row|
+        (~> row
+            [_ map: |c| (if (eq c 1) "█" "·")]
+            [_ join: ""])]
+      [_ join: "\n"]))
+
+; live animation loop. each tick: print, sleep, recurse. the
+; sleep yields the scheduler — even though we're "blocking on
+; time", the scheduler runs other vats' messages (e.g. the
+; console cap actually flushing the print) in between.
+;
+; using do-notation (which threads through Acts) so the (sleep)
+; result is the act we wait on; the recursive call is the
+; continuation that fires when the wakeup arrives.
+(defn animate (grid n)
+  (if [n <= 0] grid
+    (do (_ <- [console println: (str "── gen " [24 - n] " ──────")])
+        (do (_ <- [console println: (render grid)])
+            (do (_ <- [clock sleep: 150])
+                (animate (step grid) [n - 1]))))))
+
+(def glider
+  (list (list 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (list 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (list 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (list 0 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (list 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (list 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (list 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (list 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (list 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (list 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (list 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)
+        (list 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0)))
+
+(animate glider 24)
