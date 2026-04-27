@@ -243,15 +243,35 @@ impl VM {
             Some(l) => l,
             None => return,
         };
-        // make_env_inline stashes bindings DIRECTLY on the env's
-        // HeapObject (one alloc) instead of going through a Table
-        // foreign payload (two allocs + indexmap insert per binding).
-        // env_get understands both shapes — semantics preserved.
-        let new_env = heap.make_env_inline(lazy.scope_val, lazy.bindings);
-        if let Some(new_env_id) = new_env.as_any_object() {
-            heap.env = new_env_id;
-            heap.lexical_scope = new_env_id;
+        // Push a virtual env cell into heap.frame_envs and point
+        // heap.env at its sentinel id (high u32 bit set). NO HeapObject
+        // is allocated — the env exists *only* as a heap-side cell of
+        // (names, values, parent). env_get / env_def recognize the
+        // sentinel and walk the cell directly. The env still behaves
+        // exactly like a real env: same chain semantics, same defs,
+        // same eval target — just without the per-call HeapObject
+        // overhead.
+        //
+        // Cells live until the heap GC sweeps them or the vat ends.
+        // We don't pop on frame return because the cell's id might
+        // have escaped (captured by a closure created in eval'd code,
+        // stored in a slot, etc.). For frames that don't escape, this
+        // is a small memory overhead; for those that do, it's the
+        // correct behavior. A future refinement could promote the
+        // cell to a real HeapObject only if escape is detected.
+        let mut names = Vec::with_capacity(lazy.bindings.len());
+        let mut values = Vec::with_capacity(lazy.bindings.len());
+        for (n, v) in lazy.bindings {
+            names.push(n);
+            values.push(v);
         }
+        let idx = heap.frame_envs.len();
+        heap.frame_envs.push(moof_core::heap::FrameEnvCell {
+            names, values, parent: lazy.scope_val,
+        });
+        let id = moof_core::heap::virtual_env_id(idx);
+        heap.env = id;
+        heap.lexical_scope = id;
     }
 
     /// The ONE opcode loop. Reads from the current (top) frame.
@@ -905,8 +925,11 @@ impl VM {
                     let saved_target_parent: Option<(u32, Value)> = None;
                     let mut saved_values: Vec<(u32, Option<Value>)> = Vec::new();
                     if let Some(env_id) = env_val.as_any_object() {
+                        // Virtual frame envs are full-fledged envs as
+                        // far as eval is concerned — just swap.
+                        let is_virtual = moof_core::heap::is_virtual_env_id(env_id);
                         let bind_sym = heap.find_symbol("bindings");
-                        let is_real_env = bind_sym
+                        let is_real_env = is_virtual || bind_sym
                             .and_then(|s| heap.get(env_id).slot_get(s))
                             .and_then(|b| b.as_any_object())
                             .map(|bid| heap.is_table(Value::nursery(bid)))

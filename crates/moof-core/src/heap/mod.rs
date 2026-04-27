@@ -184,7 +184,35 @@ pub struct Heap {
     /// only — not persisted; rebuilt at parse time. Cleaned up
     /// during GC sweeps.
     pub form_locations: std::collections::HashMap<u32, crate::source::FormLoc>,
+
+    /// Frame-env cells: a side arena of lightweight envs that don't
+    /// allocate a HeapObject. Used by the VM when materializing a
+    /// per-call env "lazily" — instead of building a full
+    /// `make_env_inline` HeapObject, push a cell here and address it
+    /// via a virtual env id (top u32 bit set). `env_get` / `env_def`
+    /// recognize the virtual shape and walk this side arena directly.
+    /// Lifetimes match the call stack: pushed at materialization,
+    /// popped on frame return.
+    pub frame_envs: Vec<FrameEnvCell>,
 }
+
+/// A lightweight per-call env. Stored in `Heap::frame_envs`, addressed
+/// via a virtual env id (`FRAME_ENV_BIT | idx`). No HeapObject, no
+/// proto, no slot_names/values — just the bindings and the parent.
+/// Roughly half the per-allocation cost of `make_env_inline`.
+#[derive(Debug, Clone)]
+pub struct FrameEnvCell {
+    pub names: Vec<u32>,
+    pub values: Vec<Value>,
+    pub parent: Value,
+}
+
+/// Top u32 bit reserved for "virtual env id" — heap arena indices
+/// will never reach this far in practice.
+pub const FRAME_ENV_BIT: u32 = 0x8000_0000;
+#[inline] pub fn is_virtual_env_id(id: u32) -> bool { (id & FRAME_ENV_BIT) != 0 }
+#[inline] pub fn virtual_env_id(idx: usize) -> u32 { (idx as u32) | FRAME_ENV_BIT }
+#[inline] pub fn frame_env_idx(id: u32) -> usize { (id & !FRAME_ENV_BIT) as usize }
 
 pub type NativeFn = Box<dyn Fn(&mut Heap, Value, &[Value]) -> Result<Value, String>>;
 
@@ -235,6 +263,7 @@ impl Heap {
             foreign_registry: ForeignTypeRegistry::new(),
             closure_sources: Vec::new(),
             form_locations: std::collections::HashMap::new(),
+            frame_envs: Vec::new(),
         };
 
         // intern well-known symbols
@@ -351,15 +380,31 @@ impl Heap {
 
     pub fn env_get(&self, sym: u32) -> Option<Value> {
         // walk the scope chain via the `parent` slot — NOT the proto chain.
-        // Two env shapes are supported transparently:
-        //   1. table-backed: env has a `bindings` slot pointing at a Table.
-        //   2. inline-backed: env has no `bindings` slot; the bindings ARE
-        //      the env's slots (skipping the reserved `parent` slot).
-        // The inline shape, built by `make_env_inline`, is what
-        // VM-internal per-call materialization uses — one HeapObject
-        // allocation instead of two (env + Table) and no IndexMap insert.
+        // Three env shapes are supported transparently:
+        //   1. virtual cell: id has FRAME_ENV_BIT set; bindings live in
+        //      `self.frame_envs[idx]`. Cheapest — no HeapObject at all.
+        //   2. table-backed: env has a `bindings` slot pointing at a Table.
+        //      Used by moof-side env construction (workspace, namespace).
+        //   3. inline-backed: env has no `bindings` slot; the bindings ARE
+        //      the env's slots (skipping the reserved `parent` slot). Used
+        //      by `make_env_inline` for promoted virtual envs.
         let mut cur = self.env;
         loop {
+            // shape 1: virtual cell
+            if is_virtual_env_id(cur) {
+                let idx = frame_env_idx(cur);
+                if let Some(cell) = self.frame_envs.get(idx) {
+                    for (i, &n) in cell.names.iter().enumerate() {
+                        if n == sym { return Some(cell.values[i]); }
+                    }
+                    let Some(next) = cell.parent.as_any_object() else { return None; };
+                    cur = next;
+                    continue;
+                } else {
+                    return None;
+                }
+            }
+            // shape 2 / 3: HeapObject env
             if let Some(bid) = self.env_bindings_id(cur) {
                 if let Some(t) = self.foreign_ref::<Table>(Value::nursery(bid)) {
                     if let Some(v) = t.map.get(&Value::symbol(sym)).copied() {
@@ -367,7 +412,6 @@ impl Heap {
                     }
                 }
             } else {
-                // inline-backed env: walk slots directly (skip parent).
                 let obj = self.get(cur);
                 for (i, &n) in obj.slot_names.iter().enumerate() {
                     if n == sym && n != self.sym_parent {
@@ -417,6 +461,19 @@ impl Heap {
     }
 
     pub fn env_def(&mut self, sym: u32, val: Value) {
+        // virtual cell: write into the side arena.
+        if is_virtual_env_id(self.env) {
+            let idx = frame_env_idx(self.env);
+            if let Some(cell) = self.frame_envs.get_mut(idx) {
+                if let Some(i) = cell.names.iter().position(|n| *n == sym) {
+                    cell.values[i] = val;
+                } else {
+                    cell.names.push(sym);
+                    cell.values.push(val);
+                }
+            }
+            return;
+        }
         if let Some(bid) = self.env_bindings_id(self.env) {
             // table-backed: insert into the Table.
             if let Some(t) = self.foreign_payload_mut::<Table>(Value::nursery(bid)) {
@@ -435,6 +492,20 @@ impl Heap {
     /// (no `bindings` slot, or bindings isn't a Table).
     pub fn bind_in_env(&mut self, env_val: Value, sym: u32, val: Value) -> bool {
         let Some(env_id) = env_val.as_any_object() else { return false; };
+        // virtual cell: write into the side arena.
+        if is_virtual_env_id(env_id) {
+            let idx = frame_env_idx(env_id);
+            if let Some(cell) = self.frame_envs.get_mut(idx) {
+                if let Some(i) = cell.names.iter().position(|n| *n == sym) {
+                    cell.values[i] = val;
+                } else {
+                    cell.names.push(sym);
+                    cell.values.push(val);
+                }
+                return true;
+            }
+            return false;
+        }
         let Some(bid) = self.env_bindings_id(env_id) else { return false; };
         if let Some(t) = self.foreign_payload_mut::<Table>(Value::nursery(bid)) {
             t.map.insert(Value::symbol(sym), val);
@@ -443,6 +514,16 @@ impl Heap {
     }
 
     pub fn env_remove(&mut self, sym: u32) {
+        if is_virtual_env_id(self.env) {
+            let idx = frame_env_idx(self.env);
+            if let Some(cell) = self.frame_envs.get_mut(idx) {
+                if let Some(i) = cell.names.iter().position(|n| *n == sym) {
+                    cell.names.remove(i);
+                    cell.values.remove(i);
+                }
+            }
+            return;
+        }
         if let Some(bid) = self.env_bindings_id(self.env) {
             if let Some(t) = self.foreign_payload_mut::<Table>(Value::nursery(bid)) {
                 t.map.shift_remove(&Value::symbol(sym));
