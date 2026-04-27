@@ -3,6 +3,7 @@
 // ONE opcode loop. Closure calls push frames, returns pop them.
 // No duplicated opcode handling. Fuel counting and TCO built in.
 
+use std::sync::Arc;
 use moof_core::dispatch;
 use moof_core::heap::Heap;
 use crate::lang::compiler::{ClosureDesc, CompileResult};
@@ -22,20 +23,15 @@ pub enum RunResult {
 struct Frame {
     regs: Vec<Value>,
     pc: usize,
-    code: Vec<u8>,
-    constants: Vec<u64>,
+    /// Shared bytecode + constant pool. Holding an Arc here means
+    /// push_closure_frame is one refcount bump per call instead of
+    /// cloning a few hundred bytes of code/constants — huge win
+    /// in tight recursion (conway's hot loop pushes thousands of
+    /// frames per generation).
+    chunk: Arc<Chunk>,
     desc_base: usize,
-    result_reg: u8,     // register in CALLER's frame to store result
-    /// On entry to this frame, the previous heap.env was saved here
-    /// so the frame's scope (the closure's `:scope`) could become the
-    /// active scope for the body's GetGlobal / DefGlobal lookups.
-    /// On Return, restore heap.env from this. Some(_) iff the entry
-    /// did swap; closures that don't carry a scope leave it None.
+    result_reg: u8,
     saved_env: Option<u32>,
-    /// Companion of saved_env for the lexical-scope pointer.
-    /// push_closure_frame sets heap.lexical_scope = closure.scope
-    /// (so closures created inside the body inherit the body's
-    /// lexical context). Restored on Return.
     saved_lex: Option<u32>,
 }
 
@@ -74,21 +70,19 @@ impl VM {
         &self.closure_descs
     }
 
-    /// Execute a chunk, returning the result.
-    pub fn execute(&mut self, heap: &mut Heap, chunk: &Chunk, _env: Value) -> Result<Value, String> {
-        let mut regs = vec![Value::NIL; chunk.num_regs as usize + 1];
+    /// Execute a chunk, returning the result. Takes Arc<Chunk> so
+    /// the bytecode is shared with the Frame, not cloned.
+    pub fn execute(&mut self, heap: &mut Heap, chunk: Arc<Chunk>, _env: Value) -> Result<Value, String> {
+        let regs = vec![Value::NIL; chunk.num_regs as usize + 1];
         self.frames.push(Frame {
-            regs: Vec::new(), // placeholder — we swap it in
+            regs,
             pc: 0,
-            code: chunk.code.clone(),
-            constants: chunk.constants.clone(),
+            chunk,
             desc_base: self.current_desc_base(),
             result_reg: 0,
             saved_env: None,
             saved_lex: None,
         });
-        // swap regs in (avoid clone)
-        std::mem::swap(&mut self.frames.last_mut().unwrap().regs, &mut regs);
         self.run(heap)
     }
 
@@ -119,13 +113,14 @@ impl VM {
             return Err(format!("closure code_idx {} out of bounds (have {})", code_idx, self.closure_descs.len()));
         }
 
-        let chunk = self.closure_descs[code_idx].chunk.clone();
+        // grab Arc handles from the desc — refcount bumps, no allocation.
+        let chunk = Arc::clone(&self.closure_descs[code_idx].chunk);
         let closure_desc_base = self.closure_descs[code_idx].desc_base;
-        let capture_local_regs = self.closure_descs[code_idx].capture_local_regs.clone();
+        let capture_local_regs = Arc::clone(&self.closure_descs[code_idx].capture_local_regs);
         let rest_reg = self.closure_descs[code_idx].rest_param_reg;
         let arity = chunk.arity as usize;
-        let param_names = self.closure_descs[code_idx].param_names.clone();
-        let capture_names = self.closure_descs[code_idx].capture_names.clone();
+        let param_names = Arc::clone(&self.closure_descs[code_idx].param_names);
+        let capture_names = Arc::clone(&self.closure_descs[code_idx].capture_names);
 
         // read captures from the heap closure object
         let captures_from_obj = heap.closure_captures(closure_val);
@@ -208,8 +203,7 @@ impl VM {
         self.frames.push(Frame {
             regs,
             pc: 0,
-            code: chunk.code.clone(),
-            constants: chunk.constants.clone(),
+            chunk,
             desc_base: closure_desc_base,
             result_reg,
             saved_env,
@@ -238,7 +232,7 @@ impl VM {
             let f = self.frames.last_mut().unwrap();
             let pc = f.pc;
 
-            if pc + 3 >= f.code.len() {
+            if pc + 3 >= f.chunk.code.len() {
                 // end of code without Return — return regs[0]
                 let val = f.regs[0];
                 let result_reg = f.result_reg;
@@ -250,10 +244,10 @@ impl VM {
                 continue;
             }
 
-            let op = f.code[pc];
-            let a = f.code[pc + 1];
-            let b = f.code[pc + 2];
-            let c = f.code[pc + 3];
+            let op = f.chunk.code[pc];
+            let a = f.chunk.code[pc + 1];
+            let b = f.chunk.code[pc + 2];
+            let c = f.chunk.code[pc + 3];
             f.pc += 4;
 
             let Some(opcode) = Op::from_u8(op) else {
@@ -263,7 +257,7 @@ impl VM {
             match opcode {
                 Op::LoadConst => {
                     let idx = u16::from_be_bytes([b, c]) as usize;
-                    let val = Value::from_bits(f.constants[idx]);
+                    let val = Value::from_bits(f.chunk.constants[idx]);
                     f.regs[a as usize] = val;
                 }
                 Op::LoadNil => f.regs[a as usize] = Value::NIL,
@@ -302,23 +296,23 @@ impl VM {
                     // >3 args use an explicit argument list + `call:`.
                     let dst = a;
                     let recv = f.regs[b as usize];
-                    if f.pc + 4 >= f.code.len() {
+                    if f.pc + 4 >= f.chunk.code.len() {
                         return Err("send: truncated".into());
                     }
-                    let sel_hi = f.code[f.pc] as usize;
+                    let sel_hi = f.chunk.code[f.pc] as usize;
                     let sel_idx = (sel_hi << 8) | (c as usize);
-                    let sel_sym = if sel_idx < f.constants.len() {
-                        Value::from_bits(f.constants[sel_idx]).as_symbol()
+                    let sel_sym = if sel_idx < f.chunk.constants.len() {
+                        Value::from_bits(f.chunk.constants[sel_idx]).as_symbol()
                             .ok_or("send: selector constant is not a symbol")?
                     } else {
                         return Err("send: selector constant out of bounds".into());
                     };
 
-                    let nargs = f.code[f.pc + 1] as usize;
+                    let nargs = f.chunk.code[f.pc + 1] as usize;
                     let arg_start = f.pc + 2;
                     let mut send_args = Vec::with_capacity(nargs);
                     for i in 0..nargs.min(3) {
-                        send_args.push(f.regs[f.code[arg_start + i] as usize]);
+                        send_args.push(f.regs[f.chunk.code[arg_start + i] as usize]);
                     }
                     f.pc += 5;
 
@@ -381,23 +375,23 @@ impl VM {
                     // tail-recursion is O(1) in frame depth.
                     let dst = a;
                     let recv = f.regs[b as usize];
-                    if f.pc + 4 >= f.code.len() {
+                    if f.pc + 4 >= f.chunk.code.len() {
                         return Err("tail_call: truncated".into());
                     }
-                    let sel_hi = f.code[f.pc] as usize;
+                    let sel_hi = f.chunk.code[f.pc] as usize;
                     let sel_idx = (sel_hi << 8) | (c as usize);
-                    let sel_sym = if sel_idx < f.constants.len() {
-                        Value::from_bits(f.constants[sel_idx]).as_symbol()
+                    let sel_sym = if sel_idx < f.chunk.constants.len() {
+                        Value::from_bits(f.chunk.constants[sel_idx]).as_symbol()
                             .ok_or("tail_call: selector not a symbol")?
                     } else {
                         return Err("tail_call: selector out of bounds".into());
                     };
 
-                    let nargs = f.code[f.pc + 1] as usize;
+                    let nargs = f.chunk.code[f.pc + 1] as usize;
                     let arg_start = f.pc + 2;
                     let mut send_args = Vec::with_capacity(nargs);
                     for i in 0..nargs.min(3) {
-                        send_args.push(f.regs[f.code[arg_start + i] as usize]);
+                        send_args.push(f.regs[f.chunk.code[arg_start + i] as usize]);
                     }
                     f.pc += 5;
 
@@ -443,13 +437,13 @@ impl VM {
                         if code_idx >= self.closure_descs.len() {
                             return Err(format!("tail_call: code_idx {} out of bounds", code_idx));
                         }
-                        let chunk = self.closure_descs[code_idx].chunk.clone();
+                        let chunk = Arc::clone(&self.closure_descs[code_idx].chunk);
                         let closure_desc_base = self.closure_descs[code_idx].desc_base;
-                        let capture_local_regs = self.closure_descs[code_idx].capture_local_regs.clone();
+                        let capture_local_regs = Arc::clone(&self.closure_descs[code_idx].capture_local_regs);
                         let rest_reg = self.closure_descs[code_idx].rest_param_reg;
                         let arity = chunk.arity as usize;
-                        let param_names = self.closure_descs[code_idx].param_names.clone();
-                        let capture_names = self.closure_descs[code_idx].capture_names.clone();
+                        let param_names = Arc::clone(&self.closure_descs[code_idx].param_names);
+                        let capture_names = Arc::clone(&self.closure_descs[code_idx].capture_names);
                         let captures_from_obj = heap.closure_captures(handler);
 
                         // uniform call protocol — see push_closure_frame for
@@ -459,12 +453,12 @@ impl VM {
                         let mut env_values: Vec<Value> = Vec::new();
 
                         let f = self.frames.last_mut().unwrap();
-                        // reuse the frame: reset everything
+                        // reuse the frame: reset everything. swap in the
+                        // new chunk Arc — old one drops via the assignment.
                         f.regs.clear();
                         f.regs.resize(chunk.num_regs as usize + 16, Value::NIL);
                         f.pc = 0;
-                        f.code = chunk.code.clone();
-                        f.constants = chunk.constants.clone();
+                        f.chunk = chunk;
                         f.desc_base = closure_desc_base;
                         // result_reg stays the same (we're replacing, not pushing)
 
@@ -586,11 +580,11 @@ impl VM {
                     let mut slot_names = Vec::with_capacity(nslots);
                     let mut slot_values = Vec::with_capacity(nslots);
                     for _ in 0..nslots {
-                        if f.pc + 3 >= f.code.len() { break; }
-                        let nc = u16::from_be_bytes([f.code[f.pc], f.code[f.pc + 1]]) as usize;
-                        let vr = f.code[f.pc + 2] as usize;
+                        if f.pc + 3 >= f.chunk.code.len() { break; }
+                        let nc = u16::from_be_bytes([f.chunk.code[f.pc], f.chunk.code[f.pc + 1]]) as usize;
+                        let vr = f.chunk.code[f.pc + 2] as usize;
                         f.pc += 4;
-                        let ns = Value::from_bits(f.constants[nc]).as_symbol()
+                        let ns = Value::from_bits(f.chunk.constants[nc]).as_symbol()
                             .ok_or("make_obj: slot name not a symbol")?;
                         slot_names.push(ns);
                         slot_values.push(f.regs[vr]);
@@ -636,7 +630,7 @@ impl VM {
                     let obj_id = f.regs[a as usize].as_any_object()
                         .ok_or("set_slot: not an object")?;
                     let name_const = b as usize;
-                    let name_sym = Value::from_bits(f.constants[name_const]).as_symbol()
+                    let name_sym = Value::from_bits(f.chunk.constants[name_const]).as_symbol()
                         .ok_or("set_slot: name is not a symbol")?;
                     let val = f.regs[c as usize];
                     heap.get_mut(obj_id).slot_set(name_sym, val);
@@ -647,7 +641,7 @@ impl VM {
                     let obj_id = f.regs[a as usize].as_any_object()
                         .ok_or("set_handler: not an object")?;
                     let sel_const = b as usize;
-                    let sel_sym = Value::from_bits(f.constants[sel_const]).as_symbol()
+                    let sel_sym = Value::from_bits(f.chunk.constants[sel_const]).as_symbol()
                         .ok_or("set_handler: selector not a symbol")?;
                     let handler = f.regs[c as usize];
                     heap.get_mut(obj_id).handler_set(sel_sym, handler);
@@ -661,7 +655,7 @@ impl VM {
                     let padded = (total_regs + 3) & !3;
                     let mut seq = Vec::with_capacity(nseq);
                     for i in 0..nseq {
-                        seq.push(f.regs[f.code[f.pc + i] as usize]);
+                        seq.push(f.regs[f.chunk.code[f.pc + i] as usize]);
                     }
                     // collect raw key/val regs first; canonicalize keys via
                     // the heap so String literals become symbol-hashed.
@@ -669,8 +663,8 @@ impl VM {
                     for i in 0..nmap {
                         let ki = nseq + i * 2;
                         let vi = nseq + i * 2 + 1;
-                        let key = f.regs[f.code[f.pc + ki] as usize];
-                        let val = f.regs[f.code[f.pc + vi] as usize];
+                        let key = f.regs[f.chunk.code[f.pc + ki] as usize];
+                        let val = f.regs[f.chunk.code[f.pc + vi] as usize];
                         pairs.push((key, val));
                     }
                     f.pc += padded;
@@ -755,7 +749,7 @@ impl VM {
                 Op::GetGlobal => {
                     let f = self.frames.last_mut().unwrap();
                     let idx = u16::from_be_bytes([b, c]) as usize;
-                    let name_sym = Value::from_bits(f.constants[idx]).as_symbol()
+                    let name_sym = Value::from_bits(f.chunk.constants[idx]).as_symbol()
                         .ok_or("get_global: name constant is not a symbol")?;
                     let val = match heap.env_get(name_sym) {
                         Some(v) => v,
@@ -770,7 +764,7 @@ impl VM {
                 Op::DefGlobal => {
                     let f = self.frames.last_mut().unwrap();
                     let idx = u16::from_be_bytes([a, b]) as usize;
-                    let name_sym = Value::from_bits(f.constants[idx]).as_symbol()
+                    let name_sym = Value::from_bits(f.chunk.constants[idx]).as_symbol()
                         .ok_or("def_global: name constant is not a symbol")?;
                     let val = f.regs[c as usize];
                     if let Some(old) = heap.env_get(name_sym) {
@@ -1059,8 +1053,7 @@ impl VM {
         self.frames.push(Frame {
             regs,
             pc: 0,
-            code: chunk.code.clone(),
-            constants: chunk.constants.clone(),
+            chunk,
             desc_base: base_idx,
             result_reg: 0,
             saved_env: None,
@@ -1073,7 +1066,7 @@ impl VM {
 /// Convenience: evaluate a chunk in a fresh VM (for tests).
 pub fn eval_chunk(heap: &mut Heap, chunk: &Chunk) -> Result<Value, String> {
     let mut vm = VM::new();
-    vm.execute(heap, chunk, Value::NIL)
+    vm.execute(heap, Arc::new(chunk.clone()), Value::NIL)
 }
 
 #[cfg(test)]

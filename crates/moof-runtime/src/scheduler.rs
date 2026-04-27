@@ -564,14 +564,17 @@ impl Scheduler {
             .map(|(_, is_op)| is_op).unwrap_or(true);
         let src_desc_base = src_desc.desc_base;
 
-        // clone all descs from desc_base onwards
+        // clone all descs from desc_base onwards. chunks are deep-cloned
+        // (the new vat needs an editable copy so we can remap constants
+        // into its heap-id space). other fields are Arc-shared so the
+        // refcount bump is the only cost.
         let src_descs: Vec<_> = from_vat.vm.closure_descs_ref()[src_desc_base..]
             .iter()
             .map(|d| {
                 let const_vals: Vec<Value> = d.chunk.constants.iter()
                     .map(|&bits| Value::from_bits(bits))
                     .collect();
-                (d.chunk.clone(), d.param_names.clone(),
+                ((*d.chunk).clone(), d.param_names.clone(),
                  d.capture_names.clone(), d.capture_parent_regs.clone(),
                  d.capture_local_regs.clone(), d.capture_values.clone(),
                  d.rest_param_reg, const_vals, d.source.clone())
@@ -611,7 +614,7 @@ impl Scheduler {
             }
 
             let desc = moof_lang::lang::compiler::ClosureDesc {
-                chunk,
+                chunk: std::sync::Arc::new(chunk),
                 param_names,
                 capture_names: cap_names,
                 capture_parent_regs: cap_parent,

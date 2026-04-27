@@ -912,7 +912,7 @@ fn encode_desc_with(heap: &Heap, d: &ClosureDesc, table: &HashTable, out: &mut V
     out.extend_from_slice(name);
 
     out.extend_from_slice(&(d.param_names.len() as u32).to_be_bytes());
-    for &sym in &d.param_names {
+    for &sym in d.param_names.iter() {
         let n = heap.symbol_name(sym).as_bytes();
         out.extend_from_slice(&(n.len() as u32).to_be_bytes());
         out.extend_from_slice(n);
@@ -924,7 +924,7 @@ fn encode_desc_with(heap: &Heap, d: &ClosureDesc, table: &HashTable, out: &mut V
     out.push(0u8);
 
     out.extend_from_slice(&(d.capture_names.len() as u32).to_be_bytes());
-    for &sym in &d.capture_names {
+    for &sym in d.capture_names.iter() {
         let n = heap.symbol_name(sym).as_bytes();
         out.extend_from_slice(&(n.len() as u32).to_be_bytes());
         out.extend_from_slice(n);
@@ -934,7 +934,7 @@ fn encode_desc_with(heap: &Heap, d: &ClosureDesc, table: &HashTable, out: &mut V
     out.extend_from_slice(&d.capture_parent_regs);
 
     out.extend_from_slice(&(d.capture_local_regs.len() as u32).to_be_bytes());
-    out.extend_from_slice(&d.capture_local_regs);
+    out.extend_from_slice(d.capture_local_regs.as_slice());
 
     out.extend_from_slice(&(d.capture_values.len() as u32).to_be_bytes());
     for v in &d.capture_values {
@@ -1077,11 +1077,11 @@ fn decode_desc(
     chunk.constants = constants;
 
     Ok(ClosureDesc {
-        chunk,
-        param_names,
-        capture_names,
+        chunk: std::sync::Arc::new(chunk),
+        param_names: std::sync::Arc::new(param_names),
+        capture_names: std::sync::Arc::new(capture_names),
         capture_parent_regs,
-        capture_local_regs,
+        capture_local_regs: std::sync::Arc::new(capture_local_regs),
         capture_values,
         desc_base,
         rest_param_reg,
@@ -1318,11 +1318,11 @@ mod tests {
         let sym_z = heap.intern("z");
         let captured_list = heap.list(&[Value::integer(1), Value::integer(2)]);
         let desc = ClosureDesc {
-            chunk,
-            param_names: vec![sym_x, sym_y],
-            capture_names: vec![sym_z],
+            chunk: std::sync::Arc::new(chunk),
+            param_names: std::sync::Arc::new(vec![sym_x, sym_y]),
+            capture_names: std::sync::Arc::new(vec![sym_z]),
             capture_parent_regs: vec![3],
-            capture_local_regs: vec![5],
+            capture_local_regs: std::sync::Arc::new(vec![5]),
             capture_values: vec![captured_list],
             desc_base: 0,
             rest_param_reg: Some(7),
@@ -1353,7 +1353,7 @@ mod tests {
         assert_eq!(fresh.symbol_name(d.param_names[0]), "x");
         assert_eq!(fresh.symbol_name(d.param_names[1]), "y");
         assert_eq!(d.capture_parent_regs, vec![3]);
-        assert_eq!(d.capture_local_regs, vec![5]);
+        assert_eq!(*d.capture_local_regs, vec![5]);
         assert_eq!(d.capture_values.len(), 1);
         // captured list is a cons of 1, 2
         let items = fresh.list_to_vec(d.capture_values[0]);

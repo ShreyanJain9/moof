@@ -3,28 +3,29 @@
 // Walks the AST (cons cells in the heap) and emits bytecode into Chunks.
 // Handles special forms: def, quote, send, if, fn, %dot, %block, %object-literal.
 
+use std::sync::Arc;
 use moof_core::heap::Heap;
 use crate::opcodes::{Chunk, Op};
 use moof_core::value::Value;
 
 pub struct ClosureDesc {
-    pub chunk: Chunk,
-    pub param_names: Vec<u32>,
-    pub capture_names: Vec<u32>,
-    pub capture_parent_regs: Vec<u8>,  // which parent registers to read
-    pub capture_local_regs: Vec<u8>,   // which local registers to write captures into
+    /// Bytecode + constants. Wrapped in Arc so push_closure_frame
+    /// gets a shared handle (one refcount bump) instead of cloning
+    /// the bytecode on every call. ClosureDesc is otherwise immutable
+    /// after compilation.
+    pub chunk: Arc<Chunk>,
+    pub param_names: Arc<Vec<u32>>,
+    pub capture_names: Arc<Vec<u32>>,
+    pub capture_parent_regs: Vec<u8>,  // used at MakeClosure time only
+    pub capture_local_regs: Arc<Vec<u8>>,
     pub capture_values: Vec<Value>,
     pub desc_base: usize,
-    pub rest_param_reg: Option<u8>,  // if set, extra args go here as a list
-    /// Source text + origin attached at compile time. All descs
-    /// produced by compiling a top-level form share the same source
-    /// (the whole form) — per-lambda source requires parser position
-    /// tracking, a future refinement.
+    pub rest_param_reg: Option<u8>,
     pub source: Option<moof_core::source::ClosureSource>,
 }
 
 pub struct CompileResult {
-    pub chunk: Chunk,
+    pub chunk: Arc<Chunk>,
     pub closure_descs: Vec<ClosureDesc>,
 }
 
@@ -425,19 +426,25 @@ impl<'a> Compiler<'a> {
                     let mut sub_descs = sub_result.closure_descs;
                     let mut chunk = sub_result.chunk;
                     if n_sub_descs > 0 {
-                        patch_make_closure_ops(&mut chunk, sub_descs_offset as u16);
+                        // unique-owner get_mut: we're the sole holder of these
+                        // Arcs at this point in compilation.
+                        if let Some(ck) = Arc::get_mut(&mut chunk) {
+                            patch_make_closure_ops(ck, sub_descs_offset as u16);
+                        }
                         for d in sub_descs.iter_mut() {
-                            patch_make_closure_ops(&mut d.chunk, sub_descs_offset as u16);
+                            if let Some(ck) = Arc::get_mut(&mut d.chunk) {
+                                patch_make_closure_ops(ck, sub_descs_offset as u16);
+                            }
                         }
                     }
                     self.closure_descs.extend(sub_descs);
 
                     let desc = ClosureDesc {
                         chunk,
-                        param_names: param_syms,
-                        capture_names,
+                        param_names: Arc::new(param_syms),
+                        capture_names: Arc::new(capture_names),
                         capture_parent_regs,
-                        capture_local_regs,
+                        capture_local_regs: Arc::new(capture_local_regs),
                         capture_values: Vec::new(), desc_base: 0, rest_param_reg: rest_reg,
                         source: self.source.clone(),
                     };
@@ -521,9 +528,13 @@ impl<'a> Compiler<'a> {
                     let mut sub_descs = sub_result.closure_descs;
                     let mut chunk = sub_result.chunk;
                     if n_sub_descs > 0 {
-                        patch_make_closure_ops(&mut chunk, sub_descs_offset as u16);
+                        if let Some(ck) = Arc::get_mut(&mut chunk) {
+                            patch_make_closure_ops(ck, sub_descs_offset as u16);
+                        }
                         for d in sub_descs.iter_mut() {
-                            patch_make_closure_ops(&mut d.chunk, sub_descs_offset as u16);
+                            if let Some(ck) = Arc::get_mut(&mut d.chunk) {
+                                patch_make_closure_ops(ck, sub_descs_offset as u16);
+                            }
                         }
                     }
                     self.closure_descs.extend(sub_descs);
@@ -534,10 +545,10 @@ impl<'a> Compiler<'a> {
                     param_names_with_env.push(dollar_under_sym);
                     let desc = ClosureDesc {
                         chunk,
-                        param_names: param_names_with_env,
-                        capture_names,
+                        param_names: Arc::new(param_names_with_env),
+                        capture_names: Arc::new(capture_names),
                         capture_parent_regs,
-                        capture_local_regs,
+                        capture_local_regs: Arc::new(capture_local_regs),
                         capture_values: Vec::new(), desc_base: 0, rest_param_reg: rest_reg,
                         source: self.source.clone(),
                     };
@@ -1088,7 +1099,7 @@ impl<'a> Compiler<'a> {
 
     fn finish(self) -> CompileResult {
         CompileResult {
-            chunk: self.chunk,
+            chunk: Arc::new(self.chunk),
             closure_descs: self.closure_descs,
         }
     }
