@@ -78,6 +78,9 @@ impl moof_core::Plugin for CorePlugin {
                 slot_values: new_vals,
                 handlers: orig_handlers,
                 foreign: orig_foreign,
+                cached_hash: std::cell::Cell::new(None),
+                child_fingerprint: std::cell::Cell::new(None),
+                is_head: false,
             });
 
             // closures install a self-referential `call:` handler at

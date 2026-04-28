@@ -71,7 +71,61 @@ impl Arena {
     }
 
     pub fn get_mut(&mut self, id: u32) -> &mut HeapObject {
+        let obj = &mut self.objects[id as usize];
+        // Conservative merkle-cache invalidation: any &mut access is
+        // assumed to mutate. False invalidations only cost recomputation;
+        // false positives (skipping a real change) would corrupt the
+        // saved image.
+        obj.invalidate_hash();
+        // Stage B-2.1 head/content detection: log mutations of objects
+        // that haven't been promoted to heads. Most legitimate mutation
+        // surfaces (root env, type protos that take post-boot extension)
+        // should be marked `is_head=true` at allocation. Bootstrap-time
+        // mutation is expected to violate this — the idea is to harvest
+        // the warnings during normal-operation runs to identify which
+        // call sites need conversion to head-mutation or COW.
+        // Throttled to a per-process count cap to avoid log spam from
+        // hot loops during a measurement run.
+        if !obj.is_head && std::env::var("MOOF_DETECT_HEAD_VIOLATIONS").is_ok() {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static COUNT: AtomicUsize = AtomicUsize::new(0);
+            let n = COUNT.fetch_add(1, Ordering::Relaxed);
+            if n < 50 {
+                eprintln!("[head-violation #{n}] get_mut on content id={id}");
+            } else if n == 50 {
+                eprintln!("[head-violation] capping further reports — set MOOF_DETECT_HEAD_VIOLATIONS_ALL=1 to see all");
+            } else if std::env::var("MOOF_DETECT_HEAD_VIOLATIONS_ALL").is_ok() {
+                eprintln!("[head-violation #{n}] get_mut on content id={id}");
+            }
+        }
+        obj
+    }
+
+    /// `get_mut` without cache invalidation OR head-violation logging.
+    /// ONLY for paths that need raw mutable access without changing
+    /// observable content — e.g. the hashing pass writing back to its
+    /// own cache cells, or GC rewriting tombstones. Use `get_mut`
+    /// everywhere else.
+    pub fn get_mut_raw(&mut self, id: u32) -> &mut HeapObject {
         &mut self.objects[id as usize]
+    }
+
+    /// Allocate an object pre-promoted to head. The head bit means
+    /// the object is exempt from the content-immutability invariant
+    /// — its slots and handlers are intentionally mutable. Use for
+    /// the root env, vat-local mailboxes, type protos that accept
+    /// post-boot handler extension.
+    pub fn alloc_head(&mut self, mut obj: HeapObject) -> u32 {
+        obj.is_head = true;
+        self.alloc(obj)
+    }
+
+    /// Promote an existing object to head in-place. Useful when the
+    /// object was allocated through some path that doesn't know about
+    /// heads (image-load, generic make_object) but the calling context
+    /// knows the object is a mutation surface.
+    pub fn promote_to_head(&mut self, id: u32) {
+        self.get_mut_raw(id).is_head = true;
     }
 
     /// Total capacity (including tombstoned slots). For "how many

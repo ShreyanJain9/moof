@@ -216,6 +216,15 @@ pub struct Heap {
     /// runs as a fresh dispatch when the timer fires, and other
     /// messages can interleave in between.
     pub timers: Vec<TimerEntry>,
+
+    /// Set of blob hashes known to be in the persistent store. Read
+    /// by save: any reachable id whose `cached_hash` is already in
+    /// here can skip the lmdb-get + put. Populated by save itself
+    /// (after a successful commit, every reachable hash gets added)
+    /// and by image-load (every hash we successfully decoded was
+    /// obviously stored). RefCell so save's `&Heap` can write through
+    /// without needing `&mut`.
+    pub known_stored: std::cell::RefCell<std::collections::HashSet<[u8; 32]>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -300,6 +309,7 @@ impl Heap {
             envs: Vec::new(),
             root_env: 0,
             timers: Vec::new(),
+            known_stored: std::cell::RefCell::new(std::collections::HashSet::new()),
         };
 
         // intern well-known symbols
@@ -354,7 +364,11 @@ impl Heap {
         // and scope captures DO go through virtual cells via
         // make_env. env_get / env_def transparently handle both.
         let bindings_table = h.alloc_table(Vec::new(), IndexMap::new());
-        h.env = h.alloc(HeapObject::new_general(
+        // The root env is a head: its `bindings` slot gets replaced
+        // every `(def x …)`. Bindings tables themselves are content
+        // (immutable, content-addressed), so each def allocates a new
+        // bindings table sharing structure with the old.
+        h.env = h.alloc_head(HeapObject::new_general(
             Value::NIL,
             vec![h.sym_parent, bindings_sym],
             vec![Value::NIL, bindings_table],
@@ -495,8 +509,54 @@ impl Heap {
         Some(unsafe { &mut *ptr })
     }
 
+    /// COW-replace the bindings of an env head. Reads the current
+    /// bindings table (immutable content), clones its seq + map,
+    /// hands the clone to `mutate` for in-place edits, allocates a
+    /// new bindings Table from the result, and writes the new Table
+    /// id into the env head's `bindings` slot.
+    ///
+    /// The env id stays stable — closures that captured the env see
+    /// the new bindings via the head's now-current `bindings` slot.
+    /// The OLD bindings Table is untouched, still in the content
+    /// pool, still validly hashed by any save snapshot that referenced
+    /// it. This is the primary mutation surface for `(def x …)`,
+    /// `(let …)`, and any other top-level binding op.
+    ///
+    /// Returns false if `env_id` isn't a Table-backed env (e.g. a
+    /// per-call inline env, or a virtual frame cell — those callers
+    /// take their own paths).
+    fn cow_bindings_replace<F>(&mut self, env_id: u32, mutate: F) -> bool
+    where F: FnOnce(&mut indexmap::IndexMap<Value, Value>),
+    {
+        let Some(bid) = self.env_bindings_id(env_id) else { return false; };
+        // Read-clone the current bindings (immutable content).
+        let (seq, mut map) = {
+            let Some(t) = self.foreign_ref::<Table>(Value::nursery(bid)) else {
+                return false;
+            };
+            (t.seq.clone(), t.map.clone())
+        };
+        // Apply the caller's mutation to the cloned map.
+        mutate(&mut map);
+        // Allocate a new bindings Table — fresh content. Stage A
+        // merkle cache will hash it on next save; stage C mmap will
+        // park it in the shared content region.
+        let new_bindings = self.alloc_table(seq, map);
+        // Mutate the env head's `bindings` slot to point at the new
+        // content. The env IS a head (it was promoted at boot or
+        // post-load), so this `get_mut` is the legitimate mutation —
+        // not a content-immutability violation.
+        let bindings_sym = self.intern("bindings");
+        self.get_mut(env_id).slot_set(bindings_sym, new_bindings);
+        true
+    }
+
     pub fn env_def(&mut self, sym: u32, val: Value) {
-        // virtual cell: write into the side arena.
+        // virtual cell: write into the side arena. (Frame cells are
+        // transient mutable heads-of-the-stack — they don't pretend
+        // to be content. Future B-2 work may freeze captured frames
+        // into content at closure-creation time, but in-place updates
+        // during a frame's lifetime stay direct.)
         if is_virtual_env_id(self.env) {
             let idx = frame_env_idx(self.env);
             if let Some(cell) = self.envs.get_mut(idx) {
@@ -509,16 +569,19 @@ impl Heap {
             }
             return;
         }
-        if let Some(bid) = self.env_bindings_id(self.env) {
-            // table-backed: insert into the Table.
-            if let Some(t) = self.foreign_payload_mut::<Table>(Value::nursery(bid)) {
-                t.map.insert(Value::symbol(sym), val);
-            }
-        } else {
-            // inline-backed (per-call materialized env): slot_set.
-            let env_id = self.env;
-            self.get_mut(env_id).slot_set(sym, val);
+        // Table-backed env (the root, or a moof-constructed env that
+        // reified bindings as a Table): COW the bindings.
+        let env_id = self.env;
+        if self.cow_bindings_replace(env_id, |map| {
+            map.insert(Value::symbol(sym), val);
+        }) {
+            return;
         }
+        // Inline-backed env (per-call materialized env that puts
+        // bindings directly on the env's slots, no bindings Table):
+        // slot_set on the env head. The env is still a head, so this
+        // mutation is legitimate.
+        self.get_mut(env_id).slot_set(sym, val);
     }
 
     /// Bind a name in a specific env value's bindings table. Like
@@ -541,11 +604,9 @@ impl Heap {
             }
             return false;
         }
-        let Some(bid) = self.env_bindings_id(env_id) else { return false; };
-        if let Some(t) = self.foreign_payload_mut::<Table>(Value::nursery(bid)) {
-            t.map.insert(Value::symbol(sym), val);
-            true
-        } else { false }
+        self.cow_bindings_replace(env_id, |map| {
+            map.insert(Value::symbol(sym), val);
+        })
     }
 
     pub fn env_remove(&mut self, sym: u32) {
@@ -559,11 +620,10 @@ impl Heap {
             }
             return;
         }
-        if let Some(bid) = self.env_bindings_id(self.env) {
-            if let Some(t) = self.foreign_payload_mut::<Table>(Value::nursery(bid)) {
-                t.map.shift_remove(&Value::symbol(sym));
-            }
-        }
+        let env_id = self.env;
+        self.cow_bindings_replace(env_id, |map| {
+            map.shift_remove(&Value::symbol(sym));
+        });
     }
 
     // -- object allocation (thin delegations to the embedded Arena) --
@@ -580,6 +640,40 @@ impl Heap {
 
     pub fn alloc_val(&mut self, obj: HeapObject) -> Value {
         Value::nursery(self.alloc(obj))
+    }
+
+    /// Allocate an object pre-promoted to head (mutable, identity-typed).
+    /// See `Arena::alloc_head` for the semantics.
+    pub fn alloc_head(&mut self, obj: HeapObject) -> u32 {
+        self.arena.alloc_head(obj)
+    }
+
+    /// Promote an already-allocated object to head. Idempotent.
+    pub fn promote_to_head(&mut self, id: u32) {
+        self.arena.promote_to_head(id);
+    }
+
+    /// Promote every object that's a known mutation surface to head:
+    ///   - the root env (already promoted at construction; idempotent).
+    ///   - every value in the type-protos table (these accept
+    ///     post-boot handler_set extensions — type plugins, user
+    ///     `(handle: with: …)` forms, etc.).
+    /// Called once after plugin registration but before bootstrap.
+    /// Bootstrap-time `(def)` runs through env_def's COW path; any
+    /// remaining violations during bootstrap are real bugs to convert.
+    pub fn promote_known_heads(&mut self) {
+        // root env (idempotent — already promoted in Heap::new but
+        // image-load may have replaced root_env with a freshly
+        // decoded HeapObject that's not flagged head).
+        let root = self.root_env;
+        if root != 0 { self.promote_to_head(root); }
+        // Every entry in the type-protos table.
+        let proto_ids: Vec<u32> = self.type_protos.iter()
+            .filter_map(|v| v.as_any_object())
+            .collect();
+        for id in proto_ids {
+            self.promote_to_head(id);
+        }
     }
 
     pub fn get(&self, id: u32) -> &HeapObject {
@@ -604,6 +698,21 @@ impl Heap {
 
     pub fn make_object_with_slots(&mut self, proto: Value, slot_names: Vec<u32>, slot_values: Vec<Value>) -> Value {
         self.alloc_val(HeapObject::new_general(proto, slot_names, slot_values))
+    }
+
+    /// Allocate a HEAD object: pre-promoted to mutable, exempt from
+    /// the content-immutability invariant. Use for type protos,
+    /// capability roots, and any other slot-mutated identity object.
+    /// Stage B-2.1 introduces this; plugins should migrate to it from
+    /// `make_object` over time.
+    pub fn make_head_object(&mut self, proto: Value) -> Value {
+        Value::nursery(self.alloc_head(HeapObject::new_empty(proto)))
+    }
+
+    pub fn make_head_object_with_slots(
+        &mut self, proto: Value, slot_names: Vec<u32>, slot_values: Vec<Value>,
+    ) -> Value {
+        Value::nursery(self.alloc_head(HeapObject::new_general(proto, slot_names, slot_values)))
     }
 
     /// Allocate a real Env value: a General whose proto is the Env

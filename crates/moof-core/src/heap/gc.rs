@@ -226,7 +226,7 @@ mod tests {
         // a Value in a closure's captures list must survive GC
         let captured_string = h.alloc_string("dont-collect-me");
         let captured_sym = h.intern("x");
-        let closure = h.make_closure(0, 1, false, &[(captured_sym, captured_string)]);
+        let closure = h.make_closure(0, 1, &[(captured_sym, captured_string)]);
         // root the closure in env
         let closure_sym = h.intern("f");
         h.env_def(closure_sym, closure);

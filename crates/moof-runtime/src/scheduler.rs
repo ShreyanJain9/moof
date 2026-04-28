@@ -163,6 +163,14 @@ impl Scheduler {
         for plugin in &self.type_plugins {
             plugin.register(&mut vat.heap);
         }
+        // Promote known mutation surfaces to heads BEFORE bootstrap
+        // runs. Plugin-installed type protos receive handler_set's
+        // throughout bootstrap (extending core types via lib/), and
+        // those are legitimate head mutations — not content drift.
+        // After this call, any remaining content-mutation in bootstrap
+        // is something we want to convert to COW or to a new head
+        // surface.
+        vat.heap.promote_known_heads();
         for (i, source) in self.bootstrap_sources.iter().enumerate() {
             let label = self.bootstrap_source_labels.get(i)
                 .map(|s| s.as_str())
@@ -801,6 +809,9 @@ impl Scheduler {
                 slot_values: new_vals,
                 handlers: Vec::new(),
                 foreign: foreign_data,
+                cached_hash: std::cell::Cell::new(None),
+                child_fingerprint: std::cell::Cell::new(None),
+                is_head: false,
             });
             return new_val;
         }

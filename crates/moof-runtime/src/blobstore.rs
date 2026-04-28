@@ -220,28 +220,40 @@ impl BlobStore {
         let env_id = env_val.as_any_object()
             .ok_or("save_snapshot: env must be a heap object")?;
 
-        // ── fixpoint-hash EVERY reachable id across env + descs +
-        //    type_protos in one pass, so sub-refs resolve consistently
-        //    no matter which root first touched them.
-        let mut reach_set: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        for id in heap.reachable_objects(env_val) { reach_set.insert(id); }
-        for d in descs {
-            for bits in &d.chunk.constants {
-                let v = Value::from_bits(*bits);
-                for id in heap.reachable_objects(v) { reach_set.insert(id); }
-            }
-            for v in &d.capture_values {
-                for id in heap.reachable_objects(*v) { reach_set.insert(id); }
-            }
-        }
-        for v in type_protos {
-            for id in heap.reachable_objects(*v) { reach_set.insert(id); }
-        }
+        // ── one merged BFS across env + descs + type_protos so the
+        //    shared subgraph (everyone references the type-protos and
+        //    a few common closures) is walked once total instead of
+        //    once per root. For conway_live with ~800 descs × ~10
+        //    constants each this is the difference between ~800ms
+        //    and ~5ms per save.
+        let time_save = std::env::var("MOOF_TIME_SAVE").is_ok();
+        let t_reach = std::time::Instant::now();
+        let mut reach_set: std::collections::HashSet<u32> =
+            std::collections::HashSet::with_capacity(heap.live_count());
+        let roots = std::iter::once(env_val)
+            .chain(descs.iter().flat_map(|d| {
+                d.chunk.constants.iter().map(|bits| Value::from_bits(*bits))
+                    .chain(d.capture_values.iter().copied())
+            }))
+            .chain(type_protos.iter().copied());
+        heap.reachable_objects_into(roots, &mut reach_set);
         let reach: Vec<u32> = reach_set.into_iter().collect();
+        if time_save { eprintln!("[save] reachable_objects (across {} descs) in {:?}", descs.len(), t_reach.elapsed()); }
+        let n_cached_before = if time_save {
+            reach.iter().filter(|&&id| heap.get(id).cached_hash.get().is_some()).count()
+        } else { 0 };
+        let t_hash = std::time::Instant::now();
         let hashes = compute_hash_table(heap, &reach);
+        if time_save {
+            eprintln!("[save] hash {} reachable ({} pre-cached, {} fresh) in {:?}",
+                reach.len(), n_cached_before, reach.len() - n_cached_before, t_hash.elapsed());
+        }
 
         // ── one write txn for everything ──
+        let t_txn = std::time::Instant::now();
         let mut wtxn = self.env.write_txn().map_err(|e| format!("txn: {e}"))?;
+        if time_save { eprintln!("[save]   txn open in {:?}", t_txn.elapsed()); }
+        let t_lmdb = std::time::Instant::now();
 
         // cycle placeholder blob — needed if any object references a
         // cycle back-edge.
@@ -255,25 +267,50 @@ impl BlobStore {
         }
 
         // write each reachable heap object's blob.
+        //
+        // Hot-path skip: heap.known_stored is the set of hashes we've
+        // already confirmed are in lmdb (either from this same save's
+        // earlier puts, from a previous save in this process, or from
+        // image-load on boot). Hashes in the set don't need a get() to
+        // verify presence and don't need a put(). For an unchanged save
+        // (every reachable id has a cached_hash that's in known_stored)
+        // this loop is O(N) HashSet contains() — vs the prior O(N)
+        // lmdb get() round-trips.
+        let mut known = heap.known_stored.borrow_mut();
+        let mut writes_this_pass: usize = 0;
         for id in &reach {
-            let bytes = canonical_blob_bytes_using_table(heap, *id, &hashes);
             let h = *hashes.get(id).expect("id not in hash table");
+            if known.contains(&h) { continue; }
             if self.blobs.get(&wtxn, h.as_slice())
                 .map_err(|e| format!("get: {e}"))?.is_none()
             {
+                let bytes = canonical_blob_bytes_using_table(heap, *id, &hashes);
                 self.blobs.put(&mut wtxn, h.as_slice(), &bytes)
                     .map_err(|e| format!("put: {e}"))?;
+                writes_this_pass += 1;
             }
+            known.insert(h);
         }
+        if time_save && writes_this_pass != reach.len() {
+            eprintln!("[save]   wrote {} new blobs (skipped {} known)",
+                writes_this_pass, reach.len() - writes_this_pass);
+        }
+        drop(known);
 
         // closure-descs blob.
+        let t_descs = std::time::Instant::now();
         let descs_bytes = encode_closure_descs_with(heap, descs, &hashes);
         let descs_hash: Hash = blake3::hash(&descs_bytes).into();
-        if self.blobs.get(&wtxn, descs_hash.as_slice())
-            .map_err(|e| format!("get descs: {e}"))?.is_none()
-        {
+        let descs_existed = self.blobs.get(&wtxn, descs_hash.as_slice())
+            .map_err(|e| format!("get descs: {e}"))?.is_some();
+        if !descs_existed {
             self.blobs.put(&mut wtxn, descs_hash.as_slice(), &descs_bytes)
                 .map_err(|e| format!("put descs: {e}"))?;
+        }
+        if time_save {
+            eprintln!("[save]   closure-descs ({} descs, {} bytes) in {:?}{}",
+                descs.len(), descs_bytes.len(), t_descs.elapsed(),
+                if descs_existed { " [dedup]" } else { "" });
         }
 
         // type-protos blob: u32 count + canonical value bytes per entry.
@@ -295,7 +332,12 @@ impl BlobStore {
         self.refs.put(&mut wtxn, "roots.type-protos", type_protos_hash.as_slice())
             .map_err(|e| format!("put roots.type-protos: {e}"))?;
 
+        let t_writes = t_lmdb.elapsed();
+        let t_commit = std::time::Instant::now();
         wtxn.commit().map_err(|e| format!("commit: {e}"))?;
+        if time_save {
+            eprintln!("[save]   blob writes in {:?}, commit in {:?}", t_writes, t_commit.elapsed());
+        }
         Ok(())
     }
 
@@ -485,36 +527,231 @@ impl BlobStore {
 
 type HashTable = std::collections::HashMap<u32, Hash>;
 
+/// Enumerate the immediate object-ref children of `id` whose hashes
+/// appear inside `id`'s canonical bytes. Ordering is the same as the
+/// encoder visits them — matters only for the child-fingerprint
+/// determinism per save (the fingerprint is rebuilt from this same
+/// order on every check).
+///
+/// MUST stay in lock-step with `canonical_blob_bytes_using_table`.
+/// If the encoder reads a sub-ref, this function must report it; if
+/// the encoder ignores a ref (e.g. opaque foreign payload), this must
+/// not include it.
+fn child_object_ids(heap: &Heap, id: u32) -> Vec<u32> {
+    let val = Value::nursery(id);
+    let mut out: Vec<u32> = Vec::new();
+
+    // Pair: car + cdr.
+    if heap.is_pair(val) {
+        let (car, cdr) = heap.pair_of(id).unwrap_or((Value::NIL, Value::NIL));
+        if let Some(cid) = car.as_any_object() { out.push(cid); }
+        if let Some(cid) = cdr.as_any_object() { out.push(cid); }
+        return out;
+    }
+
+    // Text / Bytes: leaves.
+    if heap.is_text(val) || heap.is_bytes(val) { return out; }
+
+    // Table: seq values + map keys/values.
+    if heap.is_table(val) {
+        if let Some(t) = heap.foreign_ref::<moof_core::heap::Table>(val) {
+            for v in &t.seq {
+                if let Some(cid) = v.as_any_object() { out.push(cid); }
+            }
+            // sort to match canonical encoder's deterministic ordering
+            // — same key visitation order means same fingerprint
+            // regardless of insertion order.
+            let mut entries: Vec<(Vec<u8>, Value, Value)> = t.map.iter()
+                .map(|(k, v)| (heap.canonical_value_bytes(*k), *k, *v))
+                .collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            for (_, k, v) in entries {
+                if let Some(cid) = k.as_any_object() { out.push(cid); }
+                if let Some(cid) = v.as_any_object() { out.push(cid); }
+            }
+        }
+        return out;
+    }
+
+    // Other foreign types: opaque from the encoder's POV. No children
+    // appear in canonical bytes (only the payload's serialize output).
+    if heap.get(id).foreign.is_some() { return out; }
+
+    // General object: proto + sorted slots + sorted handlers — same
+    // order the encoder uses.
+    let obj = heap.get(id);
+    if let Some(pid) = obj.proto.as_any_object() { out.push(pid); }
+    let mut slot_entries: Vec<(String, Value)> = obj.slot_names.iter()
+        .zip(obj.slot_values.iter())
+        .map(|(&sym, &v)| (heap.symbol_name(sym).to_string(), v))
+        .collect();
+    slot_entries.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    for (_, v) in &slot_entries {
+        if let Some(cid) = v.as_any_object() { out.push(cid); }
+    }
+    let mut handler_entries: Vec<(String, Value)> = obj.handlers.iter()
+        .map(|&(sym, v)| (heap.symbol_name(sym).to_string(), v))
+        .collect();
+    handler_entries.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    for (_, v) in &handler_entries {
+        if let Some(cid) = v.as_any_object() { out.push(cid); }
+    }
+    out
+}
+
+/// Compute `child_fingerprint` from a slice of children's hashes.
+/// blake3 over the concatenation — order-sensitive, matching the
+/// order `child_object_ids` visits.
+fn fingerprint_of(child_hashes: &[Hash]) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+    for h in child_hashes { hasher.update(h); }
+    hasher.finalize().into()
+}
+
+/// Build a hash table for every reachable object — using the merkle
+/// cache on each `HeapObject` so unchanged subtrees skip recomputation.
+///
+/// Algorithm:
+///   1. Compute children-of map for the whole reachable set (so the
+///      same vec is reused across passes).
+///   2. Mark "transitively dirty" via fixpoint — an id is dirty if its
+///      `cached_hash` is None or any of its in-set children is dirty.
+///      Mutations clear `cached_hash`, so this captures the whole
+///      cone of nodes affected by any mutation.
+///   3. Verify each clean (non-dirty) id's `child_fingerprint` against
+///      the freshly computed fingerprint of its children's *current*
+///      hashes (clean → use cache, dirty → use placeholder for now).
+///      Mismatch promotes the id to dirty and triggers another
+///      propagation round. Convergence usually in 1 round (the cache
+///      is self-consistent unless something exotic happened).
+///   4. Run the existing fixpoint hash convergence over only the
+///      dirty ids. Clean ids contribute their cached hashes
+///      directly to the table.
+///   5. Write final hash + new fingerprint back to each dirty id's
+///      cache cells. Subsequent saves with no mutation will see all
+///      cache hits and skip step 4 entirely.
 fn compute_hash_table(heap: &Heap, ids: &[u32]) -> HashTable {
-    let mut table: HashTable = ids.iter().copied()
-        .map(|id| (id, moof_core::cycle_placeholder()))
+    use std::collections::HashSet;
+
+    // ── 1. children_of map ──
+    let in_set: HashSet<u32> = ids.iter().copied().collect();
+    let mut children_of: HashMap<u32, Vec<u32>> = HashMap::with_capacity(ids.len());
+    for &id in ids {
+        let kids: Vec<u32> = child_object_ids(heap, id)
+            .into_iter()
+            .filter(|c| in_set.contains(c))
+            .collect();
+        children_of.insert(id, kids);
+    }
+
+    // ── 2. dirty propagation (cached_hash None ⇒ dirty, then upward) ──
+    let mut dirty: HashMap<u32, bool> = ids.iter().copied()
+        .map(|id| (id, heap.get(id).cached_hash.get().is_none()))
         .collect();
 
-    // Bounded double-buffered fixpoint. Cycles in the heap graph
-    // (env ↔ closures, etc.) make true convergence impossible — each
-    // round propagates a hash perturbation around the cycle, never
-    // settling. Cap rounds at a small number: hashes are stable for
-    // THIS save (consistent across all sub-refs in the table), and
-    // the saved image loads correctly. The only thing we lose is
-    // cross-save dedup of cyclic structures.
-    //
-    // Acyclic regions of the graph converge in `depth` rounds. Most
-    // moof images are shallow (~10 levels), so 8 rounds is plenty.
-    const ROUND_CAP: usize = 8;
-    for _ in 0..ROUND_CAP {
-        let mut next: HashTable = HashTable::with_capacity(ids.len());
-        let mut changed = false;
-        for id in ids {
-            let bytes = canonical_blob_bytes_using_table(heap, *id, &table);
-            let new_hash: Hash = blake3::hash(&bytes).into();
-            if table.get(id).copied().unwrap() != new_hash {
-                changed = true;
+    let propagate_up = |dirty: &mut HashMap<u32, bool>| {
+        loop {
+            let mut changed = false;
+            for &id in ids {
+                if dirty[&id] { continue; }
+                let mut now_dirty = false;
+                for &child in &children_of[&id] {
+                    if dirty[&child] { now_dirty = true; break; }
+                }
+                if now_dirty {
+                    dirty.insert(id, true);
+                    changed = true;
+                }
             }
-            next.insert(*id, new_hash);
+            if !changed { break; }
         }
-        table = next;
-        if !changed { break; }
+    };
+    propagate_up(&mut dirty);
+
+    // ── 3. fingerprint verification for clean ids ──
+    // For a clean id, its expected children are the ones it saw at
+    // cache-time (encoded in `child_fingerprint`). Recompute now: if
+    // mismatch, the id is actually stale → promote to dirty + repeat
+    // upward propagation.
+    loop {
+        let mut promoted = false;
+        for &id in ids {
+            if dirty[&id] { continue; }
+            let kids = &children_of[&id];
+            let mut kid_hashes: Vec<Hash> = Vec::with_capacity(kids.len());
+            let mut all_clean = true;
+            for &c in kids {
+                if dirty[&c] {
+                    all_clean = false;
+                    kid_hashes.push(moof_core::cycle_placeholder());
+                } else {
+                    kid_hashes.push(heap.get(c).cached_hash.get()
+                        .expect("clean implies cached"));
+                }
+            }
+            // If any child is dirty, we can't verify yet — but step 2
+            // should have already propagated dirty up. (Reached this
+            // branch only if step 2's children check missed the id;
+            // shouldn't happen, but be defensive.)
+            if !all_clean { continue; }
+            let new_fp = fingerprint_of(&kid_hashes);
+            if heap.get(id).child_fingerprint.get() != Some(new_fp) {
+                dirty.insert(id, true);
+                promoted = true;
+            }
+        }
+        if !promoted { break; }
+        propagate_up(&mut dirty);
     }
+
+    // ── 4. seed the table from cache (clean ids) + placeholder
+    //    (dirty ids) and run the existing 8-round fixpoint over dirty
+    //    ids only. ──
+    let mut table: HashTable = ids.iter().copied()
+        .map(|id| {
+            let h = if dirty[&id] {
+                moof_core::cycle_placeholder()
+            } else {
+                heap.get(id).cached_hash.get().unwrap()
+            };
+            (id, h)
+        }).collect();
+
+    let dirty_ids: Vec<u32> = ids.iter().copied().filter(|id| dirty[id]).collect();
+
+    const ROUND_CAP: usize = 8;
+    if !dirty_ids.is_empty() {
+        for _ in 0..ROUND_CAP {
+            let mut next = table.clone();
+            let mut changed = false;
+            for &id in &dirty_ids {
+                let bytes = canonical_blob_bytes_using_table(heap, id, &table);
+                let new_hash: Hash = blake3::hash(&bytes).into();
+                if *table.get(&id).unwrap() != new_hash {
+                    changed = true;
+                }
+                next.insert(id, new_hash);
+            }
+            table = next;
+            if !changed { break; }
+        }
+    }
+
+    // ── 5. write the converged hashes + fresh fingerprints back to
+    //    the cache cells of every dirty id. Clean ids already had
+    //    valid cache (verified in step 3), so leave them alone. ──
+    for &id in &dirty_ids {
+        let new_hash = *table.get(&id).unwrap();
+        let kids = &children_of[&id];
+        let kid_hashes: Vec<Hash> = kids.iter()
+            .map(|c| *table.get(c).unwrap())
+            .collect();
+        let fp = fingerprint_of(&kid_hashes);
+        let obj = heap.get(id);
+        obj.cached_hash.set(Some(new_hash));
+        obj.child_fingerprint.set(Some(fp));
+    }
+
     table
 }
 
@@ -684,13 +921,13 @@ fn load_blob(
     // DAG (e.g. closure ↔ proto chain via General; cons-cell self-
     // references that arise from imperfect cycle hashing collapsing
     // distinct objects to the same hash).
-    match tag {
+    let val = match tag {
         BTAG_GENERAL => {
             let placeholder_id = heap.alloc_val(HeapObject::new_empty(Value::NIL));
             let placeholder_val = Value::nursery(placeholder_id.as_any_object().unwrap());
             memo.insert(*hash, placeholder_val);
             decode_general_into(placeholder_id.as_any_object().unwrap(), store, rtxn, &bytes, heap, memo)?;
-            Ok(placeholder_val)
+            placeholder_val
         }
         BTAG_CONS => {
             // pre-alloc Pair with NIL/NIL, memoize, then fill.
@@ -700,7 +937,7 @@ fn load_blob(
             let car = decode_value(store, rtxn, &bytes, &mut offset, heap, memo)?;
             let cdr = decode_value(store, rtxn, &bytes, &mut offset, heap, memo)?;
             heap.pair_set_fields(pair_val, car, cdr);
-            Ok(pair_val)
+            pair_val
         }
         BTAG_TABLE => {
             // tables can also participate in cycles; pre-alloc empty
@@ -708,15 +945,51 @@ fn load_blob(
             // it but memoize after; for true cycle safety we should
             // also pre-alloc + fill here, but tables don't currently
             // appear in env-graph cycles.
-            let val = decode_table(store, rtxn, &bytes, heap, memo)?;
-            memo.insert(*hash, val);
-            Ok(val)
+            let v = decode_table(store, rtxn, &bytes, heap, memo)?;
+            memo.insert(*hash, v);
+            v
         }
-        BTAG_TEXT  => { let v = decode_text(&bytes, heap)?; memo.insert(*hash, v); Ok(v) }
-        BTAG_BYTES => { let v = decode_bytes(&bytes, heap)?; memo.insert(*hash, v); Ok(v) }
-        BTAG_FOREIGN => { let v = decode_foreign(&bytes, heap)?; memo.insert(*hash, v); Ok(v) }
-        _ => Err(format!("unknown blob tag: 0x{:02x}", tag)),
+        BTAG_TEXT  => { let v = decode_text(&bytes, heap)?; memo.insert(*hash, v); v }
+        BTAG_BYTES => { let v = decode_bytes(&bytes, heap)?; memo.insert(*hash, v); v }
+        BTAG_FOREIGN => { let v = decode_foreign(&bytes, heap)?; memo.insert(*hash, v); v }
+        _ => return Err(format!("unknown blob tag: 0x{:02x}", tag)),
+    };
+
+    // Merkle-cache populate: the blob's stored hash IS this object's
+    // canonical content hash by construction. Set `cached_hash` so the
+    // next save sees a hit. Also compute `child_fingerprint` from the
+    // cached_hash of every child we just loaded — for acyclic loads
+    // every child is fully populated by now. For cycles where a child
+    // is still in-progress (cached_hash None), skip both — the object
+    // will hash fresh on first save (one-time cost). Mutations made
+    // after load go through `Arena::get_mut`, which invalidates both
+    // fields, so this populate doesn't poison subsequent edits.
+    //
+    // Also seed `known_stored` — every blob we just loaded is by
+    // definition in the store, so the next save can skip the lmdb-get
+    // for it.
+    heap.known_stored.borrow_mut().insert(*hash);
+    if let Some(obj_id) = val.as_any_object() {
+        let kids = child_object_ids(heap, obj_id);
+        let mut kid_hashes: Vec<Hash> = Vec::with_capacity(kids.len());
+        let mut all_clean = true;
+        for c in &kids {
+            if let Some(h) = heap.get(*c).cached_hash.get() {
+                kid_hashes.push(h);
+            } else {
+                all_clean = false;
+                break;
+            }
+        }
+        if all_clean {
+            let fp = fingerprint_of(&kid_hashes);
+            let obj = heap.get(obj_id);
+            obj.cached_hash.set(Some(*hash));
+            obj.child_fingerprint.set(Some(fp));
+        }
     }
+
+    Ok(val)
 }
 
 /// Decode a Value (inline primitive or blob-ref).

@@ -11,6 +11,7 @@
 // put that on a real slot — `bindings`, `outer`, whatever — and the
 // semantics are defined by the type, not by the VM.
 
+use std::cell::Cell;
 use crate::value::Value;
 use crate::foreign::ForeignData;
 
@@ -21,13 +22,55 @@ use crate::foreign::ForeignData;
 /// is None (plain moof object) or Some(…) (rust-backed, with vtable
 /// for GC / serialize / cross-vat / virtual slots). Foreign payloads
 /// are immutable.
-#[derive(Debug, Clone)]
+///
+/// Merkle cache (Stage A of the merkle-DAG plan):
+///   `cached_hash` is the memoized canonical content hash of this
+///   object, including its transitive children. `child_fingerprint`
+///   is blake3 over the concatenation of children's cached hashes at
+///   the time `cached_hash` was computed. At save time, we recompute
+///   children's hashes (they're cached too); if the new fingerprint
+///   matches the stored one, the parent's cache is still valid even
+///   though we never propagated mutation upward. Both fields cleared
+///   on every mutation. `Cell` so the hashing pass can write them
+///   through `&Heap` (no `&mut` needed).
+///
+/// Head/Content distinction (Stage B-2.1):
+///   `is_head` marks an object as a mutable identity-typed "head" —
+///   the legitimate mutation surface (root env, type-proto extension
+///   points, mailboxes, etc.). Content objects (is_head=false) are
+///   semantically immutable; their canonical hash IS their identity,
+///   they're shareable between vats and between save snapshots, and
+///   any in-place mutation is a violation of the model (only
+///   tolerated during boot / pre-classification cleanup).
+///   MOOF_DETECT_HEAD_VIOLATIONS=1 logs each content mutation site so
+///   we can convert them to head-mutations or COW patterns.
+#[derive(Debug)]
 pub struct HeapObject {
     pub proto: Value,                   // VM-internal dispatch pointer (NOT a slot)
     pub slot_names: Vec<u32>,
     pub slot_values: Vec<Value>,
     pub handlers: Vec<(u32, Value)>,
     pub foreign: Option<ForeignData>,
+    pub cached_hash: Cell<Option<[u8; 32]>>,
+    pub child_fingerprint: Cell<Option<[u8; 32]>>,
+    /// Head bit — mutable identity-typed object vs immutable
+    /// content. See struct doc.
+    pub is_head: bool,
+}
+
+impl Clone for HeapObject {
+    fn clone(&self) -> Self {
+        HeapObject {
+            proto: self.proto,
+            slot_names: self.slot_names.clone(),
+            slot_values: self.slot_values.clone(),
+            handlers: self.handlers.clone(),
+            foreign: self.foreign.clone(),
+            cached_hash: Cell::new(self.cached_hash.get()),
+            child_fingerprint: Cell::new(self.child_fingerprint.get()),
+            is_head: self.is_head,
+        }
+    }
 }
 
 impl HeapObject {
@@ -39,6 +82,9 @@ impl HeapObject {
             slot_values,
             handlers: Vec::new(),
             foreign: None,
+            cached_hash: Cell::new(None),
+            child_fingerprint: Cell::new(None),
+            is_head: false,
         }
     }
 
@@ -49,6 +95,9 @@ impl HeapObject {
             slot_values: Vec::new(),
             handlers: Vec::new(),
             foreign: None,
+            cached_hash: Cell::new(None),
+            child_fingerprint: Cell::new(None),
+            is_head: false,
         }
     }
 
@@ -59,7 +108,32 @@ impl HeapObject {
             slot_values: Vec::new(),
             handlers: Vec::new(),
             foreign: Some(foreign),
+            cached_hash: Cell::new(None),
+            child_fingerprint: Cell::new(None),
+            is_head: false,
         }
+    }
+
+    /// Promote this object to a head — mutable identity-typed object.
+    /// Used at allocation time for known-mutable surfaces (root env,
+    /// type protos that accept post-boot handler extension, mailboxes).
+    /// Once set, the object is exempt from the "content is immutable"
+    /// invariant: get_mut won't warn, the merkle cache won't try to
+    /// hash it as content.
+    pub fn into_head(mut self) -> Self {
+        self.is_head = true;
+        self
+    }
+
+    /// Mark this object's content hash as needing recomputation. Any
+    /// mutation of `proto`, slots, handlers, or foreign payload should
+    /// call this. The corresponding `Arena::get_mut` does it
+    /// automatically — direct field writes outside that path must call
+    /// it themselves.
+    #[inline]
+    pub fn invalidate_hash(&self) {
+        self.cached_hash.set(None);
+        self.child_fingerprint.set(None);
     }
 
     pub fn foreign(&self) -> Option<&ForeignData> {

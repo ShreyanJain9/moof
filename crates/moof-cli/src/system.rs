@@ -228,9 +228,13 @@ impl System {
     /// all in one lmdb txn. Content-addressed (see docs/persistence.md).
     pub fn save_image(&self, vat_id: u32) -> Result<usize, String> {
         use moof_runtime::BlobStore;
+        let time_save = std::env::var("MOOF_TIME_SAVE").is_ok();
+        let t_total = std::time::Instant::now();
         let store_path = &self.manifest.image.path;
+        let t_open = std::time::Instant::now();
         let store = BlobStore::open(Path::new(store_path))
             .map_err(|e| format!("open blobstore: {e}"))?;
+        if time_save { eprintln!("[save] BlobStore::open in {:?}", t_open.elapsed()); }
         let vat = self.scheduler.vat(vat_id);
         // Save from the persistent root, not from heap.env which may
         // be a transient virtual cell mid-execution. (This shouldn't
@@ -243,6 +247,7 @@ impl System {
             vat.vm.closure_descs_ref(),
             &vat.heap.type_protos,
         )?;
+        if time_save { eprintln!("[save] total in {:?}", t_total.elapsed()); }
         Ok(vat.heap.object_count())
     }
 

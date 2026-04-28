@@ -63,6 +63,79 @@ pub fn hash_hex(h: &Hash) -> String {
 }
 
 impl Heap {
+    /// Like `reachable_objects` but runs ONE BFS over many root values
+    /// at once, accumulating into the caller-supplied set. Saves a lot
+    /// of work when the roots overlap (closures all reach the same
+    /// type-protos, etc.) — repeatedly walking from each root re-visits
+    /// the shared subgraph N times, while one merged BFS visits each
+    /// reachable object at most once total. Hot path for save_snapshot.
+    pub fn reachable_objects_into<I: IntoIterator<Item = Value>>(
+        &self,
+        roots: I,
+        seen: &mut std::collections::HashSet<u32>,
+    ) {
+        let mut worklist: Vec<u32> = Vec::new();
+        for val in roots {
+            if let Some(id) = val.as_any_object() {
+                if !crate::heap::is_virtual_env_id(id) {
+                    if seen.insert(id) { worklist.push(id); }
+                } else {
+                    let idx = crate::heap::frame_env_idx(id);
+                    if let Some(cell) = self.envs.get(idx) {
+                        if let Some(pid) = cell.parent.as_any_object() {
+                            if seen.insert(pid) { worklist.push(pid); }
+                        }
+                        for v in &cell.values {
+                            if let Some(sid) = v.as_any_object() {
+                                if seen.insert(sid) { worklist.push(sid); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        while let Some(id) = worklist.pop() {
+            if crate::heap::is_virtual_env_id(id) {
+                seen.remove(&id);
+                let idx = crate::heap::frame_env_idx(id);
+                if let Some(cell) = self.envs.get(idx) {
+                    if let Some(pid) = cell.parent.as_any_object() {
+                        if seen.insert(pid) { worklist.push(pid); }
+                    }
+                    for v in &cell.values {
+                        if let Some(sid) = v.as_any_object() {
+                            if seen.insert(sid) { worklist.push(sid); }
+                        }
+                    }
+                }
+                continue;
+            }
+            let obj = self.get(id);
+            if let Some(pid) = obj.proto.as_any_object() {
+                if seen.insert(pid) { worklist.push(pid); }
+            }
+            for v in &obj.slot_values {
+                if let Some(sid) = v.as_any_object() {
+                    if seen.insert(sid) { worklist.push(sid); }
+                }
+            }
+            for (_, hv) in &obj.handlers {
+                if let Some(hid) = hv.as_any_object() {
+                    if seen.insert(hid) { worklist.push(hid); }
+                }
+            }
+            if let Some(fd) = &obj.foreign {
+                if let Some(vt) = self.foreign_registry().vtable(fd.type_id) {
+                    (vt.trace)(&*fd.payload, &mut |v| {
+                        if let Some(sid) = v.as_any_object() {
+                            if seen.insert(sid) { worklist.push(sid); }
+                        }
+                    });
+                }
+            }
+        }
+    }
+
     /// Collect every heap object id reachable from `val` (itself +
     /// transitive closure over proto, slot_values, handler values,
     /// and foreign sub-values via the vtable's trace fn). Used by

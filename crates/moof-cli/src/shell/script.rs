@@ -57,9 +57,42 @@ impl Interface for ScriptInterface {
         // something printed, call `[console println:]`. No auto-echo
         // of the final expression's value — that was a repl habit
         // that clashed with Acts (which look ugly when stringified).
-        match sys.eval(vat_id, &self.source) {
-            Ok(_) => 0,
-            Err(e) => { eprintln!("  ~ {e}"); 1 }
+        //
+        // Auto-commit is on by default: each top-level form's eval is
+        // followed by `sys.save_image(vat_id)`. Continuous persistence
+        // — a script that crashes mid-stream still has its pre-crash
+        // state durable in lmdb. The merkle cache (stage A) + merged
+        // reachability walk + known_stored set make each per-form
+        // commit cheap (~65ms warm). Set MOOF_NO_AUTO_COMMIT=1 to
+        // restore the old single-save-at-end behavior (e.g. for
+        // benchmarking, or for a script you specifically don't want
+        // partially-committed).
+        if std::env::var("MOOF_NO_AUTO_COMMIT").is_ok() {
+            return match sys.eval(vat_id, &self.source) {
+                Ok(_) => 0,
+                Err(e) => { eprintln!("  ~ {e}"); 1 }
+            };
         }
+        self.run_with_auto_commit(sys, vat_id)
+    }
+}
+
+impl ScriptInterface {
+    fn run_with_auto_commit(&self, sys: &mut System, vat_id: u32) -> i32 {
+        let forms = moof_core::source::split_top_level_forms(&self.source);
+        for (form_text, _range) in forms {
+            if let Err(e) = sys.eval(vat_id, &form_text) {
+                eprintln!("  ~ {e}");
+                // best-effort commit even on error so the pre-error
+                // state persists.
+                let _ = sys.save_image(vat_id);
+                return 1;
+            }
+            if let Err(e) = sys.save_image(vat_id) {
+                eprintln!("  ~ commit: {e}");
+                return 1;
+            }
+        }
+        0
     }
 }

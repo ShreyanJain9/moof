@@ -131,6 +131,18 @@ impl Heap {
             }
             None => None,
         };
-        Ok(HeapObject { proto, slot_names, slot_values, handlers, foreign: foreign_data })
+        Ok(HeapObject {
+            proto,
+            slot_names,
+            slot_values,
+            handlers,
+            foreign: foreign_data,
+            cached_hash: std::cell::Cell::new(None),
+            child_fingerprint: std::cell::Cell::new(None),
+            // Reloaded objects from disk default to content. The
+            // root_env and other heads will be re-promoted by the
+            // System loader.
+            is_head: false,
+        })
     }
 }

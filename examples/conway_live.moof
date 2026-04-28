@@ -94,6 +94,7 @@
 ; arrives, queued behind any console flushes that landed in between.
 
 (defn sleep (ms) [clock sleep: ms])
+(defn puts (s) [console println: (str s "huehuehue")])
 
 ; (animate grid) — single arg. count + total are private to the
 ; tail-recursive helper; the caller just hands in a Grid.
@@ -101,8 +102,8 @@
 
 (defn %anim (grid n total)
   (if [n <= 0] grid
-    (do (_ <- [console println: (str "── gen " [total - n] " ──────")])
-        (_ <- [console println: [grid render]])
+    (do (_ <- (puts (str "── gen " [total - n] " ──────")))
+        (_ <- (puts [grid render]))
         (_ <- (sleep 150))
         (%anim [grid step] [n - 1] total))))
 
