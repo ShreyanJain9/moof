@@ -1,0 +1,269 @@
+;; bootstrap.moof — moof's standard library, defined in moof.
+;;
+;; loaded at world boot. anything definable above the rust line lives
+;; here. when you find yourself adding rust, ask whether it could be
+;; moof code (process/docs-driven.md: default-to-moof).
+;;
+;; the substrate provides: arithmetic, comparison, cons/head/tail,
+;; null?/list?/list, not, identity, println/print, type-of.
+;; everything else is built on those.
+
+;; ─────────────────────────────────────────────────────────────────
+;; predicates
+;; ─────────────────────────────────────────────────────────────────
+
+(def zero?
+  (fn (n) (= n 0)))
+
+(def positive?
+  (fn (n) (> n 0)))
+
+(def negative?
+  (fn (n) (< n 0)))
+
+(def even?
+  (fn (n) (= 0 (- n (* 2 (/ n 2))))))
+
+(def odd?
+  (fn (n) (not (even? n))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; numeric helpers
+;; ─────────────────────────────────────────────────────────────────
+
+(def abs
+  (fn (n)
+    (if (< n 0) (- 0 n) n)))
+
+(def max
+  (fn (a b)
+    (if (> a b) a b)))
+
+(def min
+  (fn (a b)
+    (if (< a b) a b)))
+
+(def square
+  (fn (x) (* x x)))
+
+(def cube
+  (fn (x) (* x x x)))
+
+(def factorial
+  (fn (n)
+    (if (= n 0)
+        1
+        (* n (factorial (- n 1))))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; list operations — recursion all the way down
+;; ─────────────────────────────────────────────────────────────────
+
+(def length
+  (fn (xs)
+    (if (null? xs)
+        0
+        (+ 1 (length (tail xs))))))
+
+(def reverse-helper
+  (fn (xs acc)
+    (if (null? xs)
+        acc
+        (reverse-helper (tail xs) (cons (head xs) acc)))))
+
+(def reverse
+  (fn (xs)
+    (reverse-helper xs ())))
+
+(def append
+  (fn (xs ys)
+    (if (null? xs)
+        ys
+        (cons (head xs) (append (tail xs) ys)))))
+
+(def map
+  (fn (f xs)
+    (if (null? xs)
+        ()
+        (cons (f (head xs))
+              (map f (tail xs))))))
+
+(def filter
+  (fn (pred xs)
+    (if (null? xs)
+        ()
+        (if (pred (head xs))
+            (cons (head xs) (filter pred (tail xs)))
+            (filter pred (tail xs))))))
+
+(def reduce
+  (fn (f init xs)
+    (if (null? xs)
+        init
+        (reduce f (f init (head xs)) (tail xs)))))
+
+(def each
+  (fn (f xs)
+    (if (null? xs)
+        ()
+        (do
+          (f (head xs))
+          (each f (tail xs))))))
+
+(def any?
+  (fn (pred xs)
+    (if (null? xs)
+        #false
+        (if (pred (head xs))
+            #true
+            (any? pred (tail xs))))))
+
+(def all?
+  (fn (pred xs)
+    (if (null? xs)
+        #true
+        (if (pred (head xs))
+            (all? pred (tail xs))
+            #false))))
+
+(def take
+  (fn (n xs)
+    (if (= n 0)
+        ()
+        (if (null? xs)
+            ()
+            (cons (head xs) (take (- n 1) (tail xs)))))))
+
+(def drop
+  (fn (n xs)
+    (if (= n 0)
+        xs
+        (if (null? xs)
+            ()
+            (drop (- n 1) (tail xs))))))
+
+(def nth
+  (fn (n xs)
+    (if (= n 0)
+        (head xs)
+        (nth (- n 1) (tail xs)))))
+
+(def last
+  (fn (xs)
+    (if (null? (tail xs))
+        (head xs)
+        (last (tail xs)))))
+
+(def contains?
+  (fn (xs x)
+    (any? (fn (y) (= x y)) xs)))
+
+(def sum
+  (fn (xs)
+    (reduce + 0 xs)))
+
+(def product
+  (fn (xs)
+    (reduce * 1 xs)))
+
+(def count-where
+  (fn (pred xs)
+    (length (filter pred xs))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; ranges, iteration
+;; ─────────────────────────────────────────────────────────────────
+
+(def range-helper
+  (fn (lo hi acc)
+    (if (>= lo hi)
+        (reverse acc)
+        (range-helper (+ lo 1) hi (cons lo acc)))))
+
+(def range
+  (fn (lo hi)
+    (range-helper lo hi ())))
+
+(def repeat
+  (fn (n x)
+    (if (= n 0)
+        ()
+        (cons x (repeat (- n 1) x)))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; function composition / higher order
+;; ─────────────────────────────────────────────────────────────────
+
+(def compose
+  (fn (f g)
+    (fn (x) (f (g x)))))
+
+(def flip
+  (fn (f)
+    (fn (a b) (f b a))))
+
+(def constant
+  (fn (x)
+    (fn () x)))
+
+;; ─────────────────────────────────────────────────────────────────
+;; control flow, sugared
+;; ─────────────────────────────────────────────────────────────────
+
+(def when
+  ;; (when cond body...) ⇒ if cond then (do body...) else nil
+  ;; — well, we don't have variadic body via macro yet; use fn form
+  ;; for now and pass a thunk.
+  (fn (cond thunk)
+    (if cond (thunk) ())))
+
+(def unless
+  (fn (cond thunk)
+    (if cond () (thunk))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; printing helpers
+;; ─────────────────────────────────────────────────────────────────
+
+(def show-list
+  (fn (xs)
+    (each println xs)))
+
+;; ─────────────────────────────────────────────────────────────────
+;; REPL — the loop itself lives in moof.
+;;
+;; the substrate provides: read-line, parse, eval, try-eval, show,
+;; print, println. everything else here is moof code on top.
+;; ─────────────────────────────────────────────────────────────────
+
+(def repl-banner
+  (fn ()
+    (do
+      (println "moof v4 — phase 2")
+      (println "type expressions, ctrl-d to exit, (quit) to leave cleanly.")
+      (println ""))))
+
+(def repl-prompt
+  (fn () (print "> ")))
+
+(def repl-iter
+  (fn ()
+    (do
+      (repl-prompt)
+      (let ((line (read-line)))
+        (if (null? line)
+            'goodbye             ;; EOF
+            (let ((result (try-eval (parse line))))
+              (if (= (head result) 'ok)
+                  (do
+                    (println (show (head (tail result))))
+                    (repl-iter))
+                  (do
+                    (println (str "! " (head (tail result))))
+                    (repl-iter)))))))))
+
+(def repl
+  (fn ()
+    (do
+      (repl-banner)
+      (repl-iter))))

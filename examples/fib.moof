@@ -1,0 +1,23 @@
+;; fibonacci. naive recursion + tail-recursive.
+
+(def fib
+  (fn (n)
+    (if (< n 2)
+        n
+        (+ (fib (- n 1)) (fib (- n 2))))))
+
+(def fib-iter-helper
+  (fn (n a b)
+    (if (= n 0)
+        a
+        (fib-iter-helper (- n 1) b (+ a b)))))
+
+(def fib-iter
+  (fn (n)
+    (fib-iter-helper n 0 1)))
+
+(println "fib 0..10 (naive):")
+(println (map fib (range 0 11)))
+
+(println "fib 0..20 (iter):")
+(println (map fib-iter (range 0 21)))

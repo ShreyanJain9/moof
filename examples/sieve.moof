@@ -1,0 +1,19 @@
+;; sieve of eratosthenes — primes up to 50.
+;; demonstrates: closures, higher-order fns, recursion, list ops.
+
+(def divides?
+  (fn (a b)
+    (= 0 (- b (* a (/ b a))))))
+
+(def sieve
+  (fn (xs)
+    (if (null? xs)
+        ()
+        (let ((p (head xs)))
+          (cons p
+                (sieve
+                  (filter (fn (n) (not (divides? p n)))
+                          (tail xs))))))))
+
+(println "primes up to 50:")
+(println (sieve (range 2 51)))
