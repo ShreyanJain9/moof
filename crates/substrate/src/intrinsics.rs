@@ -110,7 +110,10 @@ fn install_call_on_method(w: &mut World) {
         })?;
         let captured_sym = world.intern("captured-self");
         let captured = world.heap.get(id).slot(captured_sym);
-        world.invoke(id, captured, args)
+        // closures-as-callables have no defining-proto in the OO
+        // sense (they're not "found on" a proto). super-send from
+        // inside a closure body raises a useful error.
+        world.invoke(id, captured, args, FormId::NONE)
     });
 }
 

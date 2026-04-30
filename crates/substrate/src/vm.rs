@@ -37,6 +37,11 @@ pub struct Frame {
     /// where this frame's operand stack contributions begin in
     /// the world's shared `stack`.
     pub stack_base: usize,
+    /// the proto on which the currently-running method was found.
+    /// `[super sel …]` walks from this proto's parent. for
+    /// top-level chunks (no method dispatch), this is
+    /// `FormId::NONE`.
+    pub defining_proto: FormId,
 }
 
 /// the interpreter's per-vat state.
@@ -57,14 +62,14 @@ impl World {
         args: &[Value],
     ) -> Result<Value, RaiseError> {
         match self.lookup_handler(receiver, selector) {
-            Some((handler, _defining)) => {
+            Some((handler, defining)) => {
                 let method = handler.as_form_id().ok_or_else(|| {
                     RaiseError::new(
                         self.intern("dispatch-error"),
                         "handler is not a method-Form",
                     )
                 })?;
-                self.invoke(method, receiver, args)
+                self.invoke(method, receiver, args, defining)
             }
             None => self.dispatch_dnu(receiver, selector, args),
         }
@@ -104,34 +109,36 @@ impl World {
             && cached.cached_proto == receiver_proto
             && cached.cached_generation == self.proto_generation(receiver_proto)
         {
-            // cache hit — invoke the cached method directly.
-            // (we trust that `set-handler!` bumps the generation
-            // whenever the table changes.)
-            return self.invoke(cached.cached_method, receiver, args);
+            // cache hit — invoke the cached method directly with the
+            // cached defining-proto so super-sends in the body
+            // resolve correctly.
+            return self.invoke(
+                cached.cached_method,
+                receiver,
+                args,
+                cached.cached_defining,
+            );
         }
         // cache miss or stale — slow path + populate.
         match self.lookup_handler(receiver, selector) {
-            Some((handler, _defining)) => {
+            Some((handler, defining)) => {
                 let method = handler.as_form_id().ok_or_else(|| {
                     RaiseError::new(
                         self.intern("dispatch-error"),
                         "handler is not a method-Form",
                     )
                 })?;
-                // populate the IC slot. we *only* cache against
-                // `receiver_proto`, not the defining proto — a
-                // future receiver with the same proto can hit
-                // again. invalidation triggers when receiver_proto
-                // generation bumps.
+                // populate the IC slot.
                 if let Some(ics) = self.chunk_ics.get_mut(&chunk) {
                     if let Some(slot) = ics.get_mut(ic_idx as usize) {
                         slot.cached_proto = receiver_proto;
                         slot.cached_method = method;
+                        slot.cached_defining = defining;
                         slot.cached_generation =
                             self.proto_generations.get(&receiver_proto).copied().unwrap_or(0);
                     }
                 }
-                self.invoke(method, receiver, args)
+                self.invoke(method, receiver, args, defining)
             }
             None => self.dispatch_dnu(receiver, selector, args),
         }
@@ -166,11 +173,14 @@ impl World {
     }
 
     /// invoke a specific method-Form with the given receiver/args.
+    /// `defining_proto` is the proto on which the method was found
+    /// — used by the new frame's `super` sends to walk above.
     pub fn invoke(
         &mut self,
         method: FormId,
         self_v: Value,
         args: &[Value],
+        defining_proto: FormId,
     ) -> Result<Value, RaiseError> {
         // native?
         if let Some(&native_fn) = self.native_fns.get(&method) {
@@ -211,16 +221,17 @@ impl World {
             })?;
             self.env_bind(call_env, name, arg);
         }
-        run_method(self, chunk_id, call_env, self_v)
+        run_method(self, chunk_id, call_env, self_v, defining_proto)
     }
 
     /// run a top-level chunk (no enclosing method). used by the
     /// repl and the cli to evaluate a single expression in the
     /// global env. equivalent to invoking a zero-arg method whose
-    /// body is `chunk`.
+    /// body is `chunk`. `defining_proto` is `NONE` because no
+    /// method dispatch led here.
     pub fn run_top(&mut self, chunk: FormId) -> Result<Value, RaiseError> {
         let env = self.global_env;
-        run_method(self, chunk, env, Value::Nil)
+        run_method(self, chunk, env, Value::Nil, FormId::NONE)
     }
 }
 
@@ -233,6 +244,7 @@ fn run_method(
     chunk: FormId,
     env: FormId,
     self_v: Value,
+    defining_proto: FormId,
 ) -> Result<Value, RaiseError> {
     let starting_depth = world.vm.frames.len();
     world.vm.frames.push(Frame {
@@ -241,6 +253,7 @@ fn run_method(
         env,
         self_: self_v,
         stack_base: world.vm.stack.len(),
+        defining_proto,
     });
     while world.vm.frames.len() > starting_depth {
         step(world)?;
@@ -350,13 +363,16 @@ fn step(world: &mut World) -> Result<(), RaiseError> {
             // tail calls reuse the current frame for bytecode methods
             // — Rust-stack-bounded recursion is replaced with one
             // frame replace, satisfying tail-call optimization.
-            let resolved = match world.lookup_handler(receiver, selector) {
-                Some((handler, _)) => handler.as_form_id().ok_or_else(|| {
-                    RaiseError::new(
-                        world.intern("dispatch-error"),
-                        "handler is not a method-Form",
-                    )
-                })?,
+            let (resolved, defining) = match world.lookup_handler(receiver, selector) {
+                Some((handler, defining)) => {
+                    let id = handler.as_form_id().ok_or_else(|| {
+                        RaiseError::new(
+                            world.intern("dispatch-error"),
+                            "handler is not a method-Form",
+                        )
+                    })?;
+                    (id, defining)
+                }
                 None => {
                     // fall through to dnu — no TCO opportunity
                     // because the dispatch is itself a non-tail
@@ -419,7 +435,58 @@ fn step(world: &mut World) -> Result<(), RaiseError> {
                 env: call_env,
                 self_: receiver,
                 stack_base: base,
+                defining_proto: defining,
             };
+        }
+        Op::SuperSend {
+            selector,
+            argc,
+            ic_idx: _,
+        } => {
+            // [super selector args…] — receiver is the current
+            // frame's self; lookup walks above frame.defining_proto.
+            let argc_u = argc as usize;
+            if world.vm.stack.len() < argc_u {
+                return Err(RaiseError::new(
+                    world.intern("vm-error"),
+                    format!(
+                        "super-send argc={} but stack has {}",
+                        argc,
+                        world.vm.stack.len()
+                    ),
+                ));
+            }
+            let split = world.vm.stack.len() - argc_u;
+            let args: Vec<Value> = world.vm.stack.drain(split..).collect();
+            let self_v = world.vm.frames[frame_idx].self_;
+            let defining = world.vm.frames[frame_idx].defining_proto;
+            if defining.is_none() {
+                return Err(RaiseError::new(
+                    world.intern("super-error"),
+                    "super-send from a non-method frame (no defining proto)",
+                ));
+            }
+            match world.lookup_handler_super(defining, selector) {
+                Some((handler, new_defining)) => {
+                    let method = handler.as_form_id().ok_or_else(|| {
+                        RaiseError::new(
+                            world.intern("dispatch-error"),
+                            "super handler is not a method-Form",
+                        )
+                    })?;
+                    let result = world.invoke(method, self_v, &args, new_defining)?;
+                    world.vm.stack.push(result);
+                }
+                None => {
+                    return Err(RaiseError::new(
+                        world.intern("super-error"),
+                        format!(
+                            "no super-handler for `{}` above defining proto",
+                            world.resolve(selector)
+                        ),
+                    ));
+                }
+            }
         }
         Op::PushClosure { chunk: closure_chunk } => {
             // capture the current env in a closure-Form whose body

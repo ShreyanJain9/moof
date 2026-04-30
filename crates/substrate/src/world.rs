@@ -57,6 +57,9 @@ pub struct ICache {
     pub cached_proto: FormId,
     /// the resolved method-FormId, or [`FormId::NONE`].
     pub cached_method: FormId,
+    /// the proto on which `cached_method` was found — used by
+    /// `super` sends from the method's body.
+    pub cached_defining: FormId,
     /// the proto's generation at the time of caching.
     pub cached_generation: u32,
 }
@@ -359,6 +362,11 @@ impl World {
     /// proto-Forms — like `Object` itself — dispatch off their own
     /// handler table since their `proto` is `nil`). then walks
     /// `receiver.proto`, `receiver.proto.proto`, …
+    ///
+    /// per `docs/laws/substrate-laws.md` L2, the proto chain must
+    /// be acyclic. this method aborts cleanly after `MAX_PROTO_DEPTH`
+    /// hops. with no `set-proto!` primitive at phase A, cycles can
+    /// only arise from rust-side mistakes; bound is purely defensive.
     pub fn lookup_handler(
         &self,
         receiver: Value,
@@ -371,14 +379,45 @@ impl World {
                 return Some((handler, id));
             }
         }
-        // 2. walk the proto chain.
+        // 2. walk the proto chain with a step bound for cycle safety.
+        const MAX_PROTO_DEPTH: usize = 256;
         let mut proto = self.proto_of(receiver);
-        while let Value::Form(proto_id) = proto {
-            let f = self.heap.get(proto_id);
-            if let Some(handler) = f.handler(selector) {
-                return Some((handler, proto_id));
+        for _ in 0..MAX_PROTO_DEPTH {
+            match proto {
+                Value::Form(proto_id) => {
+                    let f = self.heap.get(proto_id);
+                    if let Some(handler) = f.handler(selector) {
+                        return Some((handler, proto_id));
+                    }
+                    proto = f.proto;
+                }
+                _ => return None,
             }
-            proto = f.proto;
+        }
+        None
+    }
+
+    /// look up a handler starting *above* `defining_proto` —
+    /// implements `super` send. used when a method that lives on
+    /// `defining_proto` wants to delegate to its parent's method.
+    pub fn lookup_handler_super(
+        &self,
+        defining_proto: FormId,
+        selector: SymId,
+    ) -> Option<(Value, FormId)> {
+        let mut proto = self.heap.get(defining_proto).proto;
+        const MAX_PROTO_DEPTH: usize = 256;
+        for _ in 0..MAX_PROTO_DEPTH {
+            match proto {
+                Value::Form(proto_id) => {
+                    let f = self.heap.get(proto_id);
+                    if let Some(handler) = f.handler(selector) {
+                        return Some((handler, proto_id));
+                    }
+                    proto = f.proto;
+                }
+                _ => return None,
+            }
         }
         None
     }

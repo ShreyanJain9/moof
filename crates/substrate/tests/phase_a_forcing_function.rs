@@ -484,6 +484,77 @@ fn fact_via_send_brackets() {
 // ─────────────────────────────────────────────────────────────────
 
 #[test]
+fn super_send_delegates_to_parent() {
+    // override-and-delegate: Dog's :sound conses 'loud onto
+    // [super sound] which returns Animal's 'unspecified.
+    let mut w = moof::new_world();
+    let r = moof::eval(
+        &mut w,
+        "(do
+            (defproto Animal
+              (handlers
+                (sound) (quote unspecified)))
+            (defproto Dog
+              (proto Animal)
+              (handlers
+                (sound) (cons (quote loud) (cons [super sound] nil))))
+            [[Dog new] sound])",
+    )
+    .unwrap();
+    // (loud unspecified) — verify by walking the cons chain.
+    let id = r.as_form_id().unwrap();
+    let head_sym = w.intern("head");
+    let tail_sym = w.intern("tail");
+    let h0 = w.heap.get(id).slot(head_sym);
+    assert_eq!(w.resolve(h0.as_sym().unwrap()), "loud");
+    let t0 = w.heap.get(id).slot(tail_sym);
+    let t0_id = t0.as_form_id().unwrap();
+    let h1 = w.heap.get(t0_id).slot(head_sym);
+    assert_eq!(w.resolve(h1.as_sym().unwrap()), "unspecified");
+}
+
+#[test]
+fn super_from_top_level_raises() {
+    // super-send outside a method body has no defining proto.
+    let mut w = moof::new_world();
+    let err = moof::eval(&mut w, "[super sound]").unwrap_err();
+    assert!(err.message.contains("non-method frame"));
+}
+
+#[test]
+fn if_with_no_else_returns_nil_for_false() {
+    let mut w = moof::new_world();
+    assert_eq!(moof::eval(&mut w, "(if #true 42)").unwrap(), Value::Int(42));
+    assert_eq!(moof::eval(&mut w, "(if #false 42)").unwrap(), Value::Nil);
+    assert_eq!(moof::eval(&mut w, "(if nil 42)").unwrap(), Value::Nil);
+}
+
+#[test]
+fn proto_chain_cycle_safety() {
+    // we don't have set-proto! at phase A, but the lookup_handler
+    // bound (256 hops) is purely defensive. with the chain that
+    // exists in a fresh world (Object.proto = Nil; depth ≤ 4 for
+    // any built-in), normal dispatch never hits the bound.
+    let mut w = moof::new_world();
+    // a deeply-derived proto: 50 levels of inheritance, each just
+    // adding a level marker. send a method that isn't on any of
+    // them; the lookup walks all 50 then dnu raises (no infinite
+    // loop, no panic).
+    let mut script = String::new();
+    script.push_str("(do (defproto L0 (handlers (which) 0))");
+    for i in 1..=50 {
+        script.push_str(&format!(
+            " (defproto L{i} (proto L{prev}) (handlers (which) {i}))",
+            i = i,
+            prev = i - 1
+        ));
+    }
+    script.push_str(" [[L50 new] which])");
+    let r = moof::eval(&mut w, &script).unwrap();
+    assert_eq!(r, Value::Int(50));
+}
+
+#[test]
 fn initialize_runs_on_new() {
     // [Proto new] sends :initialize. user override fires.
     let mut w = moof::new_world();

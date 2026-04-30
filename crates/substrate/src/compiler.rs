@@ -72,6 +72,7 @@ struct Compiler<'a> {
     self_sym: SymId,
     send_sym: SymId,
     defproto_sym: SymId,
+    super_sym: SymId,
 }
 
 impl<'a> Compiler<'a> {
@@ -88,6 +89,7 @@ impl<'a> Compiler<'a> {
         let self_sym = world.intern("self");
         let send_sym = world.intern("__send__");
         let defproto_sym = world.intern("defproto");
+        let super_sym = world.intern("super");
         Compiler {
             world,
             ops: Vec::new(),
@@ -107,6 +109,7 @@ impl<'a> Compiler<'a> {
             self_sym,
             send_sym,
             defproto_sym,
+            super_sym,
         }
     }
 
@@ -260,6 +263,11 @@ impl<'a> Compiler<'a> {
     /// `(__send__ receiver 'selector args…)` — emitted by the
     /// reader for `[recv sel args…]` and `.foo` shorthand. lowers
     /// directly to a `Send` opcode (not `:call` indirection).
+    ///
+    /// when `receiver` is the symbol `super`, we emit `SuperSend`
+    /// instead — the receiver of the dispatched method is `self`
+    /// (handled at runtime), and lookup walks the chain *above* the
+    /// current frame's defining proto.
     fn compile_send(&mut self, elems: &[Value], tail: bool) -> Result<(), RaiseError> {
         if elems.len() < 3 {
             return Err(self.err("malformed __send__ form"));
@@ -269,8 +277,13 @@ impl<'a> Compiler<'a> {
             self.err("__send__ selector must be a symbol")
         })?;
         let args = &elems[3..];
-        // push receiver, then args.
-        self.compile_expr(receiver, false)?;
+
+        let is_super = matches!(receiver, Value::Sym(s) if s == self.super_sym);
+
+        if !is_super {
+            // push receiver, then args.
+            self.compile_expr(receiver, false)?;
+        }
         for &a in args {
             self.compile_expr(a, false)?;
         }
@@ -278,7 +291,9 @@ impl<'a> Compiler<'a> {
             self.err("send: too many args (max 255)")
         })?;
         let ic = self.next_ic();
-        self.emit(if tail {
+        self.emit(if is_super {
+            Op::SuperSend { selector, argc, ic_idx: ic }
+        } else if tail {
             Op::TailSend { selector, argc }
         } else {
             Op::Send {
@@ -302,12 +317,14 @@ impl<'a> Compiler<'a> {
     }
 
     fn compile_if(&mut self, elems: &[Value], tail: bool) -> Result<(), RaiseError> {
-        if elems.len() != 4 {
-            return Err(self.err("if requires 3 args: (if cond then else)"));
-        }
-        let cond = elems[1];
-        let then_branch = elems[2];
-        let else_branch = elems[3];
+        // `(if cond then)` and `(if cond then else)` both legal.
+        // missing else defaults to nil, so the form has a value
+        // on every path (no surprise undefined-behavior).
+        let (cond, then_branch, else_branch) = match elems.len() {
+            3 => (elems[1], elems[2], Value::Nil),
+            4 => (elems[1], elems[2], elems[3]),
+            _ => return Err(self.err("if takes 2 or 3 args: (if cond then [else])")),
+        };
 
         self.compile_expr(cond, false)?;
         let jmp_to_else = self.emit_placeholder_jump(BranchKind::IfFalse);
@@ -699,7 +716,7 @@ mod tests {
             let id = self_
                 .as_form_id()
                 .ok_or_else(|| RaiseError::new(world.intern("dispatch"), "not a closure"))?;
-            world.invoke(id, Value::Nil, args)
+            world.invoke(id, Value::Nil, args, crate::form::FormId::NONE)
         });
     }
 

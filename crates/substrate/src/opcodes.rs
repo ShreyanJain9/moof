@@ -62,6 +62,16 @@ pub enum Op {
     /// reused. no stack growth.
     TailSend { selector: SymId, argc: u8 },
 
+    /// `[super selector args…]` — dispatch to the proto-chain
+    /// position *above* the current frame's defining proto, with
+    /// `self` as the receiver. lets a method delegate to the
+    /// inherited implementation it overrode.
+    SuperSend {
+        selector: SymId,
+        argc: u8,
+        ic_idx: u16,
+    },
+
     /// allocate a new closure capturing the current env, with the
     /// chunk identified by `chunk` (a Form-id pointing to a
     /// chunk-Form in the heap).
