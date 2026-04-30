@@ -63,6 +63,9 @@ struct Compiler<'a> {
     if_sym: SymId,
     let_sym: SymId,
     let_star_sym: SymId,
+    let_rec_sym: SymId,
+    when_sym: SymId,
+    unless_sym: SymId,
     do_sym: SymId,
     quote_sym: SymId,
     set_sym: SymId,
@@ -90,6 +93,9 @@ impl<'a> Compiler<'a> {
         let send_sym = world.intern("__send__");
         let defproto_sym = world.intern("defproto");
         let super_sym = world.intern("super");
+        let let_rec_sym = world.intern("let-rec");
+        let when_sym = world.intern("when");
+        let unless_sym = world.intern("unless");
         Compiler {
             world,
             ops: Vec::new(),
@@ -100,6 +106,9 @@ impl<'a> Compiler<'a> {
             if_sym,
             let_sym,
             let_star_sym,
+            let_rec_sym,
+            when_sym,
+            unless_sym,
             do_sym,
             quote_sym,
             set_sym,
@@ -233,6 +242,15 @@ impl<'a> Compiler<'a> {
             }
             if s == self.let_star_sym {
                 return self.compile_let_star(&elems, tail);
+            }
+            if s == self.let_rec_sym {
+                return self.compile_let_rec(&elems, tail);
+            }
+            if s == self.when_sym {
+                return self.compile_when(&elems, tail);
+            }
+            if s == self.unless_sym {
+                return self.compile_unless(&elems, tail);
             }
             if s == self.do_sym {
                 return self.compile_do(&elems, tail);
@@ -478,6 +496,123 @@ impl<'a> Compiler<'a> {
             }
         });
         Ok(())
+    }
+
+    /// `(let-rec ((f (fn …)) (g (fn …))) body)` — bindings may
+    /// refer to each other, including recursively. desugars to
+    /// `(let ((f nil) (g nil)) (do (set! f …) (set! g …) body))`.
+    /// closures created in the bindings capture the let's env;
+    /// later set!s mutate those slots; lookups inside closure
+    /// bodies see whichever value is current at call time.
+    fn compile_let_rec(
+        &mut self,
+        elems: &[Value],
+        tail: bool,
+    ) -> Result<(), RaiseError> {
+        if elems.len() < 3 {
+            return Err(self.err("let-rec requires bindings + body"));
+        }
+        let bindings_form = elems[1];
+        let bindings = self
+            .world
+            .list_to_vec(bindings_form)
+            .map_err(|_| self.err("let-rec: bindings must be a list"))?;
+        let mut names: Vec<SymId> = Vec::with_capacity(bindings.len());
+        let mut value_forms: Vec<Value> = Vec::with_capacity(bindings.len());
+        for b in &bindings {
+            let pair = self
+                .world
+                .list_to_vec(*b)
+                .map_err(|_| self.err("let-rec: each binding is (name value)"))?;
+            if pair.len() != 2 {
+                return Err(self.err("let-rec: each binding is (name value)"));
+            }
+            names.push(pair[0].as_sym().ok_or_else(|| {
+                self.err("let-rec: binding name must be a symbol")
+            })?);
+            value_forms.push(pair[1]);
+        }
+        // synthesize:
+        //   (let ((n1 nil) (n2 nil) …)
+        //     (do (set! n1 v1) (set! n2 v2) … body))
+        let mut nil_bindings = Vec::with_capacity(names.len());
+        for &n in &names {
+            let pair = self.world.make_list(&[Value::Sym(n), Value::Nil]);
+            nil_bindings.push(pair);
+        }
+        let nil_bindings_list = self.world.make_list(&nil_bindings);
+
+        let mut do_body: Vec<Value> = Vec::with_capacity(names.len() + 1);
+        do_body.push(Value::Sym(self.do_sym));
+        for (n, v) in names.iter().zip(value_forms.iter()) {
+            let set_form = self.world.make_list(&[
+                Value::Sym(self.set_sym),
+                Value::Sym(*n),
+                *v,
+            ]);
+            do_body.push(set_form);
+        }
+        // body remainder
+        for &b in &elems[2..] {
+            do_body.push(b);
+        }
+        let do_form = self.world.make_list(&do_body);
+
+        let let_form = self.world.make_list(&[
+            Value::Sym(self.let_sym),
+            nil_bindings_list,
+            do_form,
+        ]);
+        self.compile_expr(let_form, tail)
+    }
+
+    /// `(when cond body…)` ≡ `(if cond (do body…))` — sugar for
+    /// "do these only if true."
+    fn compile_when(&mut self, elems: &[Value], tail: bool) -> Result<(), RaiseError> {
+        if elems.len() < 2 {
+            return Err(self.err("when requires a condition"));
+        }
+        let cond = elems[1];
+        let then_branch = if elems.len() == 2 {
+            Value::Nil
+        } else {
+            // (do body…)
+            let mut body = vec![Value::Sym(self.do_sym)];
+            body.extend_from_slice(&elems[2..]);
+            self.world.make_list(&body)
+        };
+        let if_form = self.world.make_list(&[
+            Value::Sym(self.if_sym),
+            cond,
+            then_branch,
+        ]);
+        self.compile_expr(if_form, tail)
+    }
+
+    /// `(unless cond body…)` ≡ `(if cond nil (do body…))`.
+    fn compile_unless(
+        &mut self,
+        elems: &[Value],
+        tail: bool,
+    ) -> Result<(), RaiseError> {
+        if elems.len() < 2 {
+            return Err(self.err("unless requires a condition"));
+        }
+        let cond = elems[1];
+        let else_branch = if elems.len() == 2 {
+            Value::Nil
+        } else {
+            let mut body = vec![Value::Sym(self.do_sym)];
+            body.extend_from_slice(&elems[2..]);
+            self.world.make_list(&body)
+        };
+        let if_form = self.world.make_list(&[
+            Value::Sym(self.if_sym),
+            cond,
+            Value::Nil,
+            else_branch,
+        ]);
+        self.compile_expr(if_form, tail)
     }
 
     /// `(let* ((a 1) (b a)) body)` — nested single-binding lets.

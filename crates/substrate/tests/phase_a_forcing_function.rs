@@ -530,6 +530,40 @@ fn if_with_no_else_returns_nil_for_false() {
 }
 
 #[test]
+fn when_unless_let_rec() {
+    let mut w = moof::new_world();
+    // when
+    assert_eq!(
+        moof::eval(&mut w, "(when [5 > 3] 'yes)").unwrap(),
+        Value::Sym(w.intern("yes"))
+    );
+    assert_eq!(
+        moof::eval(&mut w, "(when [5 < 3] 'yes)").unwrap(),
+        Value::Nil
+    );
+    // unless
+    assert_eq!(
+        moof::eval(&mut w, "(unless [5 < 3] 'yes)").unwrap(),
+        Value::Sym(w.intern("yes"))
+    );
+    // let-rec mutual recursion
+    let r = moof::eval(
+        &mut w,
+        "(let-rec
+            ((even? (fn (n) (if [n = 0] #true (odd? [n - 1]))))
+             (odd?  (fn (n) (if [n = 0] #false (even? [n - 1])))))
+          (list (even? 10) (odd? 7)))",
+    )
+    .unwrap();
+    let id = r.as_form_id().unwrap();
+    let head_sym = w.intern("head");
+    let tail_sym = w.intern("tail");
+    assert_eq!(w.heap.get(id).slot(head_sym), Value::Bool(true));
+    let t = w.heap.get(id).slot(tail_sym).as_form_id().unwrap();
+    assert_eq!(w.heap.get(t).slot(head_sym), Value::Bool(true));
+}
+
+#[test]
 fn proto_chain_cycle_safety() {
     // we don't have set-proto! at phase A, but the lookup_handler
     // bound (256 hops) is purely defensive. with the chain that
