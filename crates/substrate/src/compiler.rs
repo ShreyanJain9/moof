@@ -78,6 +78,9 @@ struct Compiler<'a> {
     super_sym: SymId,
     table_marker_sym: SymId,
     entry_marker_sym: SymId,
+    obj_marker_sym: SymId,
+    obj_slot_sym: SymId,
+    obj_method_sym: SymId,
 }
 
 impl<'a> Compiler<'a> {
@@ -100,6 +103,9 @@ impl<'a> Compiler<'a> {
         let unless_sym = world.intern("unless");
         let table_marker_sym = world.intern("__table__");
         let entry_marker_sym = world.intern("__entry__");
+        let obj_marker_sym = world.intern("__obj__");
+        let obj_slot_sym = world.intern("__slot__");
+        let obj_method_sym = world.intern("__method__");
         Compiler {
             world,
             ops: Vec::new(),
@@ -125,6 +131,9 @@ impl<'a> Compiler<'a> {
             super_sym,
             table_marker_sym,
             entry_marker_sym,
+            obj_marker_sym,
+            obj_slot_sym,
+            obj_method_sym,
         }
     }
 
@@ -290,6 +299,9 @@ impl<'a> Compiler<'a> {
             }
             if s == self.table_marker_sym {
                 return self.compile_table(&elems);
+            }
+            if s == self.obj_marker_sym {
+                return self.compile_obj_literal(&elems);
             }
         }
         // fn-call: `(callable arg…)`
@@ -700,6 +712,215 @@ impl<'a> Compiler<'a> {
     fn err(&mut self, msg: impl Into<String>) -> RaiseError {
         let kind = self.world.intern("compile-error");
         RaiseError::new(kind, msg)
+    }
+
+    /// `(__obj__ <proto-sym> <entry…>)` — emitted by the reader for
+    /// `{Proto …}` object literals. each entry is one of:
+    /// - `(__slot__ <key-sym> <value-expr>)`
+    /// - `(__method__ <selector-sym> <params-list> <body-expr>)`
+    ///
+    /// lowering: synthesize the equivalent
+    ///
+    ///   (let ((__objLit__ [<proto> new]))
+    ///     (do
+    ///       ;; slot inits (declaration order):
+    ///       (slotSet! __objLit__ '<key> <value>) …
+    ///       ;; auto-accessors for each slot — getter `[obj name]`
+    ///       ;; reads slot, setter `[obj name: v]` writes:
+    ///       (setHandler! __objLit__ '<key>
+    ///         (fn () (slot self '<key>))) …
+    ///       (setHandler! __objLit__ '<key>:
+    ///         (fn (v) (slotSet! self '<key> v))) …
+    ///       ;; user-defined methods (may override auto-accessors):
+    ///       (setHandler! __objLit__ '<sel> (fn <params> <body>)) …
+    ///       __objLit__))
+    ///
+    /// auto-accessors give `.name` shorthand and `[obj name: v]`
+    /// setter for free; user-defined methods take precedence
+    /// (emitted last so they override).
+    fn compile_obj_literal(&mut self, elems: &[Value]) -> Result<(), RaiseError> {
+        if elems.len() < 2 {
+            return Err(self.err("__obj__: missing proto"));
+        }
+        let proto_sym = elems[1].as_sym().ok_or_else(|| {
+            self.err("__obj__: proto must be a symbol")
+        })?;
+
+        // collect slots and methods separately so we can interleave
+        // emission: slot inits → auto-accessors → user methods.
+        let mut slot_keys: Vec<SymId> = Vec::new();
+        let mut slot_vals: Vec<Value> = Vec::new();
+        let mut user_methods: Vec<(SymId, Value, Value)> = Vec::new(); // (sel, params, body)
+
+        for &entry in &elems[2..] {
+            let entry_elems = self.world.list_to_vec(entry).map_err(|_| {
+                self.err("__obj__: malformed entry")
+            })?;
+            if entry_elems.is_empty() {
+                return Err(self.err("__obj__: empty entry"));
+            }
+            let kind = entry_elems[0].as_sym().ok_or_else(|| {
+                self.err("__obj__: entry kind must be a symbol")
+            })?;
+            if kind == self.obj_slot_sym {
+                if entry_elems.len() != 3 {
+                    return Err(self.err("__obj__: __slot__ takes (key val)"));
+                }
+                let key = entry_elems[1].as_sym().ok_or_else(|| {
+                    self.err("__obj__: slot key must be a symbol")
+                })?;
+                slot_keys.push(key);
+                slot_vals.push(entry_elems[2]);
+            } else if kind == self.obj_method_sym {
+                if entry_elems.len() != 4 {
+                    return Err(self.err(
+                        "__obj__: __method__ takes (selector params body)",
+                    ));
+                }
+                let sel = entry_elems[1].as_sym().ok_or_else(|| {
+                    self.err("__obj__: method selector must be a symbol")
+                })?;
+                user_methods.push((sel, entry_elems[2], entry_elems[3]));
+            } else {
+                let kind_text = self.world.resolve(kind).to_string();
+                return Err(self.err(format!(
+                    "__obj__: unknown entry kind `{}`",
+                    kind_text
+                )));
+            }
+        }
+
+        // build the desugar.
+        let obj_local = self.world.intern("__objLit__");
+        let new_sym = self.world.intern("new");
+        let slot_set_global = self.world.intern("slotSet!");
+        let set_handler_global = self.world.intern("setHandler!");
+        let slot_global = self.world.intern("slot");
+
+        let new_call = self.world.make_list(&[
+            Value::Sym(self.send_sym),
+            Value::Sym(proto_sym),
+            Value::Sym(new_sym),
+        ]);
+        let binding = self
+            .world
+            .make_list(&[Value::Sym(obj_local), new_call]);
+        let bindings = self.world.make_list(&[binding]);
+
+        let mut do_body = Vec::with_capacity(slot_keys.len() * 3 + user_methods.len() + 2);
+        do_body.push(Value::Sym(self.do_sym));
+
+        // 1. slot inits.
+        for (key, val) in slot_keys.iter().zip(slot_vals.iter()) {
+            let quoted_key = self
+                .world
+                .make_list(&[Value::Sym(self.quote_sym), Value::Sym(*key)]);
+            let call = self.world.make_list(&[
+                Value::Sym(slot_set_global),
+                Value::Sym(obj_local),
+                quoted_key,
+                *val,
+            ]);
+            do_body.push(call);
+        }
+
+        // 2. auto-accessors per slot. getter [obj name] reads slot;
+        //    setter [obj name: v] writes slot.
+        let v_param_sym = self.world.intern("__v__");
+        let empty_params = self.world.make_list(&[]);
+        let setter_params_list =
+            self.world.make_list(&[Value::Sym(v_param_sym)]);
+
+        for &key in &slot_keys {
+            // pre-build all the inner forms so each `make_list` call
+            // takes a fresh `&mut self.world` borrow that's already
+            // dropped by the time the next call happens.
+            let quoted_key_for_init = self
+                .world
+                .make_list(&[Value::Sym(self.quote_sym), Value::Sym(key)]);
+            let quoted_key_for_getter = self
+                .world
+                .make_list(&[Value::Sym(self.quote_sym), Value::Sym(key)]);
+            let quoted_key_for_setter = self
+                .world
+                .make_list(&[Value::Sym(self.quote_sym), Value::Sym(key)]);
+
+            // getter: (fn () (slot self 'name))
+            let getter_body = self.world.make_list(&[
+                Value::Sym(slot_global),
+                Value::Sym(self.self_sym),
+                quoted_key_for_init,
+            ]);
+            let getter_fn = self.world.make_list(&[
+                Value::Sym(self.fn_sym),
+                empty_params,
+                getter_body,
+            ]);
+            let getter_install = self.world.make_list(&[
+                Value::Sym(set_handler_global),
+                Value::Sym(obj_local),
+                quoted_key_for_getter,
+                getter_fn,
+            ]);
+            do_body.push(getter_install);
+
+            // setter: (fn (v) (slotSet! self 'name v))
+            let setter_body = self.world.make_list(&[
+                Value::Sym(slot_set_global),
+                Value::Sym(self.self_sym),
+                quoted_key_for_setter,
+                Value::Sym(v_param_sym),
+            ]);
+            let setter_fn = self.world.make_list(&[
+                Value::Sym(self.fn_sym),
+                setter_params_list,
+                setter_body,
+            ]);
+            // selector for the setter is `name:`.
+            let key_text = self.world.resolve(key).to_string();
+            let setter_sel_text = format!("{}:", key_text);
+            let setter_sel = self.world.intern(&setter_sel_text);
+            let quoted_setter_sel = self.world.make_list(&[
+                Value::Sym(self.quote_sym),
+                Value::Sym(setter_sel),
+            ]);
+            let setter_install = self.world.make_list(&[
+                Value::Sym(set_handler_global),
+                Value::Sym(obj_local),
+                quoted_setter_sel,
+                setter_fn,
+            ]);
+            do_body.push(setter_install);
+        }
+
+        // 3. user-defined methods (after auto-accessors so they
+        //    win on conflict).
+        for (sel, params, body) in user_methods {
+            let quoted_sel = self
+                .world
+                .make_list(&[Value::Sym(self.quote_sym), Value::Sym(sel)]);
+            let fn_form = self
+                .world
+                .make_list(&[Value::Sym(self.fn_sym), params, body]);
+            let call = self.world.make_list(&[
+                Value::Sym(set_handler_global),
+                Value::Sym(obj_local),
+                quoted_sel,
+                fn_form,
+            ]);
+            do_body.push(call);
+        }
+
+        // final value: the new object.
+        do_body.push(Value::Sym(obj_local));
+
+        let do_form = self.world.make_list(&do_body);
+        let let_form = self.world.make_list(&[
+            Value::Sym(self.let_sym),
+            bindings,
+            do_form,
+        ]);
+        self.compile_expr(let_form, false)
     }
 
     /// `(__table__ entry…)` — emitted by the reader for `#[…]`

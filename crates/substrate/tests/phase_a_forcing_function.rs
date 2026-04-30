@@ -674,6 +674,101 @@ fn char_methods_work() {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// Object literals — `concepts/objects-and-protos.md`,
+//                   `syntax/object-literals.md`
+// ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn object_literal_basic() {
+    // `{x: 5}` produces a fresh Form with an `:x` slot and an
+    // auto-accessor.
+    let mut w = moof::new_world();
+    let v = moof::eval(&mut w, "{x: 5}").unwrap();
+    let id = v.as_form_id().unwrap();
+    let x_sym = w.intern("x");
+    assert_eq!(w.heap.get(id).slot(x_sym), Value::Int(5));
+    // auto-getter: `[obj x]` returns 5.
+    assert_eq!(
+        moof::eval(&mut w, "[{x: 5} x]").unwrap(),
+        Value::Int(5)
+    );
+}
+
+#[test]
+fn object_literal_setter_and_getter() {
+    let mut w = moof::new_world();
+    let r = moof::eval(
+        &mut w,
+        "(do (def b {x: 5}) [b x: 99] [b x])",
+    )
+    .unwrap();
+    assert_eq!(r, Value::Int(99));
+}
+
+#[test]
+fn object_literal_counter() {
+    let mut w = moof::new_world();
+    let r = moof::eval(
+        &mut w,
+        "(do
+            (def c {count: 0
+                    [bump] [self count: [.count + 1]]
+                    [read] .count})
+            [c bump]
+            [c bump]
+            [c bump]
+            [c read])",
+    )
+    .unwrap();
+    assert_eq!(r, Value::Int(3));
+}
+
+#[test]
+fn object_literal_with_proto() {
+    let mut w = moof::new_world();
+    let r = moof::eval(
+        &mut w,
+        "(do (defproto Greeter (handlers (greet) \"hello!\"))
+             [{Greeter} greet])",
+    )
+    .unwrap();
+    assert_eq!(w.string_text(r).unwrap(), "hello!");
+}
+
+#[test]
+fn object_literal_proto_with_slots() {
+    // proto + slots + extra method
+    let mut w = moof::new_world();
+    let r = moof::eval(
+        &mut w,
+        "(do (defproto Animal (handlers (sound) 'generic))
+             (def d {Animal name: 'rex
+                     [sound] 'woof})
+             [d sound])",
+    )
+    .unwrap();
+    assert_eq!(r, Value::Sym(w.intern("woof")));
+    let r = moof::eval(&mut w, "[d name]").unwrap();
+    assert_eq!(r, Value::Sym(w.intern("rex")));
+}
+
+#[test]
+fn object_literal_methods_can_self_send() {
+    // method body references `.x` (auto-accessor for `x`) inside
+    // the object — verifies self-dispatch through the literal's
+    // own handler table.
+    let mut w = moof::new_world();
+    let r = moof::eval(
+        &mut w,
+        "(do (def p {x: 3 y: 4
+                     [magnitude] [[.x * .x] + [.y * .y]]})
+             [p magnitude])",
+    )
+    .unwrap();
+    assert_eq!(r, Value::Int(25));
+}
+
+// ─────────────────────────────────────────────────────────────────
 // String surface (concepts/strings.md)
 // ─────────────────────────────────────────────────────────────────
 

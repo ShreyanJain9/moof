@@ -62,6 +62,9 @@ pub struct ReadCtx<'a> {
     bytes_sym: SymId,
     table_marker_sym: SymId,
     entry_marker_sym: SymId,
+    obj_marker_sym: SymId,
+    obj_slot_sym: SymId,
+    obj_method_sym: SymId,
     /// the proto FormId to assign to every cons cell. typically
     /// `Value::Form(list_proto)`. phase-A clients that don't yet
     /// have a List proto pass `Value::Nil`.
@@ -91,6 +94,9 @@ impl<'a> ReadCtx<'a> {
         let bytes_sym = syms.intern("bytes");
         let table_marker_sym = syms.intern("__table__");
         let entry_marker_sym = syms.intern("__entry__");
+        let obj_marker_sym = syms.intern("__obj__");
+        let obj_slot_sym = syms.intern("__slot__");
+        let obj_method_sym = syms.intern("__method__");
         ReadCtx {
             head_sym,
             tail_sym,
@@ -100,6 +106,9 @@ impl<'a> ReadCtx<'a> {
             bytes_sym,
             table_marker_sym,
             entry_marker_sym,
+            obj_marker_sym,
+            obj_slot_sym,
+            obj_method_sym,
             list_proto,
             string_proto,
             heap,
@@ -150,7 +159,10 @@ impl<'a> Cursor<'a> {
 
 /// `true` if `c` is a delimiter that terminates an atom.
 fn is_delim(c: u8) -> bool {
-    matches!(c, b'(' | b')' | b'[' | b']' | b'\'' | b'"' | b';') || c.is_ascii_whitespace()
+    matches!(
+        c,
+        b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'\'' | b'"' | b';'
+    ) || c.is_ascii_whitespace()
 }
 
 /// `true` if every byte of `name` is a binary-operator character
@@ -232,6 +244,8 @@ fn read_form(c: &mut Cursor, ctx: &mut ReadCtx) -> Result<Value, ReadError> {
         Some(b')') => Err(ReadError::at(c, "unexpected `)`")),
         Some(b'[') => read_send_bracket(c, ctx),
         Some(b']') => Err(ReadError::at(c, "unexpected `]`")),
+        Some(b'{') => read_object_literal(c, ctx),
+        Some(b'}') => Err(ReadError::at(c, "unexpected `}`")),
         Some(b'\'') => read_quote(c, ctx),
         Some(b'"') => read_string(c, ctx),
         Some(b'#') => read_hash(c, ctx),
@@ -525,6 +539,206 @@ fn read_table_literal(
             }
         }
     }
+}
+
+/// `{ proto-ref? ( name : value | [ method-header ] body )* }` —
+/// object literal per `docs/syntax/object-literals.md`.
+///
+/// emits `(__obj__ <proto-sym> <entry…>)` where each entry is one of:
+/// - `(__slot__ <key-sym> <value-expr>)`
+/// - `(__method__ <selector-sym> <params-list> <body-expr>)`
+///
+/// proto defaults to `Object` if omitted (i.e., the first non-`[`
+/// item is a slot binding `name:`).
+///
+/// inside `{…}`, `[…]` is a *method header*, not a send. the
+/// header tokens are parsed and translated to a (selector, params)
+/// pair using the same shape rules as send-brackets:
+/// - `[name]`           — unary
+/// - `[+ other]`        — binary
+/// - `[name x y …]`     — positional
+/// - `[at: i put: v]`   — keyword
+fn read_object_literal(c: &mut Cursor, ctx: &mut ReadCtx) -> Result<Value, ReadError> {
+    debug_assert_eq!(c.peek(), Some(b'{'));
+    let start_line = c.line;
+    let start_col = c.col;
+    c.advance();
+
+    let object_sym = ctx.syms.intern("Object");
+    let mut proto = Value::Sym(object_sym);
+    let mut entries: Vec<Value> = Vec::new();
+    let mut has_proto = false;
+
+    loop {
+        skip_trivia(c);
+        match c.peek() {
+            None => {
+                return Err(ReadError {
+                    message: "unterminated `{…}` object literal".into(),
+                    line: start_line,
+                    col: start_col,
+                });
+            }
+            Some(b'}') => {
+                c.advance();
+                let mut form_elems = vec![Value::Sym(ctx.obj_marker_sym), proto];
+                form_elems.extend(entries);
+                return Ok(build_list(ctx, &form_elems));
+            }
+            Some(b'[') => {
+                // method definition.
+                c.advance();
+                let header_tokens = read_method_header_tokens(c, ctx)?;
+                skip_trivia(c);
+                let body = read_form(c, ctx)?;
+                let (sel, params) = decode_method_header(
+                    ctx,
+                    &header_tokens,
+                    start_line,
+                    start_col,
+                )?;
+                let params_list = build_list(ctx, &params);
+                let entry = build_list(
+                    ctx,
+                    &[
+                        Value::Sym(ctx.obj_method_sym),
+                        Value::Sym(sel),
+                        params_list,
+                        body,
+                    ],
+                );
+                entries.push(entry);
+            }
+            _ => {
+                let form = read_form(c, ctx)?;
+                if let Value::Sym(s) = form {
+                    let text = ctx.syms.resolve(s).to_string();
+                    if text.ends_with(':') {
+                        // slot binding: `name: value`. strip the
+                        // trailing colon for the slot's name.
+                        let key_text = &text[..text.len() - 1];
+                        let key_sym = ctx.syms.intern(key_text);
+                        skip_trivia(c);
+                        let value = read_form(c, ctx)?;
+                        let entry = build_list(
+                            ctx,
+                            &[Value::Sym(ctx.obj_slot_sym), Value::Sym(key_sym), value],
+                        );
+                        entries.push(entry);
+                        continue;
+                    }
+                    if !has_proto && entries.is_empty() {
+                        // first bare symbol — proto.
+                        proto = Value::Sym(s);
+                        has_proto = true;
+                        continue;
+                    }
+                }
+                return Err(ReadError {
+                    message: "object literal: expected `name:` slot binding, `[…]` method, or proto symbol"
+                        .into(),
+                    line: start_line,
+                    col: start_col,
+                });
+            }
+        }
+    }
+}
+
+/// read tokens up to (and consuming) `]`, returning the tokens.
+/// used inside object-literal method headers where `[…]` is a
+/// header, not a send.
+fn read_method_header_tokens(
+    c: &mut Cursor,
+    ctx: &mut ReadCtx,
+) -> Result<Vec<Value>, ReadError> {
+    let mut tokens = Vec::new();
+    loop {
+        skip_trivia(c);
+        match c.peek() {
+            None => {
+                return Err(ReadError::at(c, "unterminated method header"));
+            }
+            Some(b']') => {
+                c.advance();
+                return Ok(tokens);
+            }
+            _ => {
+                tokens.push(read_form(c, ctx)?);
+            }
+        }
+    }
+}
+
+/// translate a method-header token sequence into a (selector,
+/// params-list) pair. mirrors the four send-shapes:
+/// - unary:    `[name]` → selector=`name`, params=[]
+/// - binary:   `[OP other]` → selector=OP, params=[other]
+/// - keyword:  `[kw1: a kw2: b]` → selector="kw1:kw2:", params=[a, b]
+/// - positional: `[name x y]` → selector="name", params=[x, y]
+fn decode_method_header(
+    ctx: &mut ReadCtx,
+    tokens: &[Value],
+    line: usize,
+    col: usize,
+) -> Result<(SymId, Vec<Value>), ReadError> {
+    if tokens.is_empty() {
+        return Err(ReadError {
+            message: "empty method header".into(),
+            line,
+            col,
+        });
+    }
+    let first = tokens[0];
+    let first_sym = first.as_sym().ok_or_else(|| ReadError {
+        message: "method header: selector must be a symbol".into(),
+        line,
+        col,
+    })?;
+    let first_text = ctx.syms.resolve(first_sym).to_string();
+
+    // binary
+    if is_binary_op(&first_text) && tokens.len() == 2 {
+        return Ok((first_sym, vec![tokens[1]]));
+    }
+
+    // keyword
+    if first_text.ends_with(':') {
+        let mut sel_text = String::new();
+        let mut params = Vec::new();
+        let mut i = 0;
+        while i < tokens.len() {
+            let kw_sym = tokens[i].as_sym().ok_or_else(|| ReadError {
+                message: "keyword method header: expected `kw:` symbol".into(),
+                line,
+                col,
+            })?;
+            let kw_text = ctx.syms.resolve(kw_sym).to_string();
+            if !kw_text.ends_with(':') {
+                return Err(ReadError {
+                    message: format!("keyword `{}` must end with `:`", kw_text),
+                    line,
+                    col,
+                });
+            }
+            sel_text.push_str(&kw_text);
+            i += 1;
+            if i >= tokens.len() {
+                return Err(ReadError {
+                    message: format!("keyword `{}` needs a parameter", kw_text),
+                    line,
+                    col,
+                });
+            }
+            params.push(tokens[i]);
+            i += 1;
+        }
+        let sel = ctx.syms.intern(&sel_text);
+        return Ok((sel, params));
+    }
+
+    // unary or positional
+    Ok((first_sym, tokens[1..].to_vec()))
 }
 
 /// peek for `=>` followed by whitespace / delim. doesn't consume.
