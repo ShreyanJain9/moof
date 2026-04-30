@@ -311,3 +311,126 @@ fn bootstrap_methods_use_self_correctly() {
     let r = w.send(v, length, &[]).unwrap();
     assert_eq!(r, Value::Int(3));
 }
+
+// ─────────────────────────────────────────────────────────────────
+// send brackets, .foo shorthand, defproto
+// ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn send_brackets_binary() {
+    let mut w = moof::new_world();
+    assert_eq!(moof::eval(&mut w, "[5 + 3]").unwrap(), Value::Int(8));
+    assert_eq!(moof::eval(&mut w, "[10 - 7]").unwrap(), Value::Int(3));
+    assert_eq!(moof::eval(&mut w, "[[5 + 3] * 2]").unwrap(), Value::Int(16));
+}
+
+#[test]
+fn send_brackets_unary() {
+    let mut w = moof::new_world();
+    assert_eq!(
+        moof::eval(&mut w, "[(list 1 2 3) length]").unwrap(),
+        Value::Int(3)
+    );
+    assert_eq!(moof::eval(&mut w, "[(- 0 7) abs]").unwrap(), Value::Int(7));
+}
+
+#[test]
+fn send_brackets_keyword() {
+    let mut w = moof::new_world();
+    // `:cons:` is a keyword-style selector; `[xs cons: 0]` builds
+    // a list with 0 prepended.
+    let r = moof::eval(&mut w, "[[(list 1 2) cons: 0] length]").unwrap();
+    assert_eq!(r, Value::Int(3));
+}
+
+#[test]
+fn defproto_creates_proto_with_handler() {
+    let mut w = moof::new_world();
+    let r = moof::eval(
+        &mut w,
+        "(do (defproto Foo (handlers (greet) 42)) [[Foo new] greet])",
+    )
+    .unwrap();
+    assert_eq!(r, Value::Int(42));
+}
+
+#[test]
+fn defproto_counter_full_lifecycle() {
+    let mut w = moof::new_world();
+    let r = moof::eval(
+        &mut w,
+        "(do
+            (defproto Counter
+              (handlers
+                (incr) [self count: [.count + 1]]
+                (read) .count
+                (count: v) (slot-set! self (quote count) v)
+                (count) (slot self (quote count))))
+            (def c [Counter new])
+            [c count: 0]
+            [c incr]
+            [c incr]
+            [c incr]
+            [c read])",
+    )
+    .unwrap();
+    assert_eq!(r, Value::Int(3));
+}
+
+#[test]
+fn defproto_with_inheritance() {
+    let mut w = moof::new_world();
+    let r = moof::eval(
+        &mut w,
+        "(do
+            (defproto Animal
+              (handlers
+                (sound) (quote unspecified)))
+            (defproto Dog
+              (proto Animal)
+              (handlers
+                (sound) (quote woof)))
+            [[Dog new] sound])",
+    )
+    .unwrap();
+    let woof = w.intern("woof");
+    assert_eq!(r, Value::Sym(woof));
+    // animal still says unspecified.
+    let r = moof::eval(&mut w, "[[Animal new] sound]").unwrap();
+    let unspec = w.intern("unspecified");
+    assert_eq!(r, Value::Sym(unspec));
+}
+
+#[test]
+fn dot_self_shorthand() {
+    // .foo desugars to [self foo]. inside a method body, self is
+    // the receiver, so .count reads self's count slot via the
+    // installed accessor.
+    let mut w = moof::new_world();
+    let r = moof::eval(
+        &mut w,
+        "(do
+            (defproto Box
+              (handlers
+                (peek) .stuff
+                (stuff: v) (slot-set! self (quote stuff) v)
+                (stuff) (slot self (quote stuff))))
+            (def b [Box new])
+            [b stuff: 7]
+            [b peek])",
+    )
+    .unwrap();
+    assert_eq!(r, Value::Int(7));
+}
+
+#[test]
+fn fact_via_send_brackets() {
+    let mut w = moof::new_world();
+    let r = moof::eval(
+        &mut w,
+        "(do (def fact (fn (n) (if [n = 0] 1 [n * (fact [n - 1])])))
+             (fact 12))",
+    )
+    .unwrap();
+    assert_eq!(r, Value::Int(479001600));
+}

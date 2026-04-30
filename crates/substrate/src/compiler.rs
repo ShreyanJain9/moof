@@ -70,6 +70,8 @@ struct Compiler<'a> {
     def_sym: SymId,
     call_sym: SymId,
     self_sym: SymId,
+    send_sym: SymId,
+    defproto_sym: SymId,
 }
 
 impl<'a> Compiler<'a> {
@@ -84,6 +86,8 @@ impl<'a> Compiler<'a> {
         let def_sym = world.intern("def");
         let call_sym = world.intern("call");
         let self_sym = world.intern("self");
+        let send_sym = world.intern("__send__");
+        let defproto_sym = world.intern("defproto");
         Compiler {
             world,
             ops: Vec::new(),
@@ -101,6 +105,8 @@ impl<'a> Compiler<'a> {
             def_sym,
             call_sym,
             self_sym,
+            send_sym,
+            defproto_sym,
         }
     }
 
@@ -240,9 +246,48 @@ impl<'a> Compiler<'a> {
             if s == self.def_sym {
                 return self.compile_def(&elems);
             }
+            if s == self.send_sym {
+                return self.compile_send(&elems, tail);
+            }
+            if s == self.defproto_sym {
+                return self.compile_defproto(&elems);
+            }
         }
         // fn-call: `(callable arg…)`
         self.compile_call(&elems, tail)
+    }
+
+    /// `(__send__ receiver 'selector args…)` — emitted by the
+    /// reader for `[recv sel args…]` and `.foo` shorthand. lowers
+    /// directly to a `Send` opcode (not `:call` indirection).
+    fn compile_send(&mut self, elems: &[Value], tail: bool) -> Result<(), RaiseError> {
+        if elems.len() < 3 {
+            return Err(self.err("malformed __send__ form"));
+        }
+        let receiver = elems[1];
+        let selector = elems[2].as_sym().ok_or_else(|| {
+            self.err("__send__ selector must be a symbol")
+        })?;
+        let args = &elems[3..];
+        // push receiver, then args.
+        self.compile_expr(receiver, false)?;
+        for &a in args {
+            self.compile_expr(a, false)?;
+        }
+        let argc = u8::try_from(args.len()).map_err(|_| {
+            self.err("send: too many args (max 255)")
+        })?;
+        let ic = self.next_ic();
+        self.emit(if tail {
+            Op::TailSend { selector, argc }
+        } else {
+            Op::Send {
+                selector,
+                argc,
+                ic_idx: ic,
+            }
+        });
+        Ok(())
     }
 
     /// expand a list-Form to a `Vec<Value>`. errors with a clear
@@ -485,6 +530,136 @@ impl<'a> Compiler<'a> {
     fn err(&mut self, msg: impl Into<String>) -> RaiseError {
         let kind = self.world.intern("compile-error");
         RaiseError::new(kind, msg)
+    }
+
+    /// `(defproto Name (proto Parent)? (slots …)? (handlers …)?)`
+    ///
+    /// lowers to:
+    /// 1. `[Parent new] → globals['Name]`
+    /// 2. for each `[selector params…] body` clause:
+    ///    `[set-handler! Name 'selector (fn (params…) body)]`
+    /// 3. push `Name` (so the form evaluates to the new proto).
+    ///
+    /// phase-A defproto deliberately omits auto-generated accessors
+    /// (the `(slots count step)` clause is declarative-only). user
+    /// code adds `[count]`, `[count: v]` handlers manually if needed.
+    /// the full surface (with auto-accessors and multi-clause
+    /// patterns) lands in phase A.10.
+    fn compile_defproto(&mut self, elems: &[Value]) -> Result<(), RaiseError> {
+        if elems.len() < 2 {
+            return Err(self.err("defproto: needs a name"));
+        }
+        let name = elems[1].as_sym().ok_or_else(|| {
+            self.err("defproto: name must be a symbol")
+        })?;
+
+        let mut parent_name: SymId = self.world.intern("Object");
+        let mut handlers: Vec<(SymId, Vec<SymId>, Value)> = Vec::new();
+
+        for i in 2..elems.len() {
+            let clause = elems[i];
+            let clause_elems = self.world.list_to_vec(clause).map_err(|_| {
+                self.err("defproto: each clause must be a list")
+            })?;
+            if clause_elems.is_empty() {
+                return Err(self.err("defproto: empty clause"));
+            }
+            let head = clause_elems[0].as_sym().ok_or_else(|| {
+                self.err("defproto: clause head must be a symbol")
+            })?;
+            let head_text = self.world.resolve(head).to_string();
+            match head_text.as_str() {
+                "proto" => {
+                    if clause_elems.len() != 2 {
+                        return Err(self.err("defproto: (proto X) takes one arg"));
+                    }
+                    parent_name = clause_elems[1].as_sym().ok_or_else(|| {
+                        self.err("defproto: (proto X) — X must be a symbol")
+                    })?;
+                }
+                "slots" => {
+                    // declarative-only at phase A.
+                }
+                "handlers" => {
+                    let pairs = &clause_elems[1..];
+                    if pairs.len() % 2 != 0 {
+                        return Err(self.err(
+                            "defproto: (handlers …) expects pairs of (header) body",
+                        ));
+                    }
+                    let mut j = 0;
+                    while j < pairs.len() {
+                        let header = pairs[j];
+                        let body = pairs[j + 1];
+                        let header_elems = self.world.list_to_vec(header).map_err(|_| {
+                            self.err("defproto: handler header must be a list")
+                        })?;
+                        if header_elems.is_empty() {
+                            return Err(self.err("defproto: empty handler header"));
+                        }
+                        let sel = header_elems[0].as_sym().ok_or_else(|| {
+                            self.err("defproto: selector must be a symbol")
+                        })?;
+                        let mut params = Vec::with_capacity(header_elems.len() - 1);
+                        for &p in &header_elems[1..] {
+                            params.push(p.as_sym().ok_or_else(|| {
+                                self.err("defproto: param must be a symbol")
+                            })?);
+                        }
+                        handlers.push((sel, params, body));
+                        j += 2;
+                    }
+                }
+                other => {
+                    return Err(self.err(format!(
+                        "defproto: unknown clause `{}`",
+                        other
+                    )));
+                }
+            }
+        }
+
+        // emit: `[Parent new]` then DefineGlobal Name.
+        self.emit(Op::LoadName(parent_name));
+        let new_sym = self.world.intern("new");
+        let new_ic = self.next_ic();
+        self.emit(Op::Send {
+            selector: new_sym,
+            argc: 0,
+            ic_idx: new_ic,
+        });
+        self.emit(Op::DefineGlobal(name));
+        // DefineGlobal pushes the symbol; discard.
+        self.emit(Op::Pop);
+
+        // for each handler, emit:
+        //   LoadName set-handler!
+        //   LoadName Name
+        //   LoadConst 'sel
+        //   PushClosure <body-chunk>
+        //   Send :call 3
+        //   Pop
+        let set_handler_sym = self.world.intern("set-handler!");
+        let call_sym = self.call_sym;
+        for (sel, params, body) in handlers {
+            let fn_chunk = compile_fn_body(self.world, params, body)?;
+            self.emit(Op::LoadName(set_handler_sym));
+            self.emit(Op::LoadName(name));
+            let sel_idx = self.add_const(Value::Sym(sel));
+            self.emit(Op::LoadConst(sel_idx));
+            self.emit(Op::PushClosure { chunk: fn_chunk });
+            let call_ic = self.next_ic();
+            self.emit(Op::Send {
+                selector: call_sym,
+                argc: 3,
+                ic_idx: call_ic,
+            });
+            self.emit(Op::Pop);
+        }
+
+        // result: the proto-Form itself.
+        self.emit(Op::LoadName(name));
+        Ok(())
     }
 }
 

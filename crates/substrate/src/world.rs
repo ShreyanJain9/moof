@@ -326,11 +326,26 @@ impl World {
     /// look up a handler by walking the proto chain. returns the
     /// (method-Form, defining-proto-FormId) pair, or `None` if no
     /// handler is found before the chain bottoms out.
+    ///
+    /// per `docs/concepts/objects-and-protos.md`, lookup checks the
+    /// receiver's *own* handler table first (so one-off
+    /// object-literal overrides shadow inherited methods, and so
+    /// proto-Forms — like `Object` itself — dispatch off their own
+    /// handler table since their `proto` is `nil`). then walks
+    /// `receiver.proto`, `receiver.proto.proto`, …
     pub fn lookup_handler(
         &self,
         receiver: Value,
         selector: SymId,
     ) -> Option<(Value, FormId)> {
+        // 1. receiver's own handlers (Form receivers only — tagged
+        //    immediates have no own table).
+        if let Value::Form(id) = receiver {
+            if let Some(handler) = self.heap.get(id).handler(selector) {
+                return Some((handler, id));
+            }
+        }
+        // 2. walk the proto chain.
         let mut proto = self.proto_of(receiver);
         while let Value::Form(proto_id) = proto {
             let f = self.heap.get(proto_id);

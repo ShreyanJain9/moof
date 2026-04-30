@@ -56,6 +56,8 @@ pub struct ReadCtx<'a> {
     head_sym: SymId,
     tail_sym: SymId,
     quote_sym: SymId,
+    send_sym: SymId,
+    self_sym: SymId,
     /// the proto FormId to assign to every cons cell. typically
     /// `Value::Form(list_proto)`. phase-A clients that don't yet
     /// have a List proto pass `Value::Nil`.
@@ -69,10 +71,14 @@ impl<'a> ReadCtx<'a> {
         let head_sym = syms.intern("head");
         let tail_sym = syms.intern("tail");
         let quote_sym = syms.intern("quote");
+        let send_sym = syms.intern("__send__");
+        let self_sym = syms.intern("self");
         ReadCtx {
             head_sym,
             tail_sym,
             quote_sym,
+            send_sym,
+            self_sym,
             list_proto,
             heap,
             syms,
@@ -121,7 +127,31 @@ impl<'a> Cursor<'a> {
 
 /// `true` if `c` is a delimiter that terminates an atom.
 fn is_delim(c: u8) -> bool {
-    matches!(c, b'(' | b')' | b'\'' | b'"' | b';') || c.is_ascii_whitespace()
+    matches!(c, b'(' | b')' | b'[' | b']' | b'\'' | b'"' | b';') || c.is_ascii_whitespace()
+}
+
+/// `true` if every byte of `name` is a binary-operator character
+/// per `docs/syntax/sends-and-calls.md`. `name` must be non-empty.
+fn is_binary_op(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|b| {
+            matches!(
+                b,
+                b'+' | b'-'
+                    | b'*'
+                    | b'/'
+                    | b'<'
+                    | b'>'
+                    | b'='
+                    | b'!'
+                    | b'?'
+                    | b'|'
+                    | b'&'
+                    | b'~'
+                    | b'^'
+                    | b'%'
+            )
+        })
 }
 
 /// skip whitespace and `;`-line-comments.
@@ -177,6 +207,8 @@ fn read_form(c: &mut Cursor, ctx: &mut ReadCtx) -> Result<Value, ReadError> {
         None => Err(ReadError::at(c, "unexpected end of input")),
         Some(b'(') => read_list(c, ctx),
         Some(b')') => Err(ReadError::at(c, "unexpected `)`")),
+        Some(b'[') => read_send_bracket(c, ctx),
+        Some(b']') => Err(ReadError::at(c, "unexpected `]`")),
         Some(b'\'') => read_quote(c, ctx),
         Some(b'"') => read_string(c, ctx),
         Some(b'#') => read_hash(c, ctx),
@@ -210,6 +242,146 @@ fn read_quote(c: &mut Cursor, ctx: &mut ReadCtx) -> Result<Value, ReadError> {
     let inner = read_form(c, ctx)?;
     let quote_sym_v = Value::Sym(ctx.quote_sym);
     Ok(build_list(ctx, &[quote_sym_v, inner]))
+}
+
+/// `[recv sel args…]` — smalltalk-flavored send.
+///
+/// shapes (`docs/syntax/brackets.md`):
+/// - `[recv]` — error: too few elements.
+/// - `[recv selector]` — unary send.
+/// - `[recv OP arg]` — binary send (OP is operator-chars only).
+/// - `[recv selector arg arg …]` — positional send (selector is a
+///   bareword without trailing `:`).
+/// - `[recv kw1: arg1 kw2: arg2 …]` — multi-keyword send; selector
+///   is the concatenation of the keyword markers.
+///
+/// the result is a list `(__send__ recv 'selector arg…)` that the
+/// compiler recognizes and lowers to a `Send` opcode.
+fn read_send_bracket(c: &mut Cursor, ctx: &mut ReadCtx) -> Result<Value, ReadError> {
+    debug_assert_eq!(c.peek(), Some(b'['));
+    let start_line = c.line;
+    let start_col = c.col;
+    c.advance();
+    let mut elements = Vec::new();
+    loop {
+        skip_trivia(c);
+        match c.peek() {
+            None => {
+                return Err(ReadError {
+                    message: "unterminated send bracket".into(),
+                    line: start_line,
+                    col: start_col,
+                });
+            }
+            Some(b']') => {
+                c.advance();
+                return build_send_form(ctx, &elements, start_line, start_col);
+            }
+            _ => {
+                elements.push(read_form(c, ctx)?);
+            }
+        }
+    }
+}
+
+fn build_send_form(
+    ctx: &mut ReadCtx,
+    elements: &[Value],
+    line: usize,
+    col: usize,
+) -> Result<Value, ReadError> {
+    if elements.is_empty() {
+        return Err(ReadError {
+            message: "empty send bracket `[]`".into(),
+            line,
+            col,
+        });
+    }
+    if elements.len() == 1 {
+        return Err(ReadError {
+            message: "send needs at least a selector".into(),
+            line,
+            col,
+        });
+    }
+    let receiver = elements[0];
+    let rest = &elements[1..];
+
+    let first = rest[0];
+    let first_sym = first.as_sym().ok_or_else(|| ReadError {
+        message: "selector must be a symbol".into(),
+        line,
+        col,
+    })?;
+    let first_text = ctx.syms.resolve(first_sym).to_string();
+
+    // binary: `[a OP b]` — exactly 3 elements, middle is operator-only.
+    if is_binary_op(&first_text) && rest.len() == 2 {
+        return Ok(emit_send(ctx, receiver, first_sym, &rest[1..]));
+    }
+
+    // keyword: first selector ends in `:` — parse pairs.
+    if first_text.ends_with(':') {
+        return parse_keyword_send(ctx, receiver, rest, line, col);
+    }
+
+    // unary or positional: first sym is the selector, rest are args.
+    Ok(emit_send(ctx, receiver, first_sym, &rest[1..]))
+}
+
+fn parse_keyword_send(
+    ctx: &mut ReadCtx,
+    receiver: Value,
+    rest: &[Value],
+    line: usize,
+    col: usize,
+) -> Result<Value, ReadError> {
+    let mut sel_text = String::new();
+    let mut args = Vec::new();
+    let mut i = 0;
+    while i < rest.len() {
+        let kw = rest[i].as_sym().ok_or_else(|| ReadError {
+            message: "keyword send: expected `kw:` symbol".into(),
+            line,
+            col,
+        })?;
+        let kw_text = ctx.syms.resolve(kw).to_string();
+        if !kw_text.ends_with(':') {
+            return Err(ReadError {
+                message: format!("keyword `{}` must end with `:`", kw_text),
+                line,
+                col,
+            });
+        }
+        sel_text.push_str(&kw_text);
+        i += 1;
+        if i >= rest.len() {
+            return Err(ReadError {
+                message: format!("keyword `{}` needs an argument", kw_text),
+                line,
+                col,
+            });
+        }
+        args.push(rest[i]);
+        i += 1;
+    }
+    let sel_sym = ctx.syms.intern(&sel_text);
+    Ok(emit_send(ctx, receiver, sel_sym, &args))
+}
+
+/// build the marker-tagged list: `(__send__ recv 'sel args…)`.
+fn emit_send(
+    ctx: &mut ReadCtx,
+    receiver: Value,
+    selector: SymId,
+    args: &[Value],
+) -> Value {
+    let mut entries = Vec::with_capacity(args.len() + 3);
+    entries.push(Value::Sym(ctx.send_sym));
+    entries.push(receiver);
+    entries.push(Value::Sym(selector));
+    entries.extend_from_slice(args);
+    build_list(ctx, &entries)
 }
 
 /// build a moof list from a slice of values. constructs cons cells
@@ -309,7 +481,7 @@ fn read_string(c: &mut Cursor, ctx: &mut ReadCtx) -> Result<Value, ReadError> {
     }
 }
 
-/// read a bare atom: number or symbol.
+/// read a bare atom: number, symbol, or `.foo` self-send.
 fn read_atom(c: &mut Cursor, ctx: &mut ReadCtx) -> Result<Value, ReadError> {
     let start_line = c.line;
     let start_col = c.col;
@@ -330,6 +502,15 @@ fn read_atom(c: &mut Cursor, ctx: &mut ReadCtx) -> Result<Value, ReadError> {
     }
     if text == "nil" {
         return Ok(Value::Nil);
+    }
+    // `.foo` shorthand: substitutes `[self foo]`. lowered to a
+    // send form like `[…]` does — `(__send__ self 'foo)`.
+    // (`docs/syntax/sigils.md`.)
+    if let Some(rest) = text.strip_prefix('.') {
+        if !rest.is_empty() && rest != "." {
+            let foo_sym = ctx.syms.intern(rest);
+            return Ok(emit_send(ctx, Value::Sym(ctx.self_sym), foo_sym, &[]));
+        }
     }
     // numeric? either pure decimal/+/- prefix, or 0x/0b/0o.
     if let Some(v) = try_parse_number(&text) {
