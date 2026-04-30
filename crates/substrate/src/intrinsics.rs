@@ -2259,6 +2259,31 @@ fn install_globals(w: &mut World) {
     // (list a b c) — variadic list constructor.
     install_global(w, "list", |world, _, args| Ok(world.make_list(args)));
 
+    // (append xs ys …) — concatenate lists left-to-right. used by
+    // quasiquote splicing. (append) → '(); (append xs) → xs.
+    install_global(w, "append", |world, _, args| {
+        let mut out: Vec<Value> = Vec::new();
+        let head_sym = world.intern("head");
+        let tail_sym = world.intern("tail");
+        for &arg in args {
+            let mut cur = arg;
+            while let Some(fid) = cur.as_form_id() {
+                let f = world.heap.get(fid);
+                if f.proto != Value::Form(world.protos.list) {
+                    break;
+                }
+                let head = f.slot(head_sym);
+                let tail = f.slot(tail_sym);
+                if head.is_nil() && tail.is_nil() {
+                    break;
+                }
+                out.push(head);
+                cur = tail;
+            }
+        }
+        Ok(world.make_list(&out))
+    });
+
     // ── substrate metaprogramming ───────────────────────────────
     //
     // these cross the moldable-substrate boundary: they read or

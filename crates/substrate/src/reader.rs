@@ -57,6 +57,9 @@ pub struct ReadCtx<'a> {
     head_sym: SymId,
     tail_sym: SymId,
     quote_sym: SymId,
+    quasiquote_sym: SymId,
+    unquote_sym: SymId,
+    unquote_splicing_sym: SymId,
     send_sym: SymId,
     self_sym: SymId,
     bytes_sym: SymId,
@@ -89,6 +92,9 @@ impl<'a> ReadCtx<'a> {
         let head_sym = syms.intern("head");
         let tail_sym = syms.intern("tail");
         let quote_sym = syms.intern("quote");
+        let quasiquote_sym = syms.intern("quasiquote");
+        let unquote_sym = syms.intern("unquote");
+        let unquote_splicing_sym = syms.intern("unquote-splicing");
         let send_sym = syms.intern("__send__");
         let self_sym = syms.intern("self");
         let bytes_sym = syms.intern("bytes");
@@ -101,6 +107,9 @@ impl<'a> ReadCtx<'a> {
             head_sym,
             tail_sym,
             quote_sym,
+            quasiquote_sym,
+            unquote_sym,
+            unquote_splicing_sym,
             send_sym,
             self_sym,
             bytes_sym,
@@ -161,7 +170,16 @@ impl<'a> Cursor<'a> {
 fn is_delim(c: u8) -> bool {
     matches!(
         c,
-        b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'\'' | b'"' | b';'
+        b'(' | b')'
+            | b'['
+            | b']'
+            | b'{'
+            | b'}'
+            | b'\''
+            | b'"'
+            | b';'
+            | b'`'
+            | b','
     ) || c.is_ascii_whitespace()
 }
 
@@ -263,6 +281,8 @@ fn read_form(c: &mut Cursor, ctx: &mut ReadCtx) -> Result<Value, ReadError> {
         Some(b'{') => read_object_literal(c, ctx),
         Some(b'}') => Err(ReadError::at(c, "unexpected `}`")),
         Some(b'\'') => read_quote(c, ctx),
+        Some(b'`') => read_quasiquote(c, ctx),
+        Some(b',') => read_unquote(c, ctx),
         Some(b'"') => read_string(c, ctx),
         Some(b'#') => read_hash(c, ctx),
         _ => read_atom(c, ctx),
@@ -295,6 +315,32 @@ fn read_quote(c: &mut Cursor, ctx: &mut ReadCtx) -> Result<Value, ReadError> {
     let inner = read_form(c, ctx)?;
     let quote_sym_v = Value::Sym(ctx.quote_sym);
     Ok(build_list(ctx, &[quote_sym_v, inner]))
+}
+
+/// `` `expr `` ⇒ `(quasiquote expr)`.
+fn read_quasiquote(c: &mut Cursor, ctx: &mut ReadCtx) -> Result<Value, ReadError> {
+    debug_assert_eq!(c.peek(), Some(b'`'));
+    c.advance();
+    let inner = read_form(c, ctx)?;
+    let qq_sym_v = Value::Sym(ctx.quasiquote_sym);
+    Ok(build_list(ctx, &[qq_sym_v, inner]))
+}
+
+/// `,expr` ⇒ `(unquote expr)`. `,@expr` ⇒ `(unquote-splicing expr)`.
+fn read_unquote(c: &mut Cursor, ctx: &mut ReadCtx) -> Result<Value, ReadError> {
+    debug_assert_eq!(c.peek(), Some(b','));
+    c.advance();
+    let splicing = matches!(c.peek(), Some(b'@'));
+    if splicing {
+        c.advance();
+    }
+    let inner = read_form(c, ctx)?;
+    let head_sym_v = Value::Sym(if splicing {
+        ctx.unquote_splicing_sym
+    } else {
+        ctx.unquote_sym
+    });
+    Ok(build_list(ctx, &[head_sym_v, inner]))
 }
 
 /// `[recv sel args…]` — smalltalk-flavored send, optionally with

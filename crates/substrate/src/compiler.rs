@@ -83,6 +83,9 @@ struct Compiler<'a> {
     obj_method_sym: SymId,
     cascade_marker_sym: SymId,
     defmethod_sym: SymId,
+    quasiquote_sym: SymId,
+    unquote_sym: SymId,
+    unquote_splicing_sym: SymId,
 }
 
 impl<'a> Compiler<'a> {
@@ -110,6 +113,9 @@ impl<'a> Compiler<'a> {
         let obj_method_sym = world.intern("__method__");
         let cascade_marker_sym = world.intern("__cascade__");
         let defmethod_sym = world.intern("defmethod");
+        let quasiquote_sym = world.intern("quasiquote");
+        let unquote_sym = world.intern("unquote");
+        let unquote_splicing_sym = world.intern("unquote-splicing");
         Compiler {
             world,
             ops: Vec::new(),
@@ -140,6 +146,9 @@ impl<'a> Compiler<'a> {
             obj_method_sym,
             cascade_marker_sym,
             defmethod_sym,
+            quasiquote_sym,
+            unquote_sym,
+            unquote_splicing_sym,
         }
     }
 
@@ -288,6 +297,15 @@ impl<'a> Compiler<'a> {
             if s == self.quote_sym {
                 return self.compile_quote(&elems);
             }
+            if s == self.quasiquote_sym {
+                return self.compile_quasiquote(&elems, tail);
+            }
+            if s == self.unquote_sym {
+                return Err(self.err("unquote outside quasiquote"));
+            }
+            if s == self.unquote_splicing_sym {
+                return Err(self.err("unquote-splicing outside quasiquote"));
+            }
             if s == self.set_sym {
                 return self.compile_set(&elems);
             }
@@ -421,6 +439,131 @@ impl<'a> Compiler<'a> {
         let idx = self.add_const(elems[1]);
         self.emit(Op::LoadConst(idx));
         Ok(())
+    }
+
+    /// expand a quasiquoted form to a constructor expression that
+    /// builds the same shape at runtime, with `unquote` substituting
+    /// in evaluated values and `unquote-splicing` flattening lists
+    /// into the surrounding list. nesting bumps depth: an inner
+    /// `(quasiquote …)` increases depth, an inner `(unquote …)`
+    /// decreases it; only depth-1 unquotes are evaluated.
+    fn compile_quasiquote(
+        &mut self,
+        elems: &[Value],
+        tail: bool,
+    ) -> Result<(), RaiseError> {
+        if elems.len() != 2 {
+            return Err(self.err("quasiquote requires 1 arg: `expr"));
+        }
+        let expanded = self.expand_quasiquote(elems[1], 1)?;
+        self.compile_expr(expanded, tail)
+    }
+
+    /// recursive expander. returns a source-form that, when
+    /// compiled and run, reconstructs the quasiquoted shape with
+    /// unquote-substitutions filled in.
+    fn expand_quasiquote(
+        &mut self,
+        form: Value,
+        depth: u32,
+    ) -> Result<Value, RaiseError> {
+        // an atom (sym, int, etc.) → (quote atom).
+        let id = match form.as_form_id() {
+            Some(i) => i,
+            None => return Ok(self.quote_form(form)),
+        };
+        let f = self.world.heap.get(id);
+        // not a list (maybe a Form-as-value, table, etc.) → (quote form).
+        if f.proto != Value::Form(self.world.protos.list) {
+            return Ok(self.quote_form(form));
+        }
+
+        // empty list → (quote ())
+        let elems = match self.world.list_to_vec(form) {
+            Ok(v) => v,
+            Err(_) => return Ok(self.quote_form(form)),
+        };
+        if elems.is_empty() {
+            return Ok(self.quote_form(form));
+        }
+
+        // (unquote x) at depth 1 → x (evaluated).
+        // (unquote x) at deeper depth → (list 'unquote (qq x depth-1))
+        // (quasiquote x) → (list 'quasiquote (qq x depth+1))
+        if let Some(s) = elems[0].as_sym() {
+            if s == self.unquote_sym {
+                if elems.len() != 2 {
+                    return Err(self.err("unquote requires 1 arg"));
+                }
+                if depth == 1 {
+                    return Ok(elems[1]);
+                }
+                let inner = self.expand_quasiquote(elems[1], depth - 1)?;
+                let list_sym = self.world.intern("list");
+                let quoted_uq = self.quote_form(Value::Sym(self.unquote_sym));
+                return Ok(self
+                    .world
+                    .make_list(&[Value::Sym(list_sym), quoted_uq, inner]));
+            }
+            if s == self.unquote_splicing_sym && depth == 1 {
+                return Err(self.err("unquote-splicing not in a list context"));
+            }
+            if s == self.quasiquote_sym {
+                if elems.len() != 2 {
+                    return Err(self.err("quasiquote requires 1 arg"));
+                }
+                let inner = self.expand_quasiquote(elems[1], depth + 1)?;
+                let list_sym = self.world.intern("list");
+                let quoted_qq =
+                    self.quote_form(Value::Sym(self.quasiquote_sym));
+                return Ok(self
+                    .world
+                    .make_list(&[Value::Sym(list_sym), quoted_qq, inner]));
+            }
+        }
+
+        // general list: walk right-to-left, building (cons elem rest)
+        // or (append elem rest) for splicing.
+        let cons_sym = self.world.intern("cons");
+        let append_sym = self.world.intern("append");
+        let nil_list = self.world.make_list(&[]);
+        let mut acc = self.quote_form(nil_list);
+        for elem in elems.iter().rev() {
+            // (unquote-splicing y) at depth 1 → (append y acc)
+            if let Some(sub) = elem.as_form_id().and_then(|fid| {
+                let f2 = self.world.heap.get(fid);
+                if f2.proto != Value::Form(self.world.protos.list) {
+                    return None;
+                }
+                self.world.list_to_vec(*elem).ok()
+            }) {
+                if sub.len() == 2 {
+                    if let Some(s) = sub[0].as_sym() {
+                        if s == self.unquote_splicing_sym && depth == 1 {
+                            // acc = (append y acc)
+                            acc = self.world.make_list(&[
+                                Value::Sym(append_sym),
+                                sub[1],
+                                acc,
+                            ]);
+                            continue;
+                        }
+                    }
+                }
+            }
+            // default: acc = (cons (qq elem) acc)
+            let qe = self.expand_quasiquote(*elem, depth)?;
+            acc = self
+                .world
+                .make_list(&[Value::Sym(cons_sym), qe, acc]);
+        }
+        Ok(acc)
+    }
+
+    /// helper: build `(quote v)`.
+    fn quote_form(&mut self, v: Value) -> Value {
+        self.world
+            .make_list(&[Value::Sym(self.quote_sym), v])
     }
 
     fn compile_set(&mut self, elems: &[Value]) -> Result<(), RaiseError> {
