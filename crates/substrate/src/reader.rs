@@ -189,7 +189,17 @@ fn is_binary_op(name: &str) -> bool {
         })
 }
 
-/// skip whitespace and `;`-line-comments.
+/// skip whitespace and comments.
+///
+/// per `docs/syntax/literals.md`:
+/// - `;;` line comment
+/// - `;:` doc comment (treated as line comment for now)
+/// - `;~` scratch / fixme annotation
+///
+/// a bare `;` is *not* a comment — it's reserved as a syntactic
+/// separator (cascade in `[…]`, etc). so we only consume `;` when
+/// followed by `;`, `:`, or `~`. otherwise the `;` is left for
+/// the caller.
 fn skip_trivia(c: &mut Cursor) {
     loop {
         match c.peek() {
@@ -197,6 +207,12 @@ fn skip_trivia(c: &mut Cursor) {
                 c.advance();
             }
             Some(b';') => {
+                // is this a comment? requires `;` followed by `;`,
+                // `:`, or `~`.
+                let next = c.bytes.get(c.pos + 1).copied();
+                if !matches!(next, Some(b';') | Some(b':') | Some(b'~')) {
+                    return;
+                }
                 // skip until end-of-line
                 while let Some(b) = c.peek() {
                     if b == b'\n' {
@@ -281,70 +297,105 @@ fn read_quote(c: &mut Cursor, ctx: &mut ReadCtx) -> Result<Value, ReadError> {
     Ok(build_list(ctx, &[quote_sym_v, inner]))
 }
 
-/// `[recv sel args…]` — smalltalk-flavored send.
+/// `[recv sel args…]` — smalltalk-flavored send, optionally with
+/// cascades.
 ///
 /// shapes (`docs/syntax/brackets.md`):
 /// - `[recv]` — error: too few elements.
 /// - `[recv selector]` — unary send.
 /// - `[recv OP arg]` — binary send (OP is operator-chars only).
-/// - `[recv selector arg arg …]` — positional send (selector is a
-///   bareword without trailing `:`).
-/// - `[recv kw1: arg1 kw2: arg2 …]` — multi-keyword send; selector
-///   is the concatenation of the keyword markers.
+/// - `[recv selector arg arg …]` — positional send.
+/// - `[recv kw1: arg1 kw2: arg2 …]` — multi-keyword send.
+/// - `[recv a; b; c: x]` — cascade: send `:a`, `:b`, `:c: x` to
+///   `recv` in order. the cascade returns `recv` itself.
 ///
-/// the result is a list `(__send__ recv 'selector arg…)` that the
-/// compiler recognizes and lowers to a `Send` opcode.
+/// for non-cascade sends, emits `(__send__ recv 'selector arg…)`.
+/// for cascades, emits `(__cascade__ recv (sel args…) …)`.
 fn read_send_bracket(c: &mut Cursor, ctx: &mut ReadCtx) -> Result<Value, ReadError> {
     debug_assert_eq!(c.peek(), Some(b'['));
     let start_line = c.line;
     let start_col = c.col;
     c.advance();
-    let mut elements = Vec::new();
+
+    // first element is the receiver.
+    skip_trivia(c);
+    if c.peek() == Some(b']') {
+        return Err(ReadError {
+            message: "empty send bracket `[]`".into(),
+            line: start_line,
+            col: start_col,
+        });
+    }
+    let receiver = read_form(c, ctx)?;
+
+    // collect segments (selector + args), separated by `;`. one
+    // segment = the rest of a normal send; multiple = cascade.
+    let mut segments: Vec<(SymId, Vec<Value>)> = Vec::new();
     loop {
-        skip_trivia(c);
-        match c.peek() {
-            None => {
+        let mut elems: Vec<Value> = Vec::new();
+        loop {
+            skip_trivia(c);
+            match c.peek() {
+                None => {
+                    return Err(ReadError {
+                        message: "unterminated send bracket".into(),
+                        line: start_line,
+                        col: start_col,
+                    });
+                }
+                Some(b']') => break,
+                Some(b';') => {
+                    c.advance();
+                    break;
+                }
+                _ => {
+                    elems.push(read_form(c, ctx)?);
+                }
+            }
+        }
+        if elems.is_empty() {
+            if segments.is_empty() {
                 return Err(ReadError {
-                    message: "unterminated send bracket".into(),
+                    message: "send needs at least a selector".into(),
+                    line: start_line,
+                    col: start_col,
+                });
+            } else {
+                return Err(ReadError {
+                    message: "empty cascade segment after `;`".into(),
                     line: start_line,
                     col: start_col,
                 });
             }
-            Some(b']') => {
-                c.advance();
-                return build_send_form(ctx, &elements, start_line, start_col);
-            }
-            _ => {
-                elements.push(read_form(c, ctx)?);
-            }
         }
+        let (sel, args) = decode_send_segment(ctx, &elems, start_line, start_col)?;
+        segments.push((sel, args));
+
+        // closing `]` ends the bracket.
+        if c.peek() == Some(b']') {
+            c.advance();
+            break;
+        }
+        // else we just consumed a `;`; loop reads the next segment.
+    }
+
+    if segments.len() == 1 {
+        let (sel, args) = segments.pop().unwrap();
+        Ok(emit_send(ctx, receiver, sel, &args))
+    } else {
+        Ok(emit_cascade(ctx, receiver, &segments))
     }
 }
 
-fn build_send_form(
+/// decode a flat element list into a (selector, args) pair using
+/// the same shape rules as send-brackets.
+fn decode_send_segment(
     ctx: &mut ReadCtx,
     elements: &[Value],
     line: usize,
     col: usize,
-) -> Result<Value, ReadError> {
-    if elements.is_empty() {
-        return Err(ReadError {
-            message: "empty send bracket `[]`".into(),
-            line,
-            col,
-        });
-    }
-    if elements.len() == 1 {
-        return Err(ReadError {
-            message: "send needs at least a selector".into(),
-            line,
-            col,
-        });
-    }
-    let receiver = elements[0];
-    let rest = &elements[1..];
-
-    let first = rest[0];
+) -> Result<(SymId, Vec<Value>), ReadError> {
+    let first = elements[0];
     let first_sym = first.as_sym().ok_or_else(|| ReadError {
         message: "selector must be a symbol".into(),
         line,
@@ -352,58 +403,68 @@ fn build_send_form(
     })?;
     let first_text = ctx.syms.resolve(first_sym).to_string();
 
-    // binary: `[a OP b]` — exactly 3 elements, middle is operator-only.
-    if is_binary_op(&first_text) && rest.len() == 2 {
-        return Ok(emit_send(ctx, receiver, first_sym, &rest[1..]));
+    // binary: exactly 2 elements, first is operator-only.
+    if is_binary_op(&first_text) && elements.len() == 2 {
+        return Ok((first_sym, vec![elements[1]]));
     }
 
-    // keyword: first selector ends in `:` — parse pairs.
+    // keyword: first ends in `:`.
     if first_text.ends_with(':') {
-        return parse_keyword_send(ctx, receiver, rest, line, col);
+        let mut sel_text = String::new();
+        let mut args: Vec<Value> = Vec::new();
+        let mut i = 0;
+        while i < elements.len() {
+            let kw = elements[i].as_sym().ok_or_else(|| ReadError {
+                message: "keyword send: expected `kw:` symbol".into(),
+                line,
+                col,
+            })?;
+            let kw_text = ctx.syms.resolve(kw).to_string();
+            if !kw_text.ends_with(':') {
+                return Err(ReadError {
+                    message: format!("keyword `{}` must end with `:`", kw_text),
+                    line,
+                    col,
+                });
+            }
+            sel_text.push_str(&kw_text);
+            i += 1;
+            if i >= elements.len() {
+                return Err(ReadError {
+                    message: format!("keyword `{}` needs an argument", kw_text),
+                    line,
+                    col,
+                });
+            }
+            args.push(elements[i]);
+            i += 1;
+        }
+        let sel = ctx.syms.intern(&sel_text);
+        return Ok((sel, args));
     }
 
-    // unary or positional: first sym is the selector, rest are args.
-    Ok(emit_send(ctx, receiver, first_sym, &rest[1..]))
+    // unary or positional.
+    Ok((first_sym, elements[1..].to_vec()))
 }
 
-fn parse_keyword_send(
+/// emit a cascade marker: `(__cascade__ recv (sel arg…) …)`.
+fn emit_cascade(
     ctx: &mut ReadCtx,
     receiver: Value,
-    rest: &[Value],
-    line: usize,
-    col: usize,
-) -> Result<Value, ReadError> {
-    let mut sel_text = String::new();
-    let mut args = Vec::new();
-    let mut i = 0;
-    while i < rest.len() {
-        let kw = rest[i].as_sym().ok_or_else(|| ReadError {
-            message: "keyword send: expected `kw:` symbol".into(),
-            line,
-            col,
-        })?;
-        let kw_text = ctx.syms.resolve(kw).to_string();
-        if !kw_text.ends_with(':') {
-            return Err(ReadError {
-                message: format!("keyword `{}` must end with `:`", kw_text),
-                line,
-                col,
-            });
-        }
-        sel_text.push_str(&kw_text);
-        i += 1;
-        if i >= rest.len() {
-            return Err(ReadError {
-                message: format!("keyword `{}` needs an argument", kw_text),
-                line,
-                col,
-            });
-        }
-        args.push(rest[i]);
-        i += 1;
+    segments: &[(SymId, Vec<Value>)],
+) -> Value {
+    let cascade_sym = ctx.syms.intern("__cascade__");
+    let mut parts: Vec<Value> = Vec::with_capacity(2 + segments.len());
+    parts.push(Value::Sym(cascade_sym));
+    parts.push(receiver);
+    for (sel, args) in segments {
+        let mut seg_parts = Vec::with_capacity(args.len() + 1);
+        seg_parts.push(Value::Sym(*sel));
+        seg_parts.extend_from_slice(args);
+        let seg = build_list(ctx, &seg_parts);
+        parts.push(seg);
     }
-    let sel_sym = ctx.syms.intern(&sel_text);
-    Ok(emit_send(ctx, receiver, sel_sym, &args))
+    build_list(ctx, &parts)
 }
 
 /// build the marker-tagged list: `(__send__ recv 'sel args…)`.
@@ -1232,12 +1293,15 @@ mod tests {
 
     #[test]
     fn comments_are_ignored() {
+        // `;;` is the line-comment marker now (bare `;` is reserved
+        // for cascade separators inside `[…]`). docs/syntax/literals.md.
         let (mut heap, mut syms, mut foreign) = fresh();
         let mut c = ctx(&mut heap, &mut syms, &mut foreign);
         let v = read(
-            "; a comment\n  42  ; trailing comment\n",
+            ";; a comment\n  42  ;; trailing comment\n",
             &mut c,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(v, Value::Int(42));
     }
 
@@ -1388,7 +1452,7 @@ mod tests {
     fn empty_input_is_an_error() {
         let (mut heap, mut syms, mut foreign) = fresh();
         let mut c = ctx(&mut heap, &mut syms, &mut foreign);
-        let err = read("   ; just a comment\n", &mut c).unwrap_err();
+        let err = read("   ;; just a comment\n", &mut c).unwrap_err();
         assert!(err.message.contains("end of input"));
     }
 }

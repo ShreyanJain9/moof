@@ -81,6 +81,7 @@ struct Compiler<'a> {
     obj_marker_sym: SymId,
     obj_slot_sym: SymId,
     obj_method_sym: SymId,
+    cascade_marker_sym: SymId,
 }
 
 impl<'a> Compiler<'a> {
@@ -106,6 +107,7 @@ impl<'a> Compiler<'a> {
         let obj_marker_sym = world.intern("__obj__");
         let obj_slot_sym = world.intern("__slot__");
         let obj_method_sym = world.intern("__method__");
+        let cascade_marker_sym = world.intern("__cascade__");
         Compiler {
             world,
             ops: Vec::new(),
@@ -134,6 +136,7 @@ impl<'a> Compiler<'a> {
             obj_marker_sym,
             obj_slot_sym,
             obj_method_sym,
+            cascade_marker_sym,
         }
     }
 
@@ -302,6 +305,9 @@ impl<'a> Compiler<'a> {
             }
             if s == self.obj_marker_sym {
                 return self.compile_obj_literal(&elems);
+            }
+            if s == self.cascade_marker_sym {
+                return self.compile_cascade(&elems);
             }
         }
         // fn-call: `(callable arg…)`
@@ -712,6 +718,55 @@ impl<'a> Compiler<'a> {
     fn err(&mut self, msg: impl Into<String>) -> RaiseError {
         let kind = self.world.intern("compile-error");
         RaiseError::new(kind, msg)
+    }
+
+    /// `(__cascade__ <receiver> (<sel> <arg…>) …)` — emitted by the
+    /// reader for `[obj a; b; c: x]`. sends each segment to the
+    /// receiver in order; the cascade returns the *receiver* (per
+    /// smalltalk-80 semantics, not the last result).
+    ///
+    /// lowering: compile receiver once, push. for each segment,
+    /// `Dup` the receiver, push args, send, pop the result. when
+    /// all done the receiver is on top of the stack.
+    fn compile_cascade(&mut self, elems: &[Value]) -> Result<(), RaiseError> {
+        // elems[0] = __cascade__ marker
+        // elems[1] = receiver
+        // elems[2..] = segments (each is a list `(sel arg…)`)
+        if elems.len() < 3 {
+            return Err(self.err("__cascade__: need receiver + at least one segment"));
+        }
+        let receiver = elems[1];
+        // 1. compile receiver, leave it on the stack.
+        self.compile_expr(receiver, false)?;
+
+        // 2. for each segment: Dup, compile args, Send, Pop result.
+        for &seg in &elems[2..] {
+            let seg_elems = self.world.list_to_vec(seg).map_err(|_| {
+                self.err("__cascade__: segment must be a list")
+            })?;
+            if seg_elems.is_empty() {
+                return Err(self.err("__cascade__: empty segment"));
+            }
+            let sel = seg_elems[0].as_sym().ok_or_else(|| {
+                self.err("__cascade__: selector must be a symbol")
+            })?;
+            self.emit(Op::Dup);
+            for &a in &seg_elems[1..] {
+                self.compile_expr(a, false)?;
+            }
+            let argc = u8::try_from(seg_elems.len() - 1).map_err(|_| {
+                self.err("__cascade__: too many args (max 255)")
+            })?;
+            let ic = self.next_ic();
+            self.emit(Op::Send {
+                selector: sel,
+                argc,
+                ic_idx: ic,
+            });
+            self.emit(Op::Pop);
+        }
+        // receiver is now on top.
+        Ok(())
     }
 
     /// `(__obj__ <proto-sym> <entry…>)` — emitted by the reader for

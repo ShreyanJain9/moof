@@ -674,6 +674,52 @@ fn char_methods_work() {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// Cascades [obj a; b; c] — concepts/sends-and-calls.md
+// ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn cascade_sends_in_order_returns_receiver() {
+    let mut w = moof::new_world();
+    // table cascade. push three; expect the receiver back; verify
+    // length.
+    let r = moof::eval(
+        &mut w,
+        "(do (def t #[]) [t push: 1; push: 2; push: 3])",
+    )
+    .unwrap();
+    let length = w.intern("length");
+    assert_eq!(w.send(r, length, &[]).unwrap(), Value::Int(3));
+}
+
+#[test]
+fn cascade_with_multiple_setters() {
+    let mut w = moof::new_world();
+    let r = moof::eval(
+        &mut w,
+        "(do (def b {x: 0 y: 0}) [b x: 10; y: 20] [b x])",
+    )
+    .unwrap();
+    assert_eq!(r, Value::Int(10));
+    let r = moof::eval(&mut w, "[b y]").unwrap();
+    assert_eq!(r, Value::Int(20));
+}
+
+#[test]
+fn cascade_unary_and_keyword_mixed() {
+    // mix shapes within a cascade.
+    let mut w = moof::new_world();
+    let r = moof::eval(
+        &mut w,
+        "(do (def t #[]) [t push: 1; push: 2; push: 3; pop])",
+    )
+    .unwrap();
+    // pop returns 3 (the popped value), but cascade returns the
+    // receiver. so r is the table.
+    let length = w.intern("length");
+    assert_eq!(w.send(r, length, &[]).unwrap(), Value::Int(2));
+}
+
+// ─────────────────────────────────────────────────────────────────
 // Object literals — `concepts/objects-and-protos.md`,
 //                   `syntax/object-literals.md`
 // ─────────────────────────────────────────────────────────────────
