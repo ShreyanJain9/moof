@@ -1,146 +1,232 @@
 ;; bootstrap.moof — the substrate's first moof code.
 ;;
 ;; loaded by `moof::new_world()` after the rust-side intrinsics.
-;; installs handlers on the canonical protos. demonstrates the
-;; moldable-seed claim: methods that user code can read, override,
-;; and replace are written here, in moof, not in rust.
+;; installs *methods on protocols*, never free-function globals.
 ;;
-;; per process/docs-driven.md's stdlib rule, method handlers receive
-;; the receiver as `self` (not as an explicit param). closures-as-
-;; methods take *zero* params; the body uses `self`. matches the
-;; smalltalk dispatch story.
+;; per process/docs-driven.md's stdlib rule:
+;; - methods on protocols, not free functions.
+;; - the receiver is the subject. `[xs map: f]`, not `(map f xs)`.
+;; - the only globals here are *constructors* with no meaningful
+;;   receiver (`cons`, `list`) and *substrate metaprogramming*
+;;   primitives (`set-handler!`, `slot-set!`, etc., installed in
+;;   intrinsics.rs).
 ;;
-;; phase-A note: the full Iterable / Equatable / Comparable / Sized /
-;; etc. protocol framework arrives in phase A.10 once we have multi-
-;; clause patterns. for now, individual `(set-handler! Proto 'sel …)`
-;; calls demonstrate the same shape.
+;; the only free-function-shaped utilities user-facing are `cons`
+;; and `list`. everything else is a method on List, Nil-proto,
+;; Integer, etc.
 
 ;; ─────────────────────────────────────────────────────────────────
-;; List handlers — uses `self` for the receiver
+;; Enumerable: List + Nil-proto
+;;
+;; the *primitives* (already installed in intrinsics.rs) are
+;; :head, :tail, :empty?, :null?. everything below is *derived*
+;; — defined here in moof, where users can read and override.
+;;
+;; the lowering convention: each method body uses `self` as the
+;; receiver. the closure has zero formal params; positional args
+;; arrive in the args slice via Op::Send (substrate machinery).
 ;; ─────────────────────────────────────────────────────────────────
 
 (set-handler! List 'length
-  (fn ()
-    (if (null? self)
-        0
-        (+ 1 (length (tail self))))))
+  (fn () [1 + [.tail length]]))
 
-(set-handler! Nil-proto 'length (fn () 0))
+(set-handler! Nil-proto 'length
+  (fn () 0))
 
 (set-handler! List 'empty?
-  (fn () (null? self)))
+  (fn () #false))
 
-(set-handler! Nil-proto 'empty? (fn () #true))
+(set-handler! Nil-proto 'empty?
+  (fn () #true))
 
-(def append
-  (fn (xs ys)
-    (if (null? xs)
-        ys
-        (cons (head xs) (append (tail xs) ys)))))
+(set-handler! List 'non-empty?
+  (fn () #true))
 
+(set-handler! Nil-proto 'non-empty?
+  (fn () #false))
+
+;; (defn append: ys) — concatenate two lists.
+(set-handler! List 'append:
+  (fn (ys)
+    (cons .head [.tail append: ys])))
+
+(set-handler! Nil-proto 'append:
+  (fn (ys) ys))
+
+;; (reverse) — O(n²) naive; phase C's pattern matching gives us a
+;; cleaner accumulator-form.
 (set-handler! List 'reverse
   (fn ()
-    (if (null? self)
-        (quote ())
-        (append (reverse (tail self)) (cons (head self) (quote ()))))))
+    [[.tail reverse] append: (cons .head nil)]))
 
-(set-handler! Nil-proto 'reverse (fn () (quote ())))
+(set-handler! Nil-proto 'reverse
+  (fn () nil))
 
-;; ─────────────────────────────────────────────────────────────────
-;; List collection ops — exposed as free functions for now;
-;; phase A.10's protocols turn these into derived methods.
-;; ─────────────────────────────────────────────────────────────────
+;; (map: f) — element-wise.
+(set-handler! List 'map:
+  (fn (f)
+    (cons (f .head) [.tail map: f])))
 
-(def map
-  (fn (f xs)
-    (if (null? xs)
-        (quote ())
-        (cons (f (head xs)) (map f (tail xs))))))
+(set-handler! Nil-proto 'map:
+  (fn (f) nil))
 
-(def filter
-  (fn (pred xs)
-    (if (null? xs)
-        (quote ())
-        (if (pred (head xs))
-            (cons (head xs) (filter pred (tail xs)))
-            (filter pred (tail xs))))))
+(set-handler! List 'filter:
+  (fn (pred)
+    (if (pred .head)
+        (cons .head [.tail filter: pred])
+        [.tail filter: pred])))
 
-(def reduce
-  (fn (f init xs)
-    (if (null? xs)
-        init
-        (reduce f (f init (head xs)) (tail xs)))))
+(set-handler! Nil-proto 'filter:
+  (fn (pred) nil))
 
-(def each
-  (fn (f xs)
-    (if (null? xs)
+(set-handler! List 'reduce:from:
+  (fn (f init)
+    [.tail reduce: f from: (f init .head)]))
+
+(set-handler! Nil-proto 'reduce:from:
+  (fn (f init) init))
+
+(set-handler! List 'for-each:
+  (fn (blk)
+    (do
+      (blk .head)
+      [.tail for-each: blk])))
+
+(set-handler! Nil-proto 'for-each:
+  (fn (blk) nil))
+
+(set-handler! List 'take:
+  (fn (n)
+    (if [n = 0]
         nil
-        (do
-          (f (head xs))
-          (each f (tail xs))))))
+        (cons .head [.tail take: [n - 1]]))))
 
-(def take
-  (fn (n xs)
-    (if (= n 0)
-        (quote ())
-        (if (null? xs)
-            (quote ())
-            (cons (head xs) (take (- n 1) (tail xs)))))))
+(set-handler! Nil-proto 'take:
+  (fn (n) nil))
 
-(def drop
-  (fn (n xs)
-    (if (= n 0)
-        xs
-        (if (null? xs)
-            (quote ())
-            (drop (- n 1) (tail xs))))))
+(set-handler! List 'drop:
+  (fn (n)
+    (if [n = 0]
+        self
+        [.tail drop: [n - 1]])))
 
-(def any?
-  (fn (pred xs)
-    (if (null? xs)
-        #false
-        (if (pred (head xs))
-            #true
-            (any? pred (tail xs))))))
+(set-handler! Nil-proto 'drop:
+  (fn (n) nil))
 
-(def all?
-  (fn (pred xs)
-    (if (null? xs)
+(set-handler! List 'any?:
+  (fn (pred)
+    (if (pred .head)
         #true
-        (if (pred (head xs))
-            (all? pred (tail xs))
-            #false))))
+        [.tail any?: pred])))
 
-(def sum    (fn (xs) (reduce + 0 xs)))
-(def product (fn (xs) (reduce * 1 xs)))
+(set-handler! Nil-proto 'any?:
+  (fn (pred) #false))
+
+(set-handler! List 'all?:
+  (fn (pred)
+    (if (pred .head)
+        [.tail all?: pred]
+        #false)))
+
+(set-handler! Nil-proto 'all?:
+  (fn (pred) #true))
+
+(set-handler! List 'contains?:
+  (fn (x)
+    [self any?: (fn (y) [x = y])]))
+
+(set-handler! Nil-proto 'contains?:
+  (fn (x) #false))
+
+(set-handler! List 'sum
+  (fn () [self reduce: (fn (a b) [a + b]) from: 0]))
+
+(set-handler! Nil-proto 'sum
+  (fn () 0))
+
+(set-handler! List 'product
+  (fn () [self reduce: (fn (a b) [a * b]) from: 1]))
+
+(set-handler! Nil-proto 'product
+  (fn () 1))
+
+(set-handler! List 'count-where:
+  (fn (pred)
+    [[self filter: pred] length]))
+
+(set-handler! Nil-proto 'count-where:
+  (fn (pred) 0))
+
+(set-handler! List 'last
+  (fn ()
+    (if [.tail empty?]
+        .head
+        [.tail last])))
+
+(set-handler! Nil-proto 'last
+  (fn () nil))
+
+;; (range from: lo to: hi) — exclusive upper. accumulator-style.
+(set-handler! Integer 'upto:
+  (fn (hi)
+    (if [self >= hi]
+        nil
+        (cons self [[self + 1] upto: hi]))))
 
 ;; ─────────────────────────────────────────────────────────────────
-;; Integer handlers — derived predicates + arithmetic helpers
+;; Integer — predicates + arithmetic helpers
 ;; ─────────────────────────────────────────────────────────────────
 
 (set-handler! Integer 'zero?
-  (fn () (= self 0)))
+  (fn () [self = 0]))
 
 (set-handler! Integer 'positive?
-  (fn () (> self 0)))
+  (fn () [self > 0]))
 
 (set-handler! Integer 'negative?
-  (fn () (< self 0)))
+  (fn () [self < 0]))
 
 (set-handler! Integer 'abs
   (fn ()
-    (if (< self 0)
-        (- 0 self)
+    (if [self < 0]
+        [0 - self]
         self)))
 
 (set-handler! Integer 'square
-  (fn () (* self self)))
+  (fn () [self * self]))
+
+(set-handler! Integer 'min:
+  (fn (other)
+    (if [self < other] self other)))
+
+(set-handler! Integer 'max:
+  (fn (other)
+    (if [self > other] self other)))
+
+(set-handler! Integer 'between:and:
+  (fn (lo hi)
+    (if [self < lo]
+        #false
+        [self <= hi])))
+
+(set-handler! Integer 'even?
+  (fn () [[self - [[self / 2] * 2]] = 0]))
+
+(set-handler! Integer 'odd?
+  (fn () (if .even? #false #true)))
 
 ;; ─────────────────────────────────────────────────────────────────
-;; the protocol shape — coming in A.10
+;; Bool — convenience
 ;; ─────────────────────────────────────────────────────────────────
-;;
-;; the `(defprotocol …)` operative + `(implement … on …)` will land
-;; together with multi-clause patterns. their lowering will use
-;; `set-handler!` as the primitive — we already provide that knob.
-;; phase A.10's surface is sugar over what's working here today.
+
+(set-handler! Bool 'and:
+  (fn (other)
+    (if self other #false)))
+
+(set-handler! Bool 'or:
+  (fn (other)
+    (if self #true other)))
+
+;; phase A.10's defprotocol + implement operatives will be sugar
+;; over the set-handler! calls above. the substrate-level move is
+;; already operational; the surface syntax catches up.

@@ -70,6 +70,73 @@ impl World {
         }
     }
 
+    /// dispatch with an inline-cache fast path. used by `Op::Send`
+    /// from the bytecode interpreter; the cli's direct `World::send`
+    /// goes through the slow path.
+    ///
+    /// per `docs/laws/substrate-laws.md` L10: ICs check the cached
+    /// proto's generation; mismatch (because `set-handler!`
+    /// rewrote the table) triggers re-resolution.
+    pub fn send_via_ic(
+        &mut self,
+        receiver: Value,
+        selector: SymId,
+        args: &[Value],
+        chunk: FormId,
+        ic_idx: u16,
+    ) -> Result<Value, RaiseError> {
+        let receiver_proto = match self.proto_of(receiver) {
+            Value::Form(id) => id,
+            _ => {
+                // tagged-immediate proto chain bottoms unexpectedly
+                // — fall back to the slow path which will dnu.
+                return self.send(receiver, selector, args);
+            }
+        };
+        // attempt fast path
+        let cached = self
+            .chunk_ics
+            .get(&chunk)
+            .and_then(|ics| ics.get(ic_idx as usize))
+            .copied()
+            .unwrap_or_default();
+        if !cached.cached_proto.is_none()
+            && cached.cached_proto == receiver_proto
+            && cached.cached_generation == self.proto_generation(receiver_proto)
+        {
+            // cache hit — invoke the cached method directly.
+            // (we trust that `set-handler!` bumps the generation
+            // whenever the table changes.)
+            return self.invoke(cached.cached_method, receiver, args);
+        }
+        // cache miss or stale — slow path + populate.
+        match self.lookup_handler(receiver, selector) {
+            Some((handler, _defining)) => {
+                let method = handler.as_form_id().ok_or_else(|| {
+                    RaiseError::new(
+                        self.intern("dispatch-error"),
+                        "handler is not a method-Form",
+                    )
+                })?;
+                // populate the IC slot. we *only* cache against
+                // `receiver_proto`, not the defining proto — a
+                // future receiver with the same proto can hit
+                // again. invalidation triggers when receiver_proto
+                // generation bumps.
+                if let Some(ics) = self.chunk_ics.get_mut(&chunk) {
+                    if let Some(slot) = ics.get_mut(ic_idx as usize) {
+                        slot.cached_proto = receiver_proto;
+                        slot.cached_method = method;
+                        slot.cached_generation =
+                            self.proto_generations.get(&receiver_proto).copied().unwrap_or(0);
+                    }
+                }
+                self.invoke(method, receiver, args)
+            }
+            None => self.dispatch_dnu(receiver, selector, args),
+        }
+    }
+
     /// fall-through when no handler is found anywhere on the proto
     /// chain. constructs `(does-not-understand:with: <selector>
     /// <args>)` and re-dispatches. if `:does-not-understand:with:`
@@ -272,10 +339,10 @@ fn step(world: &mut World) -> Result<(), RaiseError> {
         Op::Send {
             selector,
             argc,
-            ic_idx: _,
+            ic_idx,
         } => {
             let (receiver, args) = pop_call_args(world, argc as usize)?;
-            let result = world.send(receiver, selector, &args)?;
+            let result = world.send_via_ic(receiver, selector, &args, chunk, ic_idx)?;
             world.vm.stack.push(result);
         }
         Op::TailSend { selector, argc } => {

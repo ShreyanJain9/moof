@@ -15,23 +15,27 @@ use moof::value::Value;
 
 #[test]
 fn forcing_function_arithmetic() {
+    // canonical moof: send-bracket binary on Integer.
     let mut w = moof::new_world();
-    assert_eq!(moof::eval(&mut w, "(+ 1 2)").unwrap(), Value::Int(3));
-    assert_eq!(moof::eval(&mut w, "(* 3 (+ 4 5))").unwrap(), Value::Int(27));
-    assert_eq!(moof::eval(&mut w, "(- 10 3)").unwrap(), Value::Int(7));
+    assert_eq!(moof::eval(&mut w, "[1 + 2]").unwrap(), Value::Int(3));
+    assert_eq!(
+        moof::eval(&mut w, "[3 * [4 + 5]]").unwrap(),
+        Value::Int(27)
+    );
+    assert_eq!(moof::eval(&mut w, "[10 - 3]").unwrap(), Value::Int(7));
 }
 
 #[test]
 fn forcing_function_proto_reflection() {
     // L1 + L6: every value has a proto reachable through reflection.
     let mut w = moof::new_world();
-    let r = moof::eval(&mut w, "(proto 5)").unwrap();
+    let r = moof::eval(&mut w, "[5 proto]").unwrap();
     assert_eq!(r, Value::Form(w.protos.integer));
-    let r = moof::eval(&mut w, "(proto #true)").unwrap();
+    let r = moof::eval(&mut w, "[#true proto]").unwrap();
     assert_eq!(r, Value::Form(w.protos.bool_));
-    let r = moof::eval(&mut w, "(proto nil)").unwrap();
+    let r = moof::eval(&mut w, "[nil proto]").unwrap();
     assert_eq!(r, Value::Form(w.protos.nil));
-    let r = moof::eval(&mut w, "(proto 'hello)").unwrap();
+    let r = moof::eval(&mut w, "['hello proto]").unwrap();
     assert_eq!(r, Value::Form(w.protos.symbol));
 }
 
@@ -39,11 +43,8 @@ fn forcing_function_proto_reflection() {
 fn forcing_function_source_reflection() {
     // L5: source is canonical; `[m source]` returns the source-form.
     let mut w = moof::new_world();
-    moof::eval(&mut w, "(def square (fn (x) (* x x)))").unwrap();
-    // closures inherit :source from the underlying chunk.
-    let _ = moof::eval(&mut w, "(inspect (proto square))").unwrap();
-    // verify `[square source]` round-trips a non-nil form.
-    let source = moof::eval(&mut w, "(inspect square)").unwrap();
+    moof::eval(&mut w, "(def square (fn (x) [x * x]))").unwrap();
+    let source = moof::eval(&mut w, "[square inspect]").unwrap();
     // inspect returns to-string (a sym); existence check is enough.
     assert!(source.as_sym().is_some());
 }
@@ -55,9 +56,9 @@ fn forcing_function_recursion() {
     moof::eval(
         &mut w,
         "(def fact (fn (n)
-            (if (= n 0)
+            (if [n = 0]
                 1
-                (* n (fact (- n 1))))))",
+                [n * (fact [n - 1])])))",
     )
     .unwrap();
     assert_eq!(moof::eval(&mut w, "(fact 0)").unwrap(), Value::Int(1));
@@ -69,11 +70,7 @@ fn forcing_function_recursion() {
 #[test]
 fn forcing_function_closure_captures() {
     let mut w = moof::new_world();
-    moof::eval(
-        &mut w,
-        "(def make-adder (fn (n) (fn (x) (+ x n))))",
-    )
-    .unwrap();
+    moof::eval(&mut w, "(def make-adder (fn (n) (fn (x) [x + n])))").unwrap();
     assert_eq!(
         moof::eval(&mut w, "((make-adder 5) 7)").unwrap(),
         Value::Int(12)
@@ -119,7 +116,7 @@ fn forcing_function_does_not_understand_for_unknown_selectors() {
 fn forcing_function_let_star_is_sequential() {
     let mut w = moof::new_world();
     assert_eq!(
-        moof::eval(&mut w, "(let* ((a 1) (b a) (c (+ a b))) c)").unwrap(),
+        moof::eval(&mut w, "(let* ((a 1) (b a) (c [a + b])) c)").unwrap(),
         Value::Int(2)
     );
 }
@@ -181,7 +178,7 @@ fn forcing_function_pipeline_works() {
     let mut w = moof::new_world();
     moof::eval(
         &mut w,
-        "(def sum-to (fn (n) (if (= n 0) 0 (+ n (sum-to (- n 1))))))",
+        "(def sum-to (fn (n) (if [n = 0] 0 [n + (sum-to [n - 1])])))",
     )
     .unwrap();
     assert_eq!(
@@ -200,12 +197,12 @@ fn forcing_function_pipeline_works() {
 fn bootstrap_list_length() {
     let mut w = moof::new_world();
     assert_eq!(
-        moof::eval(&mut w, "(length (list 1 2 3 4 5))").unwrap(),
+        moof::eval(&mut w, "[(list 1 2 3 4 5) length]").unwrap(),
         Value::Int(5)
     );
-    assert_eq!(moof::eval(&mut w, "(length nil)").unwrap(), Value::Int(0));
+    assert_eq!(moof::eval(&mut w, "[nil length]").unwrap(), Value::Int(0));
     assert_eq!(
-        moof::eval(&mut w, "(length (list))").unwrap(),
+        moof::eval(&mut w, "[(list) length]").unwrap(),
         Value::Int(0)
     );
 }
@@ -214,11 +211,11 @@ fn bootstrap_list_length() {
 fn bootstrap_list_empty() {
     let mut w = moof::new_world();
     assert_eq!(
-        moof::eval(&mut w, "(empty? nil)").unwrap(),
+        moof::eval(&mut w, "[nil empty?]").unwrap(),
         Value::Bool(true)
     );
     assert_eq!(
-        moof::eval(&mut w, "(empty? (list 1))").unwrap(),
+        moof::eval(&mut w, "[(list 1) empty?]").unwrap(),
         Value::Bool(false)
     );
 }
@@ -226,53 +223,107 @@ fn bootstrap_list_empty() {
 #[test]
 fn bootstrap_integer_predicates() {
     let mut w = moof::new_world();
-    assert_eq!(moof::eval(&mut w, "(zero? 0)").unwrap(), Value::Bool(true));
-    assert_eq!(moof::eval(&mut w, "(zero? 5)").unwrap(), Value::Bool(false));
+    assert_eq!(moof::eval(&mut w, "[0 zero?]").unwrap(), Value::Bool(true));
+    assert_eq!(moof::eval(&mut w, "[5 zero?]").unwrap(), Value::Bool(false));
     assert_eq!(
-        moof::eval(&mut w, "(positive? 7)").unwrap(),
+        moof::eval(&mut w, "[7 positive?]").unwrap(),
         Value::Bool(true)
     );
     assert_eq!(
-        moof::eval(&mut w, "(negative? -3)").unwrap(),
+        moof::eval(&mut w, "[-3 negative?]").unwrap(),
         Value::Bool(true)
     );
-    assert_eq!(moof::eval(&mut w, "(abs -42)").unwrap(), Value::Int(42));
-    assert_eq!(moof::eval(&mut w, "(square 9)").unwrap(), Value::Int(81));
+    assert_eq!(moof::eval(&mut w, "[-42 abs]").unwrap(), Value::Int(42));
+    assert_eq!(moof::eval(&mut w, "[9 square]").unwrap(), Value::Int(81));
+    assert_eq!(
+        moof::eval(&mut w, "[5 between: 1 and: 10]").unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        moof::eval(&mut w, "[5 between: 6 and: 10]").unwrap(),
+        Value::Bool(false)
+    );
+    assert_eq!(moof::eval(&mut w, "[5 min: 3]").unwrap(), Value::Int(3));
+    assert_eq!(moof::eval(&mut w, "[5 max: 3]").unwrap(), Value::Int(5));
 }
 
 #[test]
 fn bootstrap_higher_order_ops() {
+    // method-shape passes lambdas explicitly: `(fn (x) [x square])`
+    // rather than reaching for a free-function `square` (which
+    // would be a free-function-stdlib anti-pattern).
     let mut w = moof::new_world();
-    // (map square '(1 2 3 4 5)) → list of squares
-    let r = moof::eval(&mut w, "(length (map square (list 1 2 3 4 5)))").unwrap();
-    assert_eq!(r, Value::Int(5));
-    // sum of squares
+    // [xs map: f] — receiver is the subject.
     let r = moof::eval(
         &mut w,
-        "(reduce + 0 (map square (list 1 2 3 4 5)))",
+        "[[(list 1 2 3 4 5) map: (fn (x) [x square])] length]",
+    )
+    .unwrap();
+    assert_eq!(r, Value::Int(5));
+    // sum of squares (via :sum derived method, which uses :reduce:from:)
+    let r = moof::eval(
+        &mut w,
+        "[[(list 1 2 3 4 5) map: (fn (x) [x square])] sum]",
     )
     .unwrap();
     assert_eq!(r, Value::Int(55));
     // filter positive
     let r = moof::eval(
         &mut w,
-        "(length (filter positive? (list -2 -1 0 1 2)))",
+        "[[(list -2 -1 0 1 2) filter: (fn (x) [x positive?])] length]",
     )
     .unwrap();
     assert_eq!(r, Value::Int(2));
     // reverse
-    let r = moof::eval(&mut w, "(head (reverse (list 1 2 3)))").unwrap();
+    let r = moof::eval(&mut w, "[[(list 1 2 3) reverse] head]").unwrap();
     assert_eq!(r, Value::Int(3));
     // take
     let r = moof::eval(
         &mut w,
-        "(length (take 3 (list 1 2 3 4 5)))",
+        "[[(list 1 2 3 4 5) take: 3] length]",
     )
     .unwrap();
     assert_eq!(r, Value::Int(3));
-    // sum
-    let r = moof::eval(&mut w, "(sum (list 1 2 3 4 5))").unwrap();
-    assert_eq!(r, Value::Int(15));
+    // contains?
+    assert_eq!(
+        moof::eval(&mut w, "[(list 1 2 3) contains?: 2]").unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        moof::eval(&mut w, "[(list 1 2 3) contains?: 9]").unwrap(),
+        Value::Bool(false)
+    );
+}
+
+#[test]
+fn bootstrap_no_free_function_predicates() {
+    // confirm `positive?` and `square` are NOT free-function globals.
+    // they're methods on Integer; user code passes a lambda
+    // explicitly when treating them as values.
+    let mut w = moof::new_world();
+    for forbidden in [
+        "positive?",
+        "negative?",
+        "zero?",
+        "abs",
+        "square",
+        "map",
+        "filter",
+        "reduce",
+        "length",
+        "empty?",
+    ] {
+        let s = w.intern(forbidden);
+        assert!(
+            w.env_lookup(w.global_env, s).is_none(),
+            "`{}` should not be a free-function global",
+            forbidden
+        );
+    }
+    // via send: yes.
+    let positive_sym = w.intern("positive?");
+    let r = w.send(Value::Int(7), positive_sym, &[]).unwrap();
+    assert_eq!(r, Value::Bool(true));
 }
 
 #[test]
@@ -280,22 +331,15 @@ fn bootstrap_set_handler_works_at_runtime() {
     // user code can install new handlers on any proto at runtime.
     // the moldable-seed claim, made operational.
     let mut w = moof::new_world();
-    // Integer doesn't have :double yet.
-    let err = moof::eval(&mut w, "(.double 5)").unwrap_err();
-    assert!(err.message.contains("unbound") || err.message.contains("does not understand"));
-    // install :double on Integer.
-    moof::eval(
-        &mut w,
-        "(set-handler! Integer 'double (fn () (* self 2)))",
-    )
-    .unwrap();
-    // also expose as a global dispatcher manually:
-    // since `(.double 5)` doesn't compile (`.foo` isn't reader sugar
-    // yet), we test via direct send:
-    let double_sym = w.intern("double");
+    // Integer doesn't have :triple yet.
+    let triple_sym = w.intern("triple");
+    let err = w.send(Value::Int(5), triple_sym, &[]).unwrap_err();
+    assert!(err.message.contains("does not understand"));
+    // install :triple on Integer.
+    moof::eval(&mut w, "(set-handler! Integer 'triple (fn () [self * 3]))").unwrap();
     assert_eq!(
-        w.send(Value::Int(5), double_sym, &[]).unwrap(),
-        Value::Int(10)
+        w.send(Value::Int(5), triple_sym, &[]).unwrap(),
+        Value::Int(15)
     );
 }
 
@@ -331,7 +375,7 @@ fn send_brackets_unary() {
         moof::eval(&mut w, "[(list 1 2 3) length]").unwrap(),
         Value::Int(3)
     );
-    assert_eq!(moof::eval(&mut w, "[(- 0 7) abs]").unwrap(), Value::Int(7));
+    assert_eq!(moof::eval(&mut w, "[[0 - 7] abs]").unwrap(), Value::Int(7));
 }
 
 #[test]
@@ -433,4 +477,56 @@ fn fact_via_send_brackets() {
     )
     .unwrap();
     assert_eq!(r, Value::Int(479001600));
+}
+
+// ─────────────────────────────────────────────────────────────────
+// inline cache verification — the corner-cut that's now uncut.
+// ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn initialize_runs_on_new() {
+    // [Proto new] sends :initialize. user override fires.
+    let mut w = moof::new_world();
+    moof::eval(
+        &mut w,
+        "(do
+            (defproto Counter
+              (handlers
+                (initialize) (slot-set! self (quote count) 100)
+                (count) (slot self (quote count))))
+            [[Counter new] count])",
+    )
+    .unwrap();
+    let r = moof::eval(&mut w, "[[Counter new] count]").unwrap();
+    assert_eq!(r, Value::Int(100));
+}
+
+#[test]
+fn inline_cache_invalidates_on_set_handler() {
+    // a tight loop that calls the same method many times. the IC
+    // caches after first call. then set-handler! changes the
+    // method's body; the IC's generation no longer matches; next
+    // call re-resolves and gets the new behavior.
+    let mut w = moof::new_world();
+    moof::eval(
+        &mut w,
+        "(set-handler! Integer 'pet (fn () (quote dog)))",
+    )
+    .unwrap();
+    // first call: cache miss → populate.
+    let r = moof::eval(&mut w, "[5 pet]").unwrap();
+    assert_eq!(w.resolve(r.as_sym().unwrap()), "dog");
+    // second call: cache hit (same proto = Integer).
+    let r = moof::eval(&mut w, "[7 pet]").unwrap();
+    assert_eq!(w.resolve(r.as_sym().unwrap()), "dog");
+    // change behavior. set-handler! bumps the proto's generation;
+    // existing ICs are now stale.
+    moof::eval(
+        &mut w,
+        "(set-handler! Integer 'pet (fn () (quote cat)))",
+    )
+    .unwrap();
+    // third call: stale-IC re-resolves; new behavior takes effect.
+    let r = moof::eval(&mut w, "[5 pet]").unwrap();
+    assert_eq!(w.resolve(r.as_sym().unwrap()), "cat");
 }

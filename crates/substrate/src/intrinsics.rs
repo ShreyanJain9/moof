@@ -18,7 +18,7 @@
 //! everything else — `length`, `map`, `filter`, the protocol
 //! framework — lives in moof code at phase A.10.
 
-use crate::form::Form;
+use crate::form::{Form, FormId};
 use crate::sym::SymId;
 use crate::value::Value;
 use crate::world::{NativeFn, RaiseError, World};
@@ -493,15 +493,24 @@ fn install_object_reflection(w: &mut World) {
         w.send(self_, to_string, &[])
     });
 
-    w.install_native(w.protos.object, "new", |w, self_, _| {
-        // (Proto :new) → fresh instance.
+    w.install_native(w.protos.object, "new", |w, self_, _args| {
+        // (Proto :new) → fresh instance, then [self initialize].
         let proto_id = self_.as_form_id().ok_or_else(|| {
             RaiseError::new(w.intern("type-error"), ":new on non-Form proto")
         })?;
         let f = Form::with_proto(Value::Form(proto_id));
         let id = w.alloc(f);
-        Ok(Value::Form(id))
+        let instance = Value::Form(id);
+        // smalltalk-style: invoke :initialize on the new instance.
+        // Object's default :initialize is a no-op; user protos
+        // override.
+        let initialize = w.intern("initialize");
+        w.send(instance, initialize, &[])?;
+        Ok(instance)
     });
+
+    // default :initialize is a no-op. user protos override.
+    w.install_native(w.protos.object, "initialize", |_, self_, _| Ok(self_));
 
     // default does-not-understand:with: raises. user code can
     // override on any proto.
@@ -550,42 +559,114 @@ fn fmt_short(w: &World, v: Value) -> String {
 // `[$out say: x]`) is the same at both phases.
 // ─────────────────────────────────────────────────────────────────
 
+/// kind tag for `Console`'s `:fd` ForeignHandle slot. lets the
+/// native `:emit:` distinguish a real fd-handle from any other
+/// foreign value the user might shove into the slot.
+const CONSOLE_FD_TAG: u32 = 0xC0_5E_FD_01;
+
+/// the rust-side state held by a Console fd ForeignHandle.
+///
+/// in phase A, we just remember whether to write to stdout or
+/// stderr — both are global file descriptors owned by the OS, so
+/// we don't need to free anything. when phase B's `os/console.mco`
+/// lands, this becomes a real `RawFd` with an `Owned` flag for
+/// fds that need closing on gc.
+struct ConsoleFd {
+    target: ConsoleTarget,
+}
+
+#[derive(Copy, Clone)]
+enum ConsoleTarget {
+    Stdout,
+    Stderr,
+}
+
+unsafe extern "C" fn console_fd_dtor(ptr: *mut std::ffi::c_void) {
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: we minted this ptr from `Box::into_raw` in
+    // `make_primordial_console`. it's a valid `Box<ConsoleFd>`
+    // and the gc owns it. boxed drop is the right cleanup.
+    let _ = unsafe { Box::from_raw(ptr as *mut ConsoleFd) };
+}
+
+fn make_primordial_console(w: &mut World, console_proto: FormId, target: ConsoleTarget) -> FormId {
+    let fd_box = Box::new(ConsoleFd { target });
+    let ptr = Box::into_raw(fd_box) as *mut std::ffi::c_void;
+    let handle_id = w.foreign.alloc(crate::foreign::ForeignHandle {
+        ptr,
+        destructor: Some(console_fd_dtor),
+        tag: CONSOLE_FD_TAG,
+    });
+    let fd_sym = w.intern("fd");
+    let label_sym = w.intern("label");
+    let label_text = match target {
+        ConsoleTarget::Stdout => "stdout",
+        ConsoleTarget::Stderr => "stderr",
+    };
+    let label_value = Value::Sym(w.intern(label_text));
+
+    let mut form = Form::with_proto(Value::Form(console_proto));
+    form.slots.insert(fd_sym, Value::Foreign(handle_id));
+    form.slots.insert(label_sym, label_value);
+    w.alloc(form)
+}
+
 fn install_console_proto_and_caps(w: &mut World) {
     // allocate a Console proto inheriting from Object.
     let console_proto = w.alloc(Form::with_proto(Value::Form(w.protos.object)));
 
     // primitive methods (rust):
-    //   :emit:  — write bytes to fd. arg[0] must be a Sym whose
-    //             text is the bytes to emit.
-    //   :close  — no-op for stdout/stderr; future fds destruct via
-    //             ForeignHandle.
-    //   :next, :done? — these are write-only; raise.
+    //   :emit:  — write bytes to the fd held in self's :fd slot.
+    //   :close  — phase A: no-op (stdout/stderr are os-owned).
+    //   :next, :done? — these are write-only; raise on read attempt.
+    //
+    // the :fd slot holds a ForeignHandle (tag = CONSOLE_FD_TAG). we
+    // verify the tag before casting — guards against a user who
+    // forgot to call :initialize, or who shoved a different
+    // ForeignHandle into the slot.
     w.install_native(console_proto, "emit:", |w, self_, args| {
         use std::io::Write;
-        let label = self_.as_form_id().and_then(|id| {
-            let label_sym = w.intern("label");
-            w.heap.get(id).slot(label_sym).as_sym()
-        });
-        let label_text = label.map(|s| w.resolve(s).to_string());
+        let id = self_.as_form_id().ok_or_else(|| {
+            RaiseError::new(w.intern("type-error"), "emit: receiver is not a Form")
+        })?;
+        let fd_sym = w.intern("fd");
+        let fd_value = w.heap.get(id).slot(fd_sym);
+        let foreign_id = match fd_value {
+            Value::Foreign(fid) => fid,
+            _ => {
+                return Err(RaiseError::new(
+                    w.intern("dispatch-error"),
+                    "Console :fd slot is not a ForeignHandle (uninitialized?)",
+                ));
+            }
+        };
+        let handle = w.foreign.get(foreign_id);
+        if handle.tag != CONSOLE_FD_TAG {
+            return Err(RaiseError::new(
+                w.intern("type-error"),
+                "Console :fd has wrong ForeignHandle tag",
+            ));
+        }
+        // SAFETY: tag-check confirms this pointer was minted by
+        // make_primordial_console; cast back to ConsoleFd. the
+        // pointer is valid for the lifetime of the holding Form
+        // (gc invariant: handle outlives Form).
+        let target = unsafe { (*(handle.ptr as *const ConsoleFd)).target };
         let bytes_sym = match args.first().copied() {
             Some(Value::Sym(s)) => s,
             _ => {
                 return Err(RaiseError::new(
                     w.intern("type-error"),
-                    "emit: expects a symbol-payload (phase-A placeholder for String)",
+                    "emit: expects a symbol payload (phase-A placeholder for String)",
                 ));
             }
         };
         let text = w.resolve(bytes_sym).to_string();
-        let result = match label_text.as_deref() {
-            Some("stdout") => std::io::stdout().write_all(text.as_bytes()),
-            Some("stderr") => std::io::stderr().write_all(text.as_bytes()),
-            other => {
-                return Err(RaiseError::new(
-                    w.intern("dispatch-error"),
-                    format!("Console with unknown label `{:?}`", other),
-                ));
-            }
+        let result = match target {
+            ConsoleTarget::Stdout => std::io::stdout().write_all(text.as_bytes()),
+            ConsoleTarget::Stderr => std::io::stderr().write_all(text.as_bytes()),
         };
         result.map_err(|e| RaiseError::new(w.intern("io-error"), e.to_string()))?;
         Ok(Value::Nil)
@@ -627,18 +708,13 @@ fn install_console_proto_and_caps(w: &mut World) {
     });
     w.install_native(console_proto, "done?", |_, _, _| Ok(Value::Bool(false)));
 
-    // primordial $out, $err.
-    let stdout_label = w.intern("stdout");
-    let stderr_label = w.intern("stderr");
-    let label_sym = w.intern("label");
-
-    let mut out_form = Form::with_proto(Value::Form(console_proto));
-    out_form.slots.insert(label_sym, Value::Sym(stdout_label));
-    let out_id = w.alloc(out_form);
-
-    let mut err_form = Form::with_proto(Value::Form(console_proto));
-    err_form.slots.insert(label_sym, Value::Sym(stderr_label));
-    let err_id = w.alloc(err_form);
+    // primordial $out, $err — fd held in a real ForeignHandle.
+    // the supervisor (here: the substrate at boot) is the *only*
+    // place these are constructed. user code reaches them via
+    // env_lookup; cannot mint new Console instances pointing at
+    // stdout/stderr without supervisor authority.
+    let out_id = make_primordial_console(w, console_proto, ConsoleTarget::Stdout);
+    let err_id = make_primordial_console(w, console_proto, ConsoleTarget::Stderr);
 
     let global = w.global_env;
     let dollar_out = w.intern("$out");
@@ -646,7 +722,10 @@ fn install_console_proto_and_caps(w: &mut World) {
     w.env_bind(global, dollar_out, Value::Form(out_id));
     w.env_bind(global, dollar_err, Value::Form(err_id));
 
-    // also expose the proto by name so user code can later subclass it.
+    // expose the proto by name so user code can subclass.
+    // (`[Console new]` would yield a Console without an :fd slot;
+    // `:emit:` would raise. real fd capture lands in phase A.9
+    // when the mco loader exposes os-side primitives.)
     let console_name = w.intern("Console");
     w.env_bind(global, console_name, Value::Form(console_proto));
 }
@@ -655,49 +734,14 @@ fn install_console_proto_and_caps(w: &mut World) {
 // global callables
 // ─────────────────────────────────────────────────────────────────
 
-/// expand `global_dispatcher!("+")` into a `NativeFn` that, given
-/// args `[a, b, …]`, sends `:+` to `a` with `[b, …]` as args.
-///
-/// the macro yields a *bare* closure with no captures, which Rust
-/// coerces to `fn(_) -> _`. this is what makes it a `NativeFn`.
-macro_rules! global_dispatcher {
-    ($sel:literal) => {{
-        let f: NativeFn = |world, _self_, args| {
-            if args.is_empty() {
-                let kind = world.intern("arity");
-                return Err(RaiseError::new(
-                    kind,
-                    concat!("global `", $sel, "` needs at least 1 arg"),
-                ));
-            }
-            let sel = world.intern($sel);
-            world.send(args[0], sel, &args[1..])
-        };
-        f
-    }};
-}
-
 fn install_globals(w: &mut World) {
-    // arithmetic + comparison forwarders.
-    install_global(w, "+", global_dispatcher!("+"));
-    install_global(w, "-", global_dispatcher!("-"));
-    install_global(w, "*", global_dispatcher!("*"));
-    install_global(w, "/", global_dispatcher!("/"));
-    install_global(w, "<", global_dispatcher!("<"));
-    install_global(w, ">", global_dispatcher!(">"));
-    install_global(w, "<=", global_dispatcher!("<="));
-    install_global(w, ">=", global_dispatcher!(">="));
-    install_global(w, "=", global_dispatcher!("="));
-    install_global(w, "!=", global_dispatcher!("!="));
+    // moof discipline (process/docs-driven.md): free functions are
+    // reserved for *constructors with no meaningful receiver* and
+    // *substrate metaprogramming primitives*. user-data ops like
+    // `length`, `map`, `+` etc. are methods on the receiver.
 
-    // structural ops.
-    install_global(w, "head", global_dispatcher!("head"));
-    install_global(w, "tail", global_dispatcher!("tail"));
-    install_global(w, "null?", global_dispatcher!("null?"));
-    install_global(w, "to-string", global_dispatcher!("to-string"));
-    install_global(w, "not", global_dispatcher!("not"));
-
-    // (cons head tail) ≡ [tail cons: head] — tail is the receiver.
+    // (cons head tail) — list constructor with no meaningful
+    // receiver among args. lowers to `[tail cons: head]`.
     install_global(w, "cons", |world, _, args| {
         if args.len() != 2 {
             return Err(RaiseError::new(world.intern("arity"), "cons takes 2 args"));
@@ -706,26 +750,18 @@ fn install_globals(w: &mut World) {
         world.send(args[1], cons_sel, &[args[0]])
     });
 
-    // (list a b c) → '(a b c). builds a fresh list.
+    // (list a b c) — variadic list constructor.
     install_global(w, "list", |world, _, args| Ok(world.make_list(args)));
 
-    // (proto v) ≡ [v proto]. mostly for repl convenience.
-    install_global(w, "proto", global_dispatcher!("proto"));
-    install_global(w, "type-of", global_dispatcher!("proto"));
-    install_global(w, "identity", global_dispatcher!("identity"));
-    install_global(w, "inspect", global_dispatcher!("inspect"));
+    // ── substrate metaprogramming ───────────────────────────────
+    //
+    // these cross the moldable-substrate boundary: they read or
+    // mutate the heap's internal structure (slot tables, handler
+    // tables). we keep them as free functions because the action
+    // is "modify the substrate's view of this Form," not "send a
+    // message to a receiver." compare to e.g. `Object.defineProperty`
+    // in javascript — substrate-shaped, not OO-shaped.
 
-    // (length xs) — sends :length to the receiver.
-    install_global(w, "length", global_dispatcher!("length"));
-    install_global(w, "empty?", global_dispatcher!("empty?"));
-    install_global(w, "reverse", global_dispatcher!("reverse"));
-    install_global(w, "zero?", global_dispatcher!("zero?"));
-    install_global(w, "positive?", global_dispatcher!("positive?"));
-    install_global(w, "negative?", global_dispatcher!("negative?"));
-    install_global(w, "abs", global_dispatcher!("abs"));
-    install_global(w, "square", global_dispatcher!("square"));
-    // (slot v 'name) — read slot directly. useful before
-    // get-slot-method on every proto.
     install_global(w, "slot", |w, _, args| {
         if args.len() != 2 {
             return Err(RaiseError::new(w.intern("arity"), "(slot v 'name)"));
@@ -738,7 +774,6 @@ fn install_globals(w: &mut World) {
         })?;
         Ok(w.heap.get(id).slot(name))
     });
-    // (slot-set! v 'name value) — write slot.
     install_global(w, "slot-set!", |w, _, args| {
         if args.len() != 3 {
             return Err(RaiseError::new(
@@ -755,19 +790,14 @@ fn install_globals(w: &mut World) {
         w.heap.get_mut(id).slots.insert(name, args[2]);
         Ok(args[2])
     });
-    // (set-handler! Proto 'selector method-fn) — install a method
-    // on a proto's handler table. method-fn is typically a closure;
-    // it must answer `:call` (so any Method-shaped Form works).
-    //
-    // this is the moldable-substrate's moof-side install primitive.
-    // phase A.10's stdlib uses it to install protocol-derived
-    // methods on List, Integer, etc. without needing a defproto
-    // operative yet.
+    // (set-handler! Proto 'sel fn) — moldable-substrate primitive.
+    // bumps the proto's generation counter so existing inline
+    // caches re-resolve on next dispatch.
     install_global(w, "set-handler!", |w, _, args| {
         if args.len() != 3 {
             return Err(RaiseError::new(
                 w.intern("arity"),
-                "(set-handler! Proto 'selector method-fn)",
+                "(set-handler! Proto 'sel fn)",
             ));
         }
         let proto_id = args[0].as_form_id().ok_or_else(|| {
@@ -776,10 +806,10 @@ fn install_globals(w: &mut World) {
         let sel = args[1].as_sym().ok_or_else(|| {
             RaiseError::new(w.intern("type-error"), "set-handler! selector must be a symbol")
         })?;
-        w.heap
-            .get_mut(proto_id)
-            .handlers
-            .insert(sel, args[2]);
+        w.heap.get_mut(proto_id).handlers.insert(sel, args[2]);
+        // bump generation so existing ICs invalidate.
+        // (`docs/laws/substrate-laws.md` L10.)
+        w.bump_proto_generation(proto_id);
         Ok(args[2])
     });
 }
@@ -812,6 +842,15 @@ mod tests {
     }
 
     fn fresh() -> World {
+        // for tests that exercise stdlib methods (like :empty? on
+        // List), we need the full new_world() with bootstrap.moof
+        // loaded. tests of *intrinsics-only* behavior call new_bare().
+        crate::new_world()
+    }
+
+    fn fresh_bare() -> World {
+        // intrinsics-only — no bootstrap.moof. for tests that
+        // verify the rust-side intrinsic wiring directly.
         let mut w = World::new();
         install(&mut w);
         w
@@ -819,33 +858,34 @@ mod tests {
 
     #[test]
     fn arithmetic_works() {
+        // canonical moof form: send-bracket binary ops on Integer.
+        // free-function `(+ a b)` is an anti-pattern
+        // (`process/docs-driven.md` stdlib rule).
         let mut w = fresh();
-        assert_eq!(ev(&mut w, "(+ 1 2)").unwrap(), Value::Int(3));
-        assert_eq!(ev(&mut w, "(- 10 3)").unwrap(), Value::Int(7));
-        assert_eq!(ev(&mut w, "(* 4 5)").unwrap(), Value::Int(20));
-        assert_eq!(ev(&mut w, "(/ 20 4)").unwrap(), Value::Int(5));
+        assert_eq!(ev(&mut w, "[1 + 2]").unwrap(), Value::Int(3));
+        assert_eq!(ev(&mut w, "[10 - 3]").unwrap(), Value::Int(7));
+        assert_eq!(ev(&mut w, "[4 * 5]").unwrap(), Value::Int(20));
+        assert_eq!(ev(&mut w, "[20 / 4]").unwrap(), Value::Int(5));
     }
 
     #[test]
     fn nested_arithmetic() {
         let mut w = fresh();
-        assert_eq!(ev(&mut w, "(* 3 (+ 4 5))").unwrap(), Value::Int(27));
+        assert_eq!(ev(&mut w, "[3 * [4 + 5]]").unwrap(), Value::Int(27));
     }
 
     #[test]
     fn comparison_works() {
         let mut w = fresh();
-        assert_eq!(ev(&mut w, "(< 1 2)").unwrap(), Value::Bool(true));
-        assert_eq!(ev(&mut w, "(< 2 1)").unwrap(), Value::Bool(false));
-        assert_eq!(ev(&mut w, "(= 5 5)").unwrap(), Value::Bool(true));
-        assert_eq!(ev(&mut w, "(>= 5 5)").unwrap(), Value::Bool(true));
-        assert_eq!(ev(&mut w, "(!= 5 6)").unwrap(), Value::Bool(true));
+        assert_eq!(ev(&mut w, "[1 < 2]").unwrap(), Value::Bool(true));
+        assert_eq!(ev(&mut w, "[2 < 1]").unwrap(), Value::Bool(false));
+        assert_eq!(ev(&mut w, "[5 = 5]").unwrap(), Value::Bool(true));
+        assert_eq!(ev(&mut w, "[5 >= 5]").unwrap(), Value::Bool(true));
+        assert_eq!(ev(&mut w, "[5 != 6]").unwrap(), Value::Bool(true));
     }
 
     #[test]
     fn integer_send_directly() {
-        // bypass the global; send to the integer directly via :+
-        // on the Integer proto.
         let mut w = fresh();
         let plus = w.intern("+");
         assert_eq!(
@@ -855,9 +895,9 @@ mod tests {
     }
 
     #[test]
-    fn proto_returns_proto_form() {
+    fn proto_via_send_bracket() {
         let mut w = fresh();
-        let r = ev(&mut w, "(proto 5)").unwrap();
+        let r = ev(&mut w, "[5 proto]").unwrap();
         assert_eq!(r, Value::Form(w.protos.integer));
     }
 
@@ -865,7 +905,7 @@ mod tests {
     fn identity_returns_form_id() {
         let mut w = fresh();
         // tagged immediates have identity 0
-        assert_eq!(ev(&mut w, "(identity 5)").unwrap(), Value::Int(0));
+        assert_eq!(ev(&mut w, "[5 identity]").unwrap(), Value::Int(0));
         // a fresh list has a real id
         let v = ev(&mut w, "(list 1 2 3)").unwrap();
         let id = v.as_form_id().unwrap();
@@ -890,19 +930,19 @@ mod tests {
     }
 
     #[test]
-    fn null_check_works() {
+    fn empty_check_works() {
         let mut w = fresh();
-        assert_eq!(ev(&mut w, "(null? nil)").unwrap(), Value::Bool(true));
-        assert_eq!(ev(&mut w, "(null? (list 1))").unwrap(), Value::Bool(false));
-        // (null? 5) — Integer doesn't have :null?, so dnu raises.
-        let err = ev(&mut w, "(null? 5)").unwrap_err();
-        assert!(err.message.contains("does not understand"));
+        assert_eq!(ev(&mut w, "[nil empty?]").unwrap(), Value::Bool(true));
+        assert_eq!(
+            ev(&mut w, "[(list 1) empty?]").unwrap(),
+            Value::Bool(false)
+        );
     }
 
     #[test]
     fn integer_to_string() {
         let mut w = fresh();
-        let r = ev(&mut w, "(to-string 42)").unwrap();
+        let r = ev(&mut w, "[42 to-string]").unwrap();
         assert_eq!(w.resolve(r.as_sym().unwrap()), "42");
     }
 
@@ -911,21 +951,19 @@ mod tests {
         let mut w = fresh();
         ev(&mut w, "(def x 10)").unwrap();
         ev(&mut w, "(def y 20)").unwrap();
-        assert_eq!(ev(&mut w, "(+ x y)").unwrap(), Value::Int(30));
+        assert_eq!(ev(&mut w, "[x + y]").unwrap(), Value::Int(30));
     }
 
     #[test]
     fn factorial_works_end_to_end() {
-        // the reflection of phase-A's forcing function: a real
-        // recursive definition compiles and runs and produces a
-        // correct answer.
+        // recursion via send-brackets; the receiver-as-self pattern.
         let mut w = fresh();
         ev(
             &mut w,
             "(def fact (fn (n)
-                (if (= n 0)
+                (if [n = 0]
                     1
-                    (* n (fact (- n 1))))))",
+                    [n * (fact [n - 1])])))",
         )
         .unwrap();
         assert_eq!(ev(&mut w, "(fact 0)").unwrap(), Value::Int(1));
@@ -939,7 +977,7 @@ mod tests {
         let mut w = fresh();
         ev(
             &mut w,
-            "(def make-adder (fn (n) (fn (x) (+ x n))))",
+            "(def make-adder (fn (n) (fn (x) [x + n])))",
         )
         .unwrap();
         assert_eq!(ev(&mut w, "((make-adder 5) 7)").unwrap(), Value::Int(12));
@@ -950,7 +988,7 @@ mod tests {
     fn let_with_arithmetic() {
         let mut w = fresh();
         assert_eq!(
-            ev(&mut w, "(let ((a 3) (b 4)) (+ a b))").unwrap(),
+            ev(&mut w, "(let ((a 3) (b 4)) [a + b])").unwrap(),
             Value::Int(7)
         );
     }
@@ -1015,7 +1053,7 @@ mod tests {
     #[test]
     fn integer_inspect_falls_through_to_to_string() {
         let mut w = fresh();
-        let r = ev(&mut w, "(inspect 42)").unwrap();
+        let r = ev(&mut w, "[42 inspect]").unwrap();
         assert_eq!(w.resolve(r.as_sym().unwrap()), "42");
     }
 
@@ -1074,11 +1112,18 @@ mod tests {
 
     #[test]
     fn no_free_function_print_in_world() {
-        // the substrate symbol-table check from
-        // `process/docs-driven.md`'s capability rule. there must be
-        // no `print`, `println`, `puts` global binding.
+        // process/docs-driven.md's capability rule: no
+        // print/println/puts. *also* no map/filter/reduce/+/-/etc.
+        // — those are methods on the receiver, not free functions.
         let mut w = fresh();
-        for forbidden in ["print", "println", "puts", "simulated_println"] {
+        let forbidden_io = ["print", "println", "puts", "simulated_println"];
+        let forbidden_user_data_ops = [
+            "map", "filter", "reduce", "each", "take", "drop",
+            "+", "-", "*", "/", "<", ">", "<=", ">=", "=", "!=",
+            "length", "empty?", "head", "tail", "null?", "abs",
+            "zero?", "positive?", "negative?",
+        ];
+        for forbidden in forbidden_io.iter().chain(forbidden_user_data_ops.iter()) {
             let s = w.intern(forbidden);
             let v = w.env_lookup(w.global_env, s);
             assert!(

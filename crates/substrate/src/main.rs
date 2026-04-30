@@ -35,13 +35,21 @@ fn usage() {
 fn eval_one_shot(source: &str) -> ExitCode {
     let mut world = moof::new_world();
     match moof::eval(&mut world, source) {
-        Ok(value) => match print_via_out(&mut world, value) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("moof: {}", e.message);
-                ExitCode::from(70)
+        Ok(value) => {
+            // skip printing nil — matches lisp convention and the
+            // REPL's behavior; programs that want explicit nil
+            // output can `[$out say: nil]` themselves.
+            if value.is_nil() {
+                return ExitCode::SUCCESS;
             }
-        },
+            match print_via_out(&mut world, value) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("moof: {}", e.message);
+                    ExitCode::from(70)
+                }
+            }
+        }
         Err(err) => {
             let _ = print_via_err(&mut world, &format!("error: {}", err.message));
             ExitCode::from(1)

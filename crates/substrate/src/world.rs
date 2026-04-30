@@ -45,6 +45,11 @@ pub type NativeFn =
 /// an inline-cache slot for one `Op::Send` site. monomorphic only
 /// at phase A; polymorphic ICs (a small array of entries) come in
 /// phase G if hot-path measurements demand it.
+///
+/// invalidation is per `docs/laws/substrate-laws.md` L10: when the
+/// substrate's `bump_proto_generation` runs (via `set-handler!`),
+/// every IC whose `cached_generation` no longer matches the proto's
+/// current generation re-resolves on next dispatch.
 #[derive(Copy, Clone, Default, Debug)]
 pub struct ICache {
     /// the proto-FormId this site last resolved against, or
@@ -52,6 +57,8 @@ pub struct ICache {
     pub cached_proto: FormId,
     /// the resolved method-FormId, or [`FormId::NONE`].
     pub cached_method: FormId,
+    /// the proto's generation at the time of caching.
+    pub cached_generation: u32,
 }
 
 /// a raised error — propagated up the call stack until caught.
@@ -101,6 +108,11 @@ pub struct World {
 
     /// method-FormId → native function pointer.
     pub native_fns: HashMap<FormId, NativeFn>,
+
+    /// per-proto generation counters. bumped on `set-handler!` to
+    /// invalidate inline caches. ICs check the cached generation
+    /// against the current value; mismatch triggers re-resolution.
+    pub proto_generations: HashMap<FormId, u32>,
 
     /// the world's global environment Form.
     pub global_env: FormId,
@@ -154,6 +166,7 @@ impl World {
             chunk_consts: HashMap::new(),
             chunk_ics: HashMap::new(),
             native_fns: HashMap::new(),
+            proto_generations: HashMap::new(),
             global_env,
             vm: Vm::default(),
             head_sym,
@@ -321,6 +334,19 @@ impl World {
         let list_proto = Value::Form(self.protos.list);
         let mut ctx = ReadCtx::new(&mut self.heap, &mut self.syms, list_proto);
         reader::read_all(text, &mut ctx)
+    }
+
+    /// the current generation for `proto_id`. zero is the default
+    /// for a never-mutated proto.
+    pub fn proto_generation(&self, proto_id: FormId) -> u32 {
+        self.proto_generations.get(&proto_id).copied().unwrap_or(0)
+    }
+
+    /// bump a proto's generation counter. call after any handler-
+    /// table mutation so existing inline caches invalidate.
+    pub fn bump_proto_generation(&mut self, proto_id: FormId) {
+        let entry = self.proto_generations.entry(proto_id).or_insert(0);
+        *entry = entry.wrapping_add(1);
     }
 
     /// look up a handler by walking the proto chain. returns the
