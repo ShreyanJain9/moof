@@ -62,10 +62,6 @@ struct Compiler<'a> {
 
     if_sym: SymId,
     let_sym: SymId,
-    let_star_sym: SymId,
-    let_rec_sym: SymId,
-    when_sym: SymId,
-    unless_sym: SymId,
     do_sym: SymId,
     quote_sym: SymId,
     set_sym: SymId,
@@ -82,7 +78,6 @@ struct Compiler<'a> {
     obj_slot_sym: SymId,
     obj_method_sym: SymId,
     cascade_marker_sym: SymId,
-    defmethod_sym: SymId,
     quasiquote_sym: SymId,
     unquote_sym: SymId,
     unquote_splicing_sym: SymId,
@@ -93,7 +88,6 @@ impl<'a> Compiler<'a> {
     fn new(world: &'a mut World, params: Vec<SymId>, source: Value) -> Self {
         let if_sym = world.intern("if");
         let let_sym = world.intern("let");
-        let let_star_sym = world.intern("let*");
         let do_sym = world.intern("do");
         let quote_sym = world.intern("quote");
         let set_sym = world.intern("set!");
@@ -104,16 +98,12 @@ impl<'a> Compiler<'a> {
         let send_sym = world.intern("__send__");
         let defproto_sym = world.intern("defproto");
         let super_sym = world.intern("super");
-        let let_rec_sym = world.intern("let-rec");
-        let when_sym = world.intern("when");
-        let unless_sym = world.intern("unless");
         let table_marker_sym = world.intern("__table__");
         let entry_marker_sym = world.intern("__entry__");
         let obj_marker_sym = world.intern("__obj__");
         let obj_slot_sym = world.intern("__slot__");
         let obj_method_sym = world.intern("__method__");
         let cascade_marker_sym = world.intern("__cascade__");
-        let defmethod_sym = world.intern("defmethod");
         let quasiquote_sym = world.intern("quasiquote");
         let unquote_sym = world.intern("unquote");
         let unquote_splicing_sym = world.intern("unquote-splicing");
@@ -127,10 +117,6 @@ impl<'a> Compiler<'a> {
             source,
             if_sym,
             let_sym,
-            let_star_sym,
-            let_rec_sym,
-            when_sym,
-            unless_sym,
             do_sym,
             quote_sym,
             set_sym,
@@ -147,7 +133,6 @@ impl<'a> Compiler<'a> {
             obj_slot_sym,
             obj_method_sym,
             cascade_marker_sym,
-            defmethod_sym,
             quasiquote_sym,
             unquote_sym,
             unquote_splicing_sym,
@@ -282,18 +267,12 @@ impl<'a> Compiler<'a> {
             if s == self.let_sym {
                 return self.compile_let(&elems, tail);
             }
-            if s == self.let_star_sym {
-                return self.compile_let_star(&elems, tail);
-            }
-            if s == self.let_rec_sym {
-                return self.compile_let_rec(&elems, tail);
-            }
-            if s == self.when_sym {
-                return self.compile_when(&elems, tail);
-            }
-            if s == self.unless_sym {
-                return self.compile_unless(&elems, tail);
-            }
+            // when, unless, let*, let-rec used to live as
+            // hardcoded special forms here. they're now plain
+            // macros in lib/bootstrap.moof (the user-defined-macro
+            // path below picks them up). the substrate stays a
+            // smaller seed; the user can override or replace any
+            // of them by re-running `(defmacro …)` from inside.
             if s == self.do_sym {
                 return self.compile_do(&elems, tail);
             }
@@ -324,13 +303,21 @@ impl<'a> Compiler<'a> {
             if s == self.defproto_sym {
                 return self.compile_defproto(&elems);
             }
-            if s == self.defmethod_sym {
-                return self.compile_defmethod(&elems);
-            }
+            // defmethod used to be a hardcoded special form. it's
+            // now a macro in lib/bootstrap.moof — see the
+            // `(defmacro defmethod …)` there. the user-defined
+            // macro path below picks it up.
             if s == self.defmacro_sym {
                 return self.compile_defmacro(&elems);
             }
             // user-defined macro? expand at compile time.
+            //
+            // calling convention (kernel/io tradition): macros take
+            // *one* arg — the list of source-arg-forms. so for
+            // `(when cond a b c)`, the macro receives one argument:
+            // the list `(cond a b c)`. the macro body destructures
+            // it with List ops, returning a Form to compile in the
+            // call site's place. see lib/bootstrap.moof for examples.
             if let Some(&macro_method) = self.world.macros.get(&s) {
                 let mid = match macro_method.as_form_id() {
                     Some(i) => i,
@@ -338,11 +325,10 @@ impl<'a> Compiler<'a> {
                         return Err(self.err("macro entry is not a Form"));
                     }
                 };
-                // pass the unevaluated arg-forms as separate args.
-                let macro_args: Vec<Value> = elems[1..].to_vec();
+                let args_list = self.world.make_list(&elems[1..]);
                 let expanded = self
                     .world
-                    .invoke(mid, Value::Nil, &macro_args, FormId::NONE)?;
+                    .invoke(mid, Value::Nil, &[args_list], FormId::NONE)?;
                 return self.compile_expr(expanded, tail);
             }
             if s == self.table_marker_sym {
@@ -704,157 +690,12 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    /// `(let-rec ((f (fn …)) (g (fn …))) body)` — bindings may
-    /// refer to each other, including recursively. desugars to
-    /// `(let ((f nil) (g nil)) (do (set! f …) (set! g …) body))`.
-    /// closures created in the bindings capture the let's env;
-    /// later set!s mutate those slots; lookups inside closure
-    /// bodies see whichever value is current at call time.
-    fn compile_let_rec(
-        &mut self,
-        elems: &[Value],
-        tail: bool,
-    ) -> Result<(), RaiseError> {
-        if elems.len() < 3 {
-            return Err(self.err("let-rec requires bindings + body"));
-        }
-        let bindings_form = elems[1];
-        let bindings = self
-            .world
-            .list_to_vec(bindings_form)
-            .map_err(|_| self.err("let-rec: bindings must be a list"))?;
-        let mut names: Vec<SymId> = Vec::with_capacity(bindings.len());
-        let mut value_forms: Vec<Value> = Vec::with_capacity(bindings.len());
-        for b in &bindings {
-            let pair = self
-                .world
-                .list_to_vec(*b)
-                .map_err(|_| self.err("let-rec: each binding is (name value)"))?;
-            if pair.len() != 2 {
-                return Err(self.err("let-rec: each binding is (name value)"));
-            }
-            names.push(pair[0].as_sym().ok_or_else(|| {
-                self.err("let-rec: binding name must be a symbol")
-            })?);
-            value_forms.push(pair[1]);
-        }
-        // synthesize:
-        //   (let ((n1 nil) (n2 nil) …)
-        //     (do (set! n1 v1) (set! n2 v2) … body))
-        let mut nil_bindings = Vec::with_capacity(names.len());
-        for &n in &names {
-            let pair = self.world.make_list(&[Value::Sym(n), Value::Nil]);
-            nil_bindings.push(pair);
-        }
-        let nil_bindings_list = self.world.make_list(&nil_bindings);
-
-        let mut do_body: Vec<Value> = Vec::with_capacity(names.len() + 1);
-        do_body.push(Value::Sym(self.do_sym));
-        for (n, v) in names.iter().zip(value_forms.iter()) {
-            let set_form = self.world.make_list(&[
-                Value::Sym(self.set_sym),
-                Value::Sym(*n),
-                *v,
-            ]);
-            do_body.push(set_form);
-        }
-        // body remainder
-        for &b in &elems[2..] {
-            do_body.push(b);
-        }
-        let do_form = self.world.make_list(&do_body);
-
-        let let_form = self.world.make_list(&[
-            Value::Sym(self.let_sym),
-            nil_bindings_list,
-            do_form,
-        ]);
-        self.compile_expr(let_form, tail)
-    }
-
-    /// `(when cond body…)` ≡ `(if cond (do body…))` — sugar for
-    /// "do these only if true."
-    fn compile_when(&mut self, elems: &[Value], tail: bool) -> Result<(), RaiseError> {
-        if elems.len() < 2 {
-            return Err(self.err("when requires a condition"));
-        }
-        let cond = elems[1];
-        let then_branch = if elems.len() == 2 {
-            Value::Nil
-        } else {
-            // (do body…)
-            let mut body = vec![Value::Sym(self.do_sym)];
-            body.extend_from_slice(&elems[2..]);
-            self.world.make_list(&body)
-        };
-        let if_form = self.world.make_list(&[
-            Value::Sym(self.if_sym),
-            cond,
-            then_branch,
-        ]);
-        self.compile_expr(if_form, tail)
-    }
-
-    /// `(unless cond body…)` ≡ `(if cond nil (do body…))`.
-    fn compile_unless(
-        &mut self,
-        elems: &[Value],
-        tail: bool,
-    ) -> Result<(), RaiseError> {
-        if elems.len() < 2 {
-            return Err(self.err("unless requires a condition"));
-        }
-        let cond = elems[1];
-        let else_branch = if elems.len() == 2 {
-            Value::Nil
-        } else {
-            let mut body = vec![Value::Sym(self.do_sym)];
-            body.extend_from_slice(&elems[2..]);
-            self.world.make_list(&body)
-        };
-        let if_form = self.world.make_list(&[
-            Value::Sym(self.if_sym),
-            cond,
-            Value::Nil,
-            else_branch,
-        ]);
-        self.compile_expr(if_form, tail)
-    }
-
-    /// `(let* ((a 1) (b a)) body)` — nested single-binding lets.
-    fn compile_let_star(
-        &mut self,
-        elems: &[Value],
-        tail: bool,
-    ) -> Result<(), RaiseError> {
-        if elems.len() < 3 {
-            return Err(self.err("let* requires bindings + body"));
-        }
-        let bindings_form = elems[1];
-        let bindings = self
-            .world
-            .list_to_vec(bindings_form)
-            .map_err(|_| self.err("let*: bindings must be a list"))?;
-        // build the nested let. start from the inside out so the
-        // outermost let appears first.
-        let body_value = if elems.len() == 3 {
-            elems[2]
-        } else {
-            let mut wrapped = vec![Value::Sym(self.do_sym)];
-            wrapped.extend_from_slice(&elems[2..]);
-            self.world.make_list(&wrapped)
-        };
-        let mut nested = body_value;
-        for binding in bindings.into_iter().rev() {
-            let single_bindings = self.world.make_list(&[binding]);
-            let let_form =
-                self.world
-                    .make_list(&[Value::Sym(self.let_sym), single_bindings, nested]);
-            nested = let_form;
-        }
-        // compile the synthesized nested let.
-        self.compile_expr(nested, tail)
-    }
+    // `let-rec`, `when`, `unless`, and `let*` were once special-
+    // forms here; they're now plain macros in lib/bootstrap.moof.
+    // see the `(defmacro …)` calls there for the canonical
+    // expansions. the compiler's job for them is "find the macro,
+    // splice in its expansion" — which is the user-defined-macro
+    // path in `compile_form`.
 
     fn compile_call(&mut self, elems: &[Value], tail: bool) -> Result<(), RaiseError> {
         // (callable arg…) → `[callable call: arg…]` with argc = N.
@@ -1425,18 +1266,27 @@ impl<'a> Compiler<'a> {
     /// install a method on a proto without `setHandler!` boilerplate.
     /// header shape mirrors defproto: `(name)` `(+ other)`
     /// `(name x y)` `(at: i put: v)`.
-    /// (defmacro name (params) body) — installs a macro that
-    /// expands at compile time. macros run during the compiler's
-    /// pass over their use-sites; the macro receives the raw arg-
-    /// Forms and returns a Form, which we then compile.
+    /// (defmacro name (args-list) body) — install a macro that
+    /// expands at compile time.
     ///
-    /// installation happens at compile time of the `defmacro` form
-    /// itself (eager registration), so subsequent forms in the same
+    /// the macro receives *one* argument: the list of unevaluated
+    /// arg-forms from the call site. so for `(when cond a b c)`,
+    /// the macro is called with the list `(cond a b c)`. the body
+    /// destructures using List ops (`[args head]`, `[args tail]`,
+    /// pattern matching once we have it) and returns a Form, which
+    /// the compiler then compiles in place of the original call.
+    ///
+    /// the single-list calling convention (kernel/io tradition)
+    /// gives macros full variadic flexibility for free; templates
+    /// usually want quasiquote (`` `(if ,c ,t ,e) ``) anyway.
+    ///
+    /// installation happens eagerly at compile time of the
+    /// `defmacro` form itself, so subsequent forms in the same
     /// chunk can use the macro.
     fn compile_defmacro(&mut self, elems: &[Value]) -> Result<(), RaiseError> {
         if elems.len() != 4 {
             return Err(self.err(
-                "defmacro: (defmacro name (params) body)",
+                "defmacro: (defmacro name (args-list-name) body)",
             ));
         }
         let name = elems[1].as_sym().ok_or_else(|| {
@@ -1497,33 +1347,11 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn compile_defmethod(&mut self, elems: &[Value]) -> Result<(), RaiseError> {
-        if elems.len() != 4 {
-            return Err(self.err(
-                "defmethod: (defmethod proto (header) body)",
-            ));
-        }
-        let proto_expr = elems[1];
-        let header = elems[2];
-        let body = elems[3];
-
-        let (sel, params) = decode_paren_header(self, header)?;
-        let fn_chunk = compile_fn_body(self.world, params, body)?;
-
-        let set_handler = self.world.intern("setHandler!");
-        self.emit(Op::LoadName(set_handler));
-        self.compile_expr(proto_expr, false)?;
-        let sel_idx = self.add_const(Value::Sym(sel));
-        self.emit(Op::LoadConst(sel_idx));
-        self.emit(Op::PushClosure { chunk: fn_chunk });
-        let ic = self.next_ic();
-        self.emit(Op::Send {
-            selector: self.call_sym,
-            argc: 3,
-            ic_idx: ic,
-        });
-        Ok(())
-    }
+    // `defmethod` was once a hardcoded special form here; it now
+    // lives as a `(defmacro defmethod …)` in lib/bootstrap.moof.
+    // its expansion is `(setHandler! ProtoExpr 'sel (fn (params)
+    // body))`, which the compiler handles via the ordinary
+    // `setHandler!` global + `fn` special form.
 }
 
 #[derive(Copy, Clone)]
@@ -1784,9 +1612,11 @@ mod tests {
 
     #[test]
     fn compile_let_star_sequential_bindings() {
-        let mut w = World::new();
-        install_closure_call(&mut w);
-        // (let* ((a 1) (b a)) b) — b sees a, even within the same let*.
+        // `let*` is now a macro defined in lib/bootstrap.moof, so
+        // this test needs a world with the bootstrap loaded
+        // (`crate::new_world()`), not the bare `World::new()` the
+        // surrounding compiler-only tests use.
+        let mut w = crate::new_world();
         let r = ev(&mut w, "(let* ((a 1) (b a)) b)").unwrap();
         assert_eq!(r, Value::Int(1));
     }

@@ -1860,6 +1860,24 @@ fn install_globals(w: &mut World) {
     // *substrate metaprogramming primitives*. user-data ops like
     // `length`, `map`, `+` etc. are methods on the receiver.
 
+    // (intern "text") — produce a Symbol with that text. used by
+    // moof-level macro plumbing (e.g. building keyword selectors
+    // by joining the kw parts) and by user code that constructs
+    // names dynamically. accepts a String or a Symbol (idempotent).
+    install_global(w, "intern", |world, _, args| {
+        if args.len() != 1 {
+            return Err(raise(world, "arity", "(intern text)"));
+        }
+        let text = match args[0] {
+            Value::Sym(s) => return Ok(Value::Sym(s)),
+            v => world.string_text(v).map(|t| t.to_string()),
+        };
+        let text = text.ok_or_else(|| {
+            type_error(world, "intern: expects a String or Symbol")
+        })?;
+        Ok(Value::Sym(world.intern(&text)))
+    });
+
     // (cons head tail) — list constructor with no meaningful
     // receiver among args. lowers to `[tail cons: head]`.
     install_global(w, "cons", |world, _, args| {
@@ -1876,46 +1894,34 @@ fn install_globals(w: &mut World) {
     // (macroexpand '(foo a b)) — run the macro for `foo` with the
     // unevaluated args and return the expansion. raises if `foo`
     // isn't a registered macro.
+    //
+    // matches the compiler's single-list calling convention: the
+    // macro is invoked with one arg = the list `(a b)`.
     install_global(w, "macroexpand", |world, _, args| {
         if args.len() != 1 {
-            return Err(RaiseError::new(
-                world.intern("arity"),
-                "macroexpand: (macroexpand 'form)",
-            ));
+            return Err(raise(world, "arity", "macroexpand: (macroexpand 'form)"));
         }
-        let form = args[0];
-        let elems = world.list_to_vec(form).map_err(|_| {
-            RaiseError::new(
-                world.intern("type-error"),
-                "macroexpand: arg must be a list-form",
-            )
-        })?;
+        let elems = world
+            .list_to_vec(args[0])
+            .map_err(|_| type_error(world, "macroexpand: arg must be a list-form"))?;
         if elems.is_empty() {
-            return Err(RaiseError::new(
-                world.intern("macroexpand"),
-                "empty form",
-            ));
+            return Err(raise(world, "macroexpand", "empty form"));
         }
-        let head = elems[0].as_sym().ok_or_else(|| {
-            RaiseError::new(
-                world.intern("macroexpand"),
-                "form head is not a symbol",
-            )
-        })?;
+        let head = elems[0]
+            .as_sym()
+            .ok_or_else(|| raise(world, "macroexpand", "form head is not a symbol"))?;
         let macro_v = world.macros.get(&head).copied().ok_or_else(|| {
-            RaiseError::new(
-                world.intern("macroexpand"),
+            raise(
+                world,
+                "macroexpand",
                 format!("`{}` is not a macro", world.resolve(head)),
             )
         })?;
-        let mid = macro_v.as_form_id().ok_or_else(|| {
-            RaiseError::new(
-                world.intern("macroexpand"),
-                "macro entry is not a Form",
-            )
-        })?;
-        let macro_args: Vec<Value> = elems[1..].to_vec();
-        world.invoke(mid, Value::Nil, &macro_args, FormId::NONE)
+        let mid = macro_v
+            .as_form_id()
+            .ok_or_else(|| raise(world, "macroexpand", "macro entry is not a Form"))?;
+        let args_list = world.make_list(&elems[1..]);
+        world.invoke(mid, Value::Nil, &[args_list], FormId::NONE)
     });
 
     // (append xs ys …) — concatenate lists left-to-right. used by

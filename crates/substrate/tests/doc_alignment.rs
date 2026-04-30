@@ -292,6 +292,150 @@ fn equality_on_proto_forms_does_not_panic() {
 // vm.rs PushClosure — captured-self regression.
 // ─────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────
+// "everything is a Form" (forms.md L1) — control-flow sugar like
+// `when` / `unless` / `let*` / `let-rec` / `defmethod` lives as
+// moof macros (lib/bootstrap.moof), not as hardcoded special-cases
+// in the rust compiler. that means: the user can inspect them,
+// re-define them, and override their expansion from inside moof.
+// ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn when_unless_letstar_letrec_are_user_inspectable_macros() {
+    let mut w = moof::new_world();
+    // each is a real Method-Form bound in the global env, with
+    // `'macro` set in its meta.
+    for name in &["when", "unless", "let*", "let-rec", "defmethod"] {
+        let sym = w.intern(name);
+        let v = w.env_lookup(w.global_env, sym).unwrap_or_else(|| {
+            panic!("expected macro `{}` bound in global env", name)
+        });
+        let id = v
+            .as_form_id()
+            .unwrap_or_else(|| panic!("`{}` is not a Form", name));
+        // the macro is registered on the world's macro table.
+        assert!(
+            w.macros.contains_key(&sym),
+            "`{}` must be registered as a macro",
+            name
+        );
+        // it's a Method-Form (closure).
+        let proto = w.heap.get(id).proto;
+        assert_eq!(proto, Value::Form(w.protos.method));
+    }
+}
+
+#[test]
+fn user_can_redefine_when() {
+    // because `when` is a moof macro, redefining it from user code
+    // works. (this is the key moldability promise — "everything
+    // modifiable lives in moof".)
+    let mut w = moof::new_world();
+    // re-define `when` to ALWAYS evaluate body, ignoring the cond.
+    moof::eval(
+        &mut w,
+        "(defmacro when (args)
+           (let ((body [args tail]))
+             `(do ,@body)))",
+    )
+    .unwrap();
+    // now `(when #false 42)` evaluates the body anyway.
+    assert_eq!(
+        moof::eval(&mut w, "(when #false 42)").unwrap(),
+        Value::Int(42),
+    );
+}
+
+#[test]
+fn macroexpand_uses_single_list_convention() {
+    // (macroexpand 'form) returns the expansion. matches the new
+    // calling convention: macros take one arg = the list of
+    // source-arg-Forms.
+    let mut w = moof::new_world();
+    let v = moof::eval(&mut w, "(macroexpand '(when c a b))").unwrap();
+    // expansion: (if c (do a b) nil)
+    let elems = w.list_to_vec(v).unwrap();
+    assert_eq!(elems.len(), 4);
+    assert_eq!(elems[0], Value::Sym(w.intern("if")));
+    assert_eq!(elems[1], Value::Sym(w.intern("c")));
+    // elems[2] is (do a b)
+    let then_branch = w.list_to_vec(elems[2]).unwrap();
+    assert_eq!(then_branch[0], Value::Sym(w.intern("do")));
+    assert_eq!(elems[3], Value::Nil);
+}
+
+#[test]
+fn defmethod_via_macro_installs_handler() {
+    let mut w = moof::new_world();
+    // single-symbol header.
+    moof::eval(
+        &mut w,
+        "(defmethod Integer (squared) [self * self])",
+    )
+    .unwrap();
+    assert_eq!(moof::eval(&mut w, "[5 squared]").unwrap(), Value::Int(25));
+
+    // binary-operator header.
+    moof::eval(
+        &mut w,
+        "(defmethod Integer (~ other) [self + [other * 100]])",
+    )
+    .unwrap();
+    assert_eq!(
+        moof::eval(&mut w, "[3 ~ 5]").unwrap(),
+        Value::Int(503),
+    );
+
+    // keyword header — the single-keyword case.
+    moof::eval(
+        &mut w,
+        "(defmethod Integer (multipliedBy: n) [self * n])",
+    )
+    .unwrap();
+    assert_eq!(
+        moof::eval(&mut w, "[7 multipliedBy: 3]").unwrap(),
+        Value::Int(21),
+    );
+
+    // keyword header — multi-keyword needs intern at expand time.
+    moof::eval(
+        &mut w,
+        "(defmethod Integer (between?: lo and: hi)
+           (if [self < lo] #false [self <= hi]))",
+    )
+    .unwrap();
+    assert_eq!(
+        moof::eval(&mut w, "[5 between?: 0 and: 10]").unwrap(),
+        Value::Bool(true),
+    );
+    assert_eq!(
+        moof::eval(&mut w, "[15 between?: 0 and: 10]").unwrap(),
+        Value::Bool(false),
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────
+// the `(intern …)` primitive — required by macros that build
+// keyword selectors at expansion time.
+// ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn intern_constructs_symbols_from_strings() {
+    let mut w = moof::new_world();
+    let v = moof::eval(&mut w, "(intern \"foo\")").unwrap();
+    assert_eq!(v, Value::Sym(w.intern("foo")));
+    // idempotent on Symbol input.
+    let v = moof::eval(&mut w, "(intern 'bar)").unwrap();
+    assert_eq!(v, Value::Sym(w.intern("bar")));
+    // joining two symbols' text and re-interning.
+    let v = moof::eval(
+        &mut w,
+        "(intern [[(intern \"at:\") toString] + [(intern \"put:\") toString]])",
+    )
+    .unwrap();
+    assert_eq!(v, Value::Sym(w.intern("at:put:")));
+}
+
 #[test]
 fn let_inside_method_sees_self() {
     // `let` desugars to a closure-call. without PushClosure

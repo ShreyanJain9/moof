@@ -23,6 +23,134 @@
 ;; `intrinsics.rs`; if it can be derived, it lives here.
 
 ;; ─────────────────────────────────────────────────────────────────
+;; control-flow + binding sugar — defined as macros so that the
+;; "everything is a Form" claim isn't a lie about what the user
+;; wrote. each of these used to be a hardcoded special-form in the
+;; rust compiler; now they're moof code, user-overridable like
+;; everything else.
+;;
+;; the macro calling convention: a macro receives ONE arg — the
+;; List of unevaluated source-arg-Forms. `(when c a b)` calls the
+;; `when` macro with `(c a b)`. macros destructure with List ops
+;; and return a Form, which the compiler then compiles in-place.
+;;
+;; the only true compiler-level special forms remaining (after these
+;; macros load) are: `if`, `let`, `do`, `quote`, `quasiquote`,
+;; `unquote`, `unquote-splicing`, `set!`, `fn`, `def`, `defmacro`,
+;; `defproto`, `__send__`, plus the reader-emitted markers
+;; `__table__`, `__obj__`, `__cascade__`. each genuinely needs
+;; bytecode-level access (jumps, closure construction, name binding,
+;; or compile-time evaluation order).
+;; ─────────────────────────────────────────────────────────────────
+
+;; (when cond body...) ≡ (if cond (do body...) nil)
+(defmacro when (args)
+  (let ((cond [args head])
+        (body [args tail]))
+    `(if ,cond (do ,@body) nil)))
+
+;; (unless cond body...) ≡ (if cond nil (do body...))
+(defmacro unless (args)
+  (let ((cond [args head])
+        (body [args tail]))
+    `(if ,cond nil (do ,@body))))
+
+;; (let* ((a 1) (b a) ...) body...) — nested single-binding lets.
+;; expands recursively: empty bindings → wrap body in (do …);
+;; otherwise peel one binding, nest the rest.
+(defmacro let* (args)
+  (let ((bindings [args head])
+        (body [args tail]))
+    (if [bindings empty?]
+        (cons 'do body)
+        `(let (,[bindings head])
+           (let* ,[bindings tail] ,@body)))))
+
+;; (let-rec ((f (fn …)) (g (fn …))) body) — bindings may refer to
+;; each other (including recursively). desugars to:
+;;   (let ((f nil) (g nil)) (do (set! f …) (set! g …) body…))
+;; closures created in the bindings capture the let's env;
+;; later set!s mutate those slots; lookups inside the closures
+;; see whichever value is current at call time.
+(defmacro let-rec (args)
+  (let ((bindings [args head])
+        (body [args tail]))
+    (let ((nil-bindings
+            [bindings map: (fn (b) (list [b head] nil))])
+          (sets
+            [bindings map:
+              (fn (b) (list 'set! [b head] [[b tail] head]))]))
+      `(let ,nil-bindings (do ,@sets ,@body)))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; defmethod — moof-side macro that desugars to setHandler!.
+;;
+;; the header decoder mirrors the send-bracket grammar
+;; (`syntax/methods-and-handlers.md`):
+;;   (name)              → unary
+;;   (+ other)           → binary (operator-only first sym)
+;;   (name x y …)        → positional
+;;   (at: i put: v)      → keyword (selectors end in `:`,
+;;                         alternating kw + param)
+;;
+;; returns (sel . params-list).
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! Symbol 'endsWithColon?
+  (fn () [[self toString] endsWith?: ":"]))
+
+;; the operator-character set — used by header-decoding to spot
+;; binary operator headers like `(+ other)`. defined as a String
+;; we test membership against; cheaper to extend than a chain of
+;; nested `if`s.
+(def __operator-chars "+-*/<>=!?|&~^%")
+
+(setHandler! Symbol 'operatorOnly?
+  (fn ()
+    [[self toString] all?:
+      (fn (c) [__operator-chars contains?: [c toString]])]))
+
+(def __decode-header
+  (fn (header)
+    (let ((first [header head])
+          (rest [header tail]))
+      (if (if [rest empty?] #false [first endsWithColon?])
+          ;; keyword form. concatenate alternating kws into one
+          ;; selector text; pull params from the slots between.
+          (__decode-keyword header "" nil)
+          ;; unary, binary, or positional — selector is `first`,
+          ;; params are everything after.
+          (cons first (cons rest nil))))))
+
+(def __decode-keyword
+  (fn (remaining acc-sel acc-params)
+    (if [remaining empty?]
+        (cons (intern acc-sel) (cons [acc-params reverse] nil))
+        (let ((kw [remaining head])
+              (after-kw [remaining tail]))
+          (if [after-kw empty?]
+              ;; keyword without a following param — error path,
+              ;; left to the resulting (fn …) compilation to catch.
+              (cons (intern acc-sel) (cons [acc-params reverse] nil))
+              (let ((param [after-kw head])
+                    (rest-elems [after-kw tail])
+                    (next-sel [acc-sel + [kw toString]]))
+                (__decode-keyword
+                  rest-elems
+                  next-sel
+                  (cons param acc-params))))))))
+
+(defmacro defmethod (args)
+  (let ((proto-expr [args head])
+        (rest [args tail]))
+    (let ((header [rest head])
+          (body [[rest tail] head]))
+      (let ((decoded (__decode-header header)))
+        (let ((sel [decoded head])
+              (params [[decoded tail] head]))
+          `(setHandler! ,proto-expr (quote ,sel) (fn ,params ,body)))))))
+
+;; ─────────────────────────────────────────────────────────────────
 ;; Object — derived defaults that flow through the proto chain
 ;;
 ;; Object's `:=`, `:!=`, `:is`, `:proto`, `:slots`, `:handlers`,
