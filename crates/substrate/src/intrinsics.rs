@@ -31,12 +31,122 @@ pub fn install(w: &mut World) {
     install_symbol_methods(w);
     install_bool_methods(w);
     install_nil_methods(w);
+    install_string_methods(w);
     install_object_reflection(w);
     install_list_methods(w);
     install_method_methods(w);
     install_console_proto_and_caps(w);
     install_globals(w);
     install_proto_globals(w);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// String methods
+// ─────────────────────────────────────────────────────────────────
+
+fn install_string_methods(w: &mut World) {
+    w.install_native(w.protos.string, "length", |w, self_, _| {
+        // length-in-bytes for now. proper char-count (utf-8 scalar
+        // values) lands when we add Char + iteration.
+        let len_opt = w.string_bytes(self_).map(|b| b.len() as i64);
+        match len_opt {
+            Some(n) => Ok(Value::Int(n)),
+            None => Err(RaiseError::new(w.intern("type-error"), "length on non-String")),
+        }
+    });
+    w.install_native(w.protos.string, "byte-length", |w, self_, _| {
+        let len_opt = w.string_bytes(self_).map(|b| b.len() as i64);
+        match len_opt {
+            Some(n) => Ok(Value::Int(n)),
+            None => Err(RaiseError::new(
+                w.intern("type-error"),
+                "byte-length on non-String",
+            )),
+        }
+    });
+    w.install_native(w.protos.string, "to-string", |_, self_, _| Ok(self_));
+    w.install_native(w.protos.string, "=", |w, self_, args| {
+        let a = w.string_text(self_).map(|t| t.to_string());
+        let b = w.string_text(args[0]).map(|t| t.to_string());
+        Ok(Value::Bool(matches!((a, b), (Some(x), Some(y)) if x == y)))
+    });
+    w.install_native(w.protos.string, "!=", |w, self_, args| {
+        let a = w.string_text(self_).map(|t| t.to_string());
+        let b = w.string_text(args[0]).map(|t| t.to_string());
+        Ok(Value::Bool(!matches!((a, b), (Some(x), Some(y)) if x == y)))
+    });
+    // [s + other] — concatenation. accepts String or Symbol on the
+    // RHS for ergonomics; falls through to :to-string otherwise.
+    w.install_native(w.protos.string, "+", |w, self_, args| {
+        let lhs_text = w.string_text(self_).map(|t| t.to_string());
+        let mut out = match lhs_text {
+            Some(t) => t,
+            None => {
+                return Err(RaiseError::new(
+                    w.intern("type-error"),
+                    "+ on non-String receiver",
+                ))
+            }
+        };
+        let rhs = args.first().copied().unwrap_or(Value::Nil);
+        let rhs_str = w
+            .string_text(rhs)
+            .map(|t| t.to_string())
+            .or_else(|| match rhs {
+                Value::Sym(s) => Some(w.resolve(s).to_string()),
+                _ => None,
+            });
+        if let Some(t) = rhs_str {
+            out.push_str(&t);
+            Ok(w.make_string(&out))
+        } else {
+            // delegate to rhs's :to-string for ergonomics.
+            let to_string = w.intern("to-string");
+            let r = w.send(rhs, to_string, &[])?;
+            let appended = w.string_text(r).map(|t| t.to_string());
+            match appended {
+                Some(t) => {
+                    out.push_str(&t);
+                    Ok(w.make_string(&out))
+                }
+                None => Err(RaiseError::new(
+                    w.intern("type-error"),
+                    "String +: rhs :to-string did not return a String",
+                )),
+            }
+        }
+    });
+    w.install_native(w.protos.string, "concat:", |w, self_, args| {
+        let lhs = w.string_text(self_).map(|t| t.to_string());
+        let mut out = match lhs {
+            Some(t) => t,
+            None => {
+                return Err(RaiseError::new(
+                    w.intern("type-error"),
+                    "concat: on non-String",
+                ))
+            }
+        };
+        let rhs = args.first().copied().unwrap_or(Value::Nil);
+        let rhs_str = w.string_text(rhs).map(|t| t.to_string());
+        match rhs_str {
+            Some(t) => {
+                out.push_str(&t);
+                Ok(w.make_string(&out))
+            }
+            None => Err(RaiseError::new(
+                w.intern("type-error"),
+                "concat: requires a String argument",
+            )),
+        }
+    });
+    w.install_native(w.protos.string, "empty?", |w, self_, _| {
+        let empty = w.string_bytes(self_).map(|b| b.is_empty());
+        match empty {
+            Some(b) => Ok(Value::Bool(b)),
+            None => Err(RaiseError::new(w.intern("type-error"), "empty? on non-String")),
+        }
+    });
 }
 
 /// :to-string on Method (covers Closure too). renders the source
@@ -46,27 +156,24 @@ fn install_method_methods(w: &mut World) {
         let id = match self_.as_form_id() {
             Some(id) => id,
             None => {
-                return Ok(Value::Sym(w.intern("<method>")));
+                return Ok(w.make_string("<method>"));
             }
         };
         let source = w.heap.get(id).meta_at(w.source_sym);
         if source.is_nil() {
-            return Ok(Value::Sym(w.intern("<closure>")));
+            return Ok(w.make_string("<closure>"));
         }
-        // try rendering source. if it's a list, recursive print;
-        // if a sym (a method name placeholder), render directly.
         match source {
             Value::Sym(s) => {
                 let text = format!("<method:{}>", w.resolve(s));
-                Ok(Value::Sym(w.intern(&text)))
+                Ok(w.make_string(&text))
             }
             Value::Form(_) => {
-                // a parsed code-form (a list).
                 let inner = render_list_to_string(w, source)?;
                 let text = format!("<closure source: {}>", inner);
-                Ok(Value::Sym(w.intern(&text)))
+                Ok(w.make_string(&text))
             }
-            _ => Ok(Value::Sym(w.intern("<closure>"))),
+            _ => Ok(w.make_string("<closure>")),
         }
     });
 }
@@ -81,6 +188,7 @@ fn install_proto_globals(w: &mut World) {
         ("Bool", w.protos.bool_),
         ("Integer", w.protos.integer),
         ("Symbol", w.protos.symbol),
+        ("String", w.protos.string),
         ("List", w.protos.list),
         ("Method", w.protos.method),
         ("Chunk", w.protos.chunk),
@@ -187,8 +295,7 @@ fn install_integer_methods(w: &mut World) {
     });
     w.install_native(w.protos.integer, "to-string", |w, self_, _args| {
         let a = int_arg(w, self_, "to-string")?;
-        let s = w.intern(&a.to_string());
-        Ok(Value::Sym(s))
+        Ok(w.make_string(&a.to_string()))
     });
 }
 
@@ -216,10 +323,8 @@ fn install_symbol_methods(w: &mut World) {
         let s = self_.as_sym().ok_or_else(|| {
             RaiseError::new(w.intern("type-error"), "to-string on non-Symbol")
         })?;
-        // Symbol's :to-string is identity — the symbol *is* its
-        // textual rendering at phase A (no String type yet).
-        let _ = w;
-        Ok(Value::Sym(s))
+        let text = w.resolve(s).to_string();
+        Ok(w.make_string(&text))
     });
 }
 
@@ -235,8 +340,8 @@ fn install_bool_methods(w: &mut World) {
         _ => Ok(Value::Bool(false)), // shouldn't happen if dispatch is right
     });
     w.install_native(w.protos.bool_, "to-string", |w, self_, _| match self_ {
-        Value::Bool(true) => Ok(Value::Sym(w.intern("#true"))),
-        Value::Bool(false) => Ok(Value::Sym(w.intern("#false"))),
+        Value::Bool(true) => Ok(w.make_string("#true")),
+        Value::Bool(false) => Ok(w.make_string("#false")),
         _ => Err(RaiseError::new(
             w.intern("type-error"),
             "to-string on non-Bool",
@@ -251,9 +356,7 @@ fn install_nil_methods(w: &mut World) {
     w.install_native(w.protos.nil, "!=", |_, self_, args| {
         Ok(Value::Bool(self_ != args[0]))
     });
-    w.install_native(w.protos.nil, "to-string", |w, _, _| {
-        Ok(Value::Sym(w.intern("nil")))
-    });
+    w.install_native(w.protos.nil, "to-string", |w, _, _| Ok(w.make_string("nil")));
     w.install_native(w.protos.nil, "head", |w, _, _| {
         // (head nil) → nil. lispy convention; users beware.
         let _ = w;
@@ -313,12 +416,13 @@ fn install_list_methods(w: &mut World) {
     // List :to-string — recursive `(elem1 elem2 ...)` rendering.
     w.install_native(w.protos.list, "to-string", |w, self_, _| {
         let s = render_list_to_string(w, self_)?;
-        Ok(Value::Sym(w.intern(&s)))
+        Ok(w.make_string(&s))
     });
 }
 
 /// recursive list-to-string. each element's :to-string is sent;
-/// joins with spaces, wraps in parens.
+/// the result is a String form; we read its bytes; join with
+/// spaces; wrap in parens.
 fn render_list_to_string(w: &mut World, list: Value) -> Result<String, RaiseError> {
     let mut out = String::from("(");
     let mut cur = list;
@@ -337,13 +441,7 @@ fn render_list_to_string(w: &mut World, list: Value) -> Result<String, RaiseErro
                 let head = w.heap.get(id).slot(head_sym);
                 let tail = w.heap.get(id).slot(tail_sym);
                 let head_str_v = w.send(head, to_string, &[])?;
-                let head_str_sym = head_str_v.as_sym().ok_or_else(|| {
-                    RaiseError::new(
-                        w.intern("type-error"),
-                        ":to-string returned non-symbol",
-                    )
-                })?;
-                out.push_str(w.resolve(head_str_sym));
+                push_string_value(w, &mut out, head_str_v)?;
                 cur = tail;
             }
             _ => {
@@ -354,19 +452,33 @@ fn render_list_to_string(w: &mut World, list: Value) -> Result<String, RaiseErro
                 }
                 out.push_str(". ");
                 let tail_str_v = w.send(cur, to_string, &[])?;
-                let tail_str_sym = tail_str_v.as_sym().ok_or_else(|| {
-                    RaiseError::new(
-                        w.intern("type-error"),
-                        ":to-string returned non-symbol",
-                    )
-                })?;
-                out.push_str(w.resolve(tail_str_sym));
+                push_string_value(w, &mut out, tail_str_v)?;
                 break;
             }
         }
     }
     out.push(')');
     Ok(out)
+}
+
+/// pull text bytes out of a String form and append to `out`.
+/// raises type-error if the value isn't a String.
+fn push_string_value(
+    w: &mut World,
+    out: &mut String,
+    value: Value,
+) -> Result<(), RaiseError> {
+    let copy = w.string_text(value).map(|t| t.to_string());
+    match copy {
+        Some(t) => {
+            out.push_str(&t);
+            Ok(())
+        }
+        None => Err(RaiseError::new(
+            w.intern("type-error"),
+            ":to-string did not return a String",
+        )),
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -475,18 +587,17 @@ fn install_object_reflection(w: &mut World) {
 
     w.install_native(w.protos.object, "to-string", |w, self_, _| {
         // default rendering: `<Form#N>` for heap forms; tagged
-        // immediates get their own to-string overrides on Integer/
-        // Symbol/Bool/Nil already.
-        match self_ {
-            Value::Form(id) => Ok(Value::Sym(w.intern(&format!("<Form#{}>", id.0)))),
-            Value::Foreign(id) => Ok(Value::Sym(w.intern(&format!("<Foreign#{}>", id.0)))),
-            Value::Nil => Ok(Value::Sym(w.intern("nil"))),
-            // these shouldn't be reached because each tagged kind
-            // overrides :to-string. defensive fallback:
-            Value::Bool(b) => Ok(Value::Sym(w.intern(if b { "#true" } else { "#false" }))),
-            Value::Int(n) => Ok(Value::Sym(w.intern(&n.to_string()))),
-            Value::Sym(s) => Ok(Value::Sym(s)), // identity for symbols
-        }
+        // immediates have their own to-string overrides.
+        let text = match self_ {
+            Value::Form(id) => format!("<Form#{}>", id.0),
+            Value::Foreign(id) => format!("<Foreign#{}>", id.0),
+            Value::Nil => "nil".to_string(),
+            // defensive fallbacks (each tagged kind overrides above):
+            Value::Bool(b) => (if b { "#true" } else { "#false" }).to_string(),
+            Value::Int(n) => n.to_string(),
+            Value::Sym(s) => w.resolve(s).to_string(),
+        };
+        Ok(w.make_string(&text))
     });
 
     w.install_native(w.protos.object, "inspect", |w, self_, _| {
@@ -653,44 +764,51 @@ fn install_console_proto_and_caps(w: &mut World) {
             ));
         }
         // SAFETY: tag-check confirms this pointer was minted by
-        // make_primordial_console; cast back to ConsoleFd. the
-        // pointer is valid for the lifetime of the holding Form
-        // (gc invariant: handle outlives Form).
+        // make_primordial_console; cast back to ConsoleFd.
         let target = unsafe { (*(handle.ptr as *const ConsoleFd)).target };
-        let bytes_sym = match args.first().copied() {
-            Some(Value::Sym(s)) => s,
-            _ => {
+        // accept a String form (preferred) or a Symbol (legacy
+        // path for substrate-level callers that haven't yet built
+        // a String). reject anything else clearly.
+        let bytes: Vec<u8> = match args.first().copied() {
+            Some(v) => {
+                if let Some(t) = w.string_text(v) {
+                    t.as_bytes().to_vec()
+                } else if let Value::Sym(s) = v {
+                    w.resolve(s).as_bytes().to_vec()
+                } else {
+                    return Err(RaiseError::new(
+                        w.intern("type-error"),
+                        "emit: expects a String (or Symbol)",
+                    ));
+                }
+            }
+            None => {
                 return Err(RaiseError::new(
-                    w.intern("type-error"),
-                    "emit: expects a symbol payload (phase-A placeholder for String)",
+                    w.intern("arity"),
+                    "emit: requires one argument",
                 ));
             }
         };
-        let text = w.resolve(bytes_sym).to_string();
         let result = match target {
-            ConsoleTarget::Stdout => std::io::stdout().write_all(text.as_bytes()),
-            ConsoleTarget::Stderr => std::io::stderr().write_all(text.as_bytes()),
+            ConsoleTarget::Stdout => std::io::stdout().write_all(&bytes),
+            ConsoleTarget::Stderr => std::io::stderr().write_all(&bytes),
         };
         result.map_err(|e| RaiseError::new(w.intern("io-error"), e.to_string()))?;
         Ok(Value::Nil)
     });
 
     // :say: x  — derived: emit (to-string x) then a newline.
-    // phase A.10's protocol-derived stdlib will replace this with
-    // a moof-side definition. for now: native, so we don't need
-    // protocol machinery at boot.
     w.install_native(console_proto, "say:", |w, self_, args| {
         let to_string = w.intern("to-string");
         let text = w.send(args[0], to_string, &[])?;
         let emit = w.intern("emit:");
         w.send(self_, emit, &[text])?;
-        let newline = Value::Sym(w.intern("\n"));
+        let newline = w.make_string("\n");
         w.send(self_, emit, &[newline])?;
         Ok(Value::Nil)
     });
 
-    // :show: x — emit without newline. lets users compose multi-
-    // value lines.
+    // :show: x — emit without newline.
     w.install_native(console_proto, "show:", |w, self_, args| {
         let to_string = w.intern("to-string");
         let text = w.send(args[0], to_string, &[])?;
@@ -946,7 +1064,7 @@ mod tests {
     fn integer_to_string() {
         let mut w = fresh();
         let r = ev(&mut w, "[42 to-string]").unwrap();
-        assert_eq!(w.resolve(r.as_sym().unwrap()), "42");
+        assert_eq!(w.string_text(r).unwrap(), "42");
     }
 
     #[test]
@@ -1057,7 +1175,7 @@ mod tests {
     fn integer_inspect_falls_through_to_to_string() {
         let mut w = fresh();
         let r = ev(&mut w, "[42 inspect]").unwrap();
-        assert_eq!(w.resolve(r.as_sym().unwrap()), "42");
+        assert_eq!(w.string_text(r).unwrap(), "42");
     }
 
     #[test]

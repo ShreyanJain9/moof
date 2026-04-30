@@ -41,6 +41,7 @@ pub struct Protos {
     pub bool_: FormId,
     pub integer: FormId,
     pub symbol: FormId,
+    pub string: FormId,
     pub list: FormId,
     pub method: FormId,
     pub chunk: FormId,
@@ -61,6 +62,7 @@ impl Protos {
         let bool_ = mk(heap);
         let integer = mk(heap);
         let symbol = mk(heap);
+        let string = mk(heap);
         let list = mk(heap);
         let method = mk(heap);
         let chunk = mk(heap);
@@ -75,6 +77,7 @@ impl Protos {
             bool_,
             integer,
             symbol,
+            string,
             list,
             method,
             chunk,

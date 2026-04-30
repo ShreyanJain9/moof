@@ -217,8 +217,17 @@ impl<'a> Compiler<'a> {
                     self.emit(Op::LoadName(s));
                 }
             }
-            Value::Form(_) => {
-                self.compile_form(form, tail)?;
+            Value::Form(id) => {
+                // List Forms (proto = List) are code to compile.
+                // any other Form (String, ToolPalette, …) is a
+                // *literal* — load from the constant pool.
+                let proto = self.world.heap.get(id).proto;
+                if proto == Value::Form(self.world.protos.list) {
+                    self.compile_form(form, tail)?;
+                } else {
+                    let idx = self.add_const(form);
+                    self.emit(Op::LoadConst(idx));
+                }
             }
         }
         Ok(())

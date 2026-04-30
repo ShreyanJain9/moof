@@ -34,6 +34,23 @@ use crate::sym::{SymId, SymTable};
 use crate::value::Value;
 use crate::vm::Vm;
 
+/// kind tag for String's `:bytes` ForeignHandle. lets natives
+/// distinguish a real string-bytes handle from any other foreign
+/// payload that could end up in the slot.
+pub const STRING_BYTES_TAG: u32 = 0x_57_52_47_55; // "WRGU" — phase A.
+
+/// destructor for a `Box<Vec<u8>>` minted by `make_string`. runs
+/// when the gc collects the holding String form.
+unsafe extern "C" fn string_bytes_dtor(ptr: *mut std::ffi::c_void) {
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: ptr was minted by `Box::into_raw(Box<Vec<u8>>)` in
+    // `World::make_string`. consume it back into a Box and let
+    // it drop.
+    let _ = unsafe { Box::from_raw(ptr as *mut Vec<u8>) };
+}
+
 /// the signature of a native method bound by a phase-A intrinsic
 /// or, later, by an mco.
 ///
@@ -134,6 +151,7 @@ pub struct World {
     pub bindings_sym: SymId,
     pub dnu_sym: SymId,
     pub quote_sym: SymId,
+    pub bytes_sym: SymId,
 }
 
 impl World {
@@ -159,6 +177,7 @@ impl World {
         let bindings_sym = syms.intern("bindings");
         let dnu_sym = syms.intern("does-not-understand:with:");
         let quote_sym = syms.intern("quote");
+        let bytes_sym = syms.intern("bytes");
 
         World {
             heap,
@@ -182,6 +201,7 @@ impl World {
             bindings_sym,
             dnu_sym,
             quote_sym,
+            bytes_sym,
         }
     }
 
@@ -193,6 +213,53 @@ impl World {
     /// resolve a symbol to its text.
     pub fn resolve(&self, sym: SymId) -> &str {
         self.syms.resolve(sym)
+    }
+
+    /// allocate a fresh String form with the given UTF-8 bytes.
+    /// the bytes are owned by a ForeignHandle whose destructor
+    /// frees the underlying `Vec<u8>` on gc.
+    pub fn make_string(&mut self, text: &str) -> Value {
+        use crate::foreign::ForeignHandle;
+        let boxed: Box<Vec<u8>> = Box::new(text.as_bytes().to_vec());
+        let ptr = Box::into_raw(boxed) as *mut std::ffi::c_void;
+        let handle_id = self.foreign.alloc(ForeignHandle {
+            ptr,
+            destructor: Some(string_bytes_dtor),
+            tag: STRING_BYTES_TAG,
+        });
+        let mut form = Form::with_proto(Value::Form(self.protos.string));
+        form.slots.insert(self.bytes_sym, Value::Foreign(handle_id));
+        Value::Form(self.alloc(form))
+    }
+
+    /// borrow a String form's UTF-8 bytes. returns `None` if
+    /// `value` isn't a well-formed String.
+    pub fn string_bytes(&self, value: Value) -> Option<&[u8]> {
+        let id = value.as_form_id()?;
+        let f = self.heap.get(id);
+        if f.proto != Value::Form(self.protos.string) {
+            return None;
+        }
+        let fid = match f.slot(self.bytes_sym) {
+            Value::Foreign(fid) => fid,
+            _ => return None,
+        };
+        let handle = self.foreign.get(fid);
+        if handle.tag != STRING_BYTES_TAG {
+            return None;
+        }
+        // SAFETY: tag-check confirms make_string minted this; cast
+        // back. the pointer outlives the holding Form (gc invariant).
+        unsafe {
+            let v: &Vec<u8> = &*(handle.ptr as *const Vec<u8>);
+            Some(v.as_slice())
+        }
+    }
+
+    /// borrow a String form's text as `&str`. `None` if not a
+    /// String or if bytes aren't valid UTF-8.
+    pub fn string_text(&self, value: Value) -> Option<&str> {
+        std::str::from_utf8(self.string_bytes(value)?).ok()
     }
 
     /// allocate a Form.
@@ -325,17 +392,31 @@ impl World {
         method_id
     }
 
-    /// reader entry — uses the canonical List proto.
+    /// reader entry — uses the canonical List + String protos.
     pub fn read(&mut self, text: &str) -> Result<Value, ReadError> {
         let list_proto = Value::Form(self.protos.list);
-        let mut ctx = ReadCtx::new(&mut self.heap, &mut self.syms, list_proto);
+        let string_proto = Value::Form(self.protos.string);
+        let mut ctx = ReadCtx::new(
+            &mut self.heap,
+            &mut self.syms,
+            &mut self.foreign,
+            list_proto,
+            string_proto,
+        );
         reader::read(text, &mut ctx)
     }
 
     /// reader-all entry.
     pub fn read_all(&mut self, text: &str) -> Result<Vec<Value>, ReadError> {
         let list_proto = Value::Form(self.protos.list);
-        let mut ctx = ReadCtx::new(&mut self.heap, &mut self.syms, list_proto);
+        let string_proto = Value::Form(self.protos.string);
+        let mut ctx = ReadCtx::new(
+            &mut self.heap,
+            &mut self.syms,
+            &mut self.foreign,
+            list_proto,
+            string_proto,
+        );
         reader::read_all(text, &mut ctx)
     }
 

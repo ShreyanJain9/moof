@@ -44,9 +44,11 @@ fn forcing_function_source_reflection() {
     // L5: source is canonical; `[m source]` returns the source-form.
     let mut w = moof::new_world();
     moof::eval(&mut w, "(def square (fn (x) [x * x]))").unwrap();
-    let source = moof::eval(&mut w, "[square inspect]").unwrap();
-    // inspect returns to-string (a sym); existence check is enough.
-    assert!(source.as_sym().is_some());
+    let inspected = moof::eval(&mut w, "[square inspect]").unwrap();
+    // inspect now returns a String form (replacing the prior
+    // Sym-as-string placeholder).
+    let text = w.string_text(inspected).unwrap();
+    assert!(!text.is_empty());
 }
 
 #[test]
@@ -527,6 +529,85 @@ fn if_with_no_else_returns_nil_for_false() {
     assert_eq!(moof::eval(&mut w, "(if #true 42)").unwrap(), Value::Int(42));
     assert_eq!(moof::eval(&mut w, "(if #false 42)").unwrap(), Value::Nil);
     assert_eq!(moof::eval(&mut w, "(if nil 42)").unwrap(), Value::Nil);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// real String type (no longer Sym-as-string-stand-in)
+// ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn string_literal_produces_string_form() {
+    let mut w = moof::new_world();
+    let v = moof::eval(&mut w, "\"hello\"").unwrap();
+    let id = v.as_form_id().unwrap();
+    assert_eq!(w.heap.get(id).proto, Value::Form(w.protos.string));
+    assert_eq!(w.string_text(v).unwrap(), "hello");
+}
+
+#[test]
+fn integer_to_string_returns_string_form() {
+    let mut w = moof::new_world();
+    let v = moof::eval(&mut w, "[42 to-string]").unwrap();
+    assert_eq!(w.string_text(v).unwrap(), "42");
+}
+
+#[test]
+fn string_concatenation() {
+    let mut w = moof::new_world();
+    let v = moof::eval(&mut w, "[\"hello\" + \" world\"]").unwrap();
+    assert_eq!(w.string_text(v).unwrap(), "hello world");
+    // concat: keyword is the same operation:
+    let v = moof::eval(&mut w, "[\"a\" concat: \"b\"]").unwrap();
+    assert_eq!(w.string_text(v).unwrap(), "ab");
+    // + delegates to rhs's :to-string for non-string rhs:
+    let v = moof::eval(&mut w, "[\"answer = \" + 42]").unwrap();
+    assert_eq!(w.string_text(v).unwrap(), "answer = 42");
+}
+
+#[test]
+fn string_length() {
+    let mut w = moof::new_world();
+    let v = moof::eval(&mut w, "[\"foo\" length]").unwrap();
+    assert_eq!(v, Value::Int(3));
+    let v = moof::eval(&mut w, "[\"\" empty?]").unwrap();
+    assert_eq!(v, Value::Bool(true));
+}
+
+#[test]
+fn string_equality_is_structural() {
+    let mut w = moof::new_world();
+    // two different String forms with same bytes compare equal.
+    let r = moof::eval(&mut w, "[\"foo\" = \"foo\"]").unwrap();
+    assert_eq!(r, Value::Bool(true));
+    let r = moof::eval(&mut w, "[\"foo\" = \"bar\"]").unwrap();
+    assert_eq!(r, Value::Bool(false));
+    // distinct from the ContentEqual on Sym (their literal id is
+    // different but bytes match).
+    let r = moof::eval(&mut w, "[\"foo\" != \"bar\"]").unwrap();
+    assert_eq!(r, Value::Bool(true));
+}
+
+#[test]
+fn list_to_string_is_a_string_form() {
+    let mut w = moof::new_world();
+    let v = moof::eval(&mut w, "[(list 1 2 3) to-string]").unwrap();
+    assert_eq!(w.string_text(v).unwrap(), "(1 2 3)");
+}
+
+#[test]
+fn console_emit_accepts_string() {
+    // verify Console's :emit: accepts a String form (not just a
+    // Sym fallback). this is the mco-pattern in action: the
+    // ForeignHandle holds the raw bytes.
+    let mut w = moof::new_world();
+    // route stdout to stderr for the test (so test runner stays
+    // happy) by mutating the cap's :fd handle's target. the
+    // simpler form: use $err which already targets stderr.
+    let dollar_err = w.intern("$err");
+    let err = w.env_lookup(w.global_env, dollar_err).unwrap();
+    let emit = w.intern("emit:");
+    let payload = w.make_string("");
+    assert_eq!(w.send(err, emit, &[payload]).unwrap(), Value::Nil);
 }
 
 #[test]

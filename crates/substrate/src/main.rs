@@ -133,7 +133,7 @@ fn print_via_out_text(
     let out = world.env_lookup(world.global_env, dollar_out).ok_or_else(|| {
         moof::world::RaiseError::new(world.intern("missing-cap"), "$out unbound")
     })?;
-    let payload = moof::value::Value::Sym(world.intern(text));
+    let payload = world.make_string(text);
     world.send(out, emit, &[payload]).map(|_| ())
 }
 
@@ -151,6 +151,6 @@ fn print_via_err(
             return Ok(());
         }
     };
-    let payload = moof::value::Value::Sym(world.intern(&format!("{}\n", text)));
+    let payload = world.make_string(&format!("{}\n", text));
     world.send(err, emit, &[payload]).map(|_| ())
 }

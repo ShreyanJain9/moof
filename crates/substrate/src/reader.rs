@@ -19,6 +19,7 @@
 //! quarantined behind a debug flag, used only to load
 //! parser.moof itself.
 
+use crate::foreign::{ForeignHandle, ForeignTable};
 use crate::form::Form;
 use crate::heap::Heap;
 use crate::sym::{SymId, SymTable};
@@ -58,30 +59,46 @@ pub struct ReadCtx<'a> {
     quote_sym: SymId,
     send_sym: SymId,
     self_sym: SymId,
+    bytes_sym: SymId,
     /// the proto FormId to assign to every cons cell. typically
     /// `Value::Form(list_proto)`. phase-A clients that don't yet
     /// have a List proto pass `Value::Nil`.
     pub list_proto: Value,
+    /// the proto FormId to assign to every String literal. when
+    /// `Nil` (e.g., bare reader unit tests), `"…"` falls back to
+    /// interning as a Sym.
+    pub string_proto: Value,
     pub heap: &'a mut Heap,
     pub syms: &'a mut SymTable,
+    pub foreign: &'a mut ForeignTable,
 }
 
 impl<'a> ReadCtx<'a> {
-    pub fn new(heap: &'a mut Heap, syms: &'a mut SymTable, list_proto: Value) -> Self {
+    pub fn new(
+        heap: &'a mut Heap,
+        syms: &'a mut SymTable,
+        foreign: &'a mut ForeignTable,
+        list_proto: Value,
+        string_proto: Value,
+    ) -> Self {
         let head_sym = syms.intern("head");
         let tail_sym = syms.intern("tail");
         let quote_sym = syms.intern("quote");
         let send_sym = syms.intern("__send__");
         let self_sym = syms.intern("self");
+        let bytes_sym = syms.intern("bytes");
         ReadCtx {
             head_sym,
             tail_sym,
             quote_sym,
             send_sym,
             self_sym,
+            bytes_sym,
             list_proto,
+            string_proto,
             heap,
             syms,
+            foreign,
         }
     }
 }
@@ -430,6 +447,12 @@ fn read_hash(c: &mut Cursor, _ctx: &mut ReadCtx) -> Result<Value, ReadError> {
 }
 
 /// read a `"…"` string with `\n \t \\ \"` escapes.
+///
+/// produces a `String` Form (proto = ctx.string_proto) whose
+/// `:bytes` slot is a ForeignHandle wrapping the UTF-8 bytes. for
+/// reader unit tests that don't have a String proto wired (legacy
+/// phase-A behavior), `string_proto = Nil` falls back to interning
+/// as a Sym so older tests still pass.
 fn read_string(c: &mut Cursor, ctx: &mut ReadCtx) -> Result<Value, ReadError> {
     debug_assert_eq!(c.peek(), Some(b'"'));
     let start_line = c.line;
@@ -447,13 +470,7 @@ fn read_string(c: &mut Cursor, ctx: &mut ReadCtx) -> Result<Value, ReadError> {
             }
             Some(b'"') => {
                 c.advance();
-                // strings are interned as symbols at phase A — we
-                // don't have a String proto yet. once String lands
-                // we'll allocate a String Form here. for now,
-                // intern-as-symbol is the honest placeholder; tests
-                // assert this.
-                let id = ctx.syms.intern(&s);
-                return Ok(Value::Sym(id));
+                return Ok(make_string_value(ctx, &s));
             }
             Some(b'\\') => {
                 c.advance();
@@ -479,6 +496,34 @@ fn read_string(c: &mut Cursor, ctx: &mut ReadCtx) -> Result<Value, ReadError> {
             }
         }
     }
+}
+
+/// allocate a String form (or fall back to Sym if no String proto
+/// is provided — used by bare reader unit tests).
+fn make_string_value(ctx: &mut ReadCtx, text: &str) -> Value {
+    if ctx.string_proto.is_nil() {
+        // legacy fallback for bare reader tests.
+        return Value::Sym(ctx.syms.intern(text));
+    }
+    // STRING_BYTES_TAG must agree with world.rs's constant. we
+    // duplicate the value here to avoid cross-module coupling
+    // (reader can't import from world without circularity).
+    const STRING_BYTES_TAG: u32 = 0x_57_52_47_55;
+    let boxed: Box<Vec<u8>> = Box::new(text.as_bytes().to_vec());
+    let ptr = Box::into_raw(boxed) as *mut std::ffi::c_void;
+    unsafe extern "C" fn dtor(ptr: *mut std::ffi::c_void) {
+        if !ptr.is_null() {
+            let _ = unsafe { Box::from_raw(ptr as *mut Vec<u8>) };
+        }
+    }
+    let handle_id = ctx.foreign.alloc(ForeignHandle {
+        ptr,
+        destructor: Some(dtor),
+        tag: STRING_BYTES_TAG,
+    });
+    let mut form = Form::with_proto(ctx.string_proto);
+    form.slots.insert(ctx.bytes_sym, Value::Foreign(handle_id));
+    Value::Form(ctx.heap.alloc(form))
 }
 
 /// read a bare atom: number, symbol, or `.foo` self-send.
@@ -598,33 +643,37 @@ pub fn tail_sym(syms: &mut SymTable) -> SymId {
 mod tests {
     use super::*;
 
-    fn fresh() -> (Heap, SymTable) {
-        (Heap::new(), SymTable::new())
+    fn fresh() -> (Heap, SymTable, ForeignTable) {
+        (Heap::new(), SymTable::new(), ForeignTable::new())
     }
 
-    fn ctx<'a>(heap: &'a mut Heap, syms: &'a mut SymTable) -> ReadCtx<'a> {
-        ReadCtx::new(heap, syms, Value::Nil)
+    fn ctx<'a>(
+        heap: &'a mut Heap,
+        syms: &'a mut SymTable,
+        foreign: &'a mut ForeignTable,
+    ) -> ReadCtx<'a> {
+        ReadCtx::new(heap, syms, foreign, Value::Nil, Value::Nil)
     }
 
     #[test]
     fn nil_literal() {
-        let (mut heap, mut syms) = fresh();
-        let mut c = ctx(&mut heap, &mut syms);
+        let (mut heap, mut syms, mut foreign) = fresh();
+        let mut c = ctx(&mut heap, &mut syms, &mut foreign);
         assert_eq!(read("nil", &mut c).unwrap(), Value::Nil);
     }
 
     #[test]
     fn boolean_literals() {
-        let (mut heap, mut syms) = fresh();
-        let mut c = ctx(&mut heap, &mut syms);
+        let (mut heap, mut syms, mut foreign) = fresh();
+        let mut c = ctx(&mut heap, &mut syms, &mut foreign);
         assert_eq!(read("#true", &mut c).unwrap(), Value::Bool(true));
         assert_eq!(read("#false", &mut c).unwrap(), Value::Bool(false));
     }
 
     #[test]
     fn integer_literals_decimal() {
-        let (mut heap, mut syms) = fresh();
-        let mut c = ctx(&mut heap, &mut syms);
+        let (mut heap, mut syms, mut foreign) = fresh();
+        let mut c = ctx(&mut heap, &mut syms, &mut foreign);
         assert_eq!(read("0", &mut c).unwrap(), Value::Int(0));
         assert_eq!(read("42", &mut c).unwrap(), Value::Int(42));
         assert_eq!(read("-7", &mut c).unwrap(), Value::Int(-7));
@@ -633,8 +682,8 @@ mod tests {
 
     #[test]
     fn integer_literals_bases() {
-        let (mut heap, mut syms) = fresh();
-        let mut c = ctx(&mut heap, &mut syms);
+        let (mut heap, mut syms, mut foreign) = fresh();
+        let mut c = ctx(&mut heap, &mut syms, &mut foreign);
         assert_eq!(read("0xff", &mut c).unwrap(), Value::Int(255));
         assert_eq!(read("0xFF", &mut c).unwrap(), Value::Int(255));
         assert_eq!(read("0b1010", &mut c).unwrap(), Value::Int(10));
@@ -644,8 +693,8 @@ mod tests {
 
     #[test]
     fn integer_literals_underscore_grouping() {
-        let (mut heap, mut syms) = fresh();
-        let mut c = ctx(&mut heap, &mut syms);
+        let (mut heap, mut syms, mut foreign) = fresh();
+        let mut c = ctx(&mut heap, &mut syms, &mut foreign);
         assert_eq!(read("1_000_000", &mut c).unwrap(), Value::Int(1_000_000));
         assert_eq!(read("0xDEAD_BEEF", &mut c).unwrap(), Value::Int(0xDEAD_BEEF));
         assert_eq!(read("0b1100_0011", &mut c).unwrap(), Value::Int(0b1100_0011));
@@ -653,8 +702,8 @@ mod tests {
 
     #[test]
     fn symbols() {
-        let (mut heap, mut syms) = fresh();
-        let mut c = ctx(&mut heap, &mut syms);
+        let (mut heap, mut syms, mut foreign) = fresh();
+        let mut c = ctx(&mut heap, &mut syms, &mut foreign);
         let foo = read("foo", &mut c).unwrap();
         let foo_again = read("foo", &mut c).unwrap();
         assert_eq!(foo, foo_again, "interning means same name = same id");
@@ -670,15 +719,15 @@ mod tests {
 
     #[test]
     fn empty_list_is_nil() {
-        let (mut heap, mut syms) = fresh();
-        let mut c = ctx(&mut heap, &mut syms);
+        let (mut heap, mut syms, mut foreign) = fresh();
+        let mut c = ctx(&mut heap, &mut syms, &mut foreign);
         assert_eq!(read("()", &mut c).unwrap(), Value::Nil);
     }
 
     #[test]
     fn list_three_ints() {
-        let (mut heap, mut syms) = fresh();
-        let mut c = ctx(&mut heap, &mut syms);
+        let (mut heap, mut syms, mut foreign) = fresh();
+        let mut c = ctx(&mut heap, &mut syms, &mut foreign);
         let v = read("(1 2 3)", &mut c).unwrap();
         let elems = list_to_vec(v, &c).unwrap();
         assert_eq!(elems, vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
@@ -686,8 +735,8 @@ mod tests {
 
     #[test]
     fn list_nested() {
-        let (mut heap, mut syms) = fresh();
-        let mut c = ctx(&mut heap, &mut syms);
+        let (mut heap, mut syms, mut foreign) = fresh();
+        let mut c = ctx(&mut heap, &mut syms, &mut foreign);
         let v = read("(foo (bar baz) qux)", &mut c).unwrap();
         let elems = list_to_vec(v, &c).unwrap();
         assert_eq!(elems.len(), 3);
@@ -699,8 +748,8 @@ mod tests {
 
     #[test]
     fn quote_sugar() {
-        let (mut heap, mut syms) = fresh();
-        let mut c = ctx(&mut heap, &mut syms);
+        let (mut heap, mut syms, mut foreign) = fresh();
+        let mut c = ctx(&mut heap, &mut syms, &mut foreign);
         let v = read("'foo", &mut c).unwrap();
         let elems = list_to_vec(v, &c).unwrap();
         // ('quote foo)
@@ -711,8 +760,8 @@ mod tests {
 
     #[test]
     fn quote_of_list() {
-        let (mut heap, mut syms) = fresh();
-        let mut c = ctx(&mut heap, &mut syms);
+        let (mut heap, mut syms, mut foreign) = fresh();
+        let mut c = ctx(&mut heap, &mut syms, &mut foreign);
         let v = read("'(1 2 3)", &mut c).unwrap();
         let elems = list_to_vec(v, &c).unwrap();
         assert_eq!(elems.len(), 2);
@@ -728,8 +777,8 @@ mod tests {
     fn strings_basic() {
         // strings intern-as-symbols in phase A; tests assert this
         // honestly so the placeholder is visible.
-        let (mut heap, mut syms) = fresh();
-        let mut c = ctx(&mut heap, &mut syms);
+        let (mut heap, mut syms, mut foreign) = fresh();
+        let mut c = ctx(&mut heap, &mut syms, &mut foreign);
         let v = read("\"hello\"", &mut c).unwrap();
         let s = v.as_sym().unwrap();
         assert_eq!(c.syms.resolve(s), "hello");
@@ -737,8 +786,8 @@ mod tests {
 
     #[test]
     fn strings_with_escapes() {
-        let (mut heap, mut syms) = fresh();
-        let mut c = ctx(&mut heap, &mut syms);
+        let (mut heap, mut syms, mut foreign) = fresh();
+        let mut c = ctx(&mut heap, &mut syms, &mut foreign);
         let v = read("\"a\\nb\\tc\\\"d\\\\e\"", &mut c).unwrap();
         let s = v.as_sym().unwrap();
         assert_eq!(c.syms.resolve(s), "a\nb\tc\"d\\e");
@@ -746,8 +795,8 @@ mod tests {
 
     #[test]
     fn comments_are_ignored() {
-        let (mut heap, mut syms) = fresh();
-        let mut c = ctx(&mut heap, &mut syms);
+        let (mut heap, mut syms, mut foreign) = fresh();
+        let mut c = ctx(&mut heap, &mut syms, &mut foreign);
         let v = read(
             "; a comment\n  42  ; trailing comment\n",
             &mut c,
@@ -757,8 +806,8 @@ mod tests {
 
     #[test]
     fn read_all_top_level_forms() {
-        let (mut heap, mut syms) = fresh();
-        let mut c = ctx(&mut heap, &mut syms);
+        let (mut heap, mut syms, mut foreign) = fresh();
+        let mut c = ctx(&mut heap, &mut syms, &mut foreign);
         let forms = read_all("1 2 3", &mut c).unwrap();
         assert_eq!(
             forms,
@@ -768,8 +817,8 @@ mod tests {
 
     #[test]
     fn errors_have_position() {
-        let (mut heap, mut syms) = fresh();
-        let mut c = ctx(&mut heap, &mut syms);
+        let (mut heap, mut syms, mut foreign) = fresh();
+        let mut c = ctx(&mut heap, &mut syms, &mut foreign);
         let err = read("(foo bar", &mut c).unwrap_err();
         assert_eq!(err.message, "unterminated list");
         // unterminated list is reported at end-of-input.
@@ -780,16 +829,16 @@ mod tests {
 
     #[test]
     fn errors_unterminated_string() {
-        let (mut heap, mut syms) = fresh();
-        let mut c = ctx(&mut heap, &mut syms);
+        let (mut heap, mut syms, mut foreign) = fresh();
+        let mut c = ctx(&mut heap, &mut syms, &mut foreign);
         let err = read("\"hello", &mut c).unwrap_err();
         assert_eq!(err.message, "unterminated string");
     }
 
     #[test]
     fn errors_unknown_hash_form() {
-        let (mut heap, mut syms) = fresh();
-        let mut c = ctx(&mut heap, &mut syms);
+        let (mut heap, mut syms, mut foreign) = fresh();
+        let mut c = ctx(&mut heap, &mut syms, &mut foreign);
         let err = read("#nope", &mut c).unwrap_err();
         assert!(err.message.contains("`#nope`"));
         // tagged literals come later — error is informative.
@@ -800,8 +849,15 @@ mod tests {
         // when a list-proto is provided, cons cells inherit it.
         let mut heap = Heap::new();
         let mut syms = SymTable::new();
+        let mut foreign = ForeignTable::new();
         let list_proto = heap.alloc(Form::default());
-        let mut c = ReadCtx::new(&mut heap, &mut syms, Value::Form(list_proto));
+        let mut c = ReadCtx::new(
+            &mut heap,
+            &mut syms,
+            &mut foreign,
+            Value::Form(list_proto),
+            Value::Nil,
+        );
         let v = read("(1)", &mut c).unwrap();
         let id = v.as_form_id().unwrap();
         assert_eq!(c.heap.get(id).proto, Value::Form(list_proto));
@@ -810,8 +866,8 @@ mod tests {
     #[test]
     fn list_iteration_is_in_order() {
         // determinism: read produces canonical, in-order cons cells.
-        let (mut heap, mut syms) = fresh();
-        let mut c = ctx(&mut heap, &mut syms);
+        let (mut heap, mut syms, mut foreign) = fresh();
+        let mut c = ctx(&mut heap, &mut syms, &mut foreign);
         let v = read("(1 2 3 4 5)", &mut c).unwrap();
         let elems = list_to_vec(v, &c).unwrap();
         assert_eq!(
@@ -828,8 +884,8 @@ mod tests {
 
     #[test]
     fn underscores_alone_dont_parse_as_number() {
-        let (mut heap, mut syms) = fresh();
-        let mut c = ctx(&mut heap, &mut syms);
+        let (mut heap, mut syms, mut foreign) = fresh();
+        let mut c = ctx(&mut heap, &mut syms, &mut foreign);
         // `_foo` is a valid symbol name; not a number.
         let v = read("_foo", &mut c).unwrap();
         assert!(v.as_sym().is_some());
@@ -837,8 +893,8 @@ mod tests {
 
     #[test]
     fn malformed_numbers_become_symbols() {
-        let (mut heap, mut syms) = fresh();
-        let mut c = ctx(&mut heap, &mut syms);
+        let (mut heap, mut syms, mut foreign) = fresh();
+        let mut c = ctx(&mut heap, &mut syms, &mut foreign);
         // `12abc` is not a valid number; phase-A treats as symbol.
         // (deliberate: lets users define `12abc` as a name.
         // parser.moof's later reader will reject more strictly.)
@@ -848,8 +904,8 @@ mod tests {
 
     #[test]
     fn negative_numbers_versus_minus_symbol() {
-        let (mut heap, mut syms) = fresh();
-        let mut c = ctx(&mut heap, &mut syms);
+        let (mut heap, mut syms, mut foreign) = fresh();
+        let mut c = ctx(&mut heap, &mut syms, &mut foreign);
         // `-` alone is the subtraction symbol, not a number.
         let v = read("-", &mut c).unwrap();
         assert!(v.as_sym().is_some());
@@ -862,8 +918,8 @@ mod tests {
 
     #[test]
     fn whitespace_is_flexible() {
-        let (mut heap, mut syms) = fresh();
-        let mut c = ctx(&mut heap, &mut syms);
+        let (mut heap, mut syms, mut foreign) = fresh();
+        let mut c = ctx(&mut heap, &mut syms, &mut foreign);
         let v = read("  (\n  foo\n  bar\n  )  ", &mut c).unwrap();
         let elems = list_to_vec(v, &c).unwrap();
         assert_eq!(elems.len(), 2);
@@ -871,8 +927,8 @@ mod tests {
 
     #[test]
     fn deeply_nested_lists() {
-        let (mut heap, mut syms) = fresh();
-        let mut c = ctx(&mut heap, &mut syms);
+        let (mut heap, mut syms, mut foreign) = fresh();
+        let mut c = ctx(&mut heap, &mut syms, &mut foreign);
         let v = read("(((a)))", &mut c).unwrap();
         let level1 = list_to_vec(v, &c).unwrap();
         assert_eq!(level1.len(), 1);
@@ -885,16 +941,16 @@ mod tests {
 
     #[test]
     fn trailing_garbage_is_an_error() {
-        let (mut heap, mut syms) = fresh();
-        let mut c = ctx(&mut heap, &mut syms);
+        let (mut heap, mut syms, mut foreign) = fresh();
+        let mut c = ctx(&mut heap, &mut syms, &mut foreign);
         let err = read("42 garbage", &mut c).unwrap_err();
         assert!(err.message.contains("trailing"));
     }
 
     #[test]
     fn empty_input_is_an_error() {
-        let (mut heap, mut syms) = fresh();
-        let mut c = ctx(&mut heap, &mut syms);
+        let (mut heap, mut syms, mut foreign) = fresh();
+        let mut c = ctx(&mut heap, &mut syms, &mut foreign);
         let err = read("   ; just a comment\n", &mut c).unwrap_err();
         assert!(err.message.contains("end of input"));
     }
