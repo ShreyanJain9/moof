@@ -1,0 +1,8 @@
+[package]
+name = "moof-abi"
+version.workspace = true
+edition.workspace = true
+description = "raw C ABI types that mcos compile against. stable across substrate versions."
+
+[lib]
+crate-type = ["rlib"]

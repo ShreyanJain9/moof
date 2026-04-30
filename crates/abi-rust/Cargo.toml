@@ -1,0 +1,8 @@
+[package]
+name = "moof-abi-rust"
+version.workspace = true
+edition.workspace = true
+description = "rust-side safe wrappers over moof-abi. mcos written in rust depend on this crate; the substrate also uses it for native methods."
+
+[dependencies]
+moof-abi = { path = "../abi" }

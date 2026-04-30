@@ -53,14 +53,98 @@ promise gets enforced by this preference.
 
 ## the rule of thumb for compiled-objects
 
-`.mco` files are *only* for rust-bound methods on a single object.
-do not use `.mco` for image persistence, package distribution,
-stdlib delivery. those have their own mechanisms
-(`concepts/persistence.md`, `concepts/data-sources.md`).
+`.mco` files are runtime-loadable native modules: a platform-tagged
+dylib + binding metadata, dlopened at runtime, exposing one moof
+proto. they are *the* mechanism for bringing rust/c libraries into
+moof. blake3, lmdb, ed25519, wgpu, websocket — all mcos.
 
-if you find yourself writing rust code, you are also writing a
-`.mco` file with that rust as a native method. otherwise you are not
-writing rust.
+two rules govern mco use:
+
+- **state stays in moof.** an mco's native methods read and write
+  `self`'s slots through the substrate native abi. opaque rust-side
+  resources (an open file handle, a wgpu device) live as
+  `ForeignHandle` *slot values* on the moof Form, with a destructor
+  the gc invokes. nothing about an mco-backed object is hidden from
+  reflection.
+- **only the primitives are native.** an mco supplies the small set
+  of operations that genuinely require rust (the leaf calls into the
+  underlying library). everything *derivable* from those primitives
+  is moof code, defined in the proto's handler table at mco load
+  time. user code can read and modify the derived methods.
+
+if you find yourself writing rust code, you are also writing an mco
+with that rust as a *primitive* method. if the rust would be
+re-derivable from a smaller set of primitives, those primitives are
+the rust; the rest stays moof. otherwise you are not writing rust.
+
+(`concepts/compiled-objects.md` for the full mco model.)
+
+## the rule of thumb for capabilities
+
+**cap discipline is from day one.** there is no "we'll add caps
+later" path. the substrate ships with the primordial cap set
+(`$out`, `$err`, `$clock`, `$random`, …) constructed at boot by the
+root supervisor; user code receives caps as arguments; nothing ever
+gets a cap by ambient lookup. this means *even phase A* — the
+smallest substrate seed — has caps.
+
+practical consequences:
+
+- **no free-function print, ever.** `print`, `println`, `puts` are
+  not in the language. the only path to stdout is `[$out emit:
+  bytes]` (low-level) or `[$out say: x]` (the derived
+  `:to-string` + emit + newline). a Smalltalk-style `Transcript`
+  arrives later as a moof-side Form wrapping `$out`; it is not a
+  substrate primitive.
+- **caps are first-class Forms** implementing standard protocols.
+  `$out` implements `DataSource` (sink); you can attach combinators
+  to it (`[$out chunk: 1024]`, `[$out tee: log-file]`).
+- **cap calls in phase A are synchronous direct invocations.**
+  intent/receipt machinery is added in phase B alongside
+  persistence, when the indirection earns its keep. user code
+  doesn't notice the change — the syntax `[$out emit: text]` is
+  identical at both phases.
+- **the substrate's symbol-table check at phase-A acceptance is**:
+  no `print`, no `println`, no `puts`, no `simulated_*`. the only
+  way to write text from moof is through a cap.
+
+## the rule of thumb for stdlib shape
+
+**prefer methods on protocols. avoid free functions.** define a
+small set of primitive methods on a protocol; *derive* a much
+larger set from them. this is clojure's protocols + haskell's
+typeclasses + rust's traits, in moof's send-shape.
+
+| protocol | primitive methods | derived methods |
+|---|---|---|
+| Iterable | `:next`, `:done?` | `:map:`, `:filter:`, `:reduce:from:`, `:for-each:`, `:to-list`, `:to-table`, `:take:`, `:drop:`, `:any?:`, `:all?:`, `:contains?:`, `:count`, `:zip:`, `:scan:from:` |
+| Equatable | `:=` | `:!=` |
+| Comparable | `:<` | `:<=`, `:>`, `:>=`, `:between:and:`, `:min:`, `:max:`, `:clamp:to:` |
+| Sized | `:length` | `:empty?`, `:non-empty?` |
+| Hashable | `:hash` | (none — qualifies for use as Set/Map keys) |
+| Showable | `:to-string` | `:inspect` (default) |
+| Ordering | `:compare:` | derives all of Comparable |
+
+a type implements a protocol by providing the primitive methods.
+the protocol's *deriving rules* (themselves moof code) install the
+derived methods into the type's proto when the protocol is mixed in.
+
+free functions are reserved for: control-flow operatives (`if`,
+`let`, `do`), top-level constructors that have no meaningful
+receiver (`(make-vat …)`), the rare pure operation that genuinely
+takes no preferred subject (`(min a b)` is borderline; `[a min:
+b]` is preferred).
+
+**when porting a free function to a protocol method, the change of
+viewpoint matters.** `(map f xs)` becomes `[xs map: f]`: the
+collection is the subject; mapping is what we ask of it. this also
+unlocks polymorphism: any Iterable answers `:map:`; the same code
+works for Lists, Tables, Strings, DataSources, Iterables you
+haven't written yet.
+
+(do not port the v4-take-1 `bootstrap.moof`'s free-function shape
+forward as-is. rewrite it method-shaped from the start in phase
+A.10.)
 
 ## the workflow
 

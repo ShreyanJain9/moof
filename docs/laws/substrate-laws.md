@@ -143,5 +143,11 @@ should be deliberate.
 - `laws/reflection-contract.md` — formal reflection guarantees.
 - `laws/isolation-laws.md` — vat-boundary rules.
 - `laws/purity-and-effects.md` — formal purity rules.
+- `laws/determinism-laws.md` — what replicated vats observe and
+  refuse.
 - `concepts/forms.md` — what L1, L6 protect.
 - `concepts/vats.md` — what L7, L13, L14 protect.
+- `concepts/replication.md` — replicated-vat mode that depends on
+  L13 + determinism-laws.
+- `concepts/effect-intents.md` — how L8's "mutation is journaled"
+  splits into mutation-log + input-log + effect-log.

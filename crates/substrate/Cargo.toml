@@ -1,0 +1,18 @@
+[package]
+name = "moof"
+version.workspace = true
+edition.workspace = true
+description = "moof v4 substrate seed — heap, dispatch, bytecode interp, mco loader, scheduler, bootstrap parser/compiler."
+
+[dependencies]
+indexmap.workspace = true
+moof-abi = { path = "../abi" }
+moof-abi-rust = { path = "../abi-rust" }
+
+[[bin]]
+name = "moof"
+path = "src/main.rs"
+
+[lib]
+name = "moof"
+path = "src/lib.rs"

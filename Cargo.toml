@@ -1,18 +1,20 @@
-[package]
-name = "moof"
-version = "0.1.0"
+[workspace]
+resolver = "2"
+members = [
+    "crates/abi",
+    "crates/abi-rust",
+    "crates/substrate",
+]
+
+[workspace.package]
+version = "0.4.0-alpha.0"
 edition = "2021"
-description = "moof v4 — phase 1 substrate seed"
+authors = ["shreyan jain"]
+description = "moof — a moldable, persistent, multi-actor environment"
 
-[dependencies]
-
-[[bin]]
-name = "moof"
-path = "src/main.rs"
-
-[lib]
-name = "moof"
-path = "src/lib.rs"
+[workspace.dependencies]
+indexmap = "2"
+libloading = "0.8"
 
 [profile.release]
 opt-level = 3

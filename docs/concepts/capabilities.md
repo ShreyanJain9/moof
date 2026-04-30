@@ -63,14 +63,26 @@ primordial caps, which it then hands out as needed:
 |---|---|---|
 | `$clock` | wall time, monotonic time, schedule timers | timer leaf |
 | `$random` | bytes / numbers from CSPRNG | random leaf |
-| `$out`, `$err` | stdout / stderr text | console leaf |
+| `$out`, `$err` | stdout / stderr — a `Console` proto implementing `DataSource` (sink). use `[$out emit: bytes]`, `[$out say: value]`. there is no separate "print api" — see `concepts/data-sources.md`. | console leaf |
 | `$fs` | filesystem read/write | file leaf |
 | `$net` | open sockets, listen, connect | network leaf |
 | `$keyboard` | input event stream (a data source) | input leaf |
-| `$screen` | output drawing surface | screen leaf |
+| `$canvas` | drawing surface (`concepts/canvas-and-input.md`) | screen leaf |
+| `$pointer` | mouse/touch input as DataSource | input leaf |
 | `$proc` | spawn other processes | process leaf |
 | `$registry` | named lookup in the world's namespace | path-resolver |
 | `$spawn` | spawn new vats | scheduler |
+
+**replicated vats cannot hold OS-bound caps.** logical-now and seed
+travel in the turn envelope, not as caps. `$canvas`, `$pointer`,
+`$keyboard`, `$out`, `$fs`, etc. live in *wrapper* solo vats; the
+replicated vat communicates with them via input envelopes
+(`concepts/replication.md`, `concepts/effect-intents.md`).
+
+caps are **per-replica ambient bindings** for the wrapper case. when
+alice's replica's wrapper holds `$canvas-alice` and bob's wrapper
+holds `$canvas-bob`, they're different caps pointing to different
+local screens. the replicated state contains neither.
 
 most user code receives one or two caps per function. caps that take
 a lot of state (file handles, sockets) are themselves caps that you
@@ -140,5 +152,10 @@ three reasons:
 
 - `concepts/references.md` — how caps cross vat boundaries.
 - `concepts/types.md` — effect rows in type signatures.
+- `concepts/effect-intents.md` — intent/receipt model in replicated
+  vats.
+- `concepts/replication.md` — per-replica ambient cap binding.
 - `laws/purity-and-effects.md` — formal rules.
 - `laws/isolation-laws.md` — vat isolation and cap unforgeability.
+- `laws/determinism-laws.md` — what replicated vats can and cannot
+  observe.

@@ -16,14 +16,16 @@ a vat consists of:
 | field | what |
 |---|---|
 | **id** | unique identifier (UUIDv7-ish, see below) |
+| **mode** | `:solo` \| `:replicated-leader` \| `:replicated-follower` (`concepts/replication.md`) |
 | **heap** | a private form-graph |
 | **inbox** | a data source — incoming messages |
-| **outbox** | a data source — outgoing messages (optional, for publish patterns) |
+| **outbox** | a data source — outgoing messages and effect-intents (`concepts/effect-intents.md`) |
 | **behavior** | a closure invoked on each received message |
 | **supervisor** | a far-ref to the supervising vat |
 | **caps** | the capabilities this vat holds |
 | **journal** | a per-vat WAL (`concepts/persistence.md`) |
 | **store** | the canonical on-disk form (`concepts/persistence.md`) |
+| **session** | (replicated only) the session-id, epoch, leader/follower role |
 
 within a vat: synchronous message sends. shared heap. cheap
 allocation. one execution thread.
@@ -129,6 +131,28 @@ streams primitive (`concepts/data-sources.md`). this means:
 this single substrate move makes a tremendous amount of debugging /
 observability / fault-injection trivial.
 
+## replication mode
+
+a vat is born in one of three modes (`concepts/replication.md`):
+
+- **`:solo`** — the default. ordinary message-passing vat. holds
+  whatever caps its supervisor grants. wall-clock and OS-entropy
+  caps are allowed.
+- **`:replicated-leader`** — part of a replicated session; this
+  replica controls the input log and effect authority.
+- **`:replicated-follower`** — part of a replicated session;
+  consumes the input log; promoted to leader on failover.
+
+a vat's mode is fixed at birth. a `:solo` vat cannot be promoted to
+replicated; it has to be born that way. replicated-leader and
+follower can swap roles via the failover protocol.
+
+solo vats hold caps directly. replicated vats *cannot* hold OS-
+bound caps (`$clock`, `$random`, raw `$fs`); the substrate refuses.
+ambient i/o for a replicated vat is provided by a *wrapper* solo
+vat that forwards events into the replicated vat as input
+envelopes.
+
 ## granularity — when is a vat?
 
 guidelines for how to scope vats:
@@ -190,4 +214,7 @@ collaboration.)
 - `concepts/data-sources.md` — what mailboxes really are.
 - `concepts/persistence.md` — per-vat on-disk shape.
 - `concepts/capabilities.md` — what's in a cap-token.
+- `concepts/replication.md` — replicated-vat mode.
+- `concepts/effect-intents.md` — how replicated vats handle caps.
 - `laws/isolation-laws.md` — formal isolation rules.
+- `laws/determinism-laws.md` — what determinism replicated vats must satisfy.

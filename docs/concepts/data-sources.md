@@ -80,6 +80,7 @@ data-flow.
 
 | thing | as a DS |
 |---|---|
+| **`$out`, `$err`** | sink-only. canonical "print" path is `[$out say: x]`. no separate console api exists. |
 | files | read/write |
 | sockets | read/write |
 | keyboards | input events |

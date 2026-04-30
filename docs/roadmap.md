@@ -1,162 +1,226 @@
 # roadmap
 
 > **what we build, in what order. each phase has a single forcing
-> function — a thing that, when it works, signals readiness for the
-> next phase.**
+> function. earlier phases are not allowed to assume later phases.
+> we resist building anything before its phase. v4-take-2 sequencing,
+> revised after the 2026-04-29 audit.**
 
-we explicitly resist building anything before its phase. earlier
-phases are not allowed to assume later phases. when tempted to
-"prepare for" a later phase, write the temptation in
-`process/open-questions.md` and move on.
+the headline changes from the previous roadmap:
+
+- **the demo is "shared 3D zoomable world"**
+  (`concepts/world-and-space.md`), not "moofpaint app." pixmaps
+  (`concepts/pixmap.md`) are *one inhabitant proto* among many.
+- **the rust line is small.** the substrate seed is ≤3k LoC of rust;
+  everything performance-sensitive (lmdb, blake3, ed25519, wgpu,
+  websocket, terminal i/o) ships as mcos
+  (`concepts/compiled-objects.md`).
+- **parser + compiler self-host immediately after phase A.** the
+  bootstrap rust parser/compiler are throwaway; parser.moof and
+  compiler.moof take over at phase A-self-host.
+
+every phase before the demo earns its keep by removing a substrate
+gap that the demo exposes. every phase after polishes the platform.
+
+before reading: skim
+[`docs/process/audit-2026-04-29.md`](process/audit-2026-04-29.md)
+for the rationale, and
+[`docs/process/state-of-the-implementation.md`](process/state-of-the-implementation.md)
+for what the previous attempt missed.
 
 ## phase 0 — vision and docs
 
-**status:** in progress (this folder).
+**status:** complete (this folder).
+
+**done.** vision, manifesto, lineage, concepts/*, syntax/*, laws/*,
+process/*. the docs read coherently; the brainstorm round of
+2026-04-29 surfaced and patched the load-bearing gaps.
+
+## phase A — substrate seed
+
+**forcing function:** `moof '(+ 1 2)' → 3`, with every law in
+`laws/substrate-laws.md` either honored or doc'd as deferred.
+≤3k LoC of rust. the seed is the *only* rust binary we expect to
+keep growing for a long time.
 
 **deliverables:**
-- vision/manifesto, lineage, one-page.
-- concepts/* covering every substrate primitive.
-- syntax/* covering the surface.
-- laws/* with formal guarantees.
-- process/docs-driven, open-questions.
-
-**done when:** the docs read coherently to a fresh reader. external
-adversarial reviews (codex, gemini) raise no foundation-level
-objections.
-
-**we do not write code in this phase.**
-
-## phase 1 — substrate seed
-
-**forcing function:** `(+ 1 2)` runs in a fresh moof process,
-prints `3`, exits cleanly.
-
-**deliverables:**
-- rust crate: form heap + GC.
-- rust crate: bytecode interpreter (~30 opcodes), send primitive,
-  inline cache slot allocation.
-- rust crate: bootstrap parser (minimal s-expressions).
-- rust crate: the world boot sequence — read manifest, allocate
-  root vat, dispatch initial message.
-- a tiny bootstrap.moof that defines `+`, `-`, `*`, `/` and a
-  println via a `$out` cap stub.
+- one Form heap kind. tagged-immediates for nil/bool/int/sym;
+  reflection through implicit proto.
+- methods are Forms (closures with `proto: Method`). chunks are
+  Forms. `Object` proto with the reflection method set installed.
+- proto-chain dispatch with inline caches.
+- bytecode interpreter (~30 ops).
+- bootstrap reader/compiler in rust (carry `src/reader.rs` /
+  `src/sym.rs`; rewrite the rest).
+- **mco loader** (the substrate's tiny native-loading mechanism).
+- bootstrap stdlib in moof.
 - a `moof` cli binary that runs a single expression.
 
-**ratio:** ~1500 lines of rust + 100 lines of moof, give or take.
+**not in scope:** persistence, vats-as-actors, replication, types,
+real parser-in-moof, GC, defs in moof.
 
-**not in scope:** persistence, datalog, type system, real parser,
-real compiler, vats-as-actors, far-refs.
+## phase A-self-host — parser and compiler in moof
 
-## phase 2 — vats and persistence
+**forcing function:** `parser.moof` parses its own source;
+`compiler.moof` compiles its own source; both produce identical
+trees/chunks across runs. the rust parser/compiler are quarantined
+behind a debug flag, used only to bring up new compiler.moof
+versions.
+
+**deliverables:**
+- `parser.moof` (~800 LoC) — the production parser. supports the
+  full surface (`syntax/*`).
+- `compiler.moof` (~700 LoC) — the production compiler. supports
+  multi-clause patterns, defproto, defop, super sends.
+- self-hosting test suite.
+
+after this phase the rust line stops growing; everything new is
+moof or mco.
+
+## phase B — single-vat persistence
 
 **forcing function:** a vat saves to disk per turn; quit and reboot
-restores its state; `(println "hi")` works through a `$out` cap that
+restores its state. `(println "hi")` works through `$out` cap that
 survives reboot.
 
-**deliverables:**
-- rust crate: per-vat lmdb store + journal.
-- rust crate: vat scheduler with mailbox (single-process; no
-  cross-process yet).
-- rust crate: canonical encoding for Forms (binary).
-- rust crate: bootloader that mmaps the store and replays journal-tail.
-- moof: the proper parser (replaces bootstrap parser; written in moof,
-  loaded as source on first boot, bytecode-cached).
-- moof: a small stdlib of List, Tab, String, Number protos.
-- moof: defproto / defop operatives.
+**deliverables (mostly mcos and moof; rust seed grows only ~+500
+LoC):**
+- per-vat heap (vat-local FormIds).
+- vat scheduler (single vat for now).
+- intent/receipt model for cap effects
+  (`concepts/effect-intents.md`).
+- mcos: `core/canonical-encoder`, `store/lmdb`, `os/clock`,
+  `os/random`, `os/console`.
+- bootloader: mmap, replay journal-tail.
+- mark-sweep GC at turn boundaries.
 
-**ratio:** another ~1500 lines of rust, ~2000 lines of moof.
+**not in scope:** replication, types, datalog, distribution.
 
-**not in scope:** distribution, datalog, types, GUI, debugger.
+## phase C — moldability foundations
 
-## phase 3 — moldability features
-
-**forcing function:** a user can edit a method via the inspector,
-hit save, and the next call uses the new code.
-
-**deliverables:**
-- moof: inspector — a vat that renders forms with per-proto views.
-- moof: live-editor — text editor for method source, recompile on save.
-- moof: debugger — pause-on-error, frame inspector, edit-and-continue.
-- moof: `become:` substrate primitive (rust support).
-- moof: doesNotUnderstand mechanism + cap-attenuation primitives.
-- moof: pattern-match library (in moof; substrate calls user code).
-
-**ratio:** ~5000 lines of moof.
-
-## phase 4 — query, types, capabilities
-
-**forcing function:** `(query (?obj proto: Counter where: [?obj count > 100]))`
-returns a data source streaming matching objects from the live world.
+**forcing function:** edit a method via `(set-handler! Counter
+:incr ...)`; the next call uses the new code. existing inline caches
+invalidate.
 
 **deliverables:**
-- moof: datalog rule and query operatives.
-- moof: type system (`Type` proto, refinement / structural / dependent).
-- moof: analyzer (effect inference, exhaustiveness checks).
-- moof: capability machinery formalized — `$out`, `$clock`, `$random`,
-  `$fs`, `$keyboard`, `$screen` caps with concrete leaves in rust.
+- proto-handler mutation + inline-cache invalidation.
+- `does-not-understand:` extension hook.
+- multi-clause pattern-matched defs.
+- text-line inspector `[obj inspect]`.
+- bytecode-from-source recompile on edit.
+- **test matrix**: live-edit a method, see new-method dispatch on
+  the next send; multi-clause exhaustiveness; pattern destructuring
+  for List/Table.
 
-**ratio:** ~5000 lines of moof, modest rust additions for new caps.
+**ratio:** ~500 lines of rust + ~1500 lines of moof.
 
-## phase 5 — distribution
+**deferred to phase D:** `become:` (until id-indirection lands).
 
-**forcing function:** alice's vat at machine A sends a message to
-bob's vat at machine B; bob's vat replies; alice sees the result.
+## phase D — replicated vats (in-process)
 
-**deliverables:**
-- rust crate: cross-process transport (unix-socket).
-- rust crate: cross-machine transport (tcp + websocket).
-- rust crate: routing table maintenance.
-- substrate: serialization promotion (auto-far-ref at boundary).
-- moof: discovery (whatever we end up with — gossip, registry,
-  bonjour).
-- moof: shared workspaces / collaboration UI.
-
-**ratio:** ~1500 lines of rust + ~3000 lines of moof.
-
-## phase 6 — tooling and culture
-
-**forcing function:** a stranger can read the docs, install moof,
-and within a day have a useful environment customized to their work.
+**forcing function:** a single rust process holds **two replica
+vats** of one logical vat. an in-process reflector feeds both the
+same totally-ordered input log. after every turn, the substrate
+asserts `canonical_hash(replica_a) == canonical_hash(replica_b)`.
 
 **deliverables:**
-- moof: package system (whatever shape).
-- moof: testing framework.
-- moof: profiling and observability.
-- moof: more inspector views, more morphic primitives.
-- documentation polish, more examples, tutorials.
+- vat-mode at birth: `:solo | :replicated-leader |
+  :replicated-follower` (`concepts/replication.md`).
+- determinism-laws enforced in rust (`laws/determinism-laws.md`):
+  deterministic alloc order, ordered hashmap iteration, no wall-
+  clock during a replicated turn, GC at turn boundaries, deterministic
+  promise ids.
+- the turn-envelope shape `(session-id, epoch, turn-seq, author,
+  logical-now, input-event, seed)`.
+- a tiny in-rust reflector (orders user-inputs and effect-receipts
+  only; not in cap traffic path).
+- the canonical-hash function over a vat's heap.
+- intent-receipt round-trip in the replicated case.
+- `become:` (with id-indirection now feasible).
+- **test matrix**: 10k random inputs, two replicas, hash-equal at
+  every turn. fault injection (drop one replica; rejoin from
+  snapshot; catch up via input log). proto-edit-as-input convergence.
 
-**ratio:** ongoing.
+**ratio:** ~1500 lines of rust + ~1000 lines of moof.
 
-## phase 7 — sunset preceding attempts
+## phase E — single-user 3D world
 
-archive any remaining v3 dependencies / scripts. v3 is permanently
-preserved at branch `v3` and tag `v3-final`. master is v4 only.
+**forcing function:** one user, one terminal. boots a world with
+several inhabitants — Pixmaps, a Counter, a Cube, a Scratchpad.
+flies the camera around in 3D, double-clicks to focus, edits
+inhabitants in place. canvas persists across reboot.
 
-**not a phase, more a cleanup.**
+**deliverables (almost entirely moof + mcos):**
+- Frame, Placement, Pose, Camera, Viewport protos
+  (`concepts/world-and-space.md`).
+- the universal `:render-with: ctx` protocol on every visible Form.
+- inhabitant protos: Pixmap, Counter, Scratchpad, Cube,
+  ToolPalette, Inspector.
+- per-user undo for pixmaps.
+- mcos: `render/terminal` (3D software rasterizer to half-blocks /
+  braille), `input/xterm-mouse`, `input/xterm-keys`,
+  `pixel-bits`, `math3d`.
+- world-vat (replicated mode, but only one replica live in this
+  phase).
+- wrapper vat (solo) bridging $canvas/$pointer/$keyboard to the
+  world-vat via input envelopes; ray-casts in the wrapper.
+
+## phase F — multi-user 3D world (websocket)
+
+**forcing function:** alice runs `moof world ./worlds/test/`. bob
+runs `moof world join wss://localhost:7878`. both inhabit the same
+3D world — see each other's cursors, edit pixmaps and counters in
+place, see live-edits to tool protos propagate within reflector
+tick (50ms). bob disconnects mid-stroke, reconnects, converges.
+
+**deliverables (one new mco; everything else moof):**
+- mco: `transport/websocket`.
+- handshake / authentication via ed25519.
+- snapshot transfer.
+- reconnect with epoch.
+- leader failover.
+- Cursor inhabitant proto (presence as a first-class Form).
+
+## phase G — gpu rendering, browser, polish
+
+**forcing function:** stretchy. "the world renders via wgpu at 60fps
+on a desktop; alice and bob are on different machines and one of
+them joined via a browser tab; the world persists for a week of
+intermittent edits."
+
+**deliverables:** mcos `render/wgpu` (gpu renderer), `render/web`
+(browser via wasm), `format/png` (pixmap export); session
+persistence as on-disk artifact (shareable); long-lived user
+identity (ed25519 keys as Forms).
+
+## phase H+ — everything else
+
+real type system (nominal + structural; refinement deferred);
+datalog queries; APL-flavored Tables; `defop` / user macros;
+hyperCard accessibility studies; profile-and-tune the substrate
+based on moofpaint workloads.
 
 ## guidelines for living with this roadmap
 
-- **no skipping ahead.** writing rust for distribution before
-  persistence is unsafe — the substrate hasn't paid for the safety
-  invariants yet. resist.
-- **no skipping back.** if phase 2 forces a redesign of phase 1,
-  that's normal — fix phase 1's docs and rust. don't ship phase 2 on
-  a broken phase 1.
+- **no skipping ahead.** writing code for phase F before phase D
+  passes is unsafe.
+- **no skipping back.** if phase D forces a redesign of phase A,
+  fix phase A first.
 - **forcing functions are not optional.** "phase n is done" means
-  the forcing function works. nothing else suffices.
-- **the docs lead.** if we discover a phase requires something
-  undocumented, the docs go first. (`process/docs-driven.md`.)
+  the forcing function passes and the test matrix is green.
+- **the docs lead.** if a phase requires something undocumented,
+  the docs go first (`process/docs-driven.md`).
 
 ## inspirations
 
 - the rust 2015 / 2018 / 2021 edition rollout: phased substrate
-  evolution with explicit cutover points.
-- the smalltalk-80 bootstrap: a tiny image that loaded the rest of
-  the world.
-- the maru posture (piumarta): tiny seed; world grows itself.
+  evolution.
+- the smalltalk-80 bootstrap.
+- the maru posture (piumarta).
+- croquet's tea-time replication discipline (kay, reed, smith).
 
 ## see also
 
 - `vision/manifesto.md` — the why.
 - `process/docs-driven.md` — the discipline.
-- `process/open-questions.md` — what's still undecided.
+- `process/audit-2026-04-29.md` — what changed about this roadmap.
+- `process/impl-plan-v4.md` — the concrete day-by-day next steps.

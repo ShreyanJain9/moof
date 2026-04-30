@@ -125,6 +125,29 @@ inspectable and modifiable. (`concepts/moldability.md`.)
 
 **moof.** this project. lowercase. friendly. fourth attempt.
 
+**mco.** "moof compiled object." a runtime-loadable native module:
+a platform-tagged dylib + binding metadata describing which dylib
+symbols implement which moof methods. the substrate seed stays
+tiny; mcos deliver native libraries (lmdb, blake3, wgpu, …) as
+ordinary moof protos. (`concepts/compiled-objects.md`.)
+
+**frame.** a coordinate space in the 3D world. frames nest. the
+root frame is "the world." (`concepts/world-and-space.md`.)
+
+**placement.** the substrate's "this Form lives here" relation.
+`{form, pose, frame}`. placements are themselves Forms.
+
+**pose.** position + orientation (quaternion) + scale, in some
+frame's coordinate system.
+
+**inhabitant.** a Form that is spatially placed in a frame, vs
+forms that live only in the heap. pixmaps, counters, cursors,
+inspectors — all inhabitants when placed.
+
+**wrapper vat.** a per-replica solo vat that holds local
+capabilities ($canvas, $pointer, $keyboard) and the local viewport.
+bridges between the replicated world-vat and the local hardware.
+
 **multi-clause.** a definition with multiple `|pattern| body`
 clauses, dispatched by pattern matching.
 (`concepts/blocks-and-patterns.md`.)
@@ -200,7 +223,47 @@ composable. (`concepts/types.md`.)
 
 **vat.** the unit of concurrency, isolation, persistence, and
 distribution. one heap, one mailbox, one journal, one supervisor.
-(`concepts/vats.md`.)
+born in one of three *modes*: `:solo`, `:replicated-leader`,
+`:replicated-follower`. (`concepts/vats.md`,
+`concepts/replication.md`.)
+
+**replicated vat.** a vat born in replicated mode. multiple
+replicas across machines process the same totally-ordered input
+log; all converge to bit-identical state at every turn boundary.
+(`concepts/replication.md`.)
+
+**reflector.** the small authority that totally orders user-input
+events for a replicated session and broadcasts them as turn
+envelopes to every replica. does not run user code; does not see
+cap-bearing traffic. (`concepts/replication.md`.)
+
+**turn envelope.** the substrate-blessed input shape for a
+replicated turn: `(session-id, epoch, turn-seq, author,
+logical-now, input-event, seed)`. signed by the reflector. all
+mid-turn computation is a function of the envelope and the heap.
+(`laws/determinism-laws.md` D2.)
+
+**effect intent.** a Form a replicated vat appends to its outbox
+slot when its code calls a cap. carries `(turn-seq, ordinal, cap,
+selector, args)`. an external authority executes intents
+at-most-once. (`concepts/effect-intents.md`.)
+
+**effect receipt.** a Form the effect authority emits after
+executing an intent. carries `(turn-seq, ordinal, status, value)`.
+arrives at every replica as an ordinary input envelope; resolves
+the originating promise. (`concepts/effect-intents.md`.)
+
+**effect authority.** the (typically leader) replica that has
+permission to actually invoke a cap. dedups by intent id;
+receipts get fed back into the input log.
+
+**logical-now.** ticks since session start, advanced by the
+reflector. read inside a replicated turn from the envelope, never
+via a cap. (`laws/determinism-laws.md` D3.)
+
+**canonical hash.** a deterministic blake3 hash of a vat's heap's
+canonical encoding. two replicas at the same turn-seq must produce
+the same hash. (`laws/determinism-laws.md` D9.)
 
 **world.** the totality of vats running together (per process or
 distributed). has a root supervisor and a path-table.

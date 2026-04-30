@@ -16,11 +16,33 @@ unit, and the supervision unit.
 
 ```
 .moof/vats/<vat-id>/
-  meta.toml              small: id, name, supervisor, caps, version
-  store.lmdb             B-tree, mmap'd: heap-id → canonical-bytes
-  journal.log            WAL: append-only, ordered mutations since checkpoint
+  meta.toml              small: id, name, mode, supervisor, caps, version
+  store.lmdb             B-tree, mmap'd: heap-id → canonical-bytes (snapshot)
+  journal.log            WAL: append-only, slot-mutations since last snapshot
+  inputs.log             append-only input envelope log (replicated vats)
+                         OR ordinary inbox messages (solo vats).
+  effects.log            append-only effect-intent + receipt log
   refs/                  named root pointers (root form, inbox cursor, etc.)
 ```
+
+three logs, three jobs:
+
+- **`journal.log`** is *derived data*: the slot-mutations that
+  applying a turn produced. used by snapshot compaction; not
+  authoritative for replay.
+- **`inputs.log`** is *the truth*: the totally-ordered envelope
+  stream. for replicated vats, this is the canonical state. for
+  solo vats, ordinary inbox messages serialize here.
+- **`effects.log`** records intents (with results, when receipted)
+  to make the effect-authority idempotent across restart.
+
+on reboot, the loader reads the latest snapshot from `store.lmdb`,
+then replays `inputs.log` from snapshot's turn-seq onward. effects
+that were already receipted are observed as receipt envelopes;
+intents that were not yet receipted are re-fired by the authority.
+
+(see `concepts/effect-intents.md` for the full intent/receipt
+mechanics.)
 
 - **store.lmdb**: keys are heap-ids (within this vat). values are
   canonical-bytes encoding the Form at that id. mmap'd, so boot is
@@ -51,21 +73,28 @@ this enables:
 every message-turn in a vat is one transaction:
 
 1. dequeue one message from `inbox`.
-2. dispatch the message. mutations buffer in memory.
+2. dispatch the message. mutations buffer in memory. cap calls
+   accumulate as `EffectIntent` entries in the outbox slot
+   (`concepts/effect-intents.md`); they do *not* fire mid-turn.
 3. at turn-end:
    - serialize buffered mutations into a journal entry.
-   - fsync the journal.
+   - serialize the input envelope (or message) that drove this
+     turn into the *input log*.
+   - fsync.
    - mark the message as "processed" (advance `inbox` cursor).
-4. yield to the scheduler.
+4. the **effect authority** (a non-replicated worker; for solo vats,
+   typically the same vat's runtime) reads the new outbox entries
+   and executes them at-most-once. each result becomes an
+   `EffectReceipt` envelope on the inbox of the originating vat.
+5. yield to the scheduler.
 
-if the vat crashes mid-turn (after step 1 but before step 3's fsync):
-- on restart, the inbox cursor is *before* this message.
-- the message replays.
-- side-effects on caps may have already happened. accept at-most-once
-  for side-effects, exactly-once for state.
+state is **exactly-once** — replay reconstructs the same heap because
+the input log + intents + receipts are all data. cap effects are
+**at-most-once** — the authority dedups by `(turn-seq, ordinal)`. a
+replay never re-fires effects; it observes their journaled receipts.
 
-(this is erlang's discipline: state is durable and exactly-once;
-side-effects are at-most-once. matches database WAL semantics.)
+(this is the croquet/datomic/akka-persistence synthesis. the input
+log is the canonical truth; the heap snapshot is derived.)
 
 ## checkpointing / compaction
 
@@ -86,11 +115,15 @@ vat can configure its own.
 
 booting a vat:
 
-1. open meta.toml; verify version, recover supervisor pointer.
+1. open meta.toml; verify version, recover supervisor pointer +
+   replication-mode.
 2. mmap store.lmdb. resolve the root form-id from `refs/root`.
-3. tail-replay any journal entries newer than the snapshot.
-4. drain any in-flight inbox messages by re-dispatching.
-5. signal "ready" to the supervisor.
+3. tail-replay any input envelopes newer than the snapshot
+   (`inputs.log`).
+4. for replicated vats: re-handshake with the reflector; catch up
+   any envelopes received after the local replica went offline.
+5. effect-authority: re-fire intents not yet receipted.
+6. signal "ready" to the supervisor.
 
 elapsed: typically tens of milliseconds for a vat with thousands of
 forms; LMDB's mmap + lazy-page-fault model means we don't actually
@@ -166,4 +199,7 @@ hands them in.
 - `concepts/data-sources.md` — journal as DS.
 - `concepts/time-and-journal.md` — time-travel, undo, replay.
 - `concepts/references.md` — how cross-vat refs persist.
+- `concepts/effect-intents.md` — intent/receipt model.
+- `concepts/replication.md` — replicated-vat persistence (input log).
+- `laws/determinism-laws.md` — determinism is what makes replay sound.
 - `reference/canonical-encoding.md` — binary encoding (when written).
