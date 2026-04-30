@@ -82,6 +82,7 @@ struct Compiler<'a> {
     obj_slot_sym: SymId,
     obj_method_sym: SymId,
     cascade_marker_sym: SymId,
+    defmethod_sym: SymId,
 }
 
 impl<'a> Compiler<'a> {
@@ -108,6 +109,7 @@ impl<'a> Compiler<'a> {
         let obj_slot_sym = world.intern("__slot__");
         let obj_method_sym = world.intern("__method__");
         let cascade_marker_sym = world.intern("__cascade__");
+        let defmethod_sym = world.intern("defmethod");
         Compiler {
             world,
             ops: Vec::new(),
@@ -137,6 +139,7 @@ impl<'a> Compiler<'a> {
             obj_slot_sym,
             obj_method_sym,
             cascade_marker_sym,
+            defmethod_sym,
         }
     }
 
@@ -299,6 +302,9 @@ impl<'a> Compiler<'a> {
             }
             if s == self.defproto_sym {
                 return self.compile_defproto(&elems);
+            }
+            if s == self.defmethod_sym {
+                return self.compile_defmethod(&elems);
             }
             if s == self.table_marker_sym {
                 return self.compile_table(&elems);
@@ -1069,8 +1075,15 @@ impl<'a> Compiler<'a> {
 
         let mut parent_name: SymId = self.world.intern("Object");
         let mut handlers: Vec<(SymId, Vec<SymId>, Value)> = Vec::new();
+        // declared slot names — get auto-getter and auto-setter
+        // installed (matches object-literal behavior).
+        let mut declared_slots: Vec<SymId> = Vec::new();
 
-        for i in 2..elems.len() {
+        // accept both:
+        //   (defproto Name (proto P) (slots …) (handlers (h) body …))
+        //   (defproto Name (proto P) (slots …) (h1) body1 (h2) body2 …)
+        let mut i = 2usize;
+        while i < elems.len() {
             let clause = elems[i];
             let clause_elems = self.world.list_to_vec(clause).map_err(|_| {
                 self.err("defproto: each clause must be a list")
@@ -1078,83 +1091,150 @@ impl<'a> Compiler<'a> {
             if clause_elems.is_empty() {
                 return Err(self.err("defproto: empty clause"));
             }
-            let head = clause_elems[0].as_sym().ok_or_else(|| {
-                self.err("defproto: clause head must be a symbol")
-            })?;
-            let head_text = self.world.resolve(head).to_string();
-            match head_text.as_str() {
-                "proto" => {
-                    if clause_elems.len() != 2 {
-                        return Err(self.err("defproto: (proto X) takes one arg"));
-                    }
-                    parent_name = clause_elems[1].as_sym().ok_or_else(|| {
-                        self.err("defproto: (proto X) — X must be a symbol")
-                    })?;
+            let head_text = clause_elems[0]
+                .as_sym()
+                .map(|s| self.world.resolve(s).to_string());
+
+            // (proto X)
+            if head_text.as_deref() == Some("proto") {
+                if clause_elems.len() != 2 {
+                    return Err(self.err("defproto: (proto X) takes one arg"));
                 }
-                "slots" => {
-                    // declarative-only at phase A.
-                }
-                "handlers" => {
-                    let pairs = &clause_elems[1..];
-                    if pairs.len() % 2 != 0 {
-                        return Err(self.err(
-                            "defproto: (handlers …) expects pairs of (header) body",
-                        ));
-                    }
-                    let mut j = 0;
-                    while j < pairs.len() {
-                        let header = pairs[j];
-                        let body = pairs[j + 1];
-                        let header_elems = self.world.list_to_vec(header).map_err(|_| {
-                            self.err("defproto: handler header must be a list")
-                        })?;
-                        if header_elems.is_empty() {
-                            return Err(self.err("defproto: empty handler header"));
-                        }
-                        let sel = header_elems[0].as_sym().ok_or_else(|| {
-                            self.err("defproto: selector must be a symbol")
-                        })?;
-                        let mut params = Vec::with_capacity(header_elems.len() - 1);
-                        for &p in &header_elems[1..] {
-                            params.push(p.as_sym().ok_or_else(|| {
-                                self.err("defproto: param must be a symbol")
-                            })?);
-                        }
-                        handlers.push((sel, params, body));
-                        j += 2;
-                    }
-                }
-                other => {
-                    return Err(self.err(format!(
-                        "defproto: unknown clause `{}`",
-                        other
-                    )));
-                }
+                parent_name = clause_elems[1].as_sym().ok_or_else(|| {
+                    self.err("defproto: (proto X) — X must be a symbol")
+                })?;
+                i += 1;
+                continue;
             }
+            // (slots a b c) — auto-getter + auto-setter per slot.
+            if head_text.as_deref() == Some("slots") {
+                for &name in &clause_elems[1..] {
+                    let s = name.as_sym().ok_or_else(|| {
+                        self.err("defproto: slot name must be a symbol")
+                    })?;
+                    declared_slots.push(s);
+                }
+                i += 1;
+                continue;
+            }
+            // (handlers …) — legacy wrapper.
+            if head_text.as_deref() == Some("handlers") {
+                let pairs = &clause_elems[1..];
+                if pairs.len() % 2 != 0 {
+                    return Err(self.err(
+                        "defproto: (handlers …) expects pairs of (header) body",
+                    ));
+                }
+                let mut j = 0;
+                while j < pairs.len() {
+                    let (sel, params) = decode_paren_header(self, pairs[j])?;
+                    handlers.push((sel, params, pairs[j + 1]));
+                    j += 2;
+                }
+                i += 1;
+                continue;
+            }
+            // flat shape: this clause is a header, next is the body.
+            if i + 1 >= elems.len() {
+                return Err(self.err(
+                    "defproto: bare header not followed by a body",
+                ));
+            }
+            let (sel, params) = decode_paren_header(self, clause)?;
+            handlers.push((sel, params, elems[i + 1]));
+            i += 2;
         }
 
-        // emit: `[Parent new]` then DefineGlobal Name.
+        // 1. proto = (getOrCreateProto 'Name Parent) — reopen
+        // an existing proto if one is bound under Name; else
+        // create fresh and bind. preserves identity on
+        // re-evaluation, matches smalltalk's class-extend.
+        let get_or_create = self.world.intern("getOrCreateProto");
+        self.emit(Op::LoadName(get_or_create));
+        let name_idx = self.add_const(Value::Sym(name));
+        self.emit(Op::LoadConst(name_idx));
         self.emit(Op::LoadName(parent_name));
-        let new_sym = self.world.intern("new");
-        let new_ic = self.next_ic();
+        let goc_ic = self.next_ic();
         self.emit(Op::Send {
-            selector: new_sym,
-            argc: 0,
-            ic_idx: new_ic,
+            selector: self.call_sym,
+            argc: 2,
+            ic_idx: goc_ic,
         });
-        self.emit(Op::DefineGlobal(name));
-        // DefineGlobal pushes the symbol; discard.
         self.emit(Op::Pop);
 
-        // for each handler, emit:
-        //   LoadName set-handler!
-        //   LoadName Name
-        //   LoadConst 'sel
-        //   PushClosure <body-chunk>
-        //   Send :call 3
-        //   Pop
+        // 2. install auto-accessors for declared slots first
+        // (so user-defined methods can override on conflict).
         let set_handler_sym = self.world.intern("setHandler!");
-        let call_sym = self.call_sym;
+        let slot_global = self.world.intern("slot");
+        let slot_set_global = self.world.intern("slotSet!");
+        let v_param_sym = self.world.intern("__v__");
+
+        for &slot_name in &declared_slots {
+            // getter: (fn () (slot self 'slot_name))
+            let quoted_key = self.world.make_list(&[
+                Value::Sym(self.quote_sym),
+                Value::Sym(slot_name),
+            ]);
+            let getter_body = self.world.make_list(&[
+                Value::Sym(slot_global),
+                Value::Sym(self.self_sym),
+                quoted_key,
+            ]);
+            let empty_params = self.world.make_list(&[]);
+            let getter_chunk =
+                compile_fn_body(self.world, vec![], getter_body)?;
+            let _ = empty_params;
+            self.emit(Op::LoadName(set_handler_sym));
+            self.emit(Op::LoadName(name));
+            let sel_idx = self.add_const(Value::Sym(slot_name));
+            self.emit(Op::LoadConst(sel_idx));
+            self.emit(Op::PushClosure {
+                chunk: getter_chunk,
+            });
+            let ic = self.next_ic();
+            self.emit(Op::Send {
+                selector: self.call_sym,
+                argc: 3,
+                ic_idx: ic,
+            });
+            self.emit(Op::Pop);
+
+            // setter: (fn (v) (slotSet! self 'slot_name v))
+            let quoted_key2 = self.world.make_list(&[
+                Value::Sym(self.quote_sym),
+                Value::Sym(slot_name),
+            ]);
+            let setter_body = self.world.make_list(&[
+                Value::Sym(slot_set_global),
+                Value::Sym(self.self_sym),
+                quoted_key2,
+                Value::Sym(v_param_sym),
+            ]);
+            let setter_chunk = compile_fn_body(
+                self.world,
+                vec![v_param_sym],
+                setter_body,
+            )?;
+            // setter selector is `slot_name:` — a fresh sym.
+            let key_text = self.world.resolve(slot_name).to_string();
+            let setter_sel = self.world.intern(&format!("{}:", key_text));
+            self.emit(Op::LoadName(set_handler_sym));
+            self.emit(Op::LoadName(name));
+            let setter_sel_idx = self.add_const(Value::Sym(setter_sel));
+            self.emit(Op::LoadConst(setter_sel_idx));
+            self.emit(Op::PushClosure {
+                chunk: setter_chunk,
+            });
+            let ic2 = self.next_ic();
+            self.emit(Op::Send {
+                selector: self.call_sym,
+                argc: 3,
+                ic_idx: ic2,
+            });
+            self.emit(Op::Pop);
+        }
+
+        // 3. user-defined handlers (override auto-accessors if same).
         for (sel, params, body) in handlers {
             let fn_chunk = compile_fn_body(self.world, params, body)?;
             self.emit(Op::LoadName(set_handler_sym));
@@ -1164,15 +1244,48 @@ impl<'a> Compiler<'a> {
             self.emit(Op::PushClosure { chunk: fn_chunk });
             let call_ic = self.next_ic();
             self.emit(Op::Send {
-                selector: call_sym,
+                selector: self.call_sym,
                 argc: 3,
                 ic_idx: call_ic,
             });
             self.emit(Op::Pop);
         }
 
-        // result: the proto-Form itself.
+        // 4. result: the proto-Form.
         self.emit(Op::LoadName(name));
+        Ok(())
+    }
+
+    /// `(defmethod ProtoExpr (header) body)`
+    ///
+    /// install a method on a proto without `setHandler!` boilerplate.
+    /// header shape mirrors defproto: `(name)` `(+ other)`
+    /// `(name x y)` `(at: i put: v)`.
+    fn compile_defmethod(&mut self, elems: &[Value]) -> Result<(), RaiseError> {
+        if elems.len() != 4 {
+            return Err(self.err(
+                "defmethod: (defmethod proto (header) body)",
+            ));
+        }
+        let proto_expr = elems[1];
+        let header = elems[2];
+        let body = elems[3];
+
+        let (sel, params) = decode_paren_header(self, header)?;
+        let fn_chunk = compile_fn_body(self.world, params, body)?;
+
+        let set_handler = self.world.intern("setHandler!");
+        self.emit(Op::LoadName(set_handler));
+        self.compile_expr(proto_expr, false)?;
+        let sel_idx = self.add_const(Value::Sym(sel));
+        self.emit(Op::LoadConst(sel_idx));
+        self.emit(Op::PushClosure { chunk: fn_chunk });
+        let ic = self.next_ic();
+        self.emit(Op::Send {
+            selector: self.call_sym,
+            argc: 3,
+            ic_idx: ic,
+        });
         Ok(())
     }
 }
@@ -1181,6 +1294,103 @@ impl<'a> Compiler<'a> {
 enum BranchKind {
     Always,
     IfFalse,
+}
+
+/// decode a parens-wrapped method header into (selector, params).
+/// shapes mirror send-brackets — see `read_send_bracket` in the
+/// reader:
+/// - `(name)` — unary
+/// - `(+ other)` — binary (operator-only first sym)
+/// - `(at: i put: v)` — keyword (selectors end in `:`)
+/// - `(name x y …)` — positional
+fn decode_paren_header(
+    c: &mut Compiler<'_>,
+    header: Value,
+) -> Result<(SymId, Vec<SymId>), RaiseError> {
+    let elems = c
+        .world
+        .list_to_vec(header)
+        .map_err(|_| c.err("method header must be a list"))?;
+    if elems.is_empty() {
+        return Err(c.err("empty method header"));
+    }
+    let first = elems[0].as_sym().ok_or_else(|| {
+        c.err("method header: first element must be a symbol")
+    })?;
+    let first_text = c.world.resolve(first).to_string();
+
+    // binary: 2 elements, first is operator-only.
+    if is_operator_only(&first_text) && elems.len() == 2 {
+        let p = elems[1].as_sym().ok_or_else(|| {
+            c.err("binary header: rhs param must be a symbol")
+        })?;
+        return Ok((first, vec![p]));
+    }
+
+    // keyword: first ends in `:`, alternates kw + param.
+    if first_text.ends_with(':') {
+        let mut sel_text = String::new();
+        let mut params = Vec::new();
+        let mut i = 0;
+        while i < elems.len() {
+            let kw = elems[i].as_sym().ok_or_else(|| {
+                c.err("keyword header: expected kw: symbol")
+            })?;
+            let kw_text = c.world.resolve(kw).to_string();
+            if !kw_text.ends_with(':') {
+                return Err(c.err(format!(
+                    "keyword `{}` must end with `:`",
+                    kw_text
+                )));
+            }
+            sel_text.push_str(&kw_text);
+            i += 1;
+            if i >= elems.len() {
+                return Err(c.err(format!(
+                    "keyword `{}` needs a param",
+                    kw_text
+                )));
+            }
+            let p = elems[i].as_sym().ok_or_else(|| {
+                c.err("keyword header: param must be a symbol")
+            })?;
+            params.push(p);
+            i += 1;
+        }
+        let sel = c.world.intern(&sel_text);
+        return Ok((sel, params));
+    }
+
+    // unary or positional.
+    let mut params = Vec::with_capacity(elems.len() - 1);
+    for &p in &elems[1..] {
+        params.push(p.as_sym().ok_or_else(|| {
+            c.err("positional header: param must be a symbol")
+        })?);
+    }
+    Ok((first, params))
+}
+
+fn is_operator_only(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|b| {
+            matches!(
+                b,
+                b'+' | b'-'
+                    | b'*'
+                    | b'/'
+                    | b'<'
+                    | b'>'
+                    | b'='
+                    | b'!'
+                    | b'?'
+                    | b'|'
+                    | b'&'
+                    | b'~'
+                    | b'^'
+                    | b'%'
+            )
+        })
 }
 
 #[cfg(test)]

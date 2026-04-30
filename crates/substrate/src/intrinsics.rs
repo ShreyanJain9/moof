@@ -1901,6 +1901,43 @@ fn install_globals(w: &mut World) {
         w.heap.get_mut(id).slots.insert(name, args[2]);
         Ok(args[2])
     });
+    // (getOrCreateProto 'Name Parent) — defproto's reopen helper.
+    // - if Name is already bound in the global env to a Form,
+    //   return that Form (reopen, preserving identity).
+    // - else allocate a fresh Form whose proto is Parent, bind it,
+    //   and return the new proto.
+    //
+    // matches prototype-tradition's class-as-object discipline:
+    // protos are mutable values you can extend in place. matches
+    // smalltalk's `class extend`.
+    install_global(w, "getOrCreateProto", |w, _, args| {
+        if args.len() != 2 {
+            return Err(RaiseError::new(
+                w.intern("arity"),
+                "(getOrCreateProto 'Name Parent)",
+            ));
+        }
+        let name_sym = args[0].as_sym().ok_or_else(|| {
+            RaiseError::new(
+                w.intern("type-error"),
+                "getOrCreateProto: name must be a symbol",
+            )
+        })?;
+        let global = w.global_env;
+        if let Some(existing) = w.env_lookup(global, name_sym) {
+            if existing.as_form_id().is_some() {
+                return Ok(existing);
+            }
+        }
+        let parent = args[1];
+        let mut form = Form::with_proto(parent);
+        let name_meta = w.intern("name");
+        form.meta.insert(name_meta, Value::Sym(name_sym));
+        let new_id = w.alloc(form);
+        let v = Value::Form(new_id);
+        w.env_bind(global, name_sym, v);
+        Ok(v)
+    });
     // (set-handler! Proto 'sel fn) — moldable-substrate primitive.
     // bumps the proto's generation counter so existing inline
     // caches re-resolve on next dispatch.
