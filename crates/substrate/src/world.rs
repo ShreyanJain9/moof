@@ -152,6 +152,7 @@ pub struct World {
     pub dnu_sym: SymId,
     pub quote_sym: SymId,
     pub bytes_sym: SymId,
+    pub rep_sym: SymId,
 }
 
 impl World {
@@ -178,6 +179,7 @@ impl World {
         let dnu_sym = syms.intern("doesNotUnderstand:with:");
         let quote_sym = syms.intern("quote");
         let bytes_sym = syms.intern("bytes");
+        let rep_sym = syms.intern("rep");
 
         World {
             heap,
@@ -202,6 +204,7 @@ impl World {
             dnu_sym,
             quote_sym,
             bytes_sym,
+            rep_sym,
         }
     }
 
@@ -260,6 +263,67 @@ impl World {
     /// String or if bytes aren't valid UTF-8.
     pub fn string_text(&self, value: Value) -> Option<&str> {
         std::str::from_utf8(self.string_bytes(value)?).ok()
+    }
+
+    /// allocate a fresh empty Table form. the `:rep` slot holds a
+    /// ForeignHandle wrapping a `Box<TableRepr>`.
+    pub fn make_table(&mut self) -> Value {
+        use crate::foreign::ForeignHandle;
+        use crate::table::{table_repr_dtor, TableRepr, TABLE_REPR_TAG};
+        let boxed: Box<TableRepr> = Box::new(TableRepr::new());
+        let ptr = Box::into_raw(boxed) as *mut std::ffi::c_void;
+        let handle_id = self.foreign.alloc(ForeignHandle {
+            ptr,
+            destructor: Some(table_repr_dtor),
+            tag: TABLE_REPR_TAG,
+        });
+        let mut form = Form::with_proto(Value::Form(self.protos.table));
+        form.slots.insert(self.rep_sym, Value::Foreign(handle_id));
+        Value::Form(self.alloc(form))
+    }
+
+    /// borrow a Table form's `TableRepr`. returns `None` if `value`
+    /// isn't a well-formed Table.
+    pub fn table_repr(&self, value: Value) -> Option<&crate::table::TableRepr> {
+        use crate::table::{TableRepr, TABLE_REPR_TAG};
+        let id = value.as_form_id()?;
+        let f = self.heap.get(id);
+        if f.proto != Value::Form(self.protos.table) {
+            return None;
+        }
+        let fid = match f.slot(self.rep_sym) {
+            Value::Foreign(fid) => fid,
+            _ => return None,
+        };
+        let handle = self.foreign.get(fid);
+        if handle.tag != TABLE_REPR_TAG {
+            return None;
+        }
+        // SAFETY: tag confirms make_table minted this; cast back.
+        unsafe { Some(&*(handle.ptr as *const TableRepr)) }
+    }
+
+    /// mutable borrow of a Table form's `TableRepr`. analogous to
+    /// `table_repr`.
+    pub fn table_repr_mut(
+        &mut self,
+        value: Value,
+    ) -> Option<&mut crate::table::TableRepr> {
+        use crate::table::{TableRepr, TABLE_REPR_TAG};
+        let id = value.as_form_id()?;
+        if self.heap.get(id).proto != Value::Form(self.protos.table) {
+            return None;
+        }
+        let fid = match self.heap.get(id).slot(self.rep_sym) {
+            Value::Foreign(fid) => fid,
+            _ => return None,
+        };
+        let handle = self.foreign.get(fid);
+        if handle.tag != TABLE_REPR_TAG {
+            return None;
+        }
+        // SAFETY: same; we have exclusive access via &mut self.
+        unsafe { Some(&mut *(handle.ptr as *mut TableRepr)) }
     }
 
     /// allocate a Form.

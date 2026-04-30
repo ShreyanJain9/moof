@@ -76,6 +76,8 @@ struct Compiler<'a> {
     send_sym: SymId,
     defproto_sym: SymId,
     super_sym: SymId,
+    table_marker_sym: SymId,
+    entry_marker_sym: SymId,
 }
 
 impl<'a> Compiler<'a> {
@@ -96,6 +98,8 @@ impl<'a> Compiler<'a> {
         let let_rec_sym = world.intern("let-rec");
         let when_sym = world.intern("when");
         let unless_sym = world.intern("unless");
+        let table_marker_sym = world.intern("__table__");
+        let entry_marker_sym = world.intern("__entry__");
         Compiler {
             world,
             ops: Vec::new(),
@@ -119,6 +123,8 @@ impl<'a> Compiler<'a> {
             send_sym,
             defproto_sym,
             super_sym,
+            table_marker_sym,
+            entry_marker_sym,
         }
     }
 
@@ -281,6 +287,9 @@ impl<'a> Compiler<'a> {
             }
             if s == self.defproto_sym {
                 return self.compile_defproto(&elems);
+            }
+            if s == self.table_marker_sym {
+                return self.compile_table(&elems);
             }
         }
         // fn-call: `(callable arg…)`
@@ -691,6 +700,74 @@ impl<'a> Compiler<'a> {
     fn err(&mut self, msg: impl Into<String>) -> RaiseError {
         let kind = self.world.intern("compile-error");
         RaiseError::new(kind, msg)
+    }
+
+    /// `(__table__ entry…)` — emitted by the reader for `#[…]`
+    /// table literals. each entry is either a bare expression
+    /// (positional) or `(__entry__ key val)` (keyed).
+    ///
+    /// lowering: `LoadName Table; Send :new 0` to push a fresh
+    /// empty Table; then for each entry emit `Dup; <eval>; Send
+    /// :push:/:at:put:; Pop` to populate it.
+    fn compile_table(&mut self, elems: &[Value]) -> Result<(), RaiseError> {
+        // 1. push fresh Table
+        let table_sym = self.world.intern("Table");
+        self.emit(Op::LoadName(table_sym));
+        let new_sym = self.world.intern("new");
+        let new_ic = self.next_ic();
+        self.emit(Op::Send {
+            selector: new_sym,
+            argc: 0,
+            ic_idx: new_ic,
+        });
+
+        // 2. for each entry, dup the table, push values, send.
+        let push_sym = self.world.intern("push:");
+        let at_put_sym = self.world.intern("at:put:");
+
+        for &entry in &elems[1..] {
+            // is this a keyed entry? (look for __entry__ head)
+            let is_keyed = match entry {
+                Value::Form(_) => self
+                    .world
+                    .list_to_vec(entry)
+                    .ok()
+                    .and_then(|v| v.first().copied())
+                    .and_then(|h| h.as_sym())
+                    .map(|s| s == self.entry_marker_sym)
+                    .unwrap_or(false),
+                _ => false,
+            };
+            if is_keyed {
+                // (__entry__ key val)
+                let entry_elems = self.world.list_to_vec(entry).unwrap();
+                if entry_elems.len() != 3 {
+                    return Err(self.err("table __entry__: expected (key value)"));
+                }
+                self.emit(Op::Dup);
+                self.compile_expr(entry_elems[1], false)?;
+                self.compile_expr(entry_elems[2], false)?;
+                let ic = self.next_ic();
+                self.emit(Op::Send {
+                    selector: at_put_sym,
+                    argc: 2,
+                    ic_idx: ic,
+                });
+                self.emit(Op::Pop);
+            } else {
+                // positional
+                self.emit(Op::Dup);
+                self.compile_expr(entry, false)?;
+                let ic = self.next_ic();
+                self.emit(Op::Send {
+                    selector: push_sym,
+                    argc: 1,
+                    ic_idx: ic,
+                });
+                self.emit(Op::Pop);
+            }
+        }
+        Ok(())
     }
 
     /// `(defproto Name (proto Parent)? (slots …)? (handlers …)?)`

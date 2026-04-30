@@ -33,12 +33,465 @@ pub fn install(w: &mut World) {
     install_nil_methods(w);
     install_char_methods(w);
     install_string_methods(w);
+    install_table_methods(w);
     install_object_reflection(w);
     install_list_methods(w);
     install_method_methods(w);
     install_console_proto_and_caps(w);
     install_globals(w);
     install_proto_globals(w);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Table methods — `docs/concepts/tables.md`
+//
+// the universal collection: positional + keyed entries in one
+// type. methods access either axis based on the key's runtime
+// kind (Integer → positional; anything else → keyed).
+// ─────────────────────────────────────────────────────────────────
+
+fn install_table_methods(w: &mut World) {
+    // override Object's :new so [Table new] returns a fresh Table
+    // with the rep slot populated. (Object's default :new would
+    // alloc an empty Form whose :emit: / :at: / etc. would all
+    // fail on the missing :rep handle.)
+    w.install_native(w.protos.table, "new", |w, _self, _args| {
+        Ok(w.make_table())
+    });
+
+    w.install_native(w.protos.table, "length", |w, self_, _| {
+        let n = match w.table_repr(self_) {
+            Some(r) => r.positional.len() as i64,
+            None => {
+                return Err(RaiseError::new(
+                    w.intern("type-error"),
+                    "length on non-Table",
+                ))
+            }
+        };
+        Ok(Value::Int(n))
+    });
+
+    w.install_native(w.protos.table, "size", |w, self_, _| {
+        let n = match w.table_repr(self_) {
+            Some(r) => r.size() as i64,
+            None => {
+                return Err(RaiseError::new(
+                    w.intern("type-error"),
+                    "size on non-Table",
+                ))
+            }
+        };
+        Ok(Value::Int(n))
+    });
+
+    w.install_native(w.protos.table, "empty?", |w, self_, _| {
+        let empty = match w.table_repr(self_) {
+            Some(r) => r.size() == 0,
+            None => {
+                return Err(RaiseError::new(
+                    w.intern("type-error"),
+                    "empty? on non-Table",
+                ))
+            }
+        };
+        Ok(Value::Bool(empty))
+    });
+
+    // [t at: k] — Integer key reads positional; anything else reads keyed.
+    w.install_native(w.protos.table, "at:", |w, self_, args| {
+        let key = args.first().copied().unwrap_or(Value::Nil);
+        match key {
+            Value::Int(i) => {
+                let v = w.table_repr(self_).and_then(|r| {
+                    if i < 0 {
+                        None
+                    } else {
+                        r.positional.get(i as usize).copied()
+                    }
+                });
+                v.ok_or_else(|| {
+                    RaiseError::new(
+                        w.intern("index-out-of-bounds"),
+                        format!("[Table at: {}] out of range", i),
+                    )
+                })
+            }
+            other => {
+                let v = w
+                    .table_repr(self_)
+                    .and_then(|r| r.keyed.get(&other).copied())
+                    .unwrap_or(Value::Nil);
+                Ok(v)
+            }
+        }
+    });
+
+    // [t at: k put: v] — keyword shape, sets positional or keyed
+    // based on key type. positional :at:put: at index = length pushes;
+    // larger indices error.
+    w.install_native(w.protos.table, "at:put:", |w, self_, args| {
+        let key = args.first().copied().unwrap_or(Value::Nil);
+        let val = args.get(1).copied().unwrap_or(Value::Nil);
+        match key {
+            Value::Int(i) => {
+                // do the mutation in a scope that drops the borrow
+                // before we may touch w.intern().
+                let result: Result<(), (i64, usize)> = (|| {
+                    let r = w.table_repr_mut(self_).ok_or((-1, 0))?;
+                    if i < 0 {
+                        return Err((i, 0));
+                    }
+                    let idx = i as usize;
+                    if idx < r.positional.len() {
+                        r.positional[idx] = val;
+                        Ok(())
+                    } else if idx == r.positional.len() {
+                        r.positional.push(val);
+                        Ok(())
+                    } else {
+                        Err((i, r.positional.len()))
+                    }
+                })();
+                match result {
+                    Ok(()) => Ok(self_),
+                    Err((i, _)) if i == -1 => Err(RaiseError::new(
+                        w.intern("type-error"),
+                        "at:put: on non-Table",
+                    )),
+                    Err((i, _)) if i < 0 => Err(RaiseError::new(
+                        w.intern("index-out-of-bounds"),
+                        format!("Table positional index must be non-negative; got {}", i),
+                    )),
+                    Err((i, len)) => Err(RaiseError::new(
+                        w.intern("index-out-of-bounds"),
+                        format!(
+                            "Table positional index {} out of range (length {})",
+                            i, len
+                        ),
+                    )),
+                }
+            }
+            other => {
+                let r = w.table_repr_mut(self_);
+                if let Some(r) = r {
+                    r.keyed.insert(other, val);
+                    Ok(self_)
+                } else {
+                    Err(RaiseError::new(
+                        w.intern("type-error"),
+                        "at:put: on non-Table",
+                    ))
+                }
+            }
+        }
+    });
+
+    // [t push: v] — positional append.
+    w.install_native(w.protos.table, "push:", |w, self_, args| {
+        let v = args.first().copied().unwrap_or(Value::Nil);
+        let r = match w.table_repr_mut(self_) {
+            Some(r) => r,
+            None => {
+                return Err(RaiseError::new(
+                    w.intern("type-error"),
+                    "push: on non-Table",
+                ))
+            }
+        };
+        r.positional.push(v);
+        Ok(self_)
+    });
+
+    // [t pop] — remove and return the last positional. raises if empty.
+    w.install_native(w.protos.table, "pop", |w, self_, _| {
+        let v = match w.table_repr_mut(self_).and_then(|r| r.positional.pop()) {
+            Some(v) => v,
+            None => {
+                return Err(RaiseError::new(
+                    w.intern("empty-table"),
+                    "pop on empty Table",
+                ))
+            }
+        };
+        Ok(v)
+    });
+
+    // [t containsKey?: k] — works on keyed + positional (via index range).
+    w.install_native(w.protos.table, "containsKey?:", |w, self_, args| {
+        let key = args.first().copied().unwrap_or(Value::Nil);
+        let r = match w.table_repr(self_) {
+            Some(r) => r,
+            None => return Ok(Value::Bool(false)),
+        };
+        let present = match key {
+            Value::Int(i) => i >= 0 && (i as usize) < r.positional.len(),
+            other => r.keyed.contains_key(&other),
+        };
+        Ok(Value::Bool(present))
+    });
+
+    // [t remove: k] — remove the keyed entry; positional indices
+    // not supported (use :at:put: with the new value, or :pop).
+    w.install_native(w.protos.table, "remove:", |w, self_, args| {
+        let key = args.first().copied().unwrap_or(Value::Nil);
+        let r = match w.table_repr_mut(self_) {
+            Some(r) => r,
+            None => {
+                return Err(RaiseError::new(
+                    w.intern("type-error"),
+                    "remove: on non-Table",
+                ))
+            }
+        };
+        let v = r.keyed.shift_remove(&key).unwrap_or(Value::Nil);
+        Ok(v)
+    });
+
+    // [t keys] — list of all keys (positional indices first, then
+    // keyed keys in insertion order).
+    w.install_native(w.protos.table, "keys", |w, self_, _| {
+        let mut keys: Vec<Value> = Vec::new();
+        if let Some(r) = w.table_repr(self_) {
+            for i in 0..r.positional.len() {
+                keys.push(Value::Int(i as i64));
+            }
+            for k in r.keyed.keys() {
+                keys.push(*k);
+            }
+        }
+        Ok(w.make_list(&keys))
+    });
+
+    // [t values] — list of all values (positional in order, then keyed).
+    w.install_native(w.protos.table, "values", |w, self_, _| {
+        let mut vals: Vec<Value> = Vec::new();
+        if let Some(r) = w.table_repr(self_) {
+            for &v in &r.positional {
+                vals.push(v);
+            }
+            for &v in r.keyed.values() {
+                vals.push(v);
+            }
+        }
+        Ok(w.make_list(&vals))
+    });
+
+    // [t asList] — positional axis as a List. (does not include keyed entries.)
+    w.install_native(w.protos.table, "asList", |w, self_, _| {
+        let vs: Vec<Value> = w
+            .table_repr(self_)
+            .map(|r| r.positional.clone())
+            .unwrap_or_default();
+        Ok(w.make_list(&vs))
+    });
+
+    // [t forEach: f] — iterate positional values then keyed values.
+    w.install_native(w.protos.table, "forEach:", |w, self_, args| {
+        let blk = args.first().copied().unwrap_or(Value::Nil);
+        let snapshot: Vec<Value> = match w.table_repr(self_) {
+            Some(r) => {
+                let mut all: Vec<Value> = r.positional.clone();
+                all.extend(r.keyed.values().copied());
+                all
+            }
+            None => {
+                return Err(RaiseError::new(
+                    w.intern("type-error"),
+                    "forEach: on non-Table",
+                ))
+            }
+        };
+        let call_sym = w.intern("call");
+        for v in snapshot {
+            w.send(blk, call_sym, &[v])?;
+        }
+        Ok(Value::Nil)
+    });
+
+    // [t map: f] — produce a new Table with f applied to each
+    // positional and keyed value (keys preserved).
+    w.install_native(w.protos.table, "map:", |w, self_, args| {
+        let blk = args.first().copied().unwrap_or(Value::Nil);
+        let positional: Vec<Value>;
+        let keyed_keys: Vec<Value>;
+        let keyed_vals: Vec<Value>;
+        match w.table_repr(self_) {
+            Some(r) => {
+                positional = r.positional.clone();
+                keyed_keys = r.keyed.keys().copied().collect();
+                keyed_vals = r.keyed.values().copied().collect();
+            }
+            None => {
+                return Err(RaiseError::new(
+                    w.intern("type-error"),
+                    "map: on non-Table",
+                ))
+            }
+        }
+        let new_table = w.make_table();
+        let call_sym = w.intern("call");
+        // positional: map each, push.
+        for v in positional {
+            let mapped = w.send(blk, call_sym, &[v])?;
+            if let Some(r) = w.table_repr_mut(new_table) {
+                r.positional.push(mapped);
+            }
+        }
+        // keyed: same value mapping, key preserved.
+        for (k, v) in keyed_keys.into_iter().zip(keyed_vals.into_iter()) {
+            let mapped = w.send(blk, call_sym, &[v])?;
+            if let Some(r) = w.table_repr_mut(new_table) {
+                r.keyed.insert(k, mapped);
+            }
+        }
+        Ok(new_table)
+    });
+
+    // [t filter: pred] — produce a new Table with only entries
+    // (positional + keyed) for which pred returns truthy.
+    w.install_native(w.protos.table, "filter:", |w, self_, args| {
+        let pred = args.first().copied().unwrap_or(Value::Nil);
+        let positional: Vec<Value>;
+        let keyed_keys: Vec<Value>;
+        let keyed_vals: Vec<Value>;
+        match w.table_repr(self_) {
+            Some(r) => {
+                positional = r.positional.clone();
+                keyed_keys = r.keyed.keys().copied().collect();
+                keyed_vals = r.keyed.values().copied().collect();
+            }
+            None => {
+                return Err(RaiseError::new(
+                    w.intern("type-error"),
+                    "filter: on non-Table",
+                ))
+            }
+        }
+        let new_table = w.make_table();
+        let call_sym = w.intern("call");
+        for v in positional {
+            let keep = w.send(pred, call_sym, &[v])?;
+            if keep.is_truthy() {
+                if let Some(r) = w.table_repr_mut(new_table) {
+                    r.positional.push(v);
+                }
+            }
+        }
+        for (k, v) in keyed_keys.into_iter().zip(keyed_vals.into_iter()) {
+            let keep = w.send(pred, call_sym, &[v])?;
+            if keep.is_truthy() {
+                if let Some(r) = w.table_repr_mut(new_table) {
+                    r.keyed.insert(k, v);
+                }
+            }
+        }
+        Ok(new_table)
+    });
+
+    // [t reduce: f from: init] — fold over positional then keyed values.
+    w.install_native(w.protos.table, "reduce:from:", |w, self_, args| {
+        let f = args.first().copied().unwrap_or(Value::Nil);
+        let mut acc = args.get(1).copied().unwrap_or(Value::Nil);
+        let snapshot: Vec<Value> = match w.table_repr(self_) {
+            Some(r) => {
+                let mut all: Vec<Value> = r.positional.clone();
+                all.extend(r.keyed.values().copied());
+                all
+            }
+            None => {
+                return Err(RaiseError::new(
+                    w.intern("type-error"),
+                    "reduce:from: on non-Table",
+                ))
+            }
+        };
+        let call_sym = w.intern("call");
+        for v in snapshot {
+            acc = w.send(f, call_sym, &[acc, v])?;
+        }
+        Ok(acc)
+    });
+
+    // [t = other] — structural equality. compares positional in
+    // order + keyed by key/value pairs (insertion order).
+    w.install_native(w.protos.table, "=", |w, self_, args| {
+        let other = args.first().copied().unwrap_or(Value::Nil);
+        let a = w.table_repr(self_);
+        let b = w.table_repr(other);
+        match (a, b) {
+            (Some(ra), Some(rb)) => Ok(Value::Bool(
+                ra.positional == rb.positional && ra.keyed == rb.keyed,
+            )),
+            _ => Ok(Value::Bool(false)),
+        }
+    });
+
+    w.install_native(w.protos.table, "!=", |w, self_, args| {
+        let other = args.first().copied().unwrap_or(Value::Nil);
+        let a = w.table_repr(self_);
+        let b = w.table_repr(other);
+        match (a, b) {
+            (Some(ra), Some(rb)) => Ok(Value::Bool(
+                !(ra.positional == rb.positional && ra.keyed == rb.keyed),
+            )),
+            _ => Ok(Value::Bool(true)),
+        }
+    });
+
+    // [t toString] — `#[1 2 'name => "ada"]`-shaped rendering.
+    w.install_native(w.protos.table, "toString", |w, self_, _| {
+        render_table_to_string(w, self_).map(|s| w.make_string(&s))
+    });
+}
+
+fn render_table_to_string(w: &mut World, table: Value) -> Result<String, RaiseError> {
+    let positional: Vec<Value>;
+    let keyed_keys: Vec<Value>;
+    let keyed_vals: Vec<Value>;
+    match w.table_repr(table) {
+        Some(r) => {
+            positional = r.positional.clone();
+            keyed_keys = r.keyed.keys().copied().collect();
+            keyed_vals = r.keyed.values().copied().collect();
+        }
+        None => {
+            return Err(RaiseError::new(
+                w.intern("type-error"),
+                "toString on non-Table",
+            ));
+        }
+    }
+    let mut out = String::from("#[");
+    let to_string = w.intern("toString");
+    let mut first = true;
+    for v in positional {
+        if !first {
+            out.push(' ');
+        }
+        first = false;
+        let s = w.send(v, to_string, &[])?;
+        let txt = w.string_text(s).map(|t| t.to_string());
+        out.push_str(&txt.unwrap_or_else(|| "?".into()));
+    }
+    for (k, v) in keyed_keys.into_iter().zip(keyed_vals.into_iter()) {
+        if !first {
+            out.push(' ');
+        }
+        first = false;
+        let ks = w.send(k, to_string, &[])?;
+        let kt = w.string_text(ks).map(|t| t.to_string());
+        // symbols are rendered without the leading quote in
+        // table-toString — we render them as their text. that
+        // matches how `'name => "ada"` shows up in the source.
+        out.push_str(&kt.unwrap_or_else(|| "?".into()));
+        out.push_str(" => ");
+        let vs = w.send(v, to_string, &[])?;
+        let vt = w.string_text(vs).map(|t| t.to_string());
+        out.push_str(&vt.unwrap_or_else(|| "?".into()));
+    }
+    out.push(']');
+    Ok(out)
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -323,6 +776,7 @@ fn install_proto_globals(w: &mut World) {
         ("Char", w.protos.char_),
         ("String", w.protos.string),
         ("List", w.protos.list),
+        ("Table", w.protos.table),
         ("Method", w.protos.method),
         ("Chunk", w.protos.chunk),
         ("Closure", w.protos.closure),

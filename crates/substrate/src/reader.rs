@@ -60,6 +60,8 @@ pub struct ReadCtx<'a> {
     send_sym: SymId,
     self_sym: SymId,
     bytes_sym: SymId,
+    table_marker_sym: SymId,
+    entry_marker_sym: SymId,
     /// the proto FormId to assign to every cons cell. typically
     /// `Value::Form(list_proto)`. phase-A clients that don't yet
     /// have a List proto pass `Value::Nil`.
@@ -87,6 +89,8 @@ impl<'a> ReadCtx<'a> {
         let send_sym = syms.intern("__send__");
         let self_sym = syms.intern("self");
         let bytes_sym = syms.intern("bytes");
+        let table_marker_sym = syms.intern("__table__");
+        let entry_marker_sym = syms.intern("__entry__");
         ReadCtx {
             head_sym,
             tail_sym,
@@ -94,6 +98,8 @@ impl<'a> ReadCtx<'a> {
             send_sym,
             self_sym,
             bytes_sym,
+            table_marker_sym,
+            entry_marker_sym,
             list_proto,
             string_proto,
             heap,
@@ -416,10 +422,13 @@ fn build_list(ctx: &mut ReadCtx, elements: &[Value]) -> Value {
     tail
 }
 
-/// read `#…` — hash-prefixed forms. phase A handles `#true`,
-/// `#false`, and char literals `#\…`. tables/tagged-literals come
-/// later.
-fn read_hash(c: &mut Cursor, _ctx: &mut ReadCtx) -> Result<Value, ReadError> {
+/// read `#…` — hash-prefixed forms. supported:
+///   `#true` `#false`           — boolean literals
+///   `#\…`                      — char literal
+///   `#[ … ]`                   — Table literal
+///
+/// tagged literals (`#Date "..."`, `#Url "..."`, etc.) come later.
+fn read_hash(c: &mut Cursor, ctx: &mut ReadCtx) -> Result<Value, ReadError> {
     debug_assert_eq!(c.peek(), Some(b'#'));
     let start_line = c.line;
     let start_col = c.col;
@@ -428,6 +437,10 @@ fn read_hash(c: &mut Cursor, _ctx: &mut ReadCtx) -> Result<Value, ReadError> {
     if c.peek() == Some(b'\\') {
         c.advance();
         return read_char_literal(c, start_line, start_col);
+    }
+    // table literal? `#[ … ]`
+    if c.peek() == Some(b'[') {
+        return read_table_literal(c, ctx, start_line, start_col);
     }
     // peek the rest until a delimiter; that's the bareword.
     let mut word = String::new();
@@ -443,13 +456,98 @@ fn read_hash(c: &mut Cursor, _ctx: &mut ReadCtx) -> Result<Value, ReadError> {
         "false" => Ok(Value::Bool(false)),
         other => Err(ReadError {
             message: format!(
-                "unknown hash form `#{}` (phase-A reader supports `#true`, `#false`, and `#\\…`)",
+                "unknown hash form `#{}` (supports `#true`, `#false`, `#\\…`, `#[…]`)",
                 other
             ),
             line: start_line,
             col: start_col,
         }),
     }
+}
+
+/// read `#[ a b 'name => "ada" c ]` — Table literal.
+///
+/// emits a `(__table__ <entry…>)` form. each entry is either:
+/// - a bare expression form (positional)
+/// - `(__entry__ <key-expr> <value-expr>)` (keyed)
+///
+/// `=>` between two expressions promotes the previous element from
+/// positional to keyed. expressions are evaluated by the compiler;
+/// the reader produces literal cons cells.
+fn read_table_literal(
+    c: &mut Cursor,
+    ctx: &mut ReadCtx,
+    start_line: usize,
+    start_col: usize,
+) -> Result<Value, ReadError> {
+    debug_assert_eq!(c.peek(), Some(b'['));
+    c.advance();
+    let mut entries: Vec<Value> = Vec::new();
+    loop {
+        skip_trivia(c);
+        match c.peek() {
+            None => {
+                return Err(ReadError {
+                    message: "unterminated `#[…]` table literal".into(),
+                    line: start_line,
+                    col: start_col,
+                });
+            }
+            Some(b']') => {
+                c.advance();
+                let mut form_elems = vec![Value::Sym(ctx.table_marker_sym)];
+                form_elems.extend(entries);
+                return Ok(build_list(ctx, &form_elems));
+            }
+            _ => {
+                let elem = read_form(c, ctx)?;
+                // peek for `=>` to upgrade to keyed entry.
+                skip_trivia(c);
+                if peek_arrow(c) {
+                    consume_arrow(c);
+                    skip_trivia(c);
+                    if c.peek() == Some(b']') || c.peek().is_none() {
+                        return Err(ReadError {
+                            message: "`=>` expects a value after it".into(),
+                            line: start_line,
+                            col: start_col,
+                        });
+                    }
+                    let val = read_form(c, ctx)?;
+                    let entry = build_list(
+                        ctx,
+                        &[Value::Sym(ctx.entry_marker_sym), elem, val],
+                    );
+                    entries.push(entry);
+                } else {
+                    entries.push(elem);
+                }
+            }
+        }
+    }
+}
+
+/// peek for `=>` followed by whitespace / delim. doesn't consume.
+fn peek_arrow(c: &Cursor) -> bool {
+    let pos = c.pos;
+    if pos + 2 > c.bytes.len() {
+        return false;
+    }
+    if c.bytes[pos] != b'=' || c.bytes[pos + 1] != b'>' {
+        return false;
+    }
+    if pos + 2 == c.bytes.len() {
+        return true;
+    }
+    is_delim(c.bytes[pos + 2])
+}
+
+/// consume a 2-byte `=>`.
+fn consume_arrow(c: &mut Cursor) {
+    debug_assert_eq!(c.peek(), Some(b'='));
+    c.advance();
+    debug_assert_eq!(c.peek(), Some(b'>'));
+    c.advance();
 }
 
 /// read a char literal starting *after* the `#\` prefix.

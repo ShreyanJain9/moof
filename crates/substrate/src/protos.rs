@@ -44,6 +44,7 @@ pub struct Protos {
     pub char_: FormId,
     pub string: FormId,
     pub list: FormId,
+    pub table: FormId,
     pub method: FormId,
     pub chunk: FormId,
     pub closure: FormId,
@@ -66,6 +67,7 @@ impl Protos {
         let char_ = mk(heap);
         let string = mk(heap);
         let list = mk(heap);
+        let table = mk(heap);
         let method = mk(heap);
         let chunk = mk(heap);
         let env = mk(heap);
@@ -82,6 +84,7 @@ impl Protos {
             char_,
             string,
             list,
+            table,
             method,
             chunk,
             closure,

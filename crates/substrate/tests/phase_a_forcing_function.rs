@@ -673,6 +673,157 @@ fn char_methods_work() {
     assert_eq!(moof::eval(&mut w, "[#\\a < #\\b]").unwrap(), Value::Bool(true));
 }
 
+// ─────────────────────────────────────────────────────────────────
+// Tables — `concepts/tables.md`
+// ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn table_positional_literal() {
+    let mut w = moof::new_world();
+    let v = moof::eval(&mut w, "#[1 2 3]").unwrap();
+    let id = v.as_form_id().unwrap();
+    assert_eq!(w.heap.get(id).proto, Value::Form(w.protos.table));
+    assert_eq!(moof::eval(&mut w, "[#[1 2 3] length]").unwrap(), Value::Int(3));
+    assert_eq!(
+        moof::eval(&mut w, "[#[1 2 3] at: 0]").unwrap(),
+        Value::Int(1)
+    );
+    assert_eq!(
+        moof::eval(&mut w, "[#[1 2 3] at: 2]").unwrap(),
+        Value::Int(3)
+    );
+}
+
+#[test]
+fn table_keyed_literal() {
+    let mut w = moof::new_world();
+    let v = moof::eval(&mut w, "#['name => \"ada\" 'age => 30]").unwrap();
+    let id = v.as_form_id().unwrap();
+    assert_eq!(w.heap.get(id).proto, Value::Form(w.protos.table));
+    let r = moof::eval(&mut w, "[#['name => 1 'age => 30] at: 'age]").unwrap();
+    assert_eq!(r, Value::Int(30));
+    let r = moof::eval(&mut w, "[#['name => 1 'age => 30] containsKey?: 'age]")
+        .unwrap();
+    assert_eq!(r, Value::Bool(true));
+    let r = moof::eval(
+        &mut w,
+        "[#['name => 1 'age => 30] containsKey?: 'missing]",
+    )
+    .unwrap();
+    assert_eq!(r, Value::Bool(false));
+}
+
+#[test]
+fn table_mixed_literal() {
+    let mut w = moof::new_world();
+    let v = moof::eval(&mut w, "#[1 2 3 'tag => 'urgent]").unwrap();
+    let length = w.intern("length");
+    let size = w.intern("size");
+    assert_eq!(w.send(v, length, &[]).unwrap(), Value::Int(3)); // positional only
+    assert_eq!(w.send(v, size, &[]).unwrap(), Value::Int(4)); // positional + keyed
+}
+
+#[test]
+fn table_higher_order_methods() {
+    let mut w = moof::new_world();
+    // map
+    let v = moof::eval(
+        &mut w,
+        "[[#[1 2 3 4 5] map: (fn (x) [x * 10])] length]",
+    )
+    .unwrap();
+    assert_eq!(v, Value::Int(5));
+    // reduce
+    let v = moof::eval(
+        &mut w,
+        "[#[1 2 3 4 5] reduce: (fn (a b) [a + b]) from: 0]",
+    )
+    .unwrap();
+    assert_eq!(v, Value::Int(15));
+    // filter
+    let v = moof::eval(
+        &mut w,
+        "[[#[-2 -1 0 1 2] filter: (fn (x) [x positive?])] length]",
+    )
+    .unwrap();
+    assert_eq!(v, Value::Int(2));
+    // forEach
+    moof::eval(
+        &mut w,
+        "[#[1 2 3] forEach: (fn (x) [$err emit: \"\"])]",
+    )
+    .unwrap();
+}
+
+#[test]
+fn table_mutation_via_methods() {
+    let mut w = moof::new_world();
+    moof::eval(&mut w, "(def t #[])").unwrap();
+    moof::eval(&mut w, "[t push: 1]").unwrap();
+    moof::eval(&mut w, "[t push: 2]").unwrap();
+    moof::eval(&mut w, "[t push: 3]").unwrap();
+    assert_eq!(moof::eval(&mut w, "[t length]").unwrap(), Value::Int(3));
+    moof::eval(&mut w, "[t at: 'name put: 'alice]").unwrap();
+    assert_eq!(
+        moof::eval(&mut w, "[t at: 'name]").unwrap(),
+        Value::Sym(w.intern("alice"))
+    );
+    assert_eq!(moof::eval(&mut w, "[t size]").unwrap(), Value::Int(4));
+    let popped = moof::eval(&mut w, "[t pop]").unwrap();
+    assert_eq!(popped, Value::Int(3));
+}
+
+#[test]
+fn table_keys_and_values() {
+    let mut w = moof::new_world();
+    let r = moof::eval(&mut w, "[[#['x => 1 'y => 2 'z => 3] keys] length]").unwrap();
+    assert_eq!(r, Value::Int(3));
+    let r = moof::eval(&mut w, "[[#[10 20 30 'x => 99] keys] length]").unwrap();
+    assert_eq!(r, Value::Int(4)); // 0, 1, 2, 'x
+    let r = moof::eval(&mut w, "[[#[10 20 30 'x => 99] values] length]").unwrap();
+    assert_eq!(r, Value::Int(4));
+}
+
+#[test]
+fn table_to_string() {
+    let mut w = moof::new_world();
+    let v = moof::eval(&mut w, "[#[1 2 3] toString]").unwrap();
+    assert_eq!(w.string_text(v).unwrap(), "#[1 2 3]");
+    // keyed
+    let v = moof::eval(&mut w, "[#['x => 1] toString]").unwrap();
+    assert_eq!(w.string_text(v).unwrap(), "#[x => 1]");
+}
+
+#[test]
+fn table_equality_is_structural() {
+    let mut w = moof::new_world();
+    let r = moof::eval(&mut w, "[#[1 2 3] = #[1 2 3]]").unwrap();
+    assert_eq!(r, Value::Bool(true));
+    let r = moof::eval(&mut w, "[#[1 2 3] = #[1 2]]").unwrap();
+    assert_eq!(r, Value::Bool(false));
+    let r = moof::eval(&mut w, "[#['a => 1] = #['a => 1]]").unwrap();
+    assert_eq!(r, Value::Bool(true));
+}
+
+#[test]
+fn table_empty_literal() {
+    let mut w = moof::new_world();
+    assert_eq!(moof::eval(&mut w, "[#[] empty?]").unwrap(), Value::Bool(true));
+    assert_eq!(moof::eval(&mut w, "[#[] length]").unwrap(), Value::Int(0));
+    assert_eq!(moof::eval(&mut w, "[#[] size]").unwrap(), Value::Int(0));
+}
+
+#[test]
+fn table_new_via_proto() {
+    // [Table new] → fresh empty Table.
+    let mut w = moof::new_world();
+    let v = moof::eval(&mut w, "[Table new]").unwrap();
+    let id = v.as_form_id().unwrap();
+    assert_eq!(w.heap.get(id).proto, Value::Form(w.protos.table));
+    let length = w.intern("length");
+    assert_eq!(w.send(v, length, &[]).unwrap(), Value::Int(0));
+}
+
 #[test]
 fn camel_case_methods_only() {
     // kebab-named methods are gone — they're now camelCase. test

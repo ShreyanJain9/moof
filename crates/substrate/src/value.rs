@@ -26,7 +26,8 @@ use crate::sym::SymId;
 /// a moof value as the runtime sees it.
 ///
 /// `Copy` because every variant is small (≤ 8 bytes payload).
-#[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
+/// `Hash` so Tables (and future Set/Map) can use Values as keys.
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Default)]
 pub enum Value {
     /// `nil` — also the empty list (`docs/concepts/lists.md`).
     /// proto: `Nil`. natural default.
