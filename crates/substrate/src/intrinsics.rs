@@ -445,6 +445,64 @@ fn install_table_methods(w: &mut World) {
     w.install_native(w.protos.table, "toString", |w, self_, _| {
         render_table_to_string(w, self_).map(|s| w.make_string(&s))
     });
+
+    // [t asString] — collect positional Chars into a String. raises
+    // if any positional entry isn't a Char.
+    w.install_native(w.protos.table, "asString", |w, self_, _| {
+        let entries: Vec<Value> = match w.table_repr(self_) {
+            Some(r) => r.positional.clone(),
+            None => {
+                return Err(RaiseError::new(
+                    w.intern("type-error"),
+                    "asString on non-Table",
+                ));
+            }
+        };
+        let mut out = String::new();
+        for v in entries {
+            match v {
+                Value::Char(cp) => {
+                    if let Some(c) = char::from_u32(cp) {
+                        out.push(c);
+                    }
+                }
+                _ => {
+                    return Err(RaiseError::new(
+                        w.intern("type-error"),
+                        "asString: every positional entry must be a Char",
+                    ));
+                }
+            }
+        }
+        Ok(w.make_string(&out))
+    });
+
+    // [t as: String] — protocol-style coercion. arg is a proto-Form.
+    w.install_native(w.protos.table, "as:", |w, self_, args| {
+        let target = args.first().copied().unwrap_or(Value::Nil);
+        let table_proto = Value::Form(w.protos.table);
+        let string_proto = Value::Form(w.protos.string);
+        let list_proto = Value::Form(w.protos.list);
+        if target == string_proto {
+            let sel = w.intern("asString");
+            return w.send(self_, sel, &[]);
+        }
+        if target == table_proto {
+            return Ok(self_);
+        }
+        if target == list_proto {
+            // a Table's positional entries as a List.
+            let entries: Vec<Value> = match w.table_repr(self_) {
+                Some(r) => r.positional.clone(),
+                None => Vec::new(),
+            };
+            return Ok(w.make_list(&entries));
+        }
+        Err(RaiseError::new(
+            w.intern("conversion"),
+            "Table can be converted as: String, List, Table",
+        ))
+    });
 }
 
 fn render_table_to_string(w: &mut World, table: Value) -> Result<String, RaiseError> {
@@ -840,6 +898,142 @@ fn install_string_methods(w: &mut World) {
         Ok(Value::Nil)
     });
     w.install_native(w.protos.string, "toString", |_, self_, _| Ok(self_));
+
+    // [s asTable] — a Table of Chars, one per Unicode scalar.
+    // [s asList]  — same shape but as a List (alias for toList).
+    // [s as: Table] — protocol-style coercion. arg is a proto-Form;
+    // dispatches by identity.
+    w.install_native(w.protos.string, "asTable", |w, self_, _| {
+        let chars: Vec<Value> = match w.string_text(self_) {
+            Some(t) => t.chars().map(|c| Value::Char(c as u32)).collect(),
+            None => {
+                return Err(RaiseError::new(
+                    w.intern("type-error"),
+                    "asTable on non-String",
+                ));
+            }
+        };
+        let tbl = w.make_table();
+        if let Some(r) = w.table_repr_mut(tbl) {
+            for v in chars {
+                r.positional.push(v);
+            }
+        }
+        Ok(tbl)
+    });
+    w.install_native(w.protos.string, "asList", |w, self_, _| {
+        let chars: Vec<Value> = match w.string_text(self_) {
+            Some(t) => t.chars().map(|c| Value::Char(c as u32)).collect(),
+            None => {
+                return Err(RaiseError::new(
+                    w.intern("type-error"),
+                    "asList on non-String",
+                ));
+            }
+        };
+        Ok(w.make_list(&chars))
+    });
+    w.install_native(w.protos.string, "as:", |w, self_, args| {
+        let target = args.first().copied().unwrap_or(Value::Nil);
+        let table_proto = Value::Form(w.protos.table);
+        let list_proto = Value::Form(w.protos.list);
+        let string_proto = Value::Form(w.protos.string);
+        if target == table_proto {
+            let sel = w.intern("asTable");
+            return w.send(self_, sel, &[]);
+        }
+        if target == list_proto {
+            let sel = w.intern("asList");
+            return w.send(self_, sel, &[]);
+        }
+        if target == string_proto {
+            return Ok(self_);
+        }
+        Err(RaiseError::new(
+            w.intern("conversion"),
+            "String can be converted as: Table, List, String",
+        ))
+    });
+
+    // [s map: f] — map each Char through `f` and collect the
+    // results into a new String (each result must be a Char or
+    // String).
+    w.install_native(w.protos.string, "map:", |w, self_, args| {
+        let chars: Vec<Value> = match w.string_text(self_) {
+            Some(t) => t.chars().map(|c| Value::Char(c as u32)).collect(),
+            None => {
+                return Err(RaiseError::new(
+                    w.intern("type-error"),
+                    "map: on non-String",
+                ));
+            }
+        };
+        let blk = args.first().copied().unwrap_or(Value::Nil);
+        let call_sym = w.intern("call");
+        let mut out = String::new();
+        for ch in chars {
+            let r = w.send(blk, call_sym, &[ch])?;
+            match r {
+                Value::Char(cp) => {
+                    if let Some(c) = char::from_u32(cp) {
+                        out.push(c);
+                    }
+                }
+                _ => {
+                    if let Some(t) = w.string_text(r) {
+                        out.push_str(t);
+                    } else {
+                        return Err(RaiseError::new(
+                            w.intern("type-error"),
+                            "String map: block must return a Char or String",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(w.make_string(&out))
+    });
+
+    // [s filter: pred] — keep Chars where pred returns truthy.
+    w.install_native(w.protos.string, "filter:", |w, self_, args| {
+        let chars: Vec<Value> = match w.string_text(self_) {
+            Some(t) => t.chars().map(|c| Value::Char(c as u32)).collect(),
+            None => {
+                return Err(RaiseError::new(
+                    w.intern("type-error"),
+                    "filter: on non-String",
+                ));
+            }
+        };
+        let blk = args.first().copied().unwrap_or(Value::Nil);
+        let call_sym = w.intern("call");
+        let mut out = String::new();
+        for ch in chars {
+            let r = w.send(blk, call_sym, &[ch])?;
+            if r.is_truthy() {
+                if let Value::Char(cp) = ch {
+                    if let Some(c) = char::from_u32(cp) {
+                        out.push(c);
+                    }
+                }
+            }
+        }
+        Ok(w.make_string(&out))
+    });
+
+    // [s reverse] — return a new String with the Chars reversed.
+    w.install_native(w.protos.string, "reverse", |w, self_, _| {
+        let reversed: Option<String> = w
+            .string_text(self_)
+            .map(|t| t.chars().rev().collect());
+        match reversed {
+            Some(s) => Ok(w.make_string(&s)),
+            None => Err(RaiseError::new(
+                w.intern("type-error"),
+                "reverse on non-String",
+            )),
+        }
+    });
     w.install_native(w.protos.string, "=", |w, self_, args| {
         let a = w.string_text(self_).map(|t| t.to_string());
         let b = w.string_text(args[0]).map(|t| t.to_string());
