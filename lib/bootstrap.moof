@@ -35,13 +35,205 @@
 ;; and return a Form, which the compiler then compiles in-place.
 ;;
 ;; the only true compiler-level special forms remaining (after these
-;; macros load) are: `if`, `let`, `do`, `quote`, `quasiquote`,
-;; `unquote`, `unquote-splicing`, `set!`, `fn`, `def`, `defmacro`,
-;; `defproto`, `__send__`, plus the reader-emitted markers
-;; `__table__`, `__obj__`, `__cascade__`. each genuinely needs
-;; bytecode-level access (jumps, closure construction, name binding,
-;; or compile-time evaluation order).
+;; macros load) are: `if`, `let`, `do`, `quote`, `set!`, `fn`,
+;; `def`, `defmacro`, plus the reader-emitted helper `__send__`
+;; (its operand grammar is private to the reader). each genuinely
+;; needs bytecode-level access (jumps, closure construction, name
+;; binding, compile-time evaluation order).
 ;; ─────────────────────────────────────────────────────────────────
+
+;; quasiquote — pure source-to-source expansion that builds a
+;; runtime constructor for the quasiquoted form. lives here
+;; (rather than the rust compiler) so that user code can read it,
+;; reason about it, and override it. defined first because every
+;; macro below it uses quasiquote in its body.
+;;
+;; the rules (kernel/CL tradition):
+;;   - atom (sym, int, etc.)              → `(quote atom)`
+;;   - empty list                         → `(quote ())`
+;;   - (unquote x) at depth 1             → x (eval'd at runtime)
+;;   - (unquote x) at depth > 1           → `(list 'unquote (qq x [d-1]))`
+;;   - (quasiquote x) inside              → `(list 'quasiquote (qq x [d+1]))`
+;;   - (unquote-splicing y) inside list at depth 1
+;;                                        → splice into accumulator via `append`
+;;   - general list, walk right-to-left   → `(cons (qq elem) acc)`
+;;
+;; the helpers are top-level `def`s (not methods) so that the
+;; macro body — which can't itself use quasiquote, since we're
+;; defining it — stays terse with bare `cons` / `list` / `quote`.
+
+(def __qq-list?
+  (fn (v)
+    (if [v is nil]
+        #true
+        (if [[v proto] is List] #true #false))))
+
+;; pre-bootstrap, the only "is this an empty list?" predicate
+;; that's reachable is `[v is nil]` (Object's identity-eq to nil).
+;; `:empty?` and `:null?` only get installed further down the file,
+;; so the quasiquote helpers — which run during compilation of
+;; *later* macros in this same file — must use `is nil`.
+
+(def __qq-marker?
+  (fn (form sym)
+    (if (__qq-list? form)
+        (if [form is nil]
+            #false
+            [[form head] is sym])
+        #false)))
+
+(def __qq-walk-elems
+  (fn (elems depth)
+    (if [elems is nil]
+        (list 'quote nil)
+        (let ((elem [elems head])
+              (acc (__qq-walk-elems [elems tail] depth)))
+          (if (if [depth = 1]
+                  (__qq-marker? elem 'unquote-splicing)
+                  #false)
+              (list 'append [[elem tail] head] acc)
+              (list 'cons (__qq-expand elem depth) acc))))))
+
+(def __qq-expand
+  (fn (form depth)
+    (if (__qq-list? form)
+        (if [form is nil]
+            (list 'quote form)
+            (let ((first [form head]))
+              (if [first is 'unquote]
+                  (if [depth = 1]
+                      [[form tail] head]
+                      (list 'list
+                            (list 'quote 'unquote)
+                            (__qq-expand [[form tail] head]
+                                         [depth - 1])))
+              (if [first is 'quasiquote]
+                  (list 'list
+                        (list 'quote 'quasiquote)
+                        (__qq-expand [[form tail] head]
+                                     [depth + 1]))
+                  (__qq-walk-elems form depth)))))
+        (list 'quote form))))
+
+(defmacro quasiquote (args)
+  (__qq-expand [args head] 1))
+
+;; ─────────────────────────────────────────────────────────────────
+;; reader-emitted markers — these are the head-symbols the reader
+;; uses to convey surface-syntax to the compiler:
+;;
+;;   __cascade__   for `[recv ; seg1 ; seg2]` cascade sends
+;;   __table__     for `#[a b 'k => v]` table literals
+;;   __obj__       for `{Proto slot: v [sel] body}` object literals
+;;   __entry__     marker inside __table__ for a `k => v` entry
+;;   __slot__      marker inside __obj__ for a slot init
+;;   __method__    marker inside __obj__ for a method decl
+;;
+;; the reader emits them; the user never types them. they used to
+;; be hardcoded in the compiler. now they're macros — same
+;; user-modifiable promise as the rest of the surface syntax.
+;; ─────────────────────────────────────────────────────────────────
+
+;; (__cascade__ recv (sel1 args1...) (sel2 args2...) ...) →
+;;   (let ((__r recv))
+;;     (do (__send__ __r sel1 args1...)
+;;         (__send__ __r sel2 args2...)
+;;         ...
+;;         __r))
+;;
+;; cascade returns the receiver (smalltalk semantics). each
+;; segment's value is discarded.
+(defmacro __cascade__ (args)
+  (let ((receiver [args head])
+        (segments [args tail]))
+    (let ((sends
+            [segments map:
+              (fn (seg)
+                ;; seg = (sel arg1 arg2 ...)
+                ;; → (__send__ __r sel arg1 arg2 ...)
+                (cons '__send__ (cons '__r seg)))]))
+      `(let ((__r ,receiver))
+         (do ,@sends __r)))))
+
+;; (__table__ entry1 entry2 ...) → builds a fresh Table.
+;; each entry is either:
+;;   - a positional expression                  → `[__t push: expr]`
+;;   - `(__entry__ key-expr value-expr)`        → `[__t at: k put: v]`
+;; everything is wrapped in a (let ((__t [Table new])) (do … __t))
+;; so the table-Form is the value of the literal.
+(defmacro __table__ (args)
+  (let ((inits
+          [args map:
+            (fn (entry)
+              (if (__qq-marker? entry '__entry__)
+                  (let ((k [[entry tail] head])
+                        (v [[[entry tail] tail] head]))
+                    `[__t at: ,k put: ,v])
+                  `[__t push: ,entry]))]))
+    `(let ((__t [Table new]))
+       (do ,@inits __t))))
+
+;; (__obj__ ProtoName entry1 entry2 ...) — `{Proto …}` object
+;; literal, after the reader has tagged each entry. each entry is
+;; one of:
+;;   (__slot__ key val)              — slot init
+;;   (__method__ sel params body)    — method declaration
+;;
+;; expands to:
+;;   (let ((__objLit__ [Proto new]))
+;;     (do (slotSet! __objLit__ 'k v) …          ; 1. slot inits
+;;         (setHandler! __objLit__ 'k             ; 2. auto getters
+;;            (fn () (slot self 'k))) …
+;;         (setHandler! __objLit__ 'k:            ; 3. auto setters
+;;            (fn (__v__) (slotSet! self 'k __v__))) …
+;;         (setHandler! __objLit__ 'sel           ; 4. user methods
+;;            (fn params body)) …                 ;    (after auto-
+;;         __objLit__))                           ;    accessors so
+;;                                                ;    they override)
+(defmacro __obj__ (args)
+  (let ((proto-sym [args head])
+        (entries [args tail]))
+    (let ((slot-entries
+            [entries filter:
+              (fn (e) [[e head] is '__slot__])])
+          (method-entries
+            [entries filter:
+              (fn (e) [[e head] is '__method__])]))
+      (let ((slot-inits
+              [slot-entries map:
+                (fn (e)
+                  (let ((k [[e tail] head])
+                        (v [[[e tail] tail] head]))
+                    `(slotSet! __objLit__ ',k ,v)))])
+            (slot-getters
+              [slot-entries map:
+                (fn (e)
+                  (let ((k [[e tail] head]))
+                    `(setHandler! __objLit__ ',k
+                                   (fn () (slot self ',k)))))])
+            (slot-setters
+              [slot-entries map:
+                (fn (e)
+                  (let ((k [[e tail] head]))
+                    (let ((setter-sel
+                            (intern [[k toString] + ":"])))
+                      `(setHandler! __objLit__ ',setter-sel
+                                     (fn (__v__)
+                                       (slotSet! self ',k __v__))))))])
+            (user-methods
+              [method-entries map:
+                (fn (e)
+                  (let ((sel [[e tail] head])
+                        (params [[[e tail] tail] head])
+                        (body [[[[e tail] tail] tail] head]))
+                    `(setHandler! __objLit__ ',sel
+                                   (fn ,params ,body))))]))
+        `(let ((__objLit__ [,proto-sym new]))
+           (do ,@slot-inits
+               ,@slot-getters
+               ,@slot-setters
+               ,@user-methods
+               __objLit__))))))
 
 ;; (when cond body...) ≡ (if cond (do body...) nil)
 (defmacro when (args)

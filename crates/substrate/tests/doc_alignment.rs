@@ -305,7 +305,16 @@ fn when_unless_letstar_letrec_are_user_inspectable_macros() {
     let mut w = moof::new_world();
     // each is a real Method-Form bound in the global env, with
     // `'macro` set in its meta.
-    for name in &["when", "unless", "let*", "let-rec", "defmethod", "defproto"] {
+    for name in &[
+        // control-flow + binding sugar
+        "when", "unless", "let*", "let-rec",
+        // proto + method definers
+        "defmethod", "defproto",
+        // source-to-source special forms now in moof
+        "quasiquote",
+        // reader-emitted markers, also moof macros now
+        "__cascade__", "__table__", "__obj__",
+    ] {
         let sym = w.intern(name);
         let v = w.env_lookup(w.global_env, sym).unwrap_or_else(|| {
             panic!("expected macro `{}` bound in global env", name)
@@ -508,6 +517,88 @@ fn defmethod_via_macro_installs_handler() {
 // the `(intern …)` primitive — required by macros that build
 // keyword selectors at expansion time.
 // ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn quasiquote_macro_round_trips_basic_shapes() {
+    // quasiquote is now a moof macro. test that the basic
+    // expander still works for atoms, lists, unquotes, splices.
+    let mut w = moof::new_world();
+    // atom → (quote atom)
+    let v = moof::eval(&mut w, "`5").unwrap();
+    assert_eq!(v, Value::Int(5));
+    // list with unquote
+    let v = moof::eval(&mut w, "(let ((x 7)) `(a ,x b))").unwrap();
+    let xs = w.list_to_vec(v).unwrap();
+    assert_eq!(xs.len(), 3);
+    assert_eq!(xs[0], Value::Sym(w.intern("a")));
+    assert_eq!(xs[1], Value::Int(7));
+    assert_eq!(xs[2], Value::Sym(w.intern("b")));
+    // splice
+    let v = moof::eval(
+        &mut w,
+        "(let ((xs '(1 2 3))) `(a ,@xs b))",
+    )
+    .unwrap();
+    let ys = w.list_to_vec(v).unwrap();
+    assert_eq!(ys.len(), 5);
+    assert_eq!(ys[0], Value::Sym(w.intern("a")));
+    assert_eq!(ys[1], Value::Int(1));
+    assert_eq!(ys[2], Value::Int(2));
+    assert_eq!(ys[3], Value::Int(3));
+    assert_eq!(ys[4], Value::Sym(w.intern("b")));
+}
+
+#[test]
+fn cascade_table_obj_literals_are_macros() {
+    // make sure the surface syntaxes still work after their
+    // markers became macros instead of compiler special-forms.
+    let mut w = moof::new_world();
+
+    // cascade: returns the receiver after each segment-send.
+    let v = moof::eval(
+        &mut w,
+        "(let ((t #[]))
+           (do [t push: 1 ; push: 2 ; push: 3]
+               [t length]))",
+    )
+    .unwrap();
+    assert_eq!(v, Value::Int(3));
+
+    // table literal — both positional and keyed entries.
+    let v = moof::eval(
+        &mut w,
+        "[#[1 2 3 'name => 'ada] size]",
+    )
+    .unwrap();
+    assert_eq!(v, Value::Int(4));
+    let v = moof::eval(
+        &mut w,
+        "[#['name => 'ada 'age => 30] at: 'name]",
+    )
+    .unwrap();
+    assert_eq!(v, Value::Sym(w.intern("ada")));
+
+    // object literal — slots + auto-accessors + custom method.
+    moof::eval(
+        &mut w,
+        "(defproto Box (slots contents))",
+    )
+    .unwrap();
+    let v = moof::eval(
+        &mut w,
+        "(let ((b {Box contents: 42 [doubled] [.contents * 2]}))
+           (do [b doubled]))",
+    )
+    .unwrap();
+    assert_eq!(v, Value::Int(84));
+    // auto-accessor for the slot.
+    let v = moof::eval(
+        &mut w,
+        "(let ((b {Box contents: 'hi})) [b contents])",
+    )
+    .unwrap();
+    assert_eq!(v, Value::Sym(w.intern("hi")));
+}
 
 #[test]
 fn intern_constructs_symbols_from_strings() {

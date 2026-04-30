@@ -71,15 +71,7 @@ struct Compiler<'a> {
     self_sym: SymId,
     send_sym: SymId,
     super_sym: SymId,
-    table_marker_sym: SymId,
-    entry_marker_sym: SymId,
-    obj_marker_sym: SymId,
-    obj_slot_sym: SymId,
-    obj_method_sym: SymId,
     cascade_marker_sym: SymId,
-    quasiquote_sym: SymId,
-    unquote_sym: SymId,
-    unquote_splicing_sym: SymId,
     defmacro_sym: SymId,
 }
 
@@ -96,15 +88,7 @@ impl<'a> Compiler<'a> {
         let self_sym = world.intern("self");
         let send_sym = world.intern("__send__");
         let super_sym = world.intern("super");
-        let table_marker_sym = world.intern("__table__");
-        let entry_marker_sym = world.intern("__entry__");
-        let obj_marker_sym = world.intern("__obj__");
-        let obj_slot_sym = world.intern("__slot__");
-        let obj_method_sym = world.intern("__method__");
         let cascade_marker_sym = world.intern("__cascade__");
-        let quasiquote_sym = world.intern("quasiquote");
-        let unquote_sym = world.intern("unquote");
-        let unquote_splicing_sym = world.intern("unquote-splicing");
         let defmacro_sym = world.intern("defmacro");
         Compiler {
             world,
@@ -124,15 +108,7 @@ impl<'a> Compiler<'a> {
             self_sym,
             send_sym,
             super_sym,
-            table_marker_sym,
-            entry_marker_sym,
-            obj_marker_sym,
-            obj_slot_sym,
-            obj_method_sym,
             cascade_marker_sym,
-            quasiquote_sym,
-            unquote_sym,
-            unquote_splicing_sym,
             defmacro_sym,
         }
     }
@@ -276,15 +252,20 @@ impl<'a> Compiler<'a> {
             if s == self.quote_sym {
                 return self.compile_quote(&elems);
             }
-            if s == self.quasiquote_sym {
-                return self.compile_quasiquote(&elems, tail);
-            }
-            if s == self.unquote_sym {
-                return Err(self.err("unquote outside quasiquote"));
-            }
-            if s == self.unquote_splicing_sym {
-                return Err(self.err("unquote-splicing outside quasiquote"));
-            }
+            // quasiquote (`` ` ``), unquote (`,`), unquote-splicing
+            // (`,@`) used to be hardcoded here. they're now a moof
+            // macro `quasiquote` defined at the top of
+            // lib/bootstrap.moof. the macro's expander produces the
+            // runtime `(cons …)` / `(append …)` / `(quote …)`
+            // construction calls that this compiler then handles
+            // through the ordinary fn-call path.
+            //
+            // bare `(unquote x)` / `(unquote-splicing x)` outside a
+            // quasiquote no longer raise here — they fall through
+            // to compile_call, which will fail with "unbound
+            // `unquote`" at runtime. the docs are clear that
+            // unquote without an enclosing quasiquote is a user
+            // error; the diagnostic is now late but correct.
             if s == self.set_sym {
                 return self.compile_set(&elems);
             }
@@ -328,15 +309,9 @@ impl<'a> Compiler<'a> {
                     .invoke(mid, Value::Nil, &[args_list], FormId::NONE)?;
                 return self.compile_expr(expanded, tail);
             }
-            if s == self.table_marker_sym {
-                return self.compile_table(&elems);
-            }
-            if s == self.obj_marker_sym {
-                return self.compile_obj_literal(&elems);
-            }
-            if s == self.cascade_marker_sym {
-                return self.compile_cascade(&elems);
-            }
+            // __table__ is now a moof macro in lib/bootstrap.moof.
+            // __obj__ is now a moof macro in lib/bootstrap.moof.
+            // __cascade__ is now a moof macro in lib/bootstrap.moof.
         }
         // fn-call: `(callable arg…)`
         self.compile_call(&elems, tail)
@@ -445,130 +420,14 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    /// expand a quasiquoted form to a constructor expression that
-    /// builds the same shape at runtime, with `unquote` substituting
-    /// in evaluated values and `unquote-splicing` flattening lists
-    /// into the surrounding list. nesting bumps depth: an inner
-    /// `(quasiquote …)` increases depth, an inner `(unquote …)`
-    /// decreases it; only depth-1 unquotes are evaluated.
-    fn compile_quasiquote(
-        &mut self,
-        elems: &[Value],
-        tail: bool,
-    ) -> Result<(), RaiseError> {
-        if elems.len() != 2 {
-            return Err(self.err("quasiquote requires 1 arg: `expr"));
-        }
-        let expanded = self.expand_quasiquote(elems[1], 1)?;
-        self.compile_expr(expanded, tail)
-    }
-
-    /// recursive expander. returns a source-form that, when
-    /// compiled and run, reconstructs the quasiquoted shape with
-    /// unquote-substitutions filled in.
-    fn expand_quasiquote(
-        &mut self,
-        form: Value,
-        depth: u32,
-    ) -> Result<Value, RaiseError> {
-        // an atom (sym, int, etc.) → (quote atom).
-        let id = match form.as_form_id() {
-            Some(i) => i,
-            None => return Ok(self.quote_form(form)),
-        };
-        let f = self.world.heap.get(id);
-        // not a list (maybe a Form-as-value, table, etc.) → (quote form).
-        if f.proto != Value::Form(self.world.protos.list) {
-            return Ok(self.quote_form(form));
-        }
-
-        // empty list → (quote ())
-        let elems = match self.world.list_to_vec(form) {
-            Ok(v) => v,
-            Err(_) => return Ok(self.quote_form(form)),
-        };
-        if elems.is_empty() {
-            return Ok(self.quote_form(form));
-        }
-
-        // (unquote x) at depth 1 → x (evaluated).
-        // (unquote x) at deeper depth → (list 'unquote (qq x depth-1))
-        // (quasiquote x) → (list 'quasiquote (qq x depth+1))
-        if let Some(s) = elems[0].as_sym() {
-            if s == self.unquote_sym {
-                if elems.len() != 2 {
-                    return Err(self.err("unquote requires 1 arg"));
-                }
-                if depth == 1 {
-                    return Ok(elems[1]);
-                }
-                let inner = self.expand_quasiquote(elems[1], depth - 1)?;
-                let list_sym = self.world.intern("list");
-                let quoted_uq = self.quote_form(Value::Sym(self.unquote_sym));
-                return Ok(self
-                    .world
-                    .make_list(&[Value::Sym(list_sym), quoted_uq, inner]));
-            }
-            if s == self.unquote_splicing_sym && depth == 1 {
-                return Err(self.err("unquote-splicing not in a list context"));
-            }
-            if s == self.quasiquote_sym {
-                if elems.len() != 2 {
-                    return Err(self.err("quasiquote requires 1 arg"));
-                }
-                let inner = self.expand_quasiquote(elems[1], depth + 1)?;
-                let list_sym = self.world.intern("list");
-                let quoted_qq =
-                    self.quote_form(Value::Sym(self.quasiquote_sym));
-                return Ok(self
-                    .world
-                    .make_list(&[Value::Sym(list_sym), quoted_qq, inner]));
-            }
-        }
-
-        // general list: walk right-to-left, building (cons elem rest)
-        // or (append elem rest) for splicing.
-        let cons_sym = self.world.intern("cons");
-        let append_sym = self.world.intern("append");
-        let nil_list = self.world.make_list(&[]);
-        let mut acc = self.quote_form(nil_list);
-        for elem in elems.iter().rev() {
-            // (unquote-splicing y) at depth 1 → (append y acc)
-            if let Some(sub) = elem.as_form_id().and_then(|fid| {
-                let f2 = self.world.heap.get(fid);
-                if f2.proto != Value::Form(self.world.protos.list) {
-                    return None;
-                }
-                self.world.list_to_vec(*elem).ok()
-            }) {
-                if sub.len() == 2 {
-                    if let Some(s) = sub[0].as_sym() {
-                        if s == self.unquote_splicing_sym && depth == 1 {
-                            // acc = (append y acc)
-                            acc = self.world.make_list(&[
-                                Value::Sym(append_sym),
-                                sub[1],
-                                acc,
-                            ]);
-                            continue;
-                        }
-                    }
-                }
-            }
-            // default: acc = (cons (qq elem) acc)
-            let qe = self.expand_quasiquote(*elem, depth)?;
-            acc = self
-                .world
-                .make_list(&[Value::Sym(cons_sym), qe, acc]);
-        }
-        Ok(acc)
-    }
-
-    /// helper: build `(quote v)`.
-    fn quote_form(&mut self, v: Value) -> Value {
-        self.world
-            .make_list(&[Value::Sym(self.quote_sym), v])
-    }
+    // quasiquote / unquote / unquote-splicing used to live here as
+    // an ~120-LoC recursive expander. they're now a moof macro
+    // `quasiquote` defined at the top of lib/bootstrap.moof, with
+    // its expansion helpers (`__qq-list?`, `__qq-marker?`,
+    // `__qq-walk-elems`, `__qq-expand`) right next to it. user
+    // code can `[quasiquote source]`-inspect the macro and
+    // override its semantics by re-running `(defmacro quasiquote
+    // …)`.
 
     fn compile_set(&mut self, elems: &[Value]) -> Result<(), RaiseError> {
         if elems.len() != 3 {
@@ -736,323 +595,20 @@ impl<'a> Compiler<'a> {
     /// lowering: compile receiver once, push. for each segment,
     /// `Dup` the receiver, push args, send, pop the result. when
     /// all done the receiver is on top of the stack.
-    fn compile_cascade(&mut self, elems: &[Value]) -> Result<(), RaiseError> {
-        // elems[0] = __cascade__ marker
-        // elems[1] = receiver
-        // elems[2..] = segments (each is a list `(sel arg…)`)
-        if elems.len() < 3 {
-            return Err(self.err("__cascade__: need receiver + at least one segment"));
-        }
-        let receiver = elems[1];
-        // 1. compile receiver, leave it on the stack.
-        self.compile_expr(receiver, false)?;
+    // `compile_cascade` was here. it's now a `(defmacro __cascade__
+    // …)` in lib/bootstrap.moof that desugars to
+    //   (let ((__r recv))
+    //     (do (__send__ __r sel1 args1…) … __r))
 
-        // 2. for each segment: Dup, compile args, Send, Pop result.
-        for &seg in &elems[2..] {
-            let seg_elems = self.world.list_to_vec(seg).map_err(|_| {
-                self.err("__cascade__: segment must be a list")
-            })?;
-            if seg_elems.is_empty() {
-                return Err(self.err("__cascade__: empty segment"));
-            }
-            let sel = seg_elems[0].as_sym().ok_or_else(|| {
-                self.err("__cascade__: selector must be a symbol")
-            })?;
-            self.emit(Op::Dup);
-            for &a in &seg_elems[1..] {
-                self.compile_expr(a, false)?;
-            }
-            let argc = u8::try_from(seg_elems.len() - 1).map_err(|_| {
-                self.err("__cascade__: too many args (max 255)")
-            })?;
-            let ic = self.next_ic();
-            self.emit(Op::Send {
-                selector: sel,
-                argc,
-                ic_idx: ic,
-            });
-            self.emit(Op::Pop);
-        }
-        // receiver is now on top.
-        Ok(())
-    }
+    // `compile_obj_literal` was here (the largest source-to-source
+    // special form, ~190 LoC). it's now a `(defmacro __obj__ …)`
+    // in lib/bootstrap.moof that desugars `{Proto …}` literals to
+    // a (let ((__objLit__ [Proto new])) (do (slotSet! …) …
+    //                                       (setHandler! …) …
+    //                                       __objLit__)).
 
-    /// `(__obj__ <proto-sym> <entry…>)` — emitted by the reader for
-    /// `{Proto …}` object literals. each entry is one of:
-    /// - `(__slot__ <key-sym> <value-expr>)`
-    /// - `(__method__ <selector-sym> <params-list> <body-expr>)`
-    ///
-    /// lowering: synthesize the equivalent
-    ///
-    ///   (let ((__objLit__ [<proto> new]))
-    ///     (do
-    ///       ;; slot inits (declaration order):
-    ///       (slotSet! __objLit__ '<key> <value>) …
-    ///       ;; auto-accessors for each slot — getter `[obj name]`
-    ///       ;; reads slot, setter `[obj name: v]` writes:
-    ///       (setHandler! __objLit__ '<key>
-    ///         (fn () (slot self '<key>))) …
-    ///       (setHandler! __objLit__ '<key>:
-    ///         (fn (v) (slotSet! self '<key> v))) …
-    ///       ;; user-defined methods (may override auto-accessors):
-    ///       (setHandler! __objLit__ '<sel> (fn <params> <body>)) …
-    ///       __objLit__))
-    ///
-    /// auto-accessors give `.name` shorthand and `[obj name: v]`
-    /// setter for free; user-defined methods take precedence
-    /// (emitted last so they override).
-    fn compile_obj_literal(&mut self, elems: &[Value]) -> Result<(), RaiseError> {
-        if elems.len() < 2 {
-            return Err(self.err("__obj__: missing proto"));
-        }
-        let proto_sym = elems[1].as_sym().ok_or_else(|| {
-            self.err("__obj__: proto must be a symbol")
-        })?;
-
-        // collect slots and methods separately so we can interleave
-        // emission: slot inits → auto-accessors → user methods.
-        let mut slot_keys: Vec<SymId> = Vec::new();
-        let mut slot_vals: Vec<Value> = Vec::new();
-        let mut user_methods: Vec<(SymId, Value, Value)> = Vec::new(); // (sel, params, body)
-
-        for &entry in &elems[2..] {
-            let entry_elems = self.world.list_to_vec(entry).map_err(|_| {
-                self.err("__obj__: malformed entry")
-            })?;
-            if entry_elems.is_empty() {
-                return Err(self.err("__obj__: empty entry"));
-            }
-            let kind = entry_elems[0].as_sym().ok_or_else(|| {
-                self.err("__obj__: entry kind must be a symbol")
-            })?;
-            if kind == self.obj_slot_sym {
-                if entry_elems.len() != 3 {
-                    return Err(self.err("__obj__: __slot__ takes (key val)"));
-                }
-                let key = entry_elems[1].as_sym().ok_or_else(|| {
-                    self.err("__obj__: slot key must be a symbol")
-                })?;
-                slot_keys.push(key);
-                slot_vals.push(entry_elems[2]);
-            } else if kind == self.obj_method_sym {
-                if entry_elems.len() != 4 {
-                    return Err(self.err(
-                        "__obj__: __method__ takes (selector params body)",
-                    ));
-                }
-                let sel = entry_elems[1].as_sym().ok_or_else(|| {
-                    self.err("__obj__: method selector must be a symbol")
-                })?;
-                user_methods.push((sel, entry_elems[2], entry_elems[3]));
-            } else {
-                let kind_text = self.world.resolve(kind).to_string();
-                return Err(self.err(format!(
-                    "__obj__: unknown entry kind `{}`",
-                    kind_text
-                )));
-            }
-        }
-
-        // build the desugar.
-        let obj_local = self.world.intern("__objLit__");
-        let new_sym = self.world.intern("new");
-        let slot_set_global = self.world.intern("slotSet!");
-        let set_handler_global = self.world.intern("setHandler!");
-        let slot_global = self.world.intern("slot");
-
-        let new_call = self.world.make_list(&[
-            Value::Sym(self.send_sym),
-            Value::Sym(proto_sym),
-            Value::Sym(new_sym),
-        ]);
-        let binding = self
-            .world
-            .make_list(&[Value::Sym(obj_local), new_call]);
-        let bindings = self.world.make_list(&[binding]);
-
-        let mut do_body = Vec::with_capacity(slot_keys.len() * 3 + user_methods.len() + 2);
-        do_body.push(Value::Sym(self.do_sym));
-
-        // 1. slot inits.
-        for (key, val) in slot_keys.iter().zip(slot_vals.iter()) {
-            let quoted_key = self
-                .world
-                .make_list(&[Value::Sym(self.quote_sym), Value::Sym(*key)]);
-            let call = self.world.make_list(&[
-                Value::Sym(slot_set_global),
-                Value::Sym(obj_local),
-                quoted_key,
-                *val,
-            ]);
-            do_body.push(call);
-        }
-
-        // 2. auto-accessors per slot. getter [obj name] reads slot;
-        //    setter [obj name: v] writes slot.
-        let v_param_sym = self.world.intern("__v__");
-        let empty_params = self.world.make_list(&[]);
-        let setter_params_list =
-            self.world.make_list(&[Value::Sym(v_param_sym)]);
-
-        for &key in &slot_keys {
-            // pre-build all the inner forms so each `make_list` call
-            // takes a fresh `&mut self.world` borrow that's already
-            // dropped by the time the next call happens.
-            let quoted_key_for_init = self
-                .world
-                .make_list(&[Value::Sym(self.quote_sym), Value::Sym(key)]);
-            let quoted_key_for_getter = self
-                .world
-                .make_list(&[Value::Sym(self.quote_sym), Value::Sym(key)]);
-            let quoted_key_for_setter = self
-                .world
-                .make_list(&[Value::Sym(self.quote_sym), Value::Sym(key)]);
-
-            // getter: (fn () (slot self 'name))
-            let getter_body = self.world.make_list(&[
-                Value::Sym(slot_global),
-                Value::Sym(self.self_sym),
-                quoted_key_for_init,
-            ]);
-            let getter_fn = self.world.make_list(&[
-                Value::Sym(self.fn_sym),
-                empty_params,
-                getter_body,
-            ]);
-            let getter_install = self.world.make_list(&[
-                Value::Sym(set_handler_global),
-                Value::Sym(obj_local),
-                quoted_key_for_getter,
-                getter_fn,
-            ]);
-            do_body.push(getter_install);
-
-            // setter: (fn (v) (slotSet! self 'name v))
-            let setter_body = self.world.make_list(&[
-                Value::Sym(slot_set_global),
-                Value::Sym(self.self_sym),
-                quoted_key_for_setter,
-                Value::Sym(v_param_sym),
-            ]);
-            let setter_fn = self.world.make_list(&[
-                Value::Sym(self.fn_sym),
-                setter_params_list,
-                setter_body,
-            ]);
-            // selector for the setter is `name:`.
-            let key_text = self.world.resolve(key).to_string();
-            let setter_sel_text = format!("{}:", key_text);
-            let setter_sel = self.world.intern(&setter_sel_text);
-            let quoted_setter_sel = self.world.make_list(&[
-                Value::Sym(self.quote_sym),
-                Value::Sym(setter_sel),
-            ]);
-            let setter_install = self.world.make_list(&[
-                Value::Sym(set_handler_global),
-                Value::Sym(obj_local),
-                quoted_setter_sel,
-                setter_fn,
-            ]);
-            do_body.push(setter_install);
-        }
-
-        // 3. user-defined methods (after auto-accessors so they
-        //    win on conflict).
-        for (sel, params, body) in user_methods {
-            let quoted_sel = self
-                .world
-                .make_list(&[Value::Sym(self.quote_sym), Value::Sym(sel)]);
-            let fn_form = self
-                .world
-                .make_list(&[Value::Sym(self.fn_sym), params, body]);
-            let call = self.world.make_list(&[
-                Value::Sym(set_handler_global),
-                Value::Sym(obj_local),
-                quoted_sel,
-                fn_form,
-            ]);
-            do_body.push(call);
-        }
-
-        // final value: the new object.
-        do_body.push(Value::Sym(obj_local));
-
-        let do_form = self.world.make_list(&do_body);
-        let let_form = self.world.make_list(&[
-            Value::Sym(self.let_sym),
-            bindings,
-            do_form,
-        ]);
-        self.compile_expr(let_form, false)
-    }
-
-    /// `(__table__ entry…)` — emitted by the reader for `#[…]`
-    /// table literals. each entry is either a bare expression
-    /// (positional) or `(__entry__ key val)` (keyed).
-    ///
-    /// lowering: `LoadName Table; Send :new 0` to push a fresh
-    /// empty Table; then for each entry emit `Dup; <eval>; Send
-    /// :push:/:at:put:; Pop` to populate it.
-    fn compile_table(&mut self, elems: &[Value]) -> Result<(), RaiseError> {
-        // 1. push fresh Table
-        let table_sym = self.world.intern("Table");
-        self.emit(Op::LoadName(table_sym));
-        let new_sym = self.world.intern("new");
-        let new_ic = self.next_ic();
-        self.emit(Op::Send {
-            selector: new_sym,
-            argc: 0,
-            ic_idx: new_ic,
-        });
-
-        // 2. for each entry, dup the table, push values, send.
-        let push_sym = self.world.intern("push:");
-        let at_put_sym = self.world.intern("at:put:");
-
-        for &entry in &elems[1..] {
-            // is this a keyed entry? (look for __entry__ head)
-            let is_keyed = match entry {
-                Value::Form(_) => self
-                    .world
-                    .list_to_vec(entry)
-                    .ok()
-                    .and_then(|v| v.first().copied())
-                    .and_then(|h| h.as_sym())
-                    .map(|s| s == self.entry_marker_sym)
-                    .unwrap_or(false),
-                _ => false,
-            };
-            if is_keyed {
-                // (__entry__ key val)
-                let entry_elems = self.world.list_to_vec(entry).unwrap();
-                if entry_elems.len() != 3 {
-                    return Err(self.err("table __entry__: expected (key value)"));
-                }
-                self.emit(Op::Dup);
-                self.compile_expr(entry_elems[1], false)?;
-                self.compile_expr(entry_elems[2], false)?;
-                let ic = self.next_ic();
-                self.emit(Op::Send {
-                    selector: at_put_sym,
-                    argc: 2,
-                    ic_idx: ic,
-                });
-                self.emit(Op::Pop);
-            } else {
-                // positional
-                self.emit(Op::Dup);
-                self.compile_expr(entry, false)?;
-                let ic = self.next_ic();
-                self.emit(Op::Send {
-                    selector: push_sym,
-                    argc: 1,
-                    ic_idx: ic,
-                });
-                self.emit(Op::Pop);
-            }
-        }
-        Ok(())
-    }
+    // `compile_table` was here. table literals now expand via the
+    // moof macro `(defmacro __table__ …)` in lib/bootstrap.moof.
 
     // `defproto` was once a hardcoded special form here (~200 LoC
     // of direct bytecode emission). it's now a `(defmacro defproto
