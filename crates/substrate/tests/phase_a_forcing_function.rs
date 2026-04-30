@@ -674,6 +674,99 @@ fn char_methods_work() {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// Floats — concepts/numbers.md
+// ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn float_literal_and_arithmetic() {
+    let mut w = moof::new_world();
+    let v = moof::eval(&mut w, "1.5").unwrap();
+    assert!(matches!(v, Value::Float(_)));
+    assert_eq!(v.as_float().unwrap(), 1.5);
+    let v = moof::eval(&mut w, "[1.5 + 2.5]").unwrap();
+    assert_eq!(v.as_float().unwrap(), 4.0);
+}
+
+#[test]
+fn float_literal_shapes() {
+    let mut w = moof::new_world();
+    assert_eq!(moof::eval(&mut w, ".5").unwrap().as_float().unwrap(), 0.5);
+    assert_eq!(moof::eval(&mut w, "1e9").unwrap().as_float().unwrap(), 1e9);
+    assert_eq!(
+        moof::eval(&mut w, "1.5e-3").unwrap().as_float().unwrap(),
+        1.5e-3
+    );
+    assert_eq!(moof::eval(&mut w, "-3.14").unwrap().as_float().unwrap(), -3.14);
+}
+
+#[test]
+fn float_int_promotion() {
+    let mut w = moof::new_world();
+    // Int + Float → Float
+    let v = moof::eval(&mut w, "[1 + 1.5]").unwrap();
+    assert_eq!(v.as_float().unwrap(), 2.5);
+    // Float + Int → Float
+    let v = moof::eval(&mut w, "[1.5 + 1]").unwrap();
+    assert_eq!(v.as_float().unwrap(), 2.5);
+    // mixed comparison
+    assert_eq!(moof::eval(&mut w, "[1 < 2.5]").unwrap(), Value::Bool(true));
+    assert_eq!(moof::eval(&mut w, "[1.5 = 1.5]").unwrap(), Value::Bool(true));
+}
+
+#[test]
+fn float_math_functions() {
+    let mut w = moof::new_world();
+    assert!((moof::eval(&mut w, "[2.0 sqrt]").unwrap().as_float().unwrap() - 2.0_f64.sqrt()).abs() < 1e-10);
+    assert!((moof::eval(&mut w, "[1.0 exp]").unwrap().as_float().unwrap() - 1.0_f64.exp()).abs() < 1e-10);
+    assert_eq!(
+        moof::eval(&mut w, "[1.999 floor]").unwrap().as_float().unwrap(),
+        1.0
+    );
+    assert_eq!(
+        moof::eval(&mut w, "[1.001 ceil]").unwrap().as_float().unwrap(),
+        2.0
+    );
+    assert_eq!(
+        moof::eval(&mut w, "[3.7 round]").unwrap().as_float().unwrap(),
+        4.0
+    );
+}
+
+#[test]
+fn float_predicates() {
+    let mut w = moof::new_world();
+    assert_eq!(moof::eval(&mut w, "[0.0 zero?]").unwrap(), Value::Bool(true));
+    assert_eq!(
+        moof::eval(&mut w, "[3.14 positive?]").unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        moof::eval(&mut w, "[-1.5 negative?]").unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn float_int_conversion() {
+    let mut w = moof::new_world();
+    assert_eq!(
+        moof::eval(&mut w, "[3 asFloat]").unwrap().as_float().unwrap(),
+        3.0
+    );
+    assert_eq!(
+        moof::eval(&mut w, "[3.7 asInteger]").unwrap(),
+        Value::Int(3)
+    );
+}
+
+#[test]
+fn float_proto() {
+    let mut w = moof::new_world();
+    let v = moof::eval(&mut w, "[1.5 proto]").unwrap();
+    assert_eq!(v, Value::Form(w.protos.float));
+}
+
+// ─────────────────────────────────────────────────────────────────
 // Cascades [obj a; b; c] — concepts/sends-and-calls.md
 // ─────────────────────────────────────────────────────────────────
 

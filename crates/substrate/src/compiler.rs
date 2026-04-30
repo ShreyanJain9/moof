@@ -224,7 +224,7 @@ impl<'a> Compiler<'a> {
             Value::Bool(false) => {
                 self.emit(Op::PushFalse);
             }
-            Value::Int(_) | Value::Char(_) | Value::Foreign(_) => {
+            Value::Int(_) | Value::Float(_) | Value::Char(_) | Value::Foreign(_) => {
                 let idx = self.add_const(form);
                 self.emit(Op::LoadConst(idx));
             }

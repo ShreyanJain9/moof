@@ -40,6 +40,7 @@ pub struct Protos {
     pub nil: FormId,
     pub bool_: FormId,
     pub integer: FormId,
+    pub float: FormId,
     pub symbol: FormId,
     pub char_: FormId,
     pub string: FormId,
@@ -63,6 +64,7 @@ impl Protos {
         let nil = mk(heap);
         let bool_ = mk(heap);
         let integer = mk(heap);
+        let float = mk(heap);
         let symbol = mk(heap);
         let char_ = mk(heap);
         let string = mk(heap);
@@ -80,6 +82,7 @@ impl Protos {
             nil,
             bool_,
             integer,
+            float,
             symbol,
             char_,
             string,

@@ -1046,6 +1046,11 @@ fn read_atom(c: &mut Cursor, ctx: &mut ReadCtx) -> Result<Value, ReadError> {
     if text == "nil" {
         return Ok(Value::Nil);
     }
+    // numeric first (so `.5`, `1.5`, `1e9` parse as Float, not as
+    // `.foo` shorthand or symbol).
+    if let Some(v) = try_parse_number(&text) {
+        return Ok(v);
+    }
     // `.foo` shorthand: substitutes `[self foo]`. lowered to a
     // send form like `[…]` does — `(__send__ self 'foo)`.
     // (`docs/syntax/sigils.md`.)
@@ -1055,54 +1060,69 @@ fn read_atom(c: &mut Cursor, ctx: &mut ReadCtx) -> Result<Value, ReadError> {
             return Ok(emit_send(ctx, Value::Sym(ctx.self_sym), foo_sym, &[]));
         }
     }
-    // numeric? either pure decimal/+/- prefix, or 0x/0b/0o.
-    if let Some(v) = try_parse_number(&text) {
-        return Ok(v);
-    }
     Ok(Value::Sym(ctx.syms.intern(&text)))
 }
 
-/// try to parse `text` as a moof integer literal. returns `None`
-/// if it doesn't look like a number, in which case the caller
-/// treats it as a symbol.
+/// try to parse `text` as a moof numeric literal — Integer or
+/// Float. returns `None` if it doesn't look like a number, in
+/// which case the caller treats it as a symbol.
+///
+/// shapes (`docs/syntax/literals.md`):
+/// - decimal Integer: `42`, `-42`, `1_000_000`
+/// - hex/bin/oct Integer: `0xff`, `0b1010`, `0o17`
+/// - Float: `1.5`, `.5`, `1.`, `1e9`, `1.5e-3`, `-3.14`
+///   (always parsed as f64 when `.` or `e/E` appears outside a
+///   base prefix).
 fn try_parse_number(text: &str) -> Option<Value> {
     // strip underscores from anywhere; they're for readability only.
-    // (`syntax/literals.md`.)
     let cleaned: String = text.chars().filter(|&c| c != '_').collect();
     let cleaned = cleaned.as_str();
-    // empty after stripping? (e.g., user wrote `"_"`, which we'd
-    // never see because `_` isn't a delim, but defensive.)
     if cleaned.is_empty() {
         return None;
     }
 
     // sign-aware base prefix detection.
-    let (sign, rest): (i64, &str) = match cleaned.as_bytes()[0] {
-        b'-' => (-1, &cleaned[1..]),
-        b'+' => (1, &cleaned[1..]),
-        _ => (1, cleaned),
+    let (sign_int, sign_f, rest): (i64, f64, &str) = match cleaned.as_bytes()[0] {
+        b'-' => (-1, -1.0, &cleaned[1..]),
+        b'+' => (1, 1.0, &cleaned[1..]),
+        _ => (1, 1.0, cleaned),
     };
     if rest.is_empty() {
         return None;
     }
 
-    // decimal-only fast path (no base prefix).
+    // base prefixes are integer-only.
     if let Some(stripped) = rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")) {
-        return i64::from_str_radix(stripped, 16).ok().map(|n| Value::Int(sign * n));
+        return i64::from_str_radix(stripped, 16)
+            .ok()
+            .map(|n| Value::Int(sign_int * n));
     }
     if let Some(stripped) = rest.strip_prefix("0b").or_else(|| rest.strip_prefix("0B")) {
-        return i64::from_str_radix(stripped, 2).ok().map(|n| Value::Int(sign * n));
+        return i64::from_str_radix(stripped, 2)
+            .ok()
+            .map(|n| Value::Int(sign_int * n));
     }
     if let Some(stripped) = rest.strip_prefix("0o").or_else(|| rest.strip_prefix("0O")) {
-        return i64::from_str_radix(stripped, 8).ok().map(|n| Value::Int(sign * n));
+        return i64::from_str_radix(stripped, 8)
+            .ok()
+            .map(|n| Value::Int(sign_int * n));
     }
-    // pure decimal — must start with a digit. (a leading `-` sign
-    // alone would have been caught above; what's left here must
-    // start with `0..9`.)
-    if !rest.bytes().next().map_or(false, |b| b.is_ascii_digit()) {
+
+    // first char is a digit OR a `.` (for `.5`).
+    let first = rest.bytes().next()?;
+    if !first.is_ascii_digit() && first != b'.' {
         return None;
     }
-    rest.parse::<i64>().ok().map(|n| Value::Int(sign * n))
+
+    // does it look like a float? (contains `.` or `e`/`E`)
+    let is_float = rest.bytes().any(|b| b == b'.' || b == b'e' || b == b'E');
+    if is_float {
+        // rust's f64::from_str doesn't accept a leading `.5`-style
+        // — wait, it actually does. let's just try.
+        return rest.parse::<f64>().ok().map(|f| Value::float(sign_f * f));
+    }
+
+    rest.parse::<i64>().ok().map(|n| Value::Int(sign_int * n))
 }
 
 /// helper for tests + downstream: walk a moof list-Form into a

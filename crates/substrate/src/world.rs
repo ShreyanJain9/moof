@@ -338,6 +338,7 @@ impl World {
             Value::Nil => Value::Form(self.protos.nil),
             Value::Bool(_) => Value::Form(self.protos.bool_),
             Value::Int(_) => Value::Form(self.protos.integer),
+            Value::Float(_) => Value::Form(self.protos.float),
             Value::Sym(_) => Value::Form(self.protos.symbol),
             Value::Char(_) => Value::Form(self.protos.char_),
             Value::Form(id) => self.heap.get(id).proto,

@@ -38,6 +38,11 @@ pub enum Value {
     /// 64-bit signed integer. proto: `Integer`. promoted to bigint
     /// on overflow in later phases (`docs/concepts/numbers.md`).
     Int(i64),
+    /// 64-bit IEEE-754 float, stored as bits so Value can derive
+    /// `Eq` + `Hash` (NaN != NaN by IEEE; we compare-by-bits here
+    /// for hashmap-key sanity). proto: `Float`. arithmetic with
+    /// `Int` auto-promotes (`docs/concepts/numbers.md`).
+    Float(u64),
     /// interned symbol. proto: `Symbol`.
     Sym(SymId),
     /// a single Unicode scalar value (`U+0000..=U+10FFFF` minus
@@ -94,6 +99,31 @@ impl Value {
             Some(n)
         } else {
             None
+        }
+    }
+
+    /// build a float-Value from an f64. canonical form is
+    /// `Value::Float(f64::to_bits())`.
+    pub fn float(x: f64) -> Self {
+        Value::Float(x.to_bits())
+    }
+
+    /// extract the f64, if this is a float.
+    pub fn as_float(self) -> Option<f64> {
+        if let Value::Float(bits) = self {
+            Some(f64::from_bits(bits))
+        } else {
+            None
+        }
+    }
+
+    /// numeric coercion: Int → f64; Float → f64; everything else → None.
+    /// used by promoting arithmetic.
+    pub fn as_number_f64(self) -> Option<f64> {
+        match self {
+            Value::Int(n) => Some(n as f64),
+            Value::Float(bits) => Some(f64::from_bits(bits)),
+            _ => None,
         }
     }
 

@@ -28,6 +28,7 @@ use crate::world::{NativeFn, RaiseError, World};
 pub fn install(w: &mut World) {
     install_call_on_method(w);
     install_integer_methods(w);
+    install_float_methods(w);
     install_symbol_methods(w);
     install_bool_methods(w);
     install_nil_methods(w);
@@ -1005,72 +1006,111 @@ fn install_call_on_method(w: &mut World) {
 // ─────────────────────────────────────────────────────────────────
 
 fn install_integer_methods(w: &mut World) {
+    // arithmetic auto-promotes when the rhs is a Float.
+    // [Int + Int] → Int; [Int + Float] → Float.
     w.install_native(w.protos.integer, "+", |w, self_, args| {
         let a = int_arg(w, self_, "+")?;
-        let b = int_arg(w, args[0], "+")?;
-        Ok(Value::Int(a.wrapping_add(b)))
+        match args[0] {
+            Value::Int(b) => Ok(Value::Int(a.wrapping_add(b))),
+            Value::Float(_) => Ok(Value::float(a as f64 + args[0].as_float().unwrap())),
+            _ => Err(RaiseError::new(
+                w.intern("type-error"),
+                "+ expected a numeric rhs",
+            )),
+        }
     });
     w.install_native(w.protos.integer, "-", |w, self_, args| {
         let a = int_arg(w, self_, "-")?;
-        let b = int_arg(w, args[0], "-")?;
-        Ok(Value::Int(a.wrapping_sub(b)))
+        match args[0] {
+            Value::Int(b) => Ok(Value::Int(a.wrapping_sub(b))),
+            Value::Float(_) => Ok(Value::float(a as f64 - args[0].as_float().unwrap())),
+            _ => Err(RaiseError::new(
+                w.intern("type-error"),
+                "- expected a numeric rhs",
+            )),
+        }
     });
     w.install_native(w.protos.integer, "*", |w, self_, args| {
         let a = int_arg(w, self_, "*")?;
-        let b = int_arg(w, args[0], "*")?;
-        Ok(Value::Int(a.wrapping_mul(b)))
+        match args[0] {
+            Value::Int(b) => Ok(Value::Int(a.wrapping_mul(b))),
+            Value::Float(_) => Ok(Value::float(a as f64 * args[0].as_float().unwrap())),
+            _ => Err(RaiseError::new(
+                w.intern("type-error"),
+                "* expected a numeric rhs",
+            )),
+        }
     });
     w.install_native(w.protos.integer, "/", |w, self_, args| {
         let a = int_arg(w, self_, "/")?;
-        let b = int_arg(w, args[0], "/")?;
-        if b == 0 {
-            return Err(RaiseError::new(
-                w.intern("division-by-zero"),
-                "integer division by zero",
-            ));
-        }
-        // moof Integer division returns the integer quotient at
-        // phase A; later phases may promote to Rational
-        // (`docs/concepts/numbers.md`) but the seed keeps it tight.
-        Ok(Value::Int(a.wrapping_div(b)))
-    });
-    w.install_native(w.protos.integer, "=", |w, self_, args| {
-        let a = int_arg(w, self_, "=")?;
         match args[0] {
-            Value::Int(b) => Ok(Value::Bool(a == b)),
-            _ => Ok(Value::Bool(false)),
+            Value::Int(b) => {
+                if b == 0 {
+                    return Err(RaiseError::new(
+                        w.intern("division-by-zero"),
+                        "integer division by zero",
+                    ));
+                }
+                Ok(Value::Int(a.wrapping_div(b)))
+            }
+            Value::Float(_) => Ok(Value::float(a as f64 / args[0].as_float().unwrap())),
+            _ => Err(RaiseError::new(
+                w.intern("type-error"),
+                "/ expected a numeric rhs",
+            )),
         }
     });
-    w.install_native(w.protos.integer, "!=", |w, self_, args| {
-        let a = int_arg(w, self_, "!=")?;
-        match args[0] {
-            Value::Int(b) => Ok(Value::Bool(a != b)),
-            _ => Ok(Value::Bool(true)),
-        }
+    w.install_native(w.protos.integer, "=", |_, self_, args| {
+        let a = self_.as_int().unwrap();
+        Ok(Value::Bool(match args[0] {
+            Value::Int(b) => a == b,
+            Value::Float(_) => (a as f64) == args[0].as_float().unwrap(),
+            _ => false,
+        }))
+    });
+    w.install_native(w.protos.integer, "!=", |_, self_, args| {
+        let a = self_.as_int().unwrap();
+        Ok(Value::Bool(match args[0] {
+            Value::Int(b) => a != b,
+            Value::Float(_) => (a as f64) != args[0].as_float().unwrap(),
+            _ => true,
+        }))
     });
     w.install_native(w.protos.integer, "<", |w, self_, args| {
-        let a = int_arg(w, self_, "<")?;
-        let b = int_arg(w, args[0], "<")?;
-        Ok(Value::Bool(a < b))
+        let a = self_.as_int().unwrap();
+        let b = args[0].as_number_f64().ok_or_else(|| {
+            RaiseError::new(w.intern("type-error"), "< expected a numeric rhs")
+        })?;
+        Ok(Value::Bool((a as f64) < b))
     });
     w.install_native(w.protos.integer, ">", |w, self_, args| {
-        let a = int_arg(w, self_, ">")?;
-        let b = int_arg(w, args[0], ">")?;
-        Ok(Value::Bool(a > b))
+        let a = self_.as_int().unwrap();
+        let b = args[0].as_number_f64().ok_or_else(|| {
+            RaiseError::new(w.intern("type-error"), "> expected a numeric rhs")
+        })?;
+        Ok(Value::Bool((a as f64) > b))
     });
     w.install_native(w.protos.integer, "<=", |w, self_, args| {
-        let a = int_arg(w, self_, "<=")?;
-        let b = int_arg(w, args[0], "<=")?;
-        Ok(Value::Bool(a <= b))
+        let a = self_.as_int().unwrap();
+        let b = args[0].as_number_f64().ok_or_else(|| {
+            RaiseError::new(w.intern("type-error"), "<= expected a numeric rhs")
+        })?;
+        Ok(Value::Bool((a as f64) <= b))
     });
     w.install_native(w.protos.integer, ">=", |w, self_, args| {
-        let a = int_arg(w, self_, ">=")?;
-        let b = int_arg(w, args[0], ">=")?;
-        Ok(Value::Bool(a >= b))
+        let a = self_.as_int().unwrap();
+        let b = args[0].as_number_f64().ok_or_else(|| {
+            RaiseError::new(w.intern("type-error"), ">= expected a numeric rhs")
+        })?;
+        Ok(Value::Bool((a as f64) >= b))
     });
     w.install_native(w.protos.integer, "toString", |w, self_, _args| {
         let a = int_arg(w, self_, "toString")?;
         Ok(w.make_string(&a.to_string()))
+    });
+    w.install_native(w.protos.integer, "asFloat", |w, self_, _args| {
+        let a = int_arg(w, self_, "asFloat")?;
+        Ok(Value::float(a as f64))
     });
 }
 
@@ -1081,6 +1121,167 @@ fn int_arg(w: &mut World, v: Value, op: &str) -> Result<i64, RaiseError> {
             format!("{} expected an Integer", op),
         )
     })
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Float — IEEE-754 f64 with `Int → Float` promotion.
+// ─────────────────────────────────────────────────────────────────
+
+fn install_float_methods(w: &mut World) {
+    fn float_arg(w: &mut World, v: Value, op: &str) -> Result<f64, RaiseError> {
+        v.as_float().ok_or_else(|| {
+            RaiseError::new(
+                w.intern("type-error"),
+                format!("{} expected a Float", op),
+            )
+        })
+    }
+    w.install_native(w.protos.float, "+", |w, self_, args| {
+        let a = float_arg(w, self_, "+")?;
+        let b = args[0].as_number_f64().ok_or_else(|| {
+            RaiseError::new(w.intern("type-error"), "+ expected a numeric rhs")
+        })?;
+        Ok(Value::float(a + b))
+    });
+    w.install_native(w.protos.float, "-", |w, self_, args| {
+        let a = float_arg(w, self_, "-")?;
+        let b = args[0].as_number_f64().ok_or_else(|| {
+            RaiseError::new(w.intern("type-error"), "- expected a numeric rhs")
+        })?;
+        Ok(Value::float(a - b))
+    });
+    w.install_native(w.protos.float, "*", |w, self_, args| {
+        let a = float_arg(w, self_, "*")?;
+        let b = args[0].as_number_f64().ok_or_else(|| {
+            RaiseError::new(w.intern("type-error"), "* expected a numeric rhs")
+        })?;
+        Ok(Value::float(a * b))
+    });
+    w.install_native(w.protos.float, "/", |w, self_, args| {
+        let a = float_arg(w, self_, "/")?;
+        let b = args[0].as_number_f64().ok_or_else(|| {
+            RaiseError::new(w.intern("type-error"), "/ expected a numeric rhs")
+        })?;
+        Ok(Value::float(a / b))
+    });
+    w.install_native(w.protos.float, "=", |_, self_, args| {
+        let a = self_.as_float().unwrap();
+        Ok(Value::Bool(args[0].as_number_f64().map_or(false, |b| a == b)))
+    });
+    w.install_native(w.protos.float, "!=", |_, self_, args| {
+        let a = self_.as_float().unwrap();
+        Ok(Value::Bool(args[0].as_number_f64().map_or(true, |b| a != b)))
+    });
+    w.install_native(w.protos.float, "<", |w, self_, args| {
+        let a = float_arg(w, self_, "<")?;
+        let b = args[0].as_number_f64().ok_or_else(|| {
+            RaiseError::new(w.intern("type-error"), "< expected a numeric rhs")
+        })?;
+        Ok(Value::Bool(a < b))
+    });
+    w.install_native(w.protos.float, ">", |w, self_, args| {
+        let a = float_arg(w, self_, ">")?;
+        let b = args[0].as_number_f64().ok_or_else(|| {
+            RaiseError::new(w.intern("type-error"), "> expected a numeric rhs")
+        })?;
+        Ok(Value::Bool(a > b))
+    });
+    w.install_native(w.protos.float, "<=", |w, self_, args| {
+        let a = float_arg(w, self_, "<=")?;
+        let b = args[0].as_number_f64().ok_or_else(|| {
+            RaiseError::new(w.intern("type-error"), "<= expected a numeric rhs")
+        })?;
+        Ok(Value::Bool(a <= b))
+    });
+    w.install_native(w.protos.float, ">=", |w, self_, args| {
+        let a = float_arg(w, self_, ">=")?;
+        let b = args[0].as_number_f64().ok_or_else(|| {
+            RaiseError::new(w.intern("type-error"), ">= expected a numeric rhs")
+        })?;
+        Ok(Value::Bool(a >= b))
+    });
+    w.install_native(w.protos.float, "toString", |w, self_, _| {
+        let a = float_arg(w, self_, "toString")?;
+        Ok(w.make_string(&format_float(a)))
+    });
+    w.install_native(w.protos.float, "abs", |w, self_, _| {
+        let a = float_arg(w, self_, "abs")?;
+        Ok(Value::float(a.abs()))
+    });
+    w.install_native(w.protos.float, "sqrt", |w, self_, _| {
+        let a = float_arg(w, self_, "sqrt")?;
+        Ok(Value::float(a.sqrt()))
+    });
+    w.install_native(w.protos.float, "log", |w, self_, _| {
+        let a = float_arg(w, self_, "log")?;
+        Ok(Value::float(a.ln()))
+    });
+    w.install_native(w.protos.float, "exp", |w, self_, _| {
+        let a = float_arg(w, self_, "exp")?;
+        Ok(Value::float(a.exp()))
+    });
+    w.install_native(w.protos.float, "sin", |w, self_, _| {
+        let a = float_arg(w, self_, "sin")?;
+        Ok(Value::float(a.sin()))
+    });
+    w.install_native(w.protos.float, "cos", |w, self_, _| {
+        let a = float_arg(w, self_, "cos")?;
+        Ok(Value::float(a.cos()))
+    });
+    w.install_native(w.protos.float, "floor", |w, self_, _| {
+        let a = float_arg(w, self_, "floor")?;
+        Ok(Value::float(a.floor()))
+    });
+    w.install_native(w.protos.float, "ceil", |w, self_, _| {
+        let a = float_arg(w, self_, "ceil")?;
+        Ok(Value::float(a.ceil()))
+    });
+    w.install_native(w.protos.float, "round", |w, self_, _| {
+        let a = float_arg(w, self_, "round")?;
+        Ok(Value::float(a.round()))
+    });
+    w.install_native(w.protos.float, "asInteger", |w, self_, _| {
+        let a = float_arg(w, self_, "asInteger")?;
+        Ok(Value::Int(a as i64))
+    });
+    w.install_native(w.protos.float, "nan?", |_, self_, _| {
+        Ok(Value::Bool(self_.as_float().map_or(false, |f| f.is_nan())))
+    });
+    w.install_native(w.protos.float, "finite?", |_, self_, _| {
+        Ok(Value::Bool(self_.as_float().map_or(false, |f| f.is_finite())))
+    });
+    w.install_native(w.protos.float, "zero?", |_, self_, _| {
+        Ok(Value::Bool(self_.as_float().map_or(false, |f| f == 0.0)))
+    });
+    w.install_native(w.protos.float, "positive?", |_, self_, _| {
+        Ok(Value::Bool(self_.as_float().map_or(false, |f| f > 0.0)))
+    });
+    w.install_native(w.protos.float, "negative?", |_, self_, _| {
+        Ok(Value::Bool(self_.as_float().map_or(false, |f| f < 0.0)))
+    });
+}
+
+/// render a float with up to ~17 sig-digits and a `.` even for
+/// whole values (so `1.0` doesn't render as `1`).
+fn format_float(f: f64) -> String {
+    if f.is_nan() {
+        "NaN".into()
+    } else if f.is_infinite() {
+        if f > 0.0 {
+            "∞".into()
+        } else {
+            "-∞".into()
+        }
+    } else if f == 0.0 {
+        "0.0".into()
+    } else {
+        let s = format!("{}", f);
+        if !s.contains('.') && !s.contains('e') && !s.contains('E') {
+            format!("{}.0", s)
+        } else {
+            s
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1370,6 +1571,7 @@ fn install_object_reflection(w: &mut World) {
             // defensive fallbacks (each tagged kind overrides above):
             Value::Bool(b) => (if b { "#true" } else { "#false" }).to_string(),
             Value::Int(n) => n.to_string(),
+            Value::Float(_) => format_float(self_.as_float().unwrap()),
             Value::Sym(s) => w.resolve(s).to_string(),
             Value::Char(cp) => {
                 if let Some(ch) = char::from_u32(cp) {
@@ -1434,6 +1636,7 @@ fn fmt_short(w: &World, v: Value) -> String {
         Value::Bool(true) => "#true".into(),
         Value::Bool(false) => "#false".into(),
         Value::Int(n) => n.to_string(),
+        Value::Float(_) => format_float(v.as_float().unwrap()),
         Value::Sym(s) => format!("'{}", w.resolve(s)),
         Value::Char(cp) => {
             char::from_u32(cp)
