@@ -2259,6 +2259,51 @@ fn install_globals(w: &mut World) {
     // (list a b c) — variadic list constructor.
     install_global(w, "list", |world, _, args| Ok(world.make_list(args)));
 
+    // (macroexpand '(foo a b)) — run the macro for `foo` with the
+    // unevaluated args and return the expansion. raises if `foo`
+    // isn't a registered macro.
+    install_global(w, "macroexpand", |world, _, args| {
+        if args.len() != 1 {
+            return Err(RaiseError::new(
+                world.intern("arity"),
+                "macroexpand: (macroexpand 'form)",
+            ));
+        }
+        let form = args[0];
+        let elems = world.list_to_vec(form).map_err(|_| {
+            RaiseError::new(
+                world.intern("type-error"),
+                "macroexpand: arg must be a list-form",
+            )
+        })?;
+        if elems.is_empty() {
+            return Err(RaiseError::new(
+                world.intern("macroexpand"),
+                "empty form",
+            ));
+        }
+        let head = elems[0].as_sym().ok_or_else(|| {
+            RaiseError::new(
+                world.intern("macroexpand"),
+                "form head is not a symbol",
+            )
+        })?;
+        let macro_v = world.macros.get(&head).copied().ok_or_else(|| {
+            RaiseError::new(
+                world.intern("macroexpand"),
+                format!("`{}` is not a macro", world.resolve(head)),
+            )
+        })?;
+        let mid = macro_v.as_form_id().ok_or_else(|| {
+            RaiseError::new(
+                world.intern("macroexpand"),
+                "macro entry is not a Form",
+            )
+        })?;
+        let macro_args: Vec<Value> = elems[1..].to_vec();
+        world.invoke(mid, Value::Nil, &macro_args, FormId::NONE)
+    });
+
     // (append xs ys …) — concatenate lists left-to-right. used by
     // quasiquote splicing. (append) → '(); (append xs) → xs.
     install_global(w, "append", |world, _, args| {

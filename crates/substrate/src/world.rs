@@ -129,6 +129,13 @@ pub struct World {
     /// method-FormId → native function pointer.
     pub native_fns: HashMap<FormId, NativeFn>,
 
+    /// macro-name (sym) → macro closure (a Method-Form). when the
+    /// compiler sees `(name args…)` with `name` in this table, it
+    /// invokes the macro with the unevaluated arg-forms as a list,
+    /// then recursively compiles the returned form. macros run at
+    /// compile time only.
+    pub macros: HashMap<SymId, Value>,
+
     /// per-proto generation counters. bumped on `set-handler!` to
     /// invalidate inline caches. ICs check the cached generation
     /// against the current value; mismatch triggers re-resolution.
@@ -190,6 +197,7 @@ impl World {
             chunk_consts: HashMap::new(),
             chunk_ics: HashMap::new(),
             native_fns: HashMap::new(),
+            macros: HashMap::new(),
             proto_generations: HashMap::new(),
             global_env,
             vm: Vm::default(),

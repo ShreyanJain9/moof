@@ -86,6 +86,7 @@ struct Compiler<'a> {
     quasiquote_sym: SymId,
     unquote_sym: SymId,
     unquote_splicing_sym: SymId,
+    defmacro_sym: SymId,
 }
 
 impl<'a> Compiler<'a> {
@@ -116,6 +117,7 @@ impl<'a> Compiler<'a> {
         let quasiquote_sym = world.intern("quasiquote");
         let unquote_sym = world.intern("unquote");
         let unquote_splicing_sym = world.intern("unquote-splicing");
+        let defmacro_sym = world.intern("defmacro");
         Compiler {
             world,
             ops: Vec::new(),
@@ -149,6 +151,7 @@ impl<'a> Compiler<'a> {
             quasiquote_sym,
             unquote_sym,
             unquote_splicing_sym,
+            defmacro_sym,
         }
     }
 
@@ -323,6 +326,24 @@ impl<'a> Compiler<'a> {
             }
             if s == self.defmethod_sym {
                 return self.compile_defmethod(&elems);
+            }
+            if s == self.defmacro_sym {
+                return self.compile_defmacro(&elems);
+            }
+            // user-defined macro? expand at compile time.
+            if let Some(&macro_method) = self.world.macros.get(&s) {
+                let mid = match macro_method.as_form_id() {
+                    Some(i) => i,
+                    None => {
+                        return Err(self.err("macro entry is not a Form"));
+                    }
+                };
+                // pass the unevaluated arg-forms as separate args.
+                let macro_args: Vec<Value> = elems[1..].to_vec();
+                let expanded = self
+                    .world
+                    .invoke(mid, Value::Nil, &macro_args, FormId::NONE)?;
+                return self.compile_expr(expanded, tail);
             }
             if s == self.table_marker_sym {
                 return self.compile_table(&elems);
@@ -1404,6 +1425,78 @@ impl<'a> Compiler<'a> {
     /// install a method on a proto without `setHandler!` boilerplate.
     /// header shape mirrors defproto: `(name)` `(+ other)`
     /// `(name x y)` `(at: i put: v)`.
+    /// (defmacro name (params) body) — installs a macro that
+    /// expands at compile time. macros run during the compiler's
+    /// pass over their use-sites; the macro receives the raw arg-
+    /// Forms and returns a Form, which we then compile.
+    ///
+    /// installation happens at compile time of the `defmacro` form
+    /// itself (eager registration), so subsequent forms in the same
+    /// chunk can use the macro.
+    fn compile_defmacro(&mut self, elems: &[Value]) -> Result<(), RaiseError> {
+        if elems.len() != 4 {
+            return Err(self.err(
+                "defmacro: (defmacro name (params) body)",
+            ));
+        }
+        let name = elems[1].as_sym().ok_or_else(|| {
+            self.err("defmacro: name must be a symbol")
+        })?;
+        let params_list = elems[2];
+        let body = elems[3];
+
+        // decode params: list of symbols.
+        let param_vec = self
+            .world
+            .list_to_vec(params_list)
+            .map_err(|_| self.err("defmacro: params must be a list"))?;
+        let mut params: Vec<SymId> = Vec::with_capacity(param_vec.len());
+        for p in param_vec {
+            let s = p.as_sym().ok_or_else(|| {
+                self.err("defmacro: param must be a symbol")
+            })?;
+            params.push(s);
+        }
+
+        // compile the body to a chunk.
+        let chunk_id = compile_fn_body(self.world, params.clone(), body)?;
+
+        // wrap as a method-Form: proto Method, slots
+        // {body, params, env=global, source=original}.
+        let mut method = Form::with_proto(Value::Form(self.world.protos.method));
+        method
+            .slots
+            .insert(self.world.body_sym, Value::Form(chunk_id));
+        // params list re-built (symbols may differ in order).
+        let params_v = self
+            .world
+            .make_list(&params.iter().map(|s| Value::Sym(*s)).collect::<Vec<_>>());
+        method.slots.insert(self.world.params_sym, params_v);
+        let global_env = Value::Form(self.world.global_env);
+        method.slots.insert(self.world.env_sym, global_env);
+        method
+            .meta
+            .insert(self.world.source_sym, params_list);
+        let macro_meta = self.world.intern("macro");
+        method
+            .meta
+            .insert(macro_meta, Value::Sym(name));
+        let method_id = self.world.alloc(method);
+
+        // register in the macro table — eagerly, so subsequent
+        // forms in this chunk see it.
+        self.world.macros.insert(name, Value::Form(method_id));
+
+        // also bind in global env for `[name source]` reflection
+        // and so the closure isn't gc'd if/when we have a gc.
+        self.world
+            .env_bind(self.world.global_env, name, Value::Form(method_id));
+
+        // the form itself evaluates to nil.
+        self.emit(Op::PushNil);
+        Ok(())
+    }
+
     fn compile_defmethod(&mut self, elems: &[Value]) -> Result<(), RaiseError> {
         if elems.len() != 4 {
             return Err(self.err(
