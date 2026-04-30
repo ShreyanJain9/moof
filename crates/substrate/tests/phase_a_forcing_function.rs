@@ -111,7 +111,7 @@ fn forcing_function_does_not_understand_for_unknown_selectors() {
     let mut w = moof::new_world();
     let mystery = w.intern("flibbertigibbet");
     let err = w.send(Value::Int(5), mystery, &[]).unwrap_err();
-    assert_eq!(w.resolve(err.kind), "does-not-understand");
+    assert_eq!(w.resolve(err.kind), "doesNotUnderstand");
 }
 
 #[test]
@@ -191,7 +191,7 @@ fn forcing_function_pipeline_works() {
 
 // ─────────────────────────────────────────────────────────────────
 // the moldable-seed claim: bootstrap.moof installs methods on
-// canonical protos via `set-handler!`. these tests verify the moof-
+// canonical protos via `setHandler!`. these tests verify the moof-
 // side stdlib is loaded and dispatch-reachable.
 // ─────────────────────────────────────────────────────────────────
 
@@ -338,7 +338,7 @@ fn bootstrap_set_handler_works_at_runtime() {
     let err = w.send(Value::Int(5), triple_sym, &[]).unwrap_err();
     assert!(err.message.contains("does not understand"));
     // install :triple on Integer.
-    moof::eval(&mut w, "(set-handler! Integer 'triple (fn () [self * 3]))").unwrap();
+    moof::eval(&mut w, "(setHandler! Integer 'triple (fn () [self * 3]))").unwrap();
     assert_eq!(
         w.send(Value::Int(5), triple_sym, &[]).unwrap(),
         Value::Int(15)
@@ -410,7 +410,7 @@ fn defproto_counter_full_lifecycle() {
               (handlers
                 (incr) [self count: [.count + 1]]
                 (read) .count
-                (count: v) (slot-set! self (quote count) v)
+                (count: v) (slotSet! self (quote count) v)
                 (count) (slot self (quote count))))
             (def c [Counter new])
             [c count: 0]
@@ -459,7 +459,7 @@ fn dot_self_shorthand() {
             (defproto Box
               (handlers
                 (peek) .stuff
-                (stuff: v) (slot-set! self (quote stuff) v)
+                (stuff: v) (slotSet! self (quote stuff) v)
                 (stuff) (slot self (quote stuff))))
             (def b [Box new])
             [b stuff: 7]
@@ -547,7 +547,7 @@ fn string_literal_produces_string_form() {
 #[test]
 fn integer_to_string_returns_string_form() {
     let mut w = moof::new_world();
-    let v = moof::eval(&mut w, "[42 to-string]").unwrap();
+    let v = moof::eval(&mut w, "[42 toString]").unwrap();
     assert_eq!(w.string_text(v).unwrap(), "42");
 }
 
@@ -590,7 +590,7 @@ fn string_equality_is_structural() {
 #[test]
 fn list_to_string_is_a_string_form() {
     let mut w = moof::new_world();
-    let v = moof::eval(&mut w, "[(list 1 2 3) to-string]").unwrap();
+    let v = moof::eval(&mut w, "[(list 1 2 3) toString]").unwrap();
     assert_eq!(w.string_text(v).unwrap(), "(1 2 3)");
 }
 
@@ -600,14 +600,105 @@ fn console_emit_accepts_string() {
     // Sym fallback). this is the mco-pattern in action: the
     // ForeignHandle holds the raw bytes.
     let mut w = moof::new_world();
-    // route stdout to stderr for the test (so test runner stays
-    // happy) by mutating the cap's :fd handle's target. the
-    // simpler form: use $err which already targets stderr.
+    // route to $err (stderr) so test runner's captured stdout
+    // stays happy.
     let dollar_err = w.intern("$err");
     let err = w.env_lookup(w.global_env, dollar_err).unwrap();
     let emit = w.intern("emit:");
     let payload = w.make_string("");
     assert_eq!(w.send(err, emit, &[payload]).unwrap(), Value::Nil);
+}
+
+#[test]
+fn string_is_table_of_chars() {
+    let mut w = moof::new_world();
+    let v = moof::eval(&mut w, "[\"hello\" length]").unwrap();
+    assert_eq!(v, Value::Int(5));
+    let v = moof::eval(&mut w, "[\"hello\" at: 0]").unwrap();
+    assert!(matches!(v, Value::Char(0x68))); // 'h'
+    let v = moof::eval(&mut w, "[\"hello\" at: 4]").unwrap();
+    assert!(matches!(v, Value::Char(0x6f))); // 'o'
+    let xs = moof::eval(&mut w, "[\"abc\" asList]").unwrap();
+    let elems = w.list_to_vec(xs).unwrap();
+    assert_eq!(elems.len(), 3);
+    assert!(matches!(elems[0], Value::Char(0x61))); // 'a'
+}
+
+#[test]
+fn string_utf8_correct() {
+    let mut w = moof::new_world();
+    let v = moof::eval(&mut w, "[\"héllo\" length]").unwrap();
+    assert_eq!(v, Value::Int(5));
+    let v = moof::eval(&mut w, "[\"héllo\" byteLength]").unwrap();
+    assert_eq!(v, Value::Int(6));
+    let v = moof::eval(&mut w, "[[\"héllo\" at: 1] codepoint]").unwrap();
+    assert_eq!(v, Value::Int(233)); // é
+    let v = moof::eval(&mut w, "[\"🌙\" length]").unwrap();
+    assert_eq!(v, Value::Int(1));
+    let v = moof::eval(&mut w, "[\"🌙\" byteLength]").unwrap();
+    assert_eq!(v, Value::Int(4));
+}
+
+#[test]
+fn char_literals() {
+    let mut w = moof::new_world();
+    let v = moof::eval(&mut w, "#\\h").unwrap();
+    assert!(matches!(v, Value::Char(0x68)));
+    let v = moof::eval(&mut w, "#\\space").unwrap();
+    assert!(matches!(v, Value::Char(0x20)));
+    let v = moof::eval(&mut w, "#\\newline").unwrap();
+    assert!(matches!(v, Value::Char(0x0a)));
+    let v = moof::eval(&mut w, "#\\u{1f496}").unwrap();
+    assert_eq!(v, Value::Char(0x1f496));
+}
+
+#[test]
+fn char_methods_work() {
+    let mut w = moof::new_world();
+    assert_eq!(
+        moof::eval(&mut w, "[#\\h codepoint]").unwrap(),
+        Value::Int(104)
+    );
+    assert_eq!(moof::eval(&mut w, "[#\\h letter?]").unwrap(), Value::Bool(true));
+    assert_eq!(moof::eval(&mut w, "[#\\7 digit?]").unwrap(), Value::Bool(true));
+    assert_eq!(
+        moof::eval(&mut w, "[#\\space whitespace?]").unwrap(),
+        Value::Bool(true)
+    );
+    let v = moof::eval(&mut w, "[#\\h upcase]").unwrap();
+    assert!(matches!(v, Value::Char(0x48))); // 'H'
+    let v = moof::eval(&mut w, "[#\\Z downcase]").unwrap();
+    assert!(matches!(v, Value::Char(0x7a))); // 'z'
+    assert_eq!(moof::eval(&mut w, "[#\\a = #\\a]").unwrap(), Value::Bool(true));
+    assert_eq!(moof::eval(&mut w, "[#\\a < #\\b]").unwrap(), Value::Bool(true));
+}
+
+#[test]
+fn camel_case_methods_only() {
+    // kebab-named methods are gone — they're now camelCase. test
+    // each rename: sending the kebab name should dnu-fail.
+    let mut w = moof::new_world();
+    let kebab_methods = [
+        "to-string",
+        "byte-length",
+        "for-each:",
+        "count-where:",
+        "non-empty?",
+        "does-not-understand:with:",
+    ];
+    for kebab in kebab_methods {
+        let s = w.intern(kebab);
+        let err = w.send(Value::Int(5), s, &[]).unwrap_err();
+        assert!(
+            err.message.contains("does not understand"),
+            "kebab method `{}` should be gone (renamed to camelCase)",
+            kebab
+        );
+    }
+    // and the camelCase versions exist for [42 toString] etc.
+    let to_string = w.intern("toString");
+    let r = w.send(Value::Int(42), to_string, &[]).unwrap();
+    assert_eq!(w.string_text(r).unwrap(), "42");
 }
 
 #[test]
@@ -678,7 +769,7 @@ fn initialize_runs_on_new() {
         "(do
             (defproto Counter
               (handlers
-                (initialize) (slot-set! self (quote count) 100)
+                (initialize) (slotSet! self (quote count) 100)
                 (count) (slot self (quote count))))
             [[Counter new] count])",
     )
@@ -690,13 +781,13 @@ fn initialize_runs_on_new() {
 #[test]
 fn inline_cache_invalidates_on_set_handler() {
     // a tight loop that calls the same method many times. the IC
-    // caches after first call. then set-handler! changes the
+    // caches after first call. then setHandler! changes the
     // method's body; the IC's generation no longer matches; next
     // call re-resolves and gets the new behavior.
     let mut w = moof::new_world();
     moof::eval(
         &mut w,
-        "(set-handler! Integer 'pet (fn () (quote dog)))",
+        "(setHandler! Integer 'pet (fn () (quote dog)))",
     )
     .unwrap();
     // first call: cache miss → populate.
@@ -705,11 +796,11 @@ fn inline_cache_invalidates_on_set_handler() {
     // second call: cache hit (same proto = Integer).
     let r = moof::eval(&mut w, "[7 pet]").unwrap();
     assert_eq!(w.resolve(r.as_sym().unwrap()), "dog");
-    // change behavior. set-handler! bumps the proto's generation;
+    // change behavior. setHandler! bumps the proto's generation;
     // existing ICs are now stale.
     moof::eval(
         &mut w,
-        "(set-handler! Integer 'pet (fn () (quote cat)))",
+        "(setHandler! Integer 'pet (fn () (quote cat)))",
     )
     .unwrap();
     // third call: stale-IC re-resolves; new behavior takes effect.

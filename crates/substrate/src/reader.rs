@@ -416,13 +416,19 @@ fn build_list(ctx: &mut ReadCtx, elements: &[Value]) -> Value {
     tail
 }
 
-/// read `#…` — hash-prefixed forms. phase A handles only `#true`,
-/// `#false`. tables/tagged-literals/chars come later.
+/// read `#…` — hash-prefixed forms. phase A handles `#true`,
+/// `#false`, and char literals `#\…`. tables/tagged-literals come
+/// later.
 fn read_hash(c: &mut Cursor, _ctx: &mut ReadCtx) -> Result<Value, ReadError> {
     debug_assert_eq!(c.peek(), Some(b'#'));
     let start_line = c.line;
     let start_col = c.col;
     c.advance();
+    // char literal? `#\<rest>`
+    if c.peek() == Some(b'\\') {
+        c.advance();
+        return read_char_literal(c, start_line, start_col);
+    }
     // peek the rest until a delimiter; that's the bareword.
     let mut word = String::new();
     while let Some(b) = c.peek() {
@@ -437,9 +443,111 @@ fn read_hash(c: &mut Cursor, _ctx: &mut ReadCtx) -> Result<Value, ReadError> {
         "false" => Ok(Value::Bool(false)),
         other => Err(ReadError {
             message: format!(
-                "unknown hash form `#{}` (phase-A reader supports `#true` and `#false` only)",
+                "unknown hash form `#{}` (phase-A reader supports `#true`, `#false`, and `#\\…`)",
                 other
             ),
+            line: start_line,
+            col: start_col,
+        }),
+    }
+}
+
+/// read a char literal starting *after* the `#\` prefix.
+///
+/// supported shapes:
+/// - `#\h`             — single ASCII char
+/// - `#\space`         — named char (space, newline, tab, return)
+/// - `#\u{1f496}`      — hex codepoint
+fn read_char_literal(
+    c: &mut Cursor,
+    start_line: usize,
+    start_col: usize,
+) -> Result<Value, ReadError> {
+    // unicode escape: #\u{HEX}
+    if c.peek() == Some(b'u') {
+        // peek further to confirm `u{...}` (otherwise might be the
+        // bareword `#\u`-as-char, but that's ambiguous). we require
+        // the `{` to disambiguate.
+        if c.bytes.get(c.pos + 1).copied() == Some(b'{') {
+            c.advance(); // u
+            c.advance(); // {
+            let mut hex = String::new();
+            loop {
+                match c.peek() {
+                    Some(b'}') => {
+                        c.advance();
+                        break;
+                    }
+                    Some(b) if (b as char).is_ascii_hexdigit() => {
+                        hex.push(b as char);
+                        c.advance();
+                    }
+                    _ => {
+                        return Err(ReadError {
+                            message: format!("malformed `#\\u{{{}…}}` char literal", hex),
+                            line: start_line,
+                            col: start_col,
+                        });
+                    }
+                }
+            }
+            let cp = u32::from_str_radix(&hex, 16).map_err(|_| ReadError {
+                message: format!("invalid hex codepoint `#\\u{{{}}}`", hex),
+                line: start_line,
+                col: start_col,
+            })?;
+            // reject surrogates and out-of-range.
+            if char::from_u32(cp).is_none() {
+                return Err(ReadError {
+                    message: format!("`#\\u{{{}}}` is not a Unicode scalar value", hex),
+                    line: start_line,
+                    col: start_col,
+                });
+            }
+            return Ok(Value::Char(cp));
+        }
+    }
+    // single char or named.
+    let first = match c.advance() {
+        Some(b) => b,
+        None => {
+            return Err(ReadError {
+                message: "unterminated `#\\` char literal".into(),
+                line: start_line,
+                col: start_col,
+            });
+        }
+    };
+    // try to read more if the next char is alphabetic — for named
+    // char literals like #\space.
+    let mut buf = String::new();
+    buf.push(first as char);
+    while let Some(b) = c.peek() {
+        if is_delim(b) {
+            break;
+        }
+        buf.push(b as char);
+        c.advance();
+    }
+    if buf.len() == 1 {
+        return Ok(Value::Char(first as u32));
+    }
+    // named char
+    let cp = match buf.as_str() {
+        "space" => Some(b' ' as u32),
+        "newline" => Some(b'\n' as u32),
+        "tab" => Some(b'\t' as u32),
+        "return" => Some(b'\r' as u32),
+        "null" => Some(0u32),
+        "backspace" => Some(0x08),
+        "delete" => Some(0x7f),
+        "escape" => Some(0x1b),
+        _ => None,
+    };
+    match cp {
+        Some(c) => Ok(Value::Char(c)),
+        None => Err(ReadError {
+            message: format!("unknown char name `#\\{}`", buf),
             line: start_line,
             col: start_col,
         }),
@@ -490,9 +598,26 @@ fn read_string(c: &mut Cursor, ctx: &mut ReadCtx) -> Result<Value, ReadError> {
                     }
                 }
             }
-            Some(b) => {
+            Some(b) if b < 0x80 => {
+                // ASCII fast path.
                 s.push(b as char);
                 c.advance();
+            }
+            Some(_) => {
+                // multi-byte UTF-8 sequence — decode the next
+                // codepoint and advance by its byte length.
+                let remaining = &c.bytes[c.pos..];
+                let decoded = std::str::from_utf8(remaining)
+                    .map_err(|_| ReadError::at(c, "invalid UTF-8 in string"))?;
+                let ch = decoded
+                    .chars()
+                    .next()
+                    .ok_or_else(|| ReadError::at(c, "unexpected end of string"))?;
+                let len = ch.len_utf8();
+                s.push(ch);
+                for _ in 0..len {
+                    c.advance();
+                }
             }
         }
     }

@@ -39,6 +39,11 @@ pub enum Value {
     Int(i64),
     /// interned symbol. proto: `Symbol`.
     Sym(SymId),
+    /// a single Unicode scalar value (`U+0000..=U+10FFFF` minus
+    /// surrogates). proto: `Char`. iterating a String yields
+    /// `Char` values; `[s at: i]` returns one. (`docs/concepts/
+    /// strings.md`.)
+    Char(u32),
     /// reference to a heap-allocated Form. proto is `form.proto`.
     Form(FormId),
     /// reference to a rust-allocated foreign resource. proto is
@@ -86,6 +91,15 @@ impl Value {
     pub fn as_int(self) -> Option<i64> {
         if let Value::Int(n) = self {
             Some(n)
+        } else {
+            None
+        }
+    }
+
+    /// extract the codepoint, if this is a Char.
+    pub fn as_char(self) -> Option<u32> {
+        if let Value::Char(c) = self {
+            Some(c)
         } else {
             None
         }

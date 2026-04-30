@@ -629,7 +629,7 @@ mod tests {
         // install dnu on Object that returns the selector as its result.
         w.install_native(
             w.protos.object,
-            "does-not-understand:with:",
+            "doesNotUnderstand:with:",
             |_, _self_, args| Ok(args[0]),
         );
         let mystery = w.intern("mystery-selector");

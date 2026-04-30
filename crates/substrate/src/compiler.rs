@@ -206,7 +206,7 @@ impl<'a> Compiler<'a> {
             Value::Bool(false) => {
                 self.emit(Op::PushFalse);
             }
-            Value::Int(_) | Value::Foreign(_) => {
+            Value::Int(_) | Value::Char(_) | Value::Foreign(_) => {
                 let idx = self.add_const(form);
                 self.emit(Op::LoadConst(idx));
             }
@@ -800,7 +800,7 @@ impl<'a> Compiler<'a> {
         //   PushClosure <body-chunk>
         //   Send :call 3
         //   Pop
-        let set_handler_sym = self.world.intern("set-handler!");
+        let set_handler_sym = self.world.intern("setHandler!");
         let call_sym = self.call_sym;
         for (sel, params, body) in handlers {
             let fn_chunk = compile_fn_body(self.world, params, body)?;

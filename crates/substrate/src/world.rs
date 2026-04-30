@@ -175,7 +175,7 @@ impl World {
         let params_sym = syms.intern("params");
         let env_sym = syms.intern("env");
         let bindings_sym = syms.intern("bindings");
-        let dnu_sym = syms.intern("does-not-understand:with:");
+        let dnu_sym = syms.intern("doesNotUnderstand:with:");
         let quote_sym = syms.intern("quote");
         let bytes_sym = syms.intern("bytes");
 
@@ -275,6 +275,7 @@ impl World {
             Value::Bool(_) => Value::Form(self.protos.bool_),
             Value::Int(_) => Value::Form(self.protos.integer),
             Value::Sym(_) => Value::Form(self.protos.symbol),
+            Value::Char(_) => Value::Form(self.protos.char_),
             Value::Form(id) => self.heap.get(id).proto,
             Value::Foreign(_) => Value::Form(self.protos.foreign),
         }
