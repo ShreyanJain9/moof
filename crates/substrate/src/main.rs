@@ -1,67 +1,148 @@
-//! `moof` cli — phase A.14.
+//! `moof` cli — phase A.14 + REPL.
 //!
-//! evaluates a single moof expression supplied on argv and prints
-//! its result to stdout via the `$out` cap. this is the *only*
-//! path the substrate seed offers to write text from moof code —
-//! `process/docs-driven.md` enforces this.
+//! two modes:
+//! - `moof '<expr>'` — eval one expression, print via `$out say:`.
+//! - `moof` (no args) — drop into a REPL.
 //!
-//! later: `moof world <dir>` and `moof world join <url>` cli
-//! commands; `moof repl` for an interactive session; flag-driven
-//! diagnostic modes (disassemble, profile, etc).
+//! per `process/docs-driven.md`'s capability rule, the *only* path
+//! to stdout from moof code is `$out`. the cli pipes results
+//! through `[$out say:]` accordingly. no `print`, `println`,
+//! `puts` exist as moof-side bindings.
 
-use std::env;
+use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 2 {
-        eprintln!(
-            "moof v{} — substrate seed",
-            env!("CARGO_PKG_VERSION")
-        );
-        eprintln!("usage: moof '<expr>'");
-        eprintln!();
-        eprintln!("examples:");
-        eprintln!("  moof '(+ 1 2)'");
-        eprintln!("  moof '(let ((a 3) (b 4)) (+ a b))'");
-        eprintln!("  moof '[$out emit: \\'hi\\\\n]'");
-        return ExitCode::from(2);
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() == 1 {
+        repl()
+    } else if args.len() == 2 {
+        eval_one_shot(&args[1])
+    } else {
+        usage();
+        ExitCode::from(2)
     }
-    let source = &args[1];
+}
+
+fn usage() {
+    eprintln!("moof v{} — substrate seed", env!("CARGO_PKG_VERSION"));
+    eprintln!();
+    eprintln!("usage:");
+    eprintln!("  moof              # repl");
+    eprintln!("  moof '<expr>'     # eval one expression, print result");
+}
+
+fn eval_one_shot(source: &str) -> ExitCode {
     let mut world = moof::new_world();
     match moof::eval(&mut world, source) {
-        Ok(value) => {
-            // pipe the result through `$out say:` per the cap rule.
-            // no path to stdout that bypasses `$out` —
-            // `process/docs-driven.md` guarantees this.
-            let dollar_out = world.intern("$out");
-            let say = world.intern("say:");
-            let out = match world.env_lookup(world.global_env, dollar_out) {
-                Some(v) => v,
-                None => {
-                    eprintln!("moof: $out cap is unbound (substrate boot failed)");
-                    return ExitCode::from(70);
-                }
-            };
-            if let Err(e) = world.send(out, say, &[value]) {
-                eprintln!("moof: error printing result: {}", e.message);
-                return ExitCode::from(70);
+        Ok(value) => match print_via_out(&mut world, value) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("moof: {}", e.message);
+                ExitCode::from(70)
             }
-            ExitCode::SUCCESS
-        }
+        },
         Err(err) => {
-            // routing the error through $err to stay on-discipline.
-            let dollar_err = world.intern("$err");
-            let say = world.intern("say:");
-            let err_cap = world.env_lookup(world.global_env, dollar_err);
-            // fall back to plain eprintln if even $err is broken.
-            let payload = world.intern(&format!("error: {}", err.message));
-            if let Some(cap) = err_cap {
-                let _ = world.send(cap, say, &[moof::value::Value::Sym(payload)]);
-            } else {
-                eprintln!("error: {}", err.message);
-            }
+            let _ = print_via_err(&mut world, &format!("error: {}", err.message));
             ExitCode::from(1)
         }
     }
+}
+
+fn repl() -> ExitCode {
+    let mut world = moof::new_world();
+    print_banner(&mut world);
+    let stdin = io::stdin();
+    loop {
+        // prompt — write through $out so the cap discipline holds.
+        let _ = print_prompt(&mut world);
+        let _ = io::stdout().flush();
+
+        let mut line = String::new();
+        match stdin.lock().read_line(&mut line) {
+            Ok(0) => {
+                // EOF (ctrl-d).
+                let _ = print_via_out_text(&mut world, "\ngoodbye.\n");
+                return ExitCode::SUCCESS;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("moof: stdin read failed: {}", e);
+                return ExitCode::from(74);
+            }
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed == "(quit)" || trimmed == ":quit" {
+            let _ = print_via_out_text(&mut world, "goodbye.\n");
+            return ExitCode::SUCCESS;
+        }
+        match moof::eval(&mut world, trimmed) {
+            Ok(value) => {
+                if !value.is_nil() {
+                    let _ = print_via_out(&mut world, value);
+                }
+            }
+            Err(err) => {
+                let _ = print_via_err(&mut world, &format!("! {}", err.message));
+            }
+        }
+    }
+}
+
+fn print_banner(world: &mut moof::world::World) {
+    let banner = format!(
+        "moof v{} — substrate seed\ntype expressions; ctrl-d or :quit to exit.\n",
+        env!("CARGO_PKG_VERSION")
+    );
+    let _ = print_via_out_text(world, &banner);
+}
+
+fn print_prompt(world: &mut moof::world::World) -> Result<(), moof::world::RaiseError> {
+    print_via_out_text(world, "> ")
+}
+
+fn print_via_out(
+    world: &mut moof::world::World,
+    value: moof::value::Value,
+) -> Result<(), moof::world::RaiseError> {
+    let dollar_out = world.intern("$out");
+    let say = world.intern("say:");
+    let out = world.env_lookup(world.global_env, dollar_out).ok_or_else(|| {
+        moof::world::RaiseError::new(world.intern("missing-cap"), "$out unbound")
+    })?;
+    world.send(out, say, &[value]).map(|_| ())
+}
+
+fn print_via_out_text(
+    world: &mut moof::world::World,
+    text: &str,
+) -> Result<(), moof::world::RaiseError> {
+    let dollar_out = world.intern("$out");
+    let emit = world.intern("emit:");
+    let out = world.env_lookup(world.global_env, dollar_out).ok_or_else(|| {
+        moof::world::RaiseError::new(world.intern("missing-cap"), "$out unbound")
+    })?;
+    let payload = moof::value::Value::Sym(world.intern(text));
+    world.send(out, emit, &[payload]).map(|_| ())
+}
+
+fn print_via_err(
+    world: &mut moof::world::World,
+    text: &str,
+) -> Result<(), moof::world::RaiseError> {
+    let dollar_err = world.intern("$err");
+    let emit = world.intern("emit:");
+    let err = match world.env_lookup(world.global_env, dollar_err) {
+        Some(v) => v,
+        None => {
+            // shouldn't happen — $err is a primordial cap.
+            eprintln!("{}", text);
+            return Ok(());
+        }
+    };
+    let payload = moof::value::Value::Sym(world.intern(&format!("{}\n", text)));
+    world.send(err, emit, &[payload]).map(|_| ())
 }

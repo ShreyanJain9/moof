@@ -33,9 +33,42 @@ pub fn install(w: &mut World) {
     install_nil_methods(w);
     install_object_reflection(w);
     install_list_methods(w);
+    install_method_methods(w);
     install_console_proto_and_caps(w);
     install_globals(w);
     install_proto_globals(w);
+}
+
+/// :to-string on Method (covers Closure too). renders the source
+/// if available, else `<closure>` / `<method>`.
+fn install_method_methods(w: &mut World) {
+    w.install_native(w.protos.method, "to-string", |w, self_, _| {
+        let id = match self_.as_form_id() {
+            Some(id) => id,
+            None => {
+                return Ok(Value::Sym(w.intern("<method>")));
+            }
+        };
+        let source = w.heap.get(id).meta_at(w.source_sym);
+        if source.is_nil() {
+            return Ok(Value::Sym(w.intern("<closure>")));
+        }
+        // try rendering source. if it's a list, recursive print;
+        // if a sym (a method name placeholder), render directly.
+        match source {
+            Value::Sym(s) => {
+                let text = format!("<method:{}>", w.resolve(s));
+                Ok(Value::Sym(w.intern(&text)))
+            }
+            Value::Form(_) => {
+                // a parsed code-form (a list).
+                let inner = render_list_to_string(w, source)?;
+                let text = format!("<closure source: {}>", inner);
+                Ok(Value::Sym(w.intern(&text)))
+            }
+            _ => Ok(Value::Sym(w.intern("<closure>"))),
+        }
+    });
 }
 
 /// expose the canonical protos as moof globals (`Object`, `List`,
@@ -274,6 +307,63 @@ fn install_list_methods(w: &mut World) {
         let id = w.alloc(cell);
         Ok(Value::Form(id))
     });
+    // List :to-string — recursive `(elem1 elem2 ...)` rendering.
+    w.install_native(w.protos.list, "to-string", |w, self_, _| {
+        let s = render_list_to_string(w, self_)?;
+        Ok(Value::Sym(w.intern(&s)))
+    });
+}
+
+/// recursive list-to-string. each element's :to-string is sent;
+/// joins with spaces, wraps in parens.
+fn render_list_to_string(w: &mut World, list: Value) -> Result<String, RaiseError> {
+    let mut out = String::from("(");
+    let mut cur = list;
+    let mut first = true;
+    let to_string = w.intern("to-string");
+    let head_sym = w.head_sym;
+    let tail_sym = w.tail_sym;
+    loop {
+        match cur {
+            Value::Nil => break,
+            Value::Form(id) => {
+                if !first {
+                    out.push(' ');
+                }
+                first = false;
+                let head = w.heap.get(id).slot(head_sym);
+                let tail = w.heap.get(id).slot(tail_sym);
+                let head_str_v = w.send(head, to_string, &[])?;
+                let head_str_sym = head_str_v.as_sym().ok_or_else(|| {
+                    RaiseError::new(
+                        w.intern("type-error"),
+                        ":to-string returned non-symbol",
+                    )
+                })?;
+                out.push_str(w.resolve(head_str_sym));
+                cur = tail;
+            }
+            _ => {
+                // improper list — should be rare in moof; show as
+                // `(... . tail)`.
+                if !first {
+                    out.push(' ');
+                }
+                out.push_str(". ");
+                let tail_str_v = w.send(cur, to_string, &[])?;
+                let tail_str_sym = tail_str_v.as_sym().ok_or_else(|| {
+                    RaiseError::new(
+                        w.intern("type-error"),
+                        ":to-string returned non-symbol",
+                    )
+                })?;
+                out.push_str(w.resolve(tail_str_sym));
+                break;
+            }
+        }
+    }
+    out.push(')');
+    Ok(out)
 }
 
 // ─────────────────────────────────────────────────────────────────
