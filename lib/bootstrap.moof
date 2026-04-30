@@ -11,47 +11,101 @@
 ;;   primitives (`setHandler!`, `slotSet!`, etc., installed in
 ;;   intrinsics.rs).
 ;;
-;; the only free-function-shaped utilities user-facing are `cons`
-;; and `list`. everything else is a method on List, Nil-proto,
-;; Integer, etc.
+;; per the v4-take-2 vision (vision/one-page.md):
+;;   "every substrate concern that does not *have* to live in rust
+;;   lives in moof".
+;; this file is where that promise lands. anything here should be
+;; expressible only via:
+;;   - rust-side primitives (heap access, OS i/o, UTF-8/unicode
+;;     decoding, raw arithmetic, sym-table)
+;;   - other methods defined here
+;; if a method needs raw substrate access it lives in
+;; `intrinsics.rs`; if it can be derived, it lives here.
 
 ;; ─────────────────────────────────────────────────────────────────
-;; Enumerable: List + Nil-proto
+;; Object — derived defaults that flow through the proto chain
 ;;
-;; the *primitives* (already installed in intrinsics.rs) are
-;; :head, :tail, :empty?, :null?. everything below is *derived*
-;; — defined here in moof, where users can read and override.
+;; Object's `:=`, `:!=`, `:is`, `:proto`, `:slots`, `:handlers`,
+;; `:meta`, `:source`, `:identity`, `:toString`, `:new`, `:dnu` are
+;; rust primitives (heap access). everything else is derived here.
+;; ─────────────────────────────────────────────────────────────────
+
+;; default :initialize is a no-op. user protos override.
+(setHandler! Object 'initialize
+  (fn () self))
+
+;; :inspect is :toString in phase A; phase C swaps in a richer
+;; moof-side Inspector view by overriding this here.
+(setHandler! Object 'inspect
+  (fn () [self toString]))
+
+;; :protos — full delegation chain as a List. honors
+;; laws/reflection-contract.md R1: `[v protos]` returns a List of
+;; all protos walked from `self.proto` up to (but not including)
+;; nil. starts with the immediate proto; ends with Object.
 ;;
-;; the lowering convention: each method body uses `self` as the
-;; receiver. the closure has zero formal params; positional args
-;; arrive in the args slice via Op::Send (substrate machinery).
+;; uses `is` (identity) rather than `=` because each proto-Form
+;; carries its own `=` handler (e.g. Integer's `=` assumes
+;; self is an Int) — sending `=` to Integer-proto-Form would land
+;; in the wrong place. `is` lives only on Object.
+(setHandler! Object 'protos
+  (fn ()
+    (let ((p [self proto]))
+      (if [p is nil]
+          nil
+          (cons p [p protos])))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; Bool — convenience derived from the conditional primitive `if`.
+;; the rust intrinsic for Bool no longer carries `=`, `!=`, `not`,
+;; `toString`; those flow through Object (`=`/`!=`) or are defined
+;; here.
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! Bool 'not
+  (fn () (if self #false #true)))
+
+(setHandler! Bool 'toString
+  (fn () (if self "#true" "#false")))
+
+(setHandler! Bool 'and:
+  (fn (other) (if self other #false)))
+
+(setHandler! Bool 'or:
+  (fn (other) (if self #true other)))
+
+;; ─────────────────────────────────────────────────────────────────
+;; Nil-proto — the proto of `nil`. cons: stays rust (heap alloc).
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! Nil-proto 'toString
+  (fn () "nil"))
+
+(setHandler! Nil-proto 'head    (fn () nil))
+(setHandler! Nil-proto 'tail    (fn () nil))
+(setHandler! Nil-proto 'null?   (fn () #true))
+(setHandler! Nil-proto 'empty?  (fn () #true))
+(setHandler! Nil-proto 'length  (fn () 0))
+(setHandler! Nil-proto 'nonEmpty? (fn () #false))
+
+;; Nil-proto inherits Object's identity `=`/`!=`. since
+;; `Value::Nil == Value::Nil`, that's exactly the right semantics
+;; without any extra handlers here.
+
+;; ─────────────────────────────────────────────────────────────────
+;; List — Enumerable. primitives: head, tail, cons:, null?
 ;; ─────────────────────────────────────────────────────────────────
 
 (setHandler! List 'length
   (fn () [1 + [.tail length]]))
 
-(setHandler! Nil-proto 'length
-  (fn () 0))
-
-(setHandler! List 'empty?
-  (fn () #false))
-
-(setHandler! Nil-proto 'empty?
-  (fn () #true))
-
-(setHandler! List 'nonEmpty?
-  (fn () #true))
-
-(setHandler! Nil-proto 'nonEmpty?
-  (fn () #false))
+(setHandler! List 'empty?     (fn () #false))
+(setHandler! List 'nonEmpty?  (fn () #true))
 
 ;; (defn append: ys) — concatenate two lists.
 (setHandler! List 'append:
   (fn (ys)
     (cons .head [.tail append: ys])))
-
-(setHandler! Nil-proto 'append:
-  (fn (ys) ys))
 
 ;; (reverse) — O(n²) naive; phase C's pattern matching gives us a
 ;; cleaner accumulator-form.
@@ -59,16 +113,10 @@
   (fn ()
     [[.tail reverse] append: (cons .head nil)]))
 
-(setHandler! Nil-proto 'reverse
-  (fn () nil))
-
 ;; (map: f) — element-wise.
 (setHandler! List 'map:
   (fn (f)
     (cons (f .head) [.tail map: f])))
-
-(setHandler! Nil-proto 'map:
-  (fn (f) nil))
 
 (setHandler! List 'filter:
   (fn (pred)
@@ -76,15 +124,9 @@
         (cons .head [.tail filter: pred])
         [.tail filter: pred])))
 
-(setHandler! Nil-proto 'filter:
-  (fn (pred) nil))
-
 (setHandler! List 'reduce:from:
   (fn (f init)
     [.tail reduce: f from: (f init .head)]))
-
-(setHandler! Nil-proto 'reduce:from:
-  (fn (f init) init))
 
 (setHandler! List 'forEach:
   (fn (blk)
@@ -92,17 +134,11 @@
       (blk .head)
       [.tail forEach: blk])))
 
-(setHandler! Nil-proto 'forEach:
-  (fn (blk) nil))
-
 (setHandler! List 'take:
   (fn (n)
     (if [n = 0]
         nil
         (cons .head [.tail take: [n - 1]]))))
-
-(setHandler! Nil-proto 'take:
-  (fn (n) nil))
 
 (setHandler! List 'drop:
   (fn (n)
@@ -110,17 +146,11 @@
         self
         [.tail drop: [n - 1]])))
 
-(setHandler! Nil-proto 'drop:
-  (fn (n) nil))
-
 (setHandler! List 'any?:
   (fn (pred)
     (if (pred .head)
         #true
         [.tail any?: pred])))
-
-(setHandler! Nil-proto 'any?:
-  (fn (pred) #false))
 
 (setHandler! List 'all?:
   (fn (pred)
@@ -128,34 +158,19 @@
         [.tail all?: pred]
         #false)))
 
-(setHandler! Nil-proto 'all?:
-  (fn (pred) #true))
-
 (setHandler! List 'contains?:
   (fn (x)
     [self any?: (fn (y) [x = y])]))
 
-(setHandler! Nil-proto 'contains?:
-  (fn (x) #false))
-
 (setHandler! List 'sum
   (fn () [self reduce: (fn (a b) [a + b]) from: 0]))
-
-(setHandler! Nil-proto 'sum
-  (fn () 0))
 
 (setHandler! List 'product
   (fn () [self reduce: (fn (a b) [a * b]) from: 1]))
 
-(setHandler! Nil-proto 'product
-  (fn () 1))
-
 (setHandler! List 'countWhere:
   (fn (pred)
     [[self filter: pred] length]))
-
-(setHandler! Nil-proto 'countWhere:
-  (fn (pred) 0))
 
 (setHandler! List 'last
   (fn ()
@@ -163,28 +178,88 @@
         .head
         [.tail last])))
 
-(setHandler! Nil-proto 'last
-  (fn () nil))
+;; [xs count] — alias for :length, per docs-driven.md's Iterable
+;; protocol table.
+(setHandler! List 'count (fn () [self length]))
+(setHandler! Nil-proto 'count (fn () 0))
 
-;; (range from: lo to: hi) — exclusive upper. accumulator-style.
-(setHandler! Integer 'upto:
-  (fn (hi)
-    (if [self >= hi]
+;; [xs zip: ys] — pairwise. ((a . a') (b . b') …). stops at shorter.
+(setHandler! List 'zip:
+  (fn (ys)
+    (if [ys empty?]
         nil
-        (cons self [[self + 1] upto: hi]))))
+        (cons (cons .head (cons [ys head] nil))
+              [.tail zip: [ys tail]]))))
+
+(setHandler! Nil-proto 'zip: (fn (ys) nil))
+
+;; [xs scan: f from: init] — running fold, returning a list of all
+;; intermediate accumulators. concepts/tables.md mentions :scan: for
+;; Tables; same shape derives for Lists.
+(setHandler! List 'scan:from:
+  (fn (f init)
+    (let ((next (f init .head)))
+      (cons next [.tail scan: f from: next]))))
+
+(setHandler! Nil-proto 'scan:from: (fn (f init) nil))
+
+;; [xs at: i] — O(n) indexed access. concepts/lists.md spec'd this
+;; alongside the obvious caveat (use a Table for random access).
+(setHandler! List 'at:
+  (fn (i)
+    (if [i = 0]
+        .head
+        [.tail at: [i - 1]])))
+
+(setHandler! Nil-proto 'at:
+  (fn (i) nil))
+
+;; [xs = ys] — structural element-wise equality. flows over the
+;; head/tail spine, terminating either when both reach nil
+;; (→ #true) or when a head pair differs (→ #false).
+;;
+;; List inherits Object's identity `:=` by default; this overrides
+;; with structural so two distinct cons-cells with the same content
+;; compare equal — matching concepts/lists.md's `Equatable` impl.
+(setHandler! List '=
+  (fn (other)
+    (if [other empty?]
+        #false
+        (if [.head = [other head]]
+            [.tail = [other tail]]
+            #false))))
+
+(setHandler! List '!= (fn (other) [[self = other] not]))
+
+(setHandler! Nil-proto 'append:    (fn (ys) ys))
+(setHandler! Nil-proto 'reverse    (fn () nil))
+(setHandler! Nil-proto 'map:       (fn (f) nil))
+(setHandler! Nil-proto 'filter:    (fn (pred) nil))
+(setHandler! Nil-proto 'reduce:from: (fn (f init) init))
+(setHandler! Nil-proto 'forEach:   (fn (blk) nil))
+(setHandler! Nil-proto 'take:      (fn (n) nil))
+(setHandler! Nil-proto 'drop:      (fn (n) nil))
+(setHandler! Nil-proto 'any?:      (fn (pred) #false))
+(setHandler! Nil-proto 'all?:      (fn (pred) #true))
+(setHandler! Nil-proto 'contains?: (fn (x) #false))
+(setHandler! Nil-proto 'sum        (fn () 0))
+(setHandler! Nil-proto 'product    (fn () 1))
+(setHandler! Nil-proto 'countWhere: (fn (pred) 0))
+(setHandler! Nil-proto 'last       (fn () nil))
 
 ;; ─────────────────────────────────────────────────────────────────
-;; Integer — predicates + arithmetic helpers
+;; Integer — derived comparisons + predicates.
+;; primitives in rust: + - * / < > = toString asFloat
+;; everything else flows from those.
 ;; ─────────────────────────────────────────────────────────────────
 
-(setHandler! Integer 'zero?
-  (fn () [self = 0]))
+(setHandler! Integer '!= (fn (other) [[self = other] not]))
+(setHandler! Integer '<= (fn (other) (if [self < other] #true [self = other])))
+(setHandler! Integer '>= (fn (other) (if [self > other] #true [self = other])))
 
-(setHandler! Integer 'positive?
-  (fn () [self > 0]))
-
-(setHandler! Integer 'negative?
-  (fn () [self < 0]))
+(setHandler! Integer 'zero?     (fn () [self = 0]))
+(setHandler! Integer 'positive? (fn () [self > 0]))
+(setHandler! Integer 'negative? (fn () [self < 0]))
 
 (setHandler! Integer 'abs
   (fn ()
@@ -196,12 +271,10 @@
   (fn () [self * self]))
 
 (setHandler! Integer 'min:
-  (fn (other)
-    (if [self < other] self other)))
+  (fn (other) (if [self < other] self other)))
 
 (setHandler! Integer 'max:
-  (fn (other)
-    (if [self > other] self other)))
+  (fn (other) (if [self > other] self other)))
 
 (setHandler! Integer 'between:and:
   (fn (lo hi)
@@ -209,23 +282,235 @@
         #false
         [self <= hi])))
 
-(setHandler! Integer 'even?
-  (fn () [[self - [[self / 2] * 2]] = 0]))
+;; [n clamp: lo to: hi] — Comparable derived. concepts/numbers.md.
+(setHandler! Integer 'clamp:to:
+  (fn (lo hi)
+    (if [self < lo]
+        lo
+        (if [self > hi] hi self))))
 
-(setHandler! Integer 'odd?
-  (fn () (if .even? #false #true)))
+(setHandler! Integer 'even? (fn () [[self - [[self / 2] * 2]] = 0]))
+(setHandler! Integer 'odd?  (fn () (if .even? #false #true)))
+
+;; concepts/numbers.md tower predicates. Integer is the leaf —
+;; everything in the chain (Real, Rational, Number) is also true.
+;; Float is real but neither integer nor rational.
+(setHandler! Integer 'negate    (fn () [0 - self]))
+(setHandler! Integer 'integer?  (fn () #true))
+(setHandler! Integer 'rational? (fn () #true))
+(setHandler! Integer 'real?     (fn () #true))
+(setHandler! Integer 'finite?   (fn () #true))
+(setHandler! Integer 'nan?      (fn () #false))
+
+;; [a mod: b] / [a quotient: b] / [a remainder: b] — integer
+;; division ops. concepts/numbers.md.
+(setHandler! Integer 'mod:
+  (fn (other) [self - [[self / other] * other]]))
+
+(setHandler! Integer 'quotient: (fn (other) [self / other]))
+(setHandler! Integer 'remainder: (fn (other) [self mod: other]))
+
+;; (range from: lo to: hi) — exclusive upper. accumulator-style.
+(setHandler! Integer 'upto:
+  (fn (hi)
+    (if [self >= hi]
+        nil
+        (cons self [[self + 1] upto: hi]))))
 
 ;; ─────────────────────────────────────────────────────────────────
-;; Bool — convenience
+;; Float — derived comparisons + predicates.
+;; primitives in rust: + - * / < > = toString sqrt log exp sin cos
+;;                     floor ceil round asInteger nan? finite?
 ;; ─────────────────────────────────────────────────────────────────
 
-(setHandler! Bool 'and:
-  (fn (other)
-    (if self other #false)))
+(setHandler! Float '!= (fn (other) [[self = other] not]))
+(setHandler! Float '<= (fn (other) (if [self < other] #true [self = other])))
+(setHandler! Float '>= (fn (other) (if [self > other] #true [self = other])))
 
-(setHandler! Bool 'or:
-  (fn (other)
-    (if self #true other)))
+(setHandler! Float 'zero?     (fn () [self = 0.0]))
+(setHandler! Float 'positive? (fn () [self > 0.0]))
+(setHandler! Float 'negative? (fn () [self < 0.0]))
+
+(setHandler! Float 'abs
+  (fn () (if [self < 0.0] [0.0 - self] self)))
+
+(setHandler! Float 'negate    (fn () [0.0 - self]))
+(setHandler! Float 'integer?  (fn () #false))
+(setHandler! Float 'rational? (fn () #false))
+(setHandler! Float 'real?     (fn () #true))
+
+;; ─────────────────────────────────────────────────────────────────
+;; String — derivables. rust keeps the UTF-8/unicode primitives.
+;; ─────────────────────────────────────────────────────────────────
+
+;; structural inequality is just identity-of-content negated.
+(setHandler! String '!= (fn (other) [[self = other] not]))
+
+(setHandler! String 'empty?
+  (fn () [[self byteLength] = 0]))
+
+;; :asList is an alias for :toList — both walk the String into a
+;; List of Chars.
+(setHandler! String 'asList
+  (fn () [self toList]))
+
+;; iterate over chars by walking the Char list.
+(setHandler! String 'forEach:
+  (fn (blk) [[self toList] forEach: blk]))
+
+;; map: collects each block-result via `+` (which accepts Char +
+;; String on the rhs and dispatches through :toString otherwise).
+(setHandler! String 'map:
+  (fn (f)
+    [[[self toList] map: f] reduce: (fn (acc x) [acc + x]) from: ""]))
+
+(setHandler! String 'filter:
+  (fn (pred)
+    [[[self toList] filter: pred] reduce: (fn (acc x) [acc + x]) from: ""]))
+
+(setHandler! String 'reverse
+  (fn ()
+    [[[self toList] reverse] reduce: (fn (acc x) [acc + x]) from: ""]))
+
+;; endsWith?: derive from slice + `=`. cheap because primitives are O(n).
+(setHandler! String 'endsWith?:
+  (fn (suffix)
+    (let ((nself [self length])
+          (nsuf  [suffix length]))
+      (if [nsuf > nself]
+          #false
+          [[self slice: [nself - nsuf] length: nsuf] = suffix]))))
+
+;; concat is a stricter `+`: rhs must be a String.
+(setHandler! String 'concat:
+  (fn (other) [self + other]))
+
+;; ─────────────────────────────────────────────────────────────────
+;; Table — derivables. rust keeps positional/keyed primitives:
+;;   length at: at:put: push: pop containsKey?: remove: keys values
+;;   = (structural)
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! Table 'size
+  (fn () [[self keys] length]))
+
+(setHandler! Table 'empty?
+  (fn () [[self size] = 0]))
+
+(setHandler! Table '!=
+  (fn (other) [[self = other] not]))
+
+(setHandler! Table 'forEach:
+  (fn (blk) [[self values] forEach: blk]))
+
+;; positional-only conversion — phase G+ may extend with key-paths.
+(setHandler! Table 'toList
+  (fn ()
+    [[0 upto: [self length]] map: (fn (i) [self at: i])]))
+
+;; map: / filter: / reduce:from: preserve table shape.
+;; positional and keyed entries both flow through; map: maps the
+;; values, filter: keeps entries whose value passes pred. positional
+;; keys are written via push: (preserving compaction); keyed keys
+;; via at:put:.
+(setHandler! Table 'map:
+  (fn (f)
+    (let ((result [Table new]))
+      (do
+        [[self keys] forEach:
+          (fn (k)
+            (let ((v (f [self at: k])))
+              (if [[k proto] is Integer]
+                  [result push: v]
+                  [result at: k put: v])))]
+        result))))
+
+(setHandler! Table 'filter:
+  (fn (pred)
+    (let ((result [Table new]))
+      (do
+        [[self keys] forEach:
+          (fn (k)
+            (let ((v [self at: k]))
+              (if (pred v)
+                  (if [[k proto] is Integer]
+                      [result push: v]
+                      [result at: k put: v])
+                  nil)))]
+        result))))
+
+(setHandler! Table 'reduce:from:
+  (fn (f init) [[self values] reduce: f from: init]))
+
+;; [t reduce: f] — fold without an explicit init. uses the first
+;; value as init; on an empty Table, returns nil. concepts/tables.md.
+(setHandler! Table 'reduce:
+  (fn (f)
+    (let ((vs [self values]))
+      (if [vs empty?]
+          nil
+          [[vs tail] reduce: f from: [vs head]]))))
+
+;; [t at-or: k default: d] — keyed lookup with a fallback.
+;; concepts/tables.md.
+(setHandler! Table 'at-or:default:
+  (fn (k d)
+    (if [self containsKey?: k]
+        [self at: k]
+        d)))
+
+;; ─────────────────────────────────────────────────────────────────
+;; Console — derived sugar over the rust-primitive :emit:.
+;; the only path to stdout/stderr is via $out / $err caps.
+;; ─────────────────────────────────────────────────────────────────
+
+;; $out and $err share the Console proto via the global Console.
+;; the rust intrinsic only installs :emit: and :close; everything
+;; else is moof code, user-overridable.
+(setHandler! Console 'say:
+  (fn (x)
+    (do
+      [self emit: [x toString]]
+      [self emit: "\n"])))
+
+(setHandler! Console 'show:
+  (fn (x) [self emit: [x toString]]))
+
+(setHandler! Console 'done? (fn () #false))
+
+;; ─────────────────────────────────────────────────────────────────
+;; Method — derived reflection.
+;; primitives in rust: :body :source :params :consts :bytecodes :call.
+;; ─────────────────────────────────────────────────────────────────
+
+;; [m disassemble] — render the bytecode as a String, one op per
+;; line. each Opcode-Form already carries a :toString that includes
+;; the op name and operands; we just join them.
+(setHandler! Method 'disassemble
+  (fn ()
+    [[self bytecodes] reduce:
+      (fn (acc op) [acc + [[op toString] + "\n"]])
+      from: ""]))
+
+;; [m arity] — number of formal parameters, per laws/reflection-
+;; contract.md R2. variadic isn't a phase-A concept yet, so this
+;; just returns the param count.
+(setHandler! Method 'arity
+  (fn () [[self params] length]))
+
+;; [m parameters] — alias for :params, matching the spelling in
+;; laws/reflection-contract.md R2.
+(setHandler! Method 'parameters
+  (fn () [self params]))
+
+;; [m purity], [m caps-required] — the analyzer that fills these
+;; in arrives in phase C (laws/purity-and-effects.md). until then,
+;; the contract is honored with placeholder values:
+;;   :purity        → 'unknown
+;;   :caps-required → ()
+;; user methods can override either with their own annotation.
+(setHandler! Method 'purity        (fn () 'unknown))
+(setHandler! Method 'caps-required (fn () nil))
 
 ;; phase A.10's defprotocol + implement operatives will be sugar
 ;; over the setHandler! calls above. the substrate-level move is

@@ -489,12 +489,22 @@ fn step(world: &mut World) -> Result<(), RaiseError> {
             }
         }
         Op::PushClosure { chunk: closure_chunk } => {
-            // capture the current env in a closure-Form whose body
-            // is `closure_chunk`.
+            // capture the current env *and* the current frame's
+            // self_ in a closure-Form whose body is `closure_chunk`.
+            //
+            // capturing self lets `let`-induced closures (and
+            // ordinary `(fn …)` literals) see the enclosing
+            // method's receiver via `[m call: …]`. when the closure
+            // is installed as a handler and dispatched via
+            // `world.send`, the dispatch path overrides self_ with
+            // the runtime receiver (see `World::invoke`).
             let mut f = Form::with_proto(Value::Form(world.protos.closure));
             let env = world.vm.frames[frame_idx].env;
+            let captured_self = world.vm.frames[frame_idx].self_;
             f.slots.insert(world.body_sym, Value::Form(closure_chunk));
             f.slots.insert(world.env_sym, Value::Form(env));
+            let captured_self_sym = world.intern("captured-self");
+            f.slots.insert(captured_self_sym, captured_self);
             // the closure inherits the chunk's `:params` and `:source`.
             let params = world.heap.get(closure_chunk).slot(world.params_sym);
             f.slots.insert(world.params_sym, params);

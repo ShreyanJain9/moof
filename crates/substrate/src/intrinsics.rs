@@ -1,27 +1,121 @@
 //! the substrate's primordial native methods + global bindings.
 //!
 //! installed during `World::new()`, before any moof source loads.
-//! covers exactly what's needed for the phase-A forcing function:
+//! the rule per the v4-take-2 docs (vision/one-page.md, `audit-
+//! 2026-04-29.md`): *only* what cannot be expressed in moof lives
+//! here. everything derivable lives in `lib/bootstrap.moof`.
 //!
-//! - `:call` on `Method` (covers Closure, all method-Forms).
-//! - arithmetic + comparison on `Integer` (`:+`, `:-`, `:*`, `:/`,
-//!   `:<`, `:>`, `:<=`, `:>=`, `:=`, `:!=`).
-//! - structural ops: `:head`, `:tail`, `:cons:`, `:null?` on `List`.
-//! - identity / equality on `Object`, `Symbol`, `Bool`, `Nil`.
-//! - reflection on `Object`: `:proto`, `:slots`, `:handlers`,
-//!   `:meta`, `:source`, `:identity`, `:=`, `:is`, `:to-string`,
-//!   `:inspect`, `:new`, `:does-not-understand:with:`.
-//! - global callables that forward to receiver methods: `+`, `-`,
-//!   `*`, `/`, `<`, `>`, `<=`, `>=`, `=`, `!=`, `head`, `tail`,
-//!   `cons`, `null?`, `list?`, `not`.
+//! what's here, by category:
 //!
-//! everything else — `length`, `map`, `filter`, the protocol
-//! framework — lives in moof code at phase A.10.
+//! - **heap-touching primitives** the gc owns: alloc shapes for
+//!   String / Table, `:cons:` cell builder, `Object :new`.
+//! - **substrate metaprogramming**: `slot`, `slotSet!`,
+//!   `setHandler!`, `getOrCreateProto`, `macroexpand`, `append`.
+//! - **arithmetic / comparison primitives** on Integer / Float:
+//!   `:+ :- :* :/ :< :> :=` and the few unary float math funcs
+//!   that wrap `f64` methods.
+//! - **String** UTF-8 / unicode primitives: `:length :byteLength
+//!   :at: :toList :upcase :downcase :trim :contains?:
+//!   :startsWith?: :indexOf: :slice:length: :replace:with: :split:
+//!   :lines :+ := :asTable :as: :toString`.
+//! - **Table** rep primitives: `:new :length :at: :at:put: :push:
+//!   :pop :containsKey?: :remove: :keys :values := :toString
+//!   :asString :as:`.
+//! - **Char** primitives: `:codepoint :toString :< :letter? :digit?
+//!   :whitespace? :upcase :downcase`.
+//! - **Object reflection** through the heap: `:proto :slots
+//!   :handlers :handlerAt: :meta :source :identity :is := :!=
+//!   :toString :new :doesNotUnderstand:with:`.
+//! - **Method / Closure reflection**: `:call :body :source :params
+//!   :consts :bytecodes`.
+//! - **Console** capability primitives: `:emit: :close :next` plus
+//!   the `$out` / `$err` primordial caps.
+//! - **Global ctors / metaprog**: `cons`, `list`, `slot`,
+//!   `slotSet!`, `setHandler!`, `getOrCreateProto`, `macroexpand`,
+//!   `append`.
+//!
+//! everything *derived* from those — `:length :map: :filter:
+//!   :reduce:from: :forEach: :reverse :empty? :!= :<= :>= :zero?
+//!   :positive? :negative? :abs :inspect :initialize :say: :show:
+//!   :disassemble :asList :concat:` etc — lives in
+//!   `lib/bootstrap.moof`. moof code is the canonical artifact;
+//!   when the docs say a method exists, the bootstrap defines it.
 
 use crate::form::{Form, FormId};
 use crate::sym::SymId;
 use crate::value::Value;
 use crate::world::{NativeFn, RaiseError, World};
+
+// ─────────────────────────────────────────────────────────────────
+// shared error helpers — DRY-out for the very common patterns of
+// raising type-errors, arity-errors, and the like. they swallow
+// the `w.intern(...)` + `RaiseError::new` boilerplate.
+// ─────────────────────────────────────────────────────────────────
+
+/// `RaiseError { kind: 'type-error, message: msg }`.
+fn type_error(w: &mut World, msg: impl Into<String>) -> RaiseError {
+    RaiseError::new(w.intern("type-error"), msg)
+}
+
+/// `RaiseError { kind, message: msg }` — for non-`type-error` kinds.
+fn raise(w: &mut World, kind: &str, msg: impl Into<String>) -> RaiseError {
+    RaiseError::new(w.intern(kind), msg)
+}
+
+/// extract a String form's text, or raise type-error tagged with
+/// the operator name. shared by every String primitive.
+fn str_arg<'a>(w: &'a mut World, v: Value, op: &str) -> Result<String, RaiseError> {
+    match w.string_text(v) {
+        Some(t) => Ok(t.to_string()),
+        None => Err(type_error(w, format!("{} on non-String", op))),
+    }
+}
+
+/// extract two Strings (`self_`, `args[0]`); for binary String ops.
+fn two_strs(
+    w: &mut World,
+    self_: Value,
+    other: Value,
+    op: &str,
+) -> Result<(String, String), RaiseError> {
+    let a = str_arg(w, self_, op)?;
+    let b = str_arg(w, other, op)?;
+    Ok((a, b))
+}
+
+/// extract a numeric argument as f64, type-errored against `op`.
+/// accepts Int (lossless promotion) and Float.
+fn num_f64(w: &mut World, v: Value, op: &str) -> Result<f64, RaiseError> {
+    v.as_number_f64()
+        .ok_or_else(|| type_error(w, format!("{} expected a numeric rhs", op)))
+}
+
+/// shared `:slots` / `:handlers` / `:meta` rendering: snapshot a
+/// Form's IndexMap field as a Table, keyed by symbol → value, in
+/// insertion order.
+///
+/// per `concepts/forms.md` and `laws/reflection-contract.md` R7,
+/// these accessors return Tables (so `[v meta at: 'doc]` works the
+/// same as for any other Table). the snapshot is detached: mutating
+/// the returned Table does *not* propagate back to the source Form.
+/// phase-C live-views are a follow-up; the contract today is "you
+/// get a Table, you can iterate and at: it."
+fn form_table_to_table<F>(w: &mut World, id: FormId, table: F) -> Value
+where
+    F: Fn(&crate::form::Form) -> &indexmap::IndexMap<SymId, Value>,
+{
+    let pairs: Vec<(SymId, Value)> = table(w.heap.get(id))
+        .iter()
+        .map(|(k, v)| (*k, *v))
+        .collect();
+    let tbl = w.make_table();
+    if let Some(r) = w.table_repr_mut(tbl) {
+        for (k, v) in pairs {
+            r.keyed.insert(Value::Sym(k), v);
+        }
+    }
+    tbl
+}
 
 /// install all phase-A intrinsics. idempotent: safe to call once
 /// at world init.
@@ -74,31 +168,8 @@ fn install_table_methods(w: &mut World) {
         Ok(Value::Int(n))
     });
 
-    w.install_native(w.protos.table, "size", |w, self_, _| {
-        let n = match w.table_repr(self_) {
-            Some(r) => r.size() as i64,
-            None => {
-                return Err(RaiseError::new(
-                    w.intern("type-error"),
-                    "size on non-Table",
-                ))
-            }
-        };
-        Ok(Value::Int(n))
-    });
-
-    w.install_native(w.protos.table, "empty?", |w, self_, _| {
-        let empty = match w.table_repr(self_) {
-            Some(r) => r.size() == 0,
-            None => {
-                return Err(RaiseError::new(
-                    w.intern("type-error"),
-                    "empty? on non-Table",
-                ))
-            }
-        };
-        Ok(Value::Bool(empty))
-    });
+    // :size, :empty? are derived in lib/bootstrap.moof from :keys
+    // and :length.
 
     // [t at: k] — Integer key reads positional; anything else reads keyed.
     w.install_native(w.protos.table, "at:", |w, self_, args| {
@@ -279,141 +350,9 @@ fn install_table_methods(w: &mut World) {
         Ok(w.make_list(&vals))
     });
 
-    // [t toList] — positional axis as a List. (does not include keyed entries.)
-    w.install_native(w.protos.table, "toList", |w, self_, _| {
-        let vs: Vec<Value> = w
-            .table_repr(self_)
-            .map(|r| r.positional.clone())
-            .unwrap_or_default();
-        Ok(w.make_list(&vs))
-    });
-
-    // [t forEach: f] — iterate positional values then keyed values.
-    w.install_native(w.protos.table, "forEach:", |w, self_, args| {
-        let blk = args.first().copied().unwrap_or(Value::Nil);
-        let snapshot: Vec<Value> = match w.table_repr(self_) {
-            Some(r) => {
-                let mut all: Vec<Value> = r.positional.clone();
-                all.extend(r.keyed.values().copied());
-                all
-            }
-            None => {
-                return Err(RaiseError::new(
-                    w.intern("type-error"),
-                    "forEach: on non-Table",
-                ))
-            }
-        };
-        let call_sym = w.intern("call");
-        for v in snapshot {
-            w.send(blk, call_sym, &[v])?;
-        }
-        Ok(Value::Nil)
-    });
-
-    // [t map: f] — produce a new Table with f applied to each
-    // positional and keyed value (keys preserved).
-    w.install_native(w.protos.table, "map:", |w, self_, args| {
-        let blk = args.first().copied().unwrap_or(Value::Nil);
-        let positional: Vec<Value>;
-        let keyed_keys: Vec<Value>;
-        let keyed_vals: Vec<Value>;
-        match w.table_repr(self_) {
-            Some(r) => {
-                positional = r.positional.clone();
-                keyed_keys = r.keyed.keys().copied().collect();
-                keyed_vals = r.keyed.values().copied().collect();
-            }
-            None => {
-                return Err(RaiseError::new(
-                    w.intern("type-error"),
-                    "map: on non-Table",
-                ))
-            }
-        }
-        let new_table = w.make_table();
-        let call_sym = w.intern("call");
-        // positional: map each, push.
-        for v in positional {
-            let mapped = w.send(blk, call_sym, &[v])?;
-            if let Some(r) = w.table_repr_mut(new_table) {
-                r.positional.push(mapped);
-            }
-        }
-        // keyed: same value mapping, key preserved.
-        for (k, v) in keyed_keys.into_iter().zip(keyed_vals.into_iter()) {
-            let mapped = w.send(blk, call_sym, &[v])?;
-            if let Some(r) = w.table_repr_mut(new_table) {
-                r.keyed.insert(k, mapped);
-            }
-        }
-        Ok(new_table)
-    });
-
-    // [t filter: pred] — produce a new Table with only entries
-    // (positional + keyed) for which pred returns truthy.
-    w.install_native(w.protos.table, "filter:", |w, self_, args| {
-        let pred = args.first().copied().unwrap_or(Value::Nil);
-        let positional: Vec<Value>;
-        let keyed_keys: Vec<Value>;
-        let keyed_vals: Vec<Value>;
-        match w.table_repr(self_) {
-            Some(r) => {
-                positional = r.positional.clone();
-                keyed_keys = r.keyed.keys().copied().collect();
-                keyed_vals = r.keyed.values().copied().collect();
-            }
-            None => {
-                return Err(RaiseError::new(
-                    w.intern("type-error"),
-                    "filter: on non-Table",
-                ))
-            }
-        }
-        let new_table = w.make_table();
-        let call_sym = w.intern("call");
-        for v in positional {
-            let keep = w.send(pred, call_sym, &[v])?;
-            if keep.is_truthy() {
-                if let Some(r) = w.table_repr_mut(new_table) {
-                    r.positional.push(v);
-                }
-            }
-        }
-        for (k, v) in keyed_keys.into_iter().zip(keyed_vals.into_iter()) {
-            let keep = w.send(pred, call_sym, &[v])?;
-            if keep.is_truthy() {
-                if let Some(r) = w.table_repr_mut(new_table) {
-                    r.keyed.insert(k, v);
-                }
-            }
-        }
-        Ok(new_table)
-    });
-
-    // [t reduce: f from: init] — fold over positional then keyed values.
-    w.install_native(w.protos.table, "reduce:from:", |w, self_, args| {
-        let f = args.first().copied().unwrap_or(Value::Nil);
-        let mut acc = args.get(1).copied().unwrap_or(Value::Nil);
-        let snapshot: Vec<Value> = match w.table_repr(self_) {
-            Some(r) => {
-                let mut all: Vec<Value> = r.positional.clone();
-                all.extend(r.keyed.values().copied());
-                all
-            }
-            None => {
-                return Err(RaiseError::new(
-                    w.intern("type-error"),
-                    "reduce:from: on non-Table",
-                ))
-            }
-        };
-        let call_sym = w.intern("call");
-        for v in snapshot {
-            acc = w.send(f, call_sym, &[acc, v])?;
-        }
-        Ok(acc)
-    });
+    // :toList, :forEach:, :map:, :filter:, :reduce:from: are all
+    // derived in lib/bootstrap.moof from :keys, :values, :at: and
+    // :at:put: / :push:.
 
     // [t = other] — structural equality. compares positional in
     // order + keyed by key/value pairs (insertion order).
@@ -429,17 +368,7 @@ fn install_table_methods(w: &mut World) {
         }
     });
 
-    w.install_native(w.protos.table, "!=", |w, self_, args| {
-        let other = args.first().copied().unwrap_or(Value::Nil);
-        let a = w.table_repr(self_);
-        let b = w.table_repr(other);
-        match (a, b) {
-            (Some(ra), Some(rb)) => Ok(Value::Bool(
-                !(ra.positional == rb.positional && ra.keyed == rb.keyed),
-            )),
-            _ => Ok(Value::Bool(true)),
-        }
-    });
+    // :!= is derived in lib/bootstrap.moof from :=.
 
     // [t toString] — `#[1 2 'name => "ada"]`-shaped rendering.
     w.install_native(w.protos.table, "toString", |w, self_, _| {
@@ -578,54 +507,47 @@ fn install_char_methods(w: &mut World) {
         }
         _ => Err(RaiseError::new(w.intern("type-error"), "toString on non-Char")),
     });
-    w.install_native(w.protos.char_, "=", |_, self_, args| {
-        Ok(Value::Bool(self_ == args[0]))
-    });
-    w.install_native(w.protos.char_, "!=", |_, self_, args| {
-        Ok(Value::Bool(self_ != args[0]))
-    });
+    // `=`, `!=` flow through Object's identity (Char(a) == Char(b)
+    // iff their codepoints match).
     w.install_native(w.protos.char_, "<", |_, self_, args| match (self_, args[0]) {
         (Value::Char(a), Value::Char(b)) => Ok(Value::Bool(a < b)),
         _ => Ok(Value::Bool(false)),
     });
-    w.install_native(w.protos.char_, "letter?", |_, self_, _| match self_ {
-        Value::Char(cp) => Ok(Value::Bool(
-            char::from_u32(cp).map(|c| c.is_alphabetic()).unwrap_or(false),
-        )),
-        _ => Ok(Value::Bool(false)),
-    });
-    w.install_native(w.protos.char_, "digit?", |_, self_, _| match self_ {
-        Value::Char(cp) => Ok(Value::Bool(
-            char::from_u32(cp).map(|c| c.is_ascii_digit()).unwrap_or(false),
-        )),
-        _ => Ok(Value::Bool(false)),
-    });
-    w.install_native(w.protos.char_, "whitespace?", |_, self_, _| match self_ {
-        Value::Char(cp) => Ok(Value::Bool(
-            char::from_u32(cp).map(|c| c.is_whitespace()).unwrap_or(false),
-        )),
-        _ => Ok(Value::Bool(false)),
-    });
-    w.install_native(w.protos.char_, "upcase", |_, self_, _| match self_ {
-        Value::Char(cp) => {
-            let upper = char::from_u32(cp)
-                .and_then(|c| c.to_uppercase().next())
-                .map(|c| c as u32)
-                .unwrap_or(cp);
-            Ok(Value::Char(upper))
-        }
-        v => Ok(v),
-    });
-    w.install_native(w.protos.char_, "downcase", |_, self_, _| match self_ {
-        Value::Char(cp) => {
-            let lower = char::from_u32(cp)
-                .and_then(|c| c.to_lowercase().next())
-                .map(|c| c as u32)
-                .unwrap_or(cp);
-            Ok(Value::Char(lower))
-        }
-        v => Ok(v),
-    });
+    // unicode predicates: each one is "decode the codepoint to a
+    // char, ask `char::is_X()`, fall back to false". macroized.
+    macro_rules! char_predicate {
+        ($w:expr, $sel:expr, $pred:expr) => {
+            $w.install_native($w.protos.char_, $sel, |_, self_, _| match self_ {
+                Value::Char(cp) => Ok(Value::Bool(
+                    char::from_u32(cp).map($pred).unwrap_or(false),
+                )),
+                _ => Ok(Value::Bool(false)),
+            });
+        };
+    }
+    char_predicate!(w, "letter?",     |c: char| c.is_alphabetic());
+    char_predicate!(w, "digit?",      |c: char| c.is_ascii_digit());
+    char_predicate!(w, "whitespace?", |c: char| c.is_whitespace());
+
+    // unicode case mappings: same pattern — decode codepoint, take
+    // first char of the iterator returned by `to_uppercase`/
+    // `to_lowercase`, fall back to the original codepoint.
+    macro_rules! char_case {
+        ($w:expr, $sel:expr, $method:ident) => {
+            $w.install_native($w.protos.char_, $sel, |_, self_, _| match self_ {
+                Value::Char(cp) => {
+                    let mapped = char::from_u32(cp)
+                        .and_then(|c| c.$method().next())
+                        .map(|c| c as u32)
+                        .unwrap_or(cp);
+                    Ok(Value::Char(mapped))
+                }
+                v => Ok(v),
+            });
+        };
+    }
+    char_case!(w, "upcase",   to_uppercase);
+    char_case!(w, "downcase", to_lowercase);
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -639,185 +561,112 @@ fn install_string_methods(w: &mut World) {
     // Char. internal storage is UTF-8 for efficiency. matches
     // `docs/concepts/strings.md`.
     w.install_native(w.protos.string, "length", |w, self_, _| {
-        let count_opt = w.string_text(self_).map(|t| t.chars().count() as i64);
-        match count_opt {
-            Some(n) => Ok(Value::Int(n)),
-            None => Err(RaiseError::new(w.intern("type-error"), "length on non-String")),
-        }
+        let n = str_arg(w, self_, "length")?.chars().count() as i64;
+        Ok(Value::Int(n))
     });
     w.install_native(w.protos.string, "byteLength", |w, self_, _| {
-        let len_opt = w.string_bytes(self_).map(|b| b.len() as i64);
-        match len_opt {
-            Some(n) => Ok(Value::Int(n)),
-            None => Err(RaiseError::new(
-                w.intern("type-error"),
-                "byteLength on non-String",
-            )),
-        }
+        let n = w
+            .string_bytes(self_)
+            .map(|b| b.len() as i64)
+            .ok_or_else(|| type_error(w, "byteLength on non-String"))?;
+        Ok(Value::Int(n))
     });
     w.install_native(w.protos.string, "at:", |w, self_, args| {
         let idx = match args.first().copied() {
             Some(Value::Int(n)) => n,
-            _ => {
-                return Err(RaiseError::new(
-                    w.intern("type-error"),
-                    "[s at: i] requires an Integer index",
-                ));
-            }
+            _ => return Err(type_error(w, "[s at: i] requires an Integer index")),
         };
-        let result = w.string_text(self_).and_then(|t| {
-            if idx < 0 {
-                None
-            } else {
-                t.chars().nth(idx as usize).map(|c| c as u32)
-            }
-        });
-        match result {
-            Some(cp) => Ok(Value::Char(cp)),
-            None => Err(RaiseError::new(
-                w.intern("index-out-of-bounds"),
+        let text = str_arg(w, self_, "at:")?;
+        if idx < 0 {
+            return Err(raise(
+                w,
+                "index-out-of-bounds",
                 format!("[String at: {}] out of range", idx),
-            )),
+            ));
         }
+        text.chars()
+            .nth(idx as usize)
+            .map(|c| Value::Char(c as u32))
+            .ok_or_else(|| {
+                raise(
+                    w,
+                    "index-out-of-bounds",
+                    format!("[String at: {}] out of range", idx),
+                )
+            })
     });
-    // [s toList] — return a List of Chars. lets users walk a
-    // string with the standard List protocols. matches docs:
-    // `concepts/strings.md` :to-list (camelCased here as :toList).
+
+    // [s toList] — walk the string into a List of Chars. lets
+    // users compose with List's protocol. (`concepts/strings.md`
+    // :to-list, camelCased here.)
     w.install_native(w.protos.string, "toList", |w, self_, _| {
-        let chars: Vec<Value> = match w.string_text(self_) {
-            Some(t) => t.chars().map(|c| Value::Char(c as u32)).collect(),
-            None => {
-                return Err(RaiseError::new(w.intern("type-error"), "toList on non-String"));
-            }
-        };
+        let chars: Vec<Value> = str_arg(w, self_, "toList")?
+            .chars()
+            .map(|c| Value::Char(c as u32))
+            .collect();
         Ok(w.make_list(&chars))
     });
-    // [s upcase] / [s downcase]
-    w.install_native(w.protos.string, "upcase", |w, self_, _| {
-        let upper = w.string_text(self_).map(|t| t.to_uppercase());
-        match upper {
-            Some(u) => Ok(w.make_string(&u)),
-            None => Err(RaiseError::new(w.intern("type-error"), "upcase on non-String")),
-        }
-    });
-    w.install_native(w.protos.string, "downcase", |w, self_, _| {
-        let lower = w.string_text(self_).map(|t| t.to_lowercase());
-        match lower {
-            Some(d) => Ok(w.make_string(&d)),
-            None => Err(RaiseError::new(w.intern("type-error"), "downcase on non-String")),
-        }
-    });
-    // [s trim]
+
+    // unicode case + trim — each is a one-liner over `str_arg`.
+    macro_rules! str_unary_string {
+        ($w:expr, $sel:literal, $method:ident) => {
+            $w.install_native($w.protos.string, $sel, |w, self_, _| {
+                let s = str_arg(w, self_, $sel)?.$method();
+                Ok(w.make_string(&s))
+            });
+        };
+    }
+    str_unary_string!(w, "upcase",   to_uppercase);
+    str_unary_string!(w, "downcase", to_lowercase);
     w.install_native(w.protos.string, "trim", |w, self_, _| {
-        let trimmed = w.string_text(self_).map(|t| t.trim().to_string());
-        match trimmed {
-            Some(t) => Ok(w.make_string(&t)),
-            None => Err(RaiseError::new(w.intern("type-error"), "trim on non-String")),
-        }
+        let s = str_arg(w, self_, "trim")?.trim().to_string();
+        Ok(w.make_string(&s))
     });
-    // [s contains?: needle] — substring search.
-    w.install_native(w.protos.string, "contains?:", |w, self_, args| {
-        let needle = args.first().copied().unwrap_or(Value::Nil);
-        let result = w.string_text(self_).and_then(|hay| {
-            w.string_text(needle).map(|n| hay.contains(n))
-        });
-        match result {
-            Some(b) => Ok(Value::Bool(b)),
-            None => Err(RaiseError::new(
-                w.intern("type-error"),
-                "contains?: requires String receiver and argument",
-            )),
-        }
-    });
-    // [s startsWith?: prefix]
-    w.install_native(w.protos.string, "startsWith?:", |w, self_, args| {
-        let needle = args.first().copied().unwrap_or(Value::Nil);
-        let result = w.string_text(self_).and_then(|hay| {
-            w.string_text(needle).map(|n| hay.starts_with(n))
-        });
-        match result {
-            Some(b) => Ok(Value::Bool(b)),
-            None => Err(RaiseError::new(
-                w.intern("type-error"),
-                "startsWith?: requires String args",
-            )),
-        }
-    });
-    // [s endsWith?: suffix]
-    w.install_native(w.protos.string, "endsWith?:", |w, self_, args| {
-        let needle = args.first().copied().unwrap_or(Value::Nil);
-        let result = w.string_text(self_).and_then(|hay| {
-            w.string_text(needle).map(|n| hay.ends_with(n))
-        });
-        match result {
-            Some(b) => Ok(Value::Bool(b)),
-            None => Err(RaiseError::new(
-                w.intern("type-error"),
-                "endsWith?: requires String args",
-            )),
-        }
-    });
+
+    // substring predicates: `contains?:`, `startsWith?:` — both
+    // walk both args as Strings, ask the rust method, return Bool.
+    macro_rules! str_predicate {
+        ($w:expr, $sel:literal, $method:ident) => {
+            $w.install_native($w.protos.string, $sel, |w, self_, args| {
+                let other = args.first().copied().unwrap_or(Value::Nil);
+                let (hay, needle) = two_strs(w, self_, other, $sel)?;
+                Ok(Value::Bool(hay.$method(&needle)))
+            });
+        };
+    }
+    str_predicate!(w, "contains?:",    contains);
+    str_predicate!(w, "startsWith?:",  starts_with);
+    // [s endsWith?: suffix] is derived in lib/bootstrap.moof from
+    // :length, :slice:length:, and :=.
     // [s indexOf: needle] — char-index of first occurrence, or -1.
     // (the -1 sentinel is the discoverable default; phase G+ may
     // promote to a Maybe/Optional shape.)
     w.install_native(w.protos.string, "indexOf:", |w, self_, args| {
-        let needle = args.first().copied().unwrap_or(Value::Nil);
-        let pair = w.string_text(self_).and_then(|hay| {
-            w.string_text(needle).map(|n| (hay.to_string(), n.to_string()))
-        });
-        let (hay, needle_str) = match pair {
-            Some(p) => p,
-            None => {
-                return Err(RaiseError::new(
-                    w.intern("type-error"),
-                    "indexOf: requires String args",
-                ))
-            }
-        };
-        // byte-index → char-index conversion: count chars before the
-        // matched byte position.
-        let byte_idx = hay.find(&needle_str);
-        let result = match byte_idx {
+        let other = args.first().copied().unwrap_or(Value::Nil);
+        let (hay, needle) = two_strs(w, self_, other, "indexOf:")?;
+        let result = match hay.find(&needle) {
             None => -1,
+            // byte-index → char-index: count chars before the match.
             Some(b) => hay[..b].chars().count() as i64,
         };
         Ok(Value::Int(result))
     });
     // [s slice: start length: n] — substring by char-index.
     w.install_native(w.protos.string, "slice:length:", |w, self_, args| {
-        let start = match args.first().copied() {
-            Some(Value::Int(n)) => n,
-            _ => {
-                return Err(RaiseError::new(
-                    w.intern("type-error"),
-                    "slice:length: needs Integer start",
-                ))
-            }
-        };
-        let len = match args.get(1).copied() {
-            Some(Value::Int(n)) => n,
-            _ => {
-                return Err(RaiseError::new(
-                    w.intern("type-error"),
-                    "slice:length: needs Integer length",
-                ))
-            }
-        };
-        let text = match w.string_text(self_) {
-            Some(t) => t.to_string(),
-            None => {
-                return Err(RaiseError::new(
-                    w.intern("type-error"),
-                    "slice:length: on non-String",
-                ))
-            }
-        };
+        let start = args.first().copied().and_then(|v| v.as_int()).ok_or_else(
+            || type_error(w, "slice:length: needs Integer start"),
+        )?;
+        let len = args.get(1).copied().and_then(|v| v.as_int()).ok_or_else(
+            || type_error(w, "slice:length: needs Integer length"),
+        )?;
         if start < 0 || len < 0 {
-            return Err(RaiseError::new(
-                w.intern("index-out-of-bounds"),
+            return Err(raise(
+                w,
+                "index-out-of-bounds",
                 "slice:length: negative start or length",
             ));
         }
+        let text = str_arg(w, self_, "slice:length:")?;
         let collected: String = text
             .chars()
             .skip(start as usize)
@@ -827,36 +676,15 @@ fn install_string_methods(w: &mut World) {
     });
     // [s replace: needle with: replacement]
     w.install_native(w.protos.string, "replace:with:", |w, self_, args| {
-        let needle = args.first().copied().unwrap_or(Value::Nil);
-        let repl = args.get(1).copied().unwrap_or(Value::Nil);
-        let triple = w.string_text(self_).and_then(|s| {
-            w.string_text(needle).and_then(|n| {
-                w.string_text(repl).map(|r| (s.to_string(), n.to_string(), r.to_string()))
-            })
-        });
-        match triple {
-            Some((s, n, r)) => Ok(w.make_string(&s.replace(&n, &r))),
-            None => Err(RaiseError::new(
-                w.intern("type-error"),
-                "replace:with: requires String args",
-            )),
-        }
+        let other = args.first().copied().unwrap_or(Value::Nil);
+        let (s, n) = two_strs(w, self_, other, "replace:with:")?;
+        let r = str_arg(w, args.get(1).copied().unwrap_or(Value::Nil), "replace:with:")?;
+        Ok(w.make_string(&s.replace(&n, &r)))
     });
     // [s split: sep] — returns a List of Strings.
     w.install_native(w.protos.string, "split:", |w, self_, args| {
         let sep = args.first().copied().unwrap_or(Value::Nil);
-        let pair = w.string_text(self_).and_then(|s| {
-            w.string_text(sep).map(|p| (s.to_string(), p.to_string()))
-        });
-        let (s, p) = match pair {
-            Some(x) => x,
-            None => {
-                return Err(RaiseError::new(
-                    w.intern("type-error"),
-                    "split: requires String args",
-                ))
-            }
-        };
+        let (s, p) = two_strs(w, self_, sep, "split:")?;
         let parts: Vec<Value> = if p.is_empty() {
             // empty separator — split into chars-as-strings.
             s.chars().map(|c| w.make_string(&c.to_string())).collect()
@@ -865,54 +693,26 @@ fn install_string_methods(w: &mut World) {
         };
         Ok(w.make_list(&parts))
     });
-    // [s lines] — split on '\n', returns a List of Strings.
+    // [s lines] — split on '\n' / '\r\n'; rust's `str::lines` drops
+    // the trailing empty line that `split:` would keep, hence its
+    // own primitive.
     w.install_native(w.protos.string, "lines", |w, self_, _| {
-        let text = match w.string_text(self_) {
-            Some(t) => t.to_string(),
-            None => {
-                return Err(RaiseError::new(
-                    w.intern("type-error"),
-                    "lines on non-String",
-                ))
-            }
-        };
+        let text = str_arg(w, self_, "lines")?;
         let lines: Vec<Value> = text.lines().map(|l| w.make_string(l)).collect();
         Ok(w.make_list(&lines))
     });
-    // [s forEach: f] — invoke f on each Char.
-    w.install_native(w.protos.string, "forEach:", |w, self_, args| {
-        let chars: Vec<Value> = match w.string_text(self_) {
-            Some(t) => t.chars().map(|c| Value::Char(c as u32)).collect(),
-            None => {
-                return Err(RaiseError::new(
-                    w.intern("type-error"),
-                    "forEach: on non-String",
-                ));
-            }
-        };
-        let blk = args.first().copied().unwrap_or(Value::Nil);
-        let call_sym = w.intern("call");
-        for ch in chars {
-            w.send(blk, call_sym, &[ch])?;
-        }
-        Ok(Value::Nil)
-    });
+    // [s forEach: f] is derived in lib/bootstrap.moof — walks the
+    // Char list via :toList.
     w.install_native(w.protos.string, "toString", |_, self_, _| Ok(self_));
 
     // [s asTable] — a Table of Chars, one per Unicode scalar.
-    // [s asList]  — same shape but as a List (alias for toList).
-    // [s as: Table] — protocol-style coercion. arg is a proto-Form;
-    // dispatches by identity.
+    // [s asList] is just :toList, exposed in lib/bootstrap.moof.
+    // [s as: target] dispatches by identity — see below.
     w.install_native(w.protos.string, "asTable", |w, self_, _| {
-        let chars: Vec<Value> = match w.string_text(self_) {
-            Some(t) => t.chars().map(|c| Value::Char(c as u32)).collect(),
-            None => {
-                return Err(RaiseError::new(
-                    w.intern("type-error"),
-                    "asTable on non-String",
-                ));
-            }
-        };
+        let chars: Vec<Value> = str_arg(w, self_, "asTable")?
+            .chars()
+            .map(|c| Value::Char(c as u32))
+            .collect();
         let tbl = w.make_table();
         if let Some(r) = w.table_repr_mut(tbl) {
             for v in chars {
@@ -921,18 +721,8 @@ fn install_string_methods(w: &mut World) {
         }
         Ok(tbl)
     });
-    w.install_native(w.protos.string, "asList", |w, self_, _| {
-        let chars: Vec<Value> = match w.string_text(self_) {
-            Some(t) => t.chars().map(|c| Value::Char(c as u32)).collect(),
-            None => {
-                return Err(RaiseError::new(
-                    w.intern("type-error"),
-                    "asList on non-String",
-                ));
-            }
-        };
-        Ok(w.make_list(&chars))
-    });
+    // :asList is just an alias for :toList; lives in
+    // lib/bootstrap.moof.
     w.install_native(w.protos.string, "as:", |w, self_, args| {
         let target = args.first().copied().unwrap_or(Value::Nil);
         let table_proto = Value::Form(w.protos.table);
@@ -955,109 +745,25 @@ fn install_string_methods(w: &mut World) {
         ))
     });
 
-    // [s map: f] — map each Char through `f` and collect the
-    // results into a new String (each result must be a Char or
-    // String).
-    w.install_native(w.protos.string, "map:", |w, self_, args| {
-        let chars: Vec<Value> = match w.string_text(self_) {
-            Some(t) => t.chars().map(|c| Value::Char(c as u32)).collect(),
-            None => {
-                return Err(RaiseError::new(
-                    w.intern("type-error"),
-                    "map: on non-String",
-                ));
-            }
-        };
-        let blk = args.first().copied().unwrap_or(Value::Nil);
-        let call_sym = w.intern("call");
-        let mut out = String::new();
-        for ch in chars {
-            let r = w.send(blk, call_sym, &[ch])?;
-            match r {
-                Value::Char(cp) => {
-                    if let Some(c) = char::from_u32(cp) {
-                        out.push(c);
-                    }
-                }
-                _ => {
-                    if let Some(t) = w.string_text(r) {
-                        out.push_str(t);
-                    } else {
-                        return Err(RaiseError::new(
-                            w.intern("type-error"),
-                            "String map: block must return a Char or String",
-                        ));
-                    }
-                }
-            }
-        }
-        Ok(w.make_string(&out))
-    });
-
-    // [s filter: pred] — keep Chars where pred returns truthy.
-    w.install_native(w.protos.string, "filter:", |w, self_, args| {
-        let chars: Vec<Value> = match w.string_text(self_) {
-            Some(t) => t.chars().map(|c| Value::Char(c as u32)).collect(),
-            None => {
-                return Err(RaiseError::new(
-                    w.intern("type-error"),
-                    "filter: on non-String",
-                ));
-            }
-        };
-        let blk = args.first().copied().unwrap_or(Value::Nil);
-        let call_sym = w.intern("call");
-        let mut out = String::new();
-        for ch in chars {
-            let r = w.send(blk, call_sym, &[ch])?;
-            if r.is_truthy() {
-                if let Value::Char(cp) = ch {
-                    if let Some(c) = char::from_u32(cp) {
-                        out.push(c);
-                    }
-                }
-            }
-        }
-        Ok(w.make_string(&out))
-    });
-
-    // [s reverse] — return a new String with the Chars reversed.
-    w.install_native(w.protos.string, "reverse", |w, self_, _| {
-        let reversed: Option<String> = w
-            .string_text(self_)
-            .map(|t| t.chars().rev().collect());
-        match reversed {
-            Some(s) => Ok(w.make_string(&s)),
-            None => Err(RaiseError::new(
-                w.intern("type-error"),
-                "reverse on non-String",
-            )),
-        }
-    });
+    // [s map: f], [s filter: pred], [s reverse], [s !=] are all
+    // derived in lib/bootstrap.moof from :toList plus List ops
+    // plus :+ for char/string accumulation.
     w.install_native(w.protos.string, "=", |w, self_, args| {
-        let a = w.string_text(self_).map(|t| t.to_string());
-        let b = w.string_text(args[0]).map(|t| t.to_string());
-        Ok(Value::Bool(matches!((a, b), (Some(x), Some(y)) if x == y)))
-    });
-    w.install_native(w.protos.string, "!=", |w, self_, args| {
-        let a = w.string_text(self_).map(|t| t.to_string());
-        let b = w.string_text(args[0]).map(|t| t.to_string());
-        Ok(Value::Bool(!matches!((a, b), (Some(x), Some(y)) if x == y)))
-    });
-    // [s + other] — concatenation. accepts String or Symbol on the
-    // RHS for ergonomics; falls through to :to-string otherwise.
-    w.install_native(w.protos.string, "+", |w, self_, args| {
-        let lhs_text = w.string_text(self_).map(|t| t.to_string());
-        let mut out = match lhs_text {
-            Some(t) => t,
-            None => {
-                return Err(RaiseError::new(
-                    w.intern("type-error"),
-                    "+ on non-String receiver",
-                ))
-            }
+        // structural equality. mismatched proto → false; never
+        // raises (so `[Symbol = String]` is well-defined).
+        let eq = match (w.string_text(self_), w.string_text(args[0])) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
         };
+        Ok(Value::Bool(eq))
+    });
+
+    // [s + other] — concatenation. accepts String or Symbol on the
+    // RHS for ergonomics; falls through to :toString otherwise.
+    w.install_native(w.protos.string, "+", |w, self_, args| {
+        let mut out = str_arg(w, self_, "+")?;
         let rhs = args.first().copied().unwrap_or(Value::Nil);
+        // fast path: rhs is already a String or Symbol.
         let rhs_str = w
             .string_text(rhs)
             .map(|t| t.to_string())
@@ -1065,57 +771,21 @@ fn install_string_methods(w: &mut World) {
                 Value::Sym(s) => Some(w.resolve(s).to_string()),
                 _ => None,
             });
-        if let Some(t) = rhs_str {
-            out.push_str(&t);
-            Ok(w.make_string(&out))
-        } else {
-            // delegate to rhs's :to-string for ergonomics.
-            let to_string = w.intern("toString");
-            let r = w.send(rhs, to_string, &[])?;
-            let appended = w.string_text(r).map(|t| t.to_string());
-            match appended {
-                Some(t) => {
-                    out.push_str(&t);
-                    Ok(w.make_string(&out))
-                }
-                None => Err(RaiseError::new(
-                    w.intern("type-error"),
-                    "String +: rhs :to-string did not return a String",
-                )),
-            }
-        }
-    });
-    w.install_native(w.protos.string, "concat:", |w, self_, args| {
-        let lhs = w.string_text(self_).map(|t| t.to_string());
-        let mut out = match lhs {
+        let appended = match rhs_str {
             Some(t) => t,
             None => {
-                return Err(RaiseError::new(
-                    w.intern("type-error"),
-                    "concat: on non-String",
-                ))
+                // ergonomic path: dispatch to rhs's :toString and
+                // hope it returns a String.
+                let to_string = w.intern("toString");
+                let r = w.send(rhs, to_string, &[])?;
+                str_arg(w, r, "+ (rhs :toString)")?
             }
         };
-        let rhs = args.first().copied().unwrap_or(Value::Nil);
-        let rhs_str = w.string_text(rhs).map(|t| t.to_string());
-        match rhs_str {
-            Some(t) => {
-                out.push_str(&t);
-                Ok(w.make_string(&out))
-            }
-            None => Err(RaiseError::new(
-                w.intern("type-error"),
-                "concat: requires a String argument",
-            )),
-        }
+        out.push_str(&appended);
+        Ok(w.make_string(&out))
     });
-    w.install_native(w.protos.string, "empty?", |w, self_, _| {
-        let empty = w.string_bytes(self_).map(|b| b.is_empty());
-        match empty {
-            Some(b) => Ok(Value::Bool(b)),
-            None => Err(RaiseError::new(w.intern("type-error"), "empty? on non-String")),
-        }
-    });
+    // [s concat: t] is :+ in lib/bootstrap.moof; [s empty?] is
+    // [[s byteLength] = 0] there.
 }
 
 /// :to-string on Method (covers Closure too). renders the source
@@ -1423,73 +1093,9 @@ fn install_method_reflection(w: &mut World) {
         Ok(tbl)
     });
 
-    // [m disassemble] — a String human-readable rendering of the
-    // bytecode. one op per line, with constants interpolated.
-    w.install_native(w.protos.method, "disassemble", |w, self_, _| {
-        use crate::opcodes::Op;
-        let cid = match chunk_id_of(w, self_) {
-            Some(c) => c,
-            None => return Ok(w.make_string("<no bytecode>")),
-        };
-        let ops = w.chunk_ops.get(&cid).cloned().unwrap_or_default();
-        let consts = w.chunk_consts.get(&cid).cloned().unwrap_or_default();
-        let mut out = String::new();
-        for (i, op) in ops.iter().enumerate() {
-            let line = match *op {
-                Op::LoadConst(idx) => {
-                    let c = consts.get(idx as usize).copied().unwrap_or(Value::Nil);
-                    let rendered = render_value(w, c);
-                    format!("{:>3}  LoadConst    {:<3}  ; {}", i, idx, rendered)
-                }
-                Op::PushNil => format!("{:>3}  PushNil", i),
-                Op::PushTrue => format!("{:>3}  PushTrue", i),
-                Op::PushFalse => format!("{:>3}  PushFalse", i),
-                Op::Pop => format!("{:>3}  Pop", i),
-                Op::Dup => format!("{:>3}  Dup", i),
-                Op::LoadName(s) => format!("{:>3}  LoadName     {}", i, w.resolve(s)),
-                Op::StoreName(s) => format!("{:>3}  StoreName    {}", i, w.resolve(s)),
-                Op::LoadSelf => format!("{:>3}  LoadSelf", i),
-                Op::DefineGlobal(s) => format!("{:>3}  DefineGlobal {}", i, w.resolve(s)),
-                Op::Send {
-                    selector,
-                    argc,
-                    ic_idx,
-                } => format!(
-                    "{:>3}  Send         {}/{}  ; ic={}",
-                    i,
-                    w.resolve(selector),
-                    argc,
-                    ic_idx
-                ),
-                Op::TailSend { selector, argc } => format!(
-                    "{:>3}  TailSend     {}/{}",
-                    i,
-                    w.resolve(selector),
-                    argc
-                ),
-                Op::SuperSend {
-                    selector,
-                    argc,
-                    ic_idx,
-                } => format!(
-                    "{:>3}  SuperSend    {}/{}  ; ic={}",
-                    i,
-                    w.resolve(selector),
-                    argc,
-                    ic_idx
-                ),
-                Op::PushClosure { chunk } => {
-                    format!("{:>3}  PushClosure  <chunk #{}>", i, chunk.0)
-                }
-                Op::Jump(off) => format!("{:>3}  Jump         {:+}", i, off),
-                Op::JumpIfFalse(off) => format!("{:>3}  JumpIfFalse  {:+}", i, off),
-                Op::Return => format!("{:>3}  Return", i),
-            };
-            out.push_str(&line);
-            out.push('\n');
-        }
-        Ok(w.make_string(&out))
-    });
+    // :disassemble is derived in lib/bootstrap.moof: one line per
+    // entry of [m bytecodes], each rendered via the Opcode-Form's
+    // own :toString.
 }
 
 /// stringify a Value briefly (used in disassembly comments). we
@@ -1525,6 +1131,7 @@ fn install_proto_globals(w: &mut World) {
         ("Nil-proto", w.protos.nil),
         ("Bool", w.protos.bool_),
         ("Integer", w.protos.integer),
+        ("Float", w.protos.float),
         ("Symbol", w.protos.symbol),
         ("Char", w.protos.char_),
         ("String", w.protos.string),
@@ -1572,102 +1179,75 @@ fn install_call_on_method(w: &mut World) {
 fn install_integer_methods(w: &mut World) {
     // arithmetic auto-promotes when the rhs is a Float.
     // [Int + Int] → Int; [Int + Float] → Float.
-    w.install_native(w.protos.integer, "+", |w, self_, args| {
-        let a = int_arg(w, self_, "+")?;
-        match args[0] {
-            Value::Int(b) => Ok(Value::Int(a.wrapping_add(b))),
-            Value::Float(_) => Ok(Value::float(a as f64 + args[0].as_float().unwrap())),
-            _ => Err(RaiseError::new(
-                w.intern("type-error"),
-                "+ expected a numeric rhs",
-            )),
-        }
-    });
-    w.install_native(w.protos.integer, "-", |w, self_, args| {
-        let a = int_arg(w, self_, "-")?;
-        match args[0] {
-            Value::Int(b) => Ok(Value::Int(a.wrapping_sub(b))),
-            Value::Float(_) => Ok(Value::float(a as f64 - args[0].as_float().unwrap())),
-            _ => Err(RaiseError::new(
-                w.intern("type-error"),
-                "- expected a numeric rhs",
-            )),
-        }
-    });
-    w.install_native(w.protos.integer, "*", |w, self_, args| {
-        let a = int_arg(w, self_, "*")?;
-        match args[0] {
-            Value::Int(b) => Ok(Value::Int(a.wrapping_mul(b))),
-            Value::Float(_) => Ok(Value::float(a as f64 * args[0].as_float().unwrap())),
-            _ => Err(RaiseError::new(
-                w.intern("type-error"),
-                "* expected a numeric rhs",
-            )),
-        }
-    });
+    //
+    // each op shares the dispatch shape: parse self as Int, switch
+    // on rhs kind, fall through with a type-error. macroize.
+    macro_rules! int_arith {
+        ($w:expr, $sel:literal, $int_method:ident, $float_op:tt) => {
+            $w.install_native($w.protos.integer, $sel, |w, self_, args| {
+                let a = int_arg(w, self_, $sel)?;
+                match args[0] {
+                    Value::Int(b) => Ok(Value::Int(a.$int_method(b))),
+                    Value::Float(_) => Ok(Value::float(
+                        (a as f64) $float_op args[0].as_float().unwrap(),
+                    )),
+                    _ => Err(type_error(w, format!("{} expected a numeric rhs", $sel))),
+                }
+            });
+        };
+    }
+    int_arith!(w, "+", wrapping_add, +);
+    int_arith!(w, "-", wrapping_sub, -);
+    int_arith!(w, "*", wrapping_mul, *);
+
+    // `/` is the lone outlier — divide-by-zero check on the int path.
     w.install_native(w.protos.integer, "/", |w, self_, args| {
         let a = int_arg(w, self_, "/")?;
         match args[0] {
             Value::Int(b) => {
                 if b == 0 {
-                    return Err(RaiseError::new(
-                        w.intern("division-by-zero"),
-                        "integer division by zero",
-                    ));
+                    return Err(raise(w, "division-by-zero", "integer division by zero"));
                 }
                 Ok(Value::Int(a.wrapping_div(b)))
             }
             Value::Float(_) => Ok(Value::float(a as f64 / args[0].as_float().unwrap())),
-            _ => Err(RaiseError::new(
-                w.intern("type-error"),
-                "/ expected a numeric rhs",
-            )),
+            _ => Err(type_error(w, "/ expected a numeric rhs")),
         }
     });
+
+    // `=` allows Int-vs-Float comparison; `:!=`, `:<=`, `:>=`
+    // derive in lib/bootstrap.moof.
+    //
+    // defensive against proto-Form receivers: lookup_handler checks
+    // a Form's own handlers first, so `[Integer = nil]` lands in
+    // *this* handler with self = the Integer-proto-Form. fall back
+    // to identity comparison in that case (matching Object's `=`).
     w.install_native(w.protos.integer, "=", |_, self_, args| {
-        let a = self_.as_int().unwrap();
-        Ok(Value::Bool(match args[0] {
-            Value::Int(b) => a == b,
-            Value::Float(_) => (a as f64) == args[0].as_float().unwrap(),
-            _ => false,
+        Ok(Value::Bool(match (self_, args[0]) {
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Int(a), Value::Float(_)) => (a as f64) == args[0].as_float().unwrap(),
+            // non-Int self (e.g. Integer-proto itself receiving `=`)
+            // → fall through to identity, like Object's `=`.
+            _ => self_ == args[0],
         }))
     });
-    w.install_native(w.protos.integer, "!=", |_, self_, args| {
-        let a = self_.as_int().unwrap();
-        Ok(Value::Bool(match args[0] {
-            Value::Int(b) => a != b,
-            Value::Float(_) => (a as f64) != args[0].as_float().unwrap(),
-            _ => true,
-        }))
-    });
-    w.install_native(w.protos.integer, "<", |w, self_, args| {
-        let a = self_.as_int().unwrap();
-        let b = args[0].as_number_f64().ok_or_else(|| {
-            RaiseError::new(w.intern("type-error"), "< expected a numeric rhs")
-        })?;
-        Ok(Value::Bool((a as f64) < b))
-    });
-    w.install_native(w.protos.integer, ">", |w, self_, args| {
-        let a = self_.as_int().unwrap();
-        let b = args[0].as_number_f64().ok_or_else(|| {
-            RaiseError::new(w.intern("type-error"), "> expected a numeric rhs")
-        })?;
-        Ok(Value::Bool((a as f64) > b))
-    });
-    w.install_native(w.protos.integer, "<=", |w, self_, args| {
-        let a = self_.as_int().unwrap();
-        let b = args[0].as_number_f64().ok_or_else(|| {
-            RaiseError::new(w.intern("type-error"), "<= expected a numeric rhs")
-        })?;
-        Ok(Value::Bool((a as f64) <= b))
-    });
-    w.install_native(w.protos.integer, ">=", |w, self_, args| {
-        let a = self_.as_int().unwrap();
-        let b = args[0].as_number_f64().ok_or_else(|| {
-            RaiseError::new(w.intern("type-error"), ">= expected a numeric rhs")
-        })?;
-        Ok(Value::Bool((a as f64) >= b))
-    });
+    macro_rules! int_cmp {
+        ($w:expr, $sel:literal, $op:tt) => {
+            $w.install_native($w.protos.integer, $sel, |w, self_, args| {
+                let a = match self_.as_int() {
+                    Some(a) => a,
+                    // proto-Form receivers can't be ordered.
+                    None => return Err(type_error(w, format!(
+                        "{} expected an Integer receiver", $sel))),
+                };
+                let b = num_f64(w, args[0], $sel)?;
+                Ok(Value::Bool((a as f64) $op b))
+            });
+        };
+    }
+    int_cmp!(w, "<", <);
+    int_cmp!(w, ">", >);
+
     w.install_native(w.protos.integer, "toString", |w, self_, _args| {
         let a = int_arg(w, self_, "toString")?;
         Ok(w.make_string(&a.to_string()))
@@ -1679,12 +1259,8 @@ fn install_integer_methods(w: &mut World) {
 }
 
 fn int_arg(w: &mut World, v: Value, op: &str) -> Result<i64, RaiseError> {
-    v.as_int().ok_or_else(|| {
-        RaiseError::new(
-            w.intern("type-error"),
-            format!("{} expected an Integer", op),
-        )
-    })
+    v.as_int()
+        .ok_or_else(|| type_error(w, format!("{} expected an Integer", op)))
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1693,136 +1269,89 @@ fn int_arg(w: &mut World, v: Value, op: &str) -> Result<i64, RaiseError> {
 
 fn install_float_methods(w: &mut World) {
     fn float_arg(w: &mut World, v: Value, op: &str) -> Result<f64, RaiseError> {
-        v.as_float().ok_or_else(|| {
-            RaiseError::new(
-                w.intern("type-error"),
-                format!("{} expected a Float", op),
-            )
-        })
+        v.as_float()
+            .ok_or_else(|| type_error(w, format!("{} expected a Float", op)))
     }
-    w.install_native(w.protos.float, "+", |w, self_, args| {
-        let a = float_arg(w, self_, "+")?;
-        let b = args[0].as_number_f64().ok_or_else(|| {
-            RaiseError::new(w.intern("type-error"), "+ expected a numeric rhs")
-        })?;
-        Ok(Value::float(a + b))
-    });
-    w.install_native(w.protos.float, "-", |w, self_, args| {
-        let a = float_arg(w, self_, "-")?;
-        let b = args[0].as_number_f64().ok_or_else(|| {
-            RaiseError::new(w.intern("type-error"), "- expected a numeric rhs")
-        })?;
-        Ok(Value::float(a - b))
-    });
-    w.install_native(w.protos.float, "*", |w, self_, args| {
-        let a = float_arg(w, self_, "*")?;
-        let b = args[0].as_number_f64().ok_or_else(|| {
-            RaiseError::new(w.intern("type-error"), "* expected a numeric rhs")
-        })?;
-        Ok(Value::float(a * b))
-    });
-    w.install_native(w.protos.float, "/", |w, self_, args| {
-        let a = float_arg(w, self_, "/")?;
-        let b = args[0].as_number_f64().ok_or_else(|| {
-            RaiseError::new(w.intern("type-error"), "/ expected a numeric rhs")
-        })?;
-        Ok(Value::float(a / b))
-    });
+
+    // arithmetic primitives on Float: receiver must be Float;
+    // rhs may be Int (auto-promotes) or Float. result is always Float.
+    macro_rules! float_arith {
+        ($w:expr, $sel:literal, $op:tt) => {
+            $w.install_native($w.protos.float, $sel, |w, self_, args| {
+                let a = float_arg(w, self_, $sel)?;
+                let b = num_f64(w, args[0], $sel)?;
+                Ok(Value::float(a $op b))
+            });
+        };
+    }
+    float_arith!(w, "+", +);
+    float_arith!(w, "-", -);
+    float_arith!(w, "*", *);
+    float_arith!(w, "/", /);
+
+    // comparison primitives. `=` is Float-vs-Number identity (NaN
+    // ≠ anything, including itself). `:!=`, `:<=`, `:>=` are derived
+    // in lib/bootstrap.moof. defensive against proto-Form receivers
+    // (see Integer `=` for the same reason).
     w.install_native(w.protos.float, "=", |_, self_, args| {
-        let a = self_.as_float().unwrap();
+        let a = match self_.as_float() {
+            Some(a) => a,
+            None => return Ok(Value::Bool(self_ == args[0])),
+        };
         Ok(Value::Bool(args[0].as_number_f64().map_or(false, |b| a == b)))
     });
-    w.install_native(w.protos.float, "!=", |_, self_, args| {
-        let a = self_.as_float().unwrap();
-        Ok(Value::Bool(args[0].as_number_f64().map_or(true, |b| a != b)))
-    });
-    w.install_native(w.protos.float, "<", |w, self_, args| {
-        let a = float_arg(w, self_, "<")?;
-        let b = args[0].as_number_f64().ok_or_else(|| {
-            RaiseError::new(w.intern("type-error"), "< expected a numeric rhs")
-        })?;
-        Ok(Value::Bool(a < b))
-    });
-    w.install_native(w.protos.float, ">", |w, self_, args| {
-        let a = float_arg(w, self_, ">")?;
-        let b = args[0].as_number_f64().ok_or_else(|| {
-            RaiseError::new(w.intern("type-error"), "> expected a numeric rhs")
-        })?;
-        Ok(Value::Bool(a > b))
-    });
-    w.install_native(w.protos.float, "<=", |w, self_, args| {
-        let a = float_arg(w, self_, "<=")?;
-        let b = args[0].as_number_f64().ok_or_else(|| {
-            RaiseError::new(w.intern("type-error"), "<= expected a numeric rhs")
-        })?;
-        Ok(Value::Bool(a <= b))
-    });
-    w.install_native(w.protos.float, ">=", |w, self_, args| {
-        let a = float_arg(w, self_, ">=")?;
-        let b = args[0].as_number_f64().ok_or_else(|| {
-            RaiseError::new(w.intern("type-error"), ">= expected a numeric rhs")
-        })?;
-        Ok(Value::Bool(a >= b))
-    });
+    macro_rules! float_cmp {
+        ($w:expr, $sel:literal, $op:tt) => {
+            $w.install_native($w.protos.float, $sel, |w, self_, args| {
+                let a = float_arg(w, self_, $sel)?;
+                let b = num_f64(w, args[0], $sel)?;
+                Ok(Value::Bool(a $op b))
+            });
+        };
+    }
+    float_cmp!(w, "<", <);
+    float_cmp!(w, ">", >);
     w.install_native(w.protos.float, "toString", |w, self_, _| {
         let a = float_arg(w, self_, "toString")?;
         Ok(w.make_string(&format_float(a)))
     });
-    w.install_native(w.protos.float, "abs", |w, self_, _| {
-        let a = float_arg(w, self_, "abs")?;
-        Ok(Value::float(a.abs()))
-    });
-    w.install_native(w.protos.float, "sqrt", |w, self_, _| {
-        let a = float_arg(w, self_, "sqrt")?;
-        Ok(Value::float(a.sqrt()))
-    });
-    w.install_native(w.protos.float, "log", |w, self_, _| {
-        let a = float_arg(w, self_, "log")?;
-        Ok(Value::float(a.ln()))
-    });
-    w.install_native(w.protos.float, "exp", |w, self_, _| {
-        let a = float_arg(w, self_, "exp")?;
-        Ok(Value::float(a.exp()))
-    });
-    w.install_native(w.protos.float, "sin", |w, self_, _| {
-        let a = float_arg(w, self_, "sin")?;
-        Ok(Value::float(a.sin()))
-    });
-    w.install_native(w.protos.float, "cos", |w, self_, _| {
-        let a = float_arg(w, self_, "cos")?;
-        Ok(Value::float(a.cos()))
-    });
-    w.install_native(w.protos.float, "floor", |w, self_, _| {
-        let a = float_arg(w, self_, "floor")?;
-        Ok(Value::float(a.floor()))
-    });
-    w.install_native(w.protos.float, "ceil", |w, self_, _| {
-        let a = float_arg(w, self_, "ceil")?;
-        Ok(Value::float(a.ceil()))
-    });
-    w.install_native(w.protos.float, "round", |w, self_, _| {
-        let a = float_arg(w, self_, "round")?;
-        Ok(Value::float(a.round()))
-    });
+
+    // unary `f64`-method wrappers. `:method:` corresponds to
+    // `f.method()`; the only outlier is `:log` → `f.ln()`, hence
+    // an explicit name argument.
+    macro_rules! float_unary {
+        ($w:expr, $sel:expr, $method:ident) => {
+            $w.install_native($w.protos.float, $sel, |w, self_, _| {
+                let a = float_arg(w, self_, $sel)?;
+                Ok(Value::float(a.$method()))
+            });
+        };
+    }
+    float_unary!(w, "sqrt",  sqrt);
+    float_unary!(w, "log",   ln);
+    float_unary!(w, "exp",   exp);
+    float_unary!(w, "sin",   sin);
+    float_unary!(w, "cos",   cos);
+    float_unary!(w, "floor", floor);
+    float_unary!(w, "ceil",  ceil);
+    float_unary!(w, "round", round);
+
     w.install_native(w.protos.float, "asInteger", |w, self_, _| {
         let a = float_arg(w, self_, "asInteger")?;
         Ok(Value::Int(a as i64))
     });
-    w.install_native(w.protos.float, "nan?", |_, self_, _| {
-        Ok(Value::Bool(self_.as_float().map_or(false, |f| f.is_nan())))
-    });
-    w.install_native(w.protos.float, "finite?", |_, self_, _| {
-        Ok(Value::Bool(self_.as_float().map_or(false, |f| f.is_finite())))
-    });
-    w.install_native(w.protos.float, "zero?", |_, self_, _| {
-        Ok(Value::Bool(self_.as_float().map_or(false, |f| f == 0.0)))
-    });
-    w.install_native(w.protos.float, "positive?", |_, self_, _| {
-        Ok(Value::Bool(self_.as_float().map_or(false, |f| f > 0.0)))
-    });
-    w.install_native(w.protos.float, "negative?", |_, self_, _| {
-        Ok(Value::Bool(self_.as_float().map_or(false, |f| f < 0.0)))
-    });
+
+    // f64-classification — same shape, parametrize over the
+    // predicate.
+    macro_rules! float_predicate {
+        ($w:expr, $sel:expr, $pred:expr) => {
+            $w.install_native($w.protos.float, $sel, |_, self_, _| {
+                Ok(Value::Bool(self_.as_float().map_or(false, $pred)))
+            });
+        };
+    }
+    float_predicate!(w, "nan?",    |f: f64| f.is_nan());
+    float_predicate!(w, "finite?", |f: f64| f.is_finite());
 }
 
 /// render a float with up to ~17 sig-digits and a `.` even for
@@ -1852,73 +1381,41 @@ fn format_float(f: f64) -> String {
 // Symbol / Bool / Nil — minimum equality story
 // ─────────────────────────────────────────────────────────────────
 
+/// Symbol's only rust primitive is `:toString` — needs the sym
+/// table. equality flows through Object's identity (Sym(a) == Sym(b)
+/// iff their SymIds match).
 fn install_symbol_methods(w: &mut World) {
-    w.install_native(w.protos.symbol, "=", |_, self_, args| {
-        Ok(Value::Bool(self_ == args[0]))
-    });
-    w.install_native(w.protos.symbol, "!=", |_, self_, args| {
-        Ok(Value::Bool(self_ != args[0]))
-    });
     w.install_native(w.protos.symbol, "toString", |w, self_, _| {
         let s = self_.as_sym().ok_or_else(|| {
-            RaiseError::new(w.intern("type-error"), "to-string on non-Symbol")
+            RaiseError::new(w.intern("type-error"), "toString on non-Symbol")
         })?;
         let text = w.resolve(s).to_string();
         Ok(w.make_string(&text))
     });
 }
 
-fn install_bool_methods(w: &mut World) {
-    w.install_native(w.protos.bool_, "=", |_, self_, args| {
-        Ok(Value::Bool(self_ == args[0]))
-    });
-    w.install_native(w.protos.bool_, "!=", |_, self_, args| {
-        Ok(Value::Bool(self_ != args[0]))
-    });
-    w.install_native(w.protos.bool_, "not", |_, self_, _args| match self_ {
-        Value::Bool(b) => Ok(Value::Bool(!b)),
-        _ => Ok(Value::Bool(false)), // shouldn't happen if dispatch is right
-    });
-    w.install_native(w.protos.bool_, "toString", |w, self_, _| match self_ {
-        Value::Bool(true) => Ok(w.make_string("#true")),
-        Value::Bool(false) => Ok(w.make_string("#false")),
-        _ => Err(RaiseError::new(
-            w.intern("type-error"),
-            "to-string on non-Bool",
-        )),
-    });
+/// Bool methods all flow through the conditional primitive `if`
+/// and live in `lib/bootstrap.moof`: `=`, `!=` (Object identity),
+/// `not`, `toString`, `and:`, `or:`. nothing in this rust module.
+fn install_bool_methods(_: &mut World) {}
+
+/// Nil-proto only carries one rust primitive: `:cons:`, which
+/// allocates a fresh List cell. everything else (`=`, `!=`,
+/// `toString`, `head`, `tail`, `null?`, `empty?`, `length`,
+/// `map:`, `filter:`, `reduce:from:`, …) lives in
+/// `lib/bootstrap.moof`.
+fn install_nil_methods(w: &mut World) {
+    w.install_native(w.protos.nil, "cons:", make_cons_method);
 }
 
-fn install_nil_methods(w: &mut World) {
-    w.install_native(w.protos.nil, "=", |_, self_, args| {
-        Ok(Value::Bool(self_ == args[0]))
-    });
-    w.install_native(w.protos.nil, "!=", |_, self_, args| {
-        Ok(Value::Bool(self_ != args[0]))
-    });
-    w.install_native(w.protos.nil, "toString", |w, _, _| Ok(w.make_string("nil")));
-    w.install_native(w.protos.nil, "head", |w, _, _| {
-        // (head nil) → nil. lispy convention; users beware.
-        let _ = w;
-        Ok(Value::Nil)
-    });
-    w.install_native(w.protos.nil, "tail", |w, _, _| {
-        let _ = w;
-        Ok(Value::Nil)
-    });
-    w.install_native(w.protos.nil, "null?", |_, _, _| Ok(Value::Bool(true)));
-    // (cons h ()) — nil is the empty list, so consing onto it
-    // builds a one-element list. without this, `(map …)` and
-    // friends fall over at the recursion base case.
-    w.install_native(w.protos.nil, "cons:", |w, self_, args| {
-        let head_sym = w.head_sym;
-        let tail_sym = w.tail_sym;
-        let mut cell = Form::with_proto(Value::Form(w.protos.list));
-        cell.slots.insert(head_sym, args[0]);
-        cell.slots.insert(tail_sym, self_);
-        let id = w.alloc(cell);
-        Ok(Value::Form(id))
-    });
+/// `(cons h tail)` — allocate a List cell. shared by Nil-proto
+/// and List, since the heap operation is identical: head + tail
+/// in a fresh Form whose proto is List.
+fn make_cons_method(w: &mut World, self_: Value, args: &[Value]) -> Result<Value, RaiseError> {
+    let mut cell = Form::with_proto(Value::Form(w.protos.list));
+    cell.slots.insert(w.head_sym, args[0]);
+    cell.slots.insert(w.tail_sym, self_);
+    Ok(Value::Form(w.alloc(cell)))
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -2030,29 +1527,21 @@ fn install_object_reflection(w: &mut World) {
         Ok(w.proto_of(self_))
     });
 
-    w.install_native(w.protos.object, "slots", |w, self_, _| {
-        // returns a moof list of (sym . value) pairs. for tagged
-        // immediates with no slots, returns nil.
-        match self_ {
-            Value::Form(id) => {
-                // collect (head, tail) cons cells from the slots
-                // table, in insertion order.
-                let f = w.heap.get(id);
-                let pairs: Vec<(SymId, Value)> = f
-                    .slots
-                    .iter()
-                    .map(|(k, v)| (*k, *v))
-                    .collect();
-                let mut entries = Vec::with_capacity(pairs.len());
-                for (k, v) in pairs {
-                    let pair = w.make_list(&[Value::Sym(k), v]);
-                    entries.push(pair);
-                }
-                Ok(w.make_list(&entries))
-            }
-            _ => Ok(Value::Nil),
-        }
-    });
+    // :slots, :handlers, :meta — return a Table (key → value) of
+    // the receiver's IndexMap, in insertion order. tagged immediates
+    // have no heap slot → empty Table. matches the contract in
+    // concepts/forms.md and laws/reflection-contract.md R7.
+    macro_rules! reflect_table {
+        ($w:expr, $sel:literal, $field:ident) => {
+            $w.install_native($w.protos.object, $sel, |w, self_, _| match self_ {
+                Value::Form(id) => Ok(form_table_to_table(w, id, |f| &f.$field)),
+                _ => Ok(w.make_table()),
+            });
+        };
+    }
+    reflect_table!(w, "slots", slots);
+    reflect_table!(w, "handlers", handlers);
+    reflect_table!(w, "meta", meta);
 
     // [proto handlerAt: 'sel] — the method-Form installed for `sel`
     // on this proto (NOT inherited). nil if absent. lets you get
@@ -2060,12 +1549,7 @@ fn install_object_reflection(w: &mut World) {
     w.install_native(w.protos.object, "handlerAt:", |w, self_, args| {
         let sel = match args[0] {
             Value::Sym(s) => s,
-            _ => {
-                return Err(RaiseError::new(
-                    w.intern("type-error"),
-                    "handlerAt: expects a symbol",
-                ))
-            }
+            _ => return Err(type_error(w, "handlerAt: expects a symbol")),
         };
         match self_ {
             Value::Form(id) => Ok(w
@@ -2075,51 +1559,6 @@ fn install_object_reflection(w: &mut World) {
                 .get(&sel)
                 .copied()
                 .unwrap_or(Value::Nil)),
-            _ => Ok(Value::Nil),
-        }
-    });
-
-    w.install_native(w.protos.object, "handlers", |w, self_, _| {
-        // returns a moof list of (selector . method-Form) pairs from
-        // *this proto* (not the inherited chain). reading inherited
-        // handlers is the user's job (walk via :proto).
-        match self_ {
-            Value::Form(id) => {
-                let pairs: Vec<(SymId, Value)> = w
-                    .heap
-                    .get(id)
-                    .handlers
-                    .iter()
-                    .map(|(k, v)| (*k, *v))
-                    .collect();
-                let mut entries = Vec::with_capacity(pairs.len());
-                for (k, v) in pairs {
-                    let pair = w.make_list(&[Value::Sym(k), v]);
-                    entries.push(pair);
-                }
-                Ok(w.make_list(&entries))
-            }
-            _ => Ok(Value::Nil),
-        }
-    });
-
-    w.install_native(w.protos.object, "meta", |w, self_, _| {
-        match self_ {
-            Value::Form(id) => {
-                let pairs: Vec<(SymId, Value)> = w
-                    .heap
-                    .get(id)
-                    .meta
-                    .iter()
-                    .map(|(k, v)| (*k, *v))
-                    .collect();
-                let mut entries = Vec::with_capacity(pairs.len());
-                for (k, v) in pairs {
-                    let pair = w.make_list(&[Value::Sym(k), v]);
-                    entries.push(pair);
-                }
-                Ok(w.make_list(&entries))
-            }
             _ => Ok(Value::Nil),
         }
     });
@@ -2173,12 +1612,9 @@ fn install_object_reflection(w: &mut World) {
         Ok(w.make_string(&text))
     });
 
-    w.install_native(w.protos.object, "inspect", |w, self_, _| {
-        // phase A: same as :to-string. phase C swaps in a richer
-        // moof-side Inspector view.
-        let to_string = w.intern("toString");
-        w.send(self_, to_string, &[])
-    });
+    // :inspect is defined in lib/bootstrap.moof — it falls through
+    // to :toString in phase A; phase C overrides it on Object to a
+    // richer moof-side Inspector view.
 
     w.install_native(w.protos.object, "new", |w, self_, _args| {
         // (Proto :new) → fresh instance, then [self initialize].
@@ -2197,7 +1633,8 @@ fn install_object_reflection(w: &mut World) {
     });
 
     // default :initialize is a no-op. user protos override.
-    w.install_native(w.protos.object, "initialize", |_, self_, _| Ok(self_));
+    // :initialize is defined in lib/bootstrap.moof as an identity
+    // no-op; user protos override it to construct.
 
     // default does-not-understand:with: raises. user code can
     // override on any proto.
@@ -2376,37 +1813,20 @@ fn install_console_proto_and_caps(w: &mut World) {
         Ok(Value::Nil)
     });
 
-    // :say: x  — derived: emit (to-string x) then a newline.
-    w.install_native(console_proto, "say:", |w, self_, args| {
-        let to_string = w.intern("toString");
-        let text = w.send(args[0], to_string, &[])?;
-        let emit = w.intern("emit:");
-        w.send(self_, emit, &[text])?;
-        let newline = w.make_string("\n");
-        w.send(self_, emit, &[newline])?;
-        Ok(Value::Nil)
-    });
-
-    // :show: x — emit without newline.
-    w.install_native(console_proto, "show:", |w, self_, args| {
-        let to_string = w.intern("toString");
-        let text = w.send(args[0], to_string, &[])?;
-        let emit = w.intern("emit:");
-        w.send(self_, emit, &[text])?;
-        Ok(Value::Nil)
-    });
-
     // :close — phase A: no-op. phase B's mco wires up real fd cleanup.
     w.install_native(console_proto, "close", |_, _, _| Ok(Value::Nil));
 
-    // :next / :done? — Console is sink-only.
+    // :next — Console is sink-only. raising lives here because we
+    // don't yet expose a `raise` primitive to moof; phase B adds it
+    // alongside the effect-intent model.
     w.install_native(console_proto, "next", |w, _, _| {
         Err(RaiseError::new(
             w.intern("not-supported"),
             ":next on a Console (write-only)",
         ))
     });
-    w.install_native(console_proto, "done?", |_, _, _| Ok(Value::Bool(false)));
+
+    // :say:, :show:, :done? are derived in lib/bootstrap.moof.
 
     // primordial $out, $err — fd held in a real ForeignHandle.
     // the supervisor (here: the substrate at boot) is the *only*
@@ -2835,8 +2255,9 @@ mod tests {
     }
 
     #[test]
-    fn reflection_slots_returns_slot_pairs() {
-        // build an object with known slots; reflect.
+    fn reflection_slots_returns_table() {
+        // [v slots] returns a Table keyed by slot-name → value
+        // (concepts/forms.md, laws/reflection-contract.md R7).
         let mut w = fresh();
         let mut f = Form::with_proto(Value::Form(w.protos.object));
         let a = w.intern("a");
@@ -2846,15 +2267,11 @@ mod tests {
         let id = w.alloc(f);
         let slots_sel = w.intern("slots");
         let r = w.send(Value::Form(id), slots_sel, &[]).unwrap();
-        // r is a list of (sym . value) pairs, in insertion order.
-        let entries = w.list_to_vec(r).unwrap();
-        assert_eq!(entries.len(), 2);
-        let pair0 = w.list_to_vec(entries[0]).unwrap();
-        assert_eq!(pair0[0], Value::Sym(a));
-        assert_eq!(pair0[1], Value::Int(1));
-        let pair1 = w.list_to_vec(entries[1]).unwrap();
-        assert_eq!(pair1[0], Value::Sym(b));
-        assert_eq!(pair1[1], Value::Int(2));
+        // the returned Table has both slot names as keys.
+        let r_repr = w.table_repr(r).unwrap();
+        assert_eq!(r_repr.size(), 2);
+        assert_eq!(r_repr.keyed.get(&Value::Sym(a)).copied(), Some(Value::Int(1)));
+        assert_eq!(r_repr.keyed.get(&Value::Sym(b)).copied(), Some(Value::Int(2)));
     }
 
     #[test]
