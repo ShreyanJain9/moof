@@ -618,7 +618,7 @@ fn string_is_table_of_chars() {
     assert!(matches!(v, Value::Char(0x68))); // 'h'
     let v = moof::eval(&mut w, "[\"hello\" at: 4]").unwrap();
     assert!(matches!(v, Value::Char(0x6f))); // 'o'
-    let xs = moof::eval(&mut w, "[\"abc\" asList]").unwrap();
+    let xs = moof::eval(&mut w, "[\"abc\" toList]").unwrap();
     let elems = w.list_to_vec(xs).unwrap();
     assert_eq!(elems.len(), 3);
     assert!(matches!(elems[0], Value::Char(0x61))); // 'a'
@@ -671,6 +671,100 @@ fn char_methods_work() {
     assert!(matches!(v, Value::Char(0x7a))); // 'z'
     assert_eq!(moof::eval(&mut w, "[#\\a = #\\a]").unwrap(), Value::Bool(true));
     assert_eq!(moof::eval(&mut w, "[#\\a < #\\b]").unwrap(), Value::Bool(true));
+}
+
+// ─────────────────────────────────────────────────────────────────
+// String surface (concepts/strings.md)
+// ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn string_case_methods() {
+    let mut w = moof::new_world();
+    let v = moof::eval(&mut w, "[\"hello world\" upcase]").unwrap();
+    assert_eq!(w.string_text(v).unwrap(), "HELLO WORLD");
+    let v = moof::eval(&mut w, "[\"HELLO WORLD\" downcase]").unwrap();
+    assert_eq!(w.string_text(v).unwrap(), "hello world");
+}
+
+#[test]
+fn string_trim() {
+    let mut w = moof::new_world();
+    let v = moof::eval(&mut w, "[\"  hello  \" trim]").unwrap();
+    assert_eq!(w.string_text(v).unwrap(), "hello");
+}
+
+#[test]
+fn string_predicates() {
+    let mut w = moof::new_world();
+    assert_eq!(
+        moof::eval(&mut w, "[\"hello\" contains?: \"ell\"]").unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        moof::eval(&mut w, "[\"hello\" startsWith?: \"he\"]").unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        moof::eval(&mut w, "[\"hello\" endsWith?: \"lo\"]").unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        moof::eval(&mut w, "[\"hello\" startsWith?: \"hi\"]").unwrap(),
+        Value::Bool(false)
+    );
+}
+
+#[test]
+fn string_indexOf_and_slice() {
+    let mut w = moof::new_world();
+    assert_eq!(
+        moof::eval(&mut w, "[\"hello world\" indexOf: \"world\"]").unwrap(),
+        Value::Int(6)
+    );
+    assert_eq!(
+        moof::eval(&mut w, "[\"hello\" indexOf: \"missing\"]").unwrap(),
+        Value::Int(-1)
+    );
+    let v = moof::eval(&mut w, "[\"hello world\" slice: 6 length: 5]").unwrap();
+    assert_eq!(w.string_text(v).unwrap(), "world");
+    let v = moof::eval(&mut w, "[\"hello\" slice: 1 length: 3]").unwrap();
+    assert_eq!(w.string_text(v).unwrap(), "ell");
+}
+
+#[test]
+fn string_replace() {
+    let mut w = moof::new_world();
+    let v = moof::eval(
+        &mut w,
+        "[\"hello world\" replace: \"world\" with: \"moof\"]",
+    )
+    .unwrap();
+    assert_eq!(w.string_text(v).unwrap(), "hello moof");
+}
+
+#[test]
+fn string_split_and_lines() {
+    let mut w = moof::new_world();
+    // split returns a List of Strings.
+    let v = moof::eval(&mut w, "[\"a,b,c\" split: \",\"]").unwrap();
+    let elems = w.list_to_vec(v).unwrap();
+    assert_eq!(elems.len(), 3);
+    assert_eq!(w.string_text(elems[0]).unwrap(), "a");
+    assert_eq!(w.string_text(elems[2]).unwrap(), "c");
+    // lines splits on \n.
+    let v = moof::eval(&mut w, "[\"a\\nb\\nc\" lines]").unwrap();
+    let lines = w.list_to_vec(v).unwrap();
+    assert_eq!(lines.len(), 3);
+    assert_eq!(w.string_text(lines[1]).unwrap(), "b");
+}
+
+#[test]
+fn string_toList_returns_chars() {
+    let mut w = moof::new_world();
+    let v = moof::eval(&mut w, "[\"abc\" toList]").unwrap();
+    let elems = w.list_to_vec(v).unwrap();
+    assert_eq!(elems.len(), 3);
+    assert!(matches!(elems[0], Value::Char(0x61)));
 }
 
 // ─────────────────────────────────────────────────────────────────

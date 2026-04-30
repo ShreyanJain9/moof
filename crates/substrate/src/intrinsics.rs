@@ -277,8 +277,8 @@ fn install_table_methods(w: &mut World) {
         Ok(w.make_list(&vals))
     });
 
-    // [t asList] — positional axis as a List. (does not include keyed entries.)
-    w.install_native(w.protos.table, "asList", |w, self_, _| {
+    // [t toList] — positional axis as a List. (does not include keyed entries.)
+    w.install_native(w.protos.table, "toList", |w, self_, _| {
         let vs: Vec<Value> = w
             .table_repr(self_)
             .map(|r| r.positional.clone())
@@ -620,16 +620,204 @@ fn install_string_methods(w: &mut World) {
             )),
         }
     });
-    // [s asList] — return a List of Chars. lets users walk a
-    // string with the standard List protocols.
-    w.install_native(w.protos.string, "asList", |w, self_, _| {
+    // [s toList] — return a List of Chars. lets users walk a
+    // string with the standard List protocols. matches docs:
+    // `concepts/strings.md` :to-list (camelCased here as :toList).
+    w.install_native(w.protos.string, "toList", |w, self_, _| {
         let chars: Vec<Value> = match w.string_text(self_) {
             Some(t) => t.chars().map(|c| Value::Char(c as u32)).collect(),
             None => {
-                return Err(RaiseError::new(w.intern("type-error"), "asList on non-String"));
+                return Err(RaiseError::new(w.intern("type-error"), "toList on non-String"));
             }
         };
         Ok(w.make_list(&chars))
+    });
+    // [s upcase] / [s downcase]
+    w.install_native(w.protos.string, "upcase", |w, self_, _| {
+        let upper = w.string_text(self_).map(|t| t.to_uppercase());
+        match upper {
+            Some(u) => Ok(w.make_string(&u)),
+            None => Err(RaiseError::new(w.intern("type-error"), "upcase on non-String")),
+        }
+    });
+    w.install_native(w.protos.string, "downcase", |w, self_, _| {
+        let lower = w.string_text(self_).map(|t| t.to_lowercase());
+        match lower {
+            Some(d) => Ok(w.make_string(&d)),
+            None => Err(RaiseError::new(w.intern("type-error"), "downcase on non-String")),
+        }
+    });
+    // [s trim]
+    w.install_native(w.protos.string, "trim", |w, self_, _| {
+        let trimmed = w.string_text(self_).map(|t| t.trim().to_string());
+        match trimmed {
+            Some(t) => Ok(w.make_string(&t)),
+            None => Err(RaiseError::new(w.intern("type-error"), "trim on non-String")),
+        }
+    });
+    // [s contains?: needle] — substring search.
+    w.install_native(w.protos.string, "contains?:", |w, self_, args| {
+        let needle = args.first().copied().unwrap_or(Value::Nil);
+        let result = w.string_text(self_).and_then(|hay| {
+            w.string_text(needle).map(|n| hay.contains(n))
+        });
+        match result {
+            Some(b) => Ok(Value::Bool(b)),
+            None => Err(RaiseError::new(
+                w.intern("type-error"),
+                "contains?: requires String receiver and argument",
+            )),
+        }
+    });
+    // [s startsWith?: prefix]
+    w.install_native(w.protos.string, "startsWith?:", |w, self_, args| {
+        let needle = args.first().copied().unwrap_or(Value::Nil);
+        let result = w.string_text(self_).and_then(|hay| {
+            w.string_text(needle).map(|n| hay.starts_with(n))
+        });
+        match result {
+            Some(b) => Ok(Value::Bool(b)),
+            None => Err(RaiseError::new(
+                w.intern("type-error"),
+                "startsWith?: requires String args",
+            )),
+        }
+    });
+    // [s endsWith?: suffix]
+    w.install_native(w.protos.string, "endsWith?:", |w, self_, args| {
+        let needle = args.first().copied().unwrap_or(Value::Nil);
+        let result = w.string_text(self_).and_then(|hay| {
+            w.string_text(needle).map(|n| hay.ends_with(n))
+        });
+        match result {
+            Some(b) => Ok(Value::Bool(b)),
+            None => Err(RaiseError::new(
+                w.intern("type-error"),
+                "endsWith?: requires String args",
+            )),
+        }
+    });
+    // [s indexOf: needle] — char-index of first occurrence, or -1.
+    // (the -1 sentinel is the discoverable default; phase G+ may
+    // promote to a Maybe/Optional shape.)
+    w.install_native(w.protos.string, "indexOf:", |w, self_, args| {
+        let needle = args.first().copied().unwrap_or(Value::Nil);
+        let pair = w.string_text(self_).and_then(|hay| {
+            w.string_text(needle).map(|n| (hay.to_string(), n.to_string()))
+        });
+        let (hay, needle_str) = match pair {
+            Some(p) => p,
+            None => {
+                return Err(RaiseError::new(
+                    w.intern("type-error"),
+                    "indexOf: requires String args",
+                ))
+            }
+        };
+        // byte-index → char-index conversion: count chars before the
+        // matched byte position.
+        let byte_idx = hay.find(&needle_str);
+        let result = match byte_idx {
+            None => -1,
+            Some(b) => hay[..b].chars().count() as i64,
+        };
+        Ok(Value::Int(result))
+    });
+    // [s slice: start length: n] — substring by char-index.
+    w.install_native(w.protos.string, "slice:length:", |w, self_, args| {
+        let start = match args.first().copied() {
+            Some(Value::Int(n)) => n,
+            _ => {
+                return Err(RaiseError::new(
+                    w.intern("type-error"),
+                    "slice:length: needs Integer start",
+                ))
+            }
+        };
+        let len = match args.get(1).copied() {
+            Some(Value::Int(n)) => n,
+            _ => {
+                return Err(RaiseError::new(
+                    w.intern("type-error"),
+                    "slice:length: needs Integer length",
+                ))
+            }
+        };
+        let text = match w.string_text(self_) {
+            Some(t) => t.to_string(),
+            None => {
+                return Err(RaiseError::new(
+                    w.intern("type-error"),
+                    "slice:length: on non-String",
+                ))
+            }
+        };
+        if start < 0 || len < 0 {
+            return Err(RaiseError::new(
+                w.intern("index-out-of-bounds"),
+                "slice:length: negative start or length",
+            ));
+        }
+        let collected: String = text
+            .chars()
+            .skip(start as usize)
+            .take(len as usize)
+            .collect();
+        Ok(w.make_string(&collected))
+    });
+    // [s replace: needle with: replacement]
+    w.install_native(w.protos.string, "replace:with:", |w, self_, args| {
+        let needle = args.first().copied().unwrap_or(Value::Nil);
+        let repl = args.get(1).copied().unwrap_or(Value::Nil);
+        let triple = w.string_text(self_).and_then(|s| {
+            w.string_text(needle).and_then(|n| {
+                w.string_text(repl).map(|r| (s.to_string(), n.to_string(), r.to_string()))
+            })
+        });
+        match triple {
+            Some((s, n, r)) => Ok(w.make_string(&s.replace(&n, &r))),
+            None => Err(RaiseError::new(
+                w.intern("type-error"),
+                "replace:with: requires String args",
+            )),
+        }
+    });
+    // [s split: sep] — returns a List of Strings.
+    w.install_native(w.protos.string, "split:", |w, self_, args| {
+        let sep = args.first().copied().unwrap_or(Value::Nil);
+        let pair = w.string_text(self_).and_then(|s| {
+            w.string_text(sep).map(|p| (s.to_string(), p.to_string()))
+        });
+        let (s, p) = match pair {
+            Some(x) => x,
+            None => {
+                return Err(RaiseError::new(
+                    w.intern("type-error"),
+                    "split: requires String args",
+                ))
+            }
+        };
+        let parts: Vec<Value> = if p.is_empty() {
+            // empty separator — split into chars-as-strings.
+            s.chars().map(|c| w.make_string(&c.to_string())).collect()
+        } else {
+            s.split(&p).map(|piece| w.make_string(piece)).collect()
+        };
+        Ok(w.make_list(&parts))
+    });
+    // [s lines] — split on '\n', returns a List of Strings.
+    w.install_native(w.protos.string, "lines", |w, self_, _| {
+        let text = match w.string_text(self_) {
+            Some(t) => t.to_string(),
+            None => {
+                return Err(RaiseError::new(
+                    w.intern("type-error"),
+                    "lines on non-String",
+                ))
+            }
+        };
+        let lines: Vec<Value> = text.lines().map(|l| w.make_string(l)).collect();
+        Ok(w.make_list(&lines))
     });
     // [s forEach: f] — invoke f on each Char.
     w.install_native(w.protos.string, "forEach:", |w, self_, args| {
