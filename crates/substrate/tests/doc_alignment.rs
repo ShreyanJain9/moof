@@ -305,7 +305,7 @@ fn when_unless_letstar_letrec_are_user_inspectable_macros() {
     let mut w = moof::new_world();
     // each is a real Method-Form bound in the global env, with
     // `'macro` set in its meta.
-    for name in &["when", "unless", "let*", "let-rec", "defmethod"] {
+    for name in &["when", "unless", "let*", "let-rec", "defmethod", "defproto"] {
         let sym = w.intern(name);
         let v = w.env_lookup(w.global_env, sym).unwrap_or_else(|| {
             panic!("expected macro `{}` bound in global env", name)
@@ -362,6 +362,96 @@ fn macroexpand_uses_single_list_convention() {
     let then_branch = w.list_to_vec(elems[2]).unwrap();
     assert_eq!(then_branch[0], Value::Sym(w.intern("do")));
     assert_eq!(elems[3], Value::Nil);
+}
+
+#[test]
+fn defproto_via_macro_full_grammar() {
+    let mut w = moof::new_world();
+    // (proto P) + (slots …) + (handlers (h1) body1 (h2) body2)
+    moof::eval(
+        &mut w,
+        "(defproto Counter
+           (slots count step)
+           (handlers (incr) [self count: [.count + .step]]
+                     (read) .count))",
+    )
+    .unwrap();
+    moof::eval(&mut w, "(def c [Counter new])").unwrap();
+    moof::eval(&mut w, "[c count: 0]").unwrap();
+    moof::eval(&mut w, "[c step: 5]").unwrap();
+    moof::eval(&mut w, "[c incr]").unwrap();
+    moof::eval(&mut w, "[c incr]").unwrap();
+    assert_eq!(moof::eval(&mut w, "[c read]").unwrap(), Value::Int(10));
+    // auto-getter and `slot:`-setter are installed.
+    assert_eq!(moof::eval(&mut w, "[c count]").unwrap(), Value::Int(10));
+    assert_eq!(moof::eval(&mut w, "[c step]").unwrap(), Value::Int(5));
+
+    // flat header/body form.
+    moof::eval(
+        &mut w,
+        "(defproto Greeter (greet) 'hello (greet: name) name)",
+    )
+    .unwrap();
+    let v = moof::eval(&mut w, "[[Greeter new] greet]").unwrap();
+    assert_eq!(v, Value::Sym(w.intern("hello")));
+    let v = moof::eval(&mut w, "[[Greeter new] greet: 'world]").unwrap();
+    assert_eq!(v, Value::Sym(w.intern("world")));
+
+    // (proto P) clause — inheritance.
+    moof::eval(
+        &mut w,
+        "(defproto BoundedCounter
+           (proto Counter)
+           (slots max)
+           (handlers (incr-by: n)
+                     (if [[.count + n] > .max]
+                         'overflow
+                         (do [self count: [.count + n]] .count))))",
+    )
+    .unwrap();
+    moof::eval(&mut w, "(def b [BoundedCounter new])").unwrap();
+    moof::eval(&mut w, "[b count: 0]").unwrap();
+    moof::eval(&mut w, "[b step: 1]").unwrap();
+    moof::eval(&mut w, "[b max: 10]").unwrap();
+    assert_eq!(
+        moof::eval(&mut w, "[b incr-by: 5]").unwrap(),
+        Value::Int(5),
+    );
+    assert_eq!(
+        moof::eval(&mut w, "[b incr-by: 100]").unwrap(),
+        Value::Sym(w.intern("overflow")),
+    );
+    // inherited :read still works (delegates up to Counter).
+    assert_eq!(moof::eval(&mut w, "[b read]").unwrap(), Value::Int(5));
+}
+
+#[test]
+fn defproto_reopen_preserves_identity() {
+    // `(defproto Name …)` twice must reopen the SAME proto-Form.
+    // matches getOrCreateProto's spec — used by smalltalk-style
+    // class-extend.
+    let mut w = moof::new_world();
+    moof::eval(&mut w, "(defproto Foo (greet) 1)").unwrap();
+    let id1 = moof::eval(&mut w, "[Foo identity]")
+        .unwrap()
+        .as_int()
+        .unwrap();
+    moof::eval(&mut w, "(defproto Foo (greet) 2 (extra) 'new)").unwrap();
+    let id2 = moof::eval(&mut w, "[Foo identity]")
+        .unwrap()
+        .as_int()
+        .unwrap();
+    assert_eq!(id1, id2, "defproto should reopen, not replace");
+    // the new method is reachable.
+    assert_eq!(
+        moof::eval(&mut w, "[[Foo new] extra]").unwrap(),
+        Value::Sym(w.intern("new")),
+    );
+    // the redefined method picks up the new body.
+    assert_eq!(
+        moof::eval(&mut w, "[[Foo new] greet]").unwrap(),
+        Value::Int(2),
+    );
 }
 
 #[test]
