@@ -38,6 +38,7 @@ pub fn install(w: &mut World) {
     install_object_reflection(w);
     install_list_methods(w);
     install_method_methods(w);
+    install_method_reflection(w);
     install_console_proto_and_caps(w);
     install_globals(w);
     install_proto_globals(w);
@@ -952,6 +953,375 @@ fn install_method_methods(w: &mut World) {
     });
 }
 
+// ─────────────────────────────────────────────────────────────────
+// Method / Chunk / Closure reflection — `docs/laws/reflection-contract.md`
+//
+// every Method-or-Closure exposes:
+//   :body         → the chunk-Form (closures point here via :body slot;
+//                   for a chunk, returns self).
+//   :source       → the source form (already in `:source` meta).
+//   :params       → a Table of param symbols.
+//   :consts       → a Table of constants the chunk loads.
+//   :bytecodes    → a Table of decoded opcode-Forms.
+//   :disassemble  → a String human-readable view.
+//
+// each opcode-Form has slots `:op` (a Sym) and `:operands` (a Table).
+// reflection is read-only: edit source, the substrate re-derives.
+// ─────────────────────────────────────────────────────────────────
+
+/// resolve a method/closure receiver to its chunk-Form id, if any.
+/// returns the id of the chunk holding the bytecode in
+/// `world.chunk_ops`. closures store this in the `:body` slot;
+/// chunk-Forms are themselves the chunk.
+fn chunk_id_of(world: &World, value: Value) -> Option<crate::form::FormId> {
+    let id = value.as_form_id()?;
+    let f = world.heap.get(id);
+    // a Closure-Form's `:body` slot points at the chunk-Form.
+    let body = f.slot(world.body_sym);
+    if let Some(bid) = body.as_form_id() {
+        if world.chunk_ops.contains_key(&bid) {
+            return Some(bid);
+        }
+    }
+    // a chunk-Form is its own chunk.
+    if world.chunk_ops.contains_key(&id) {
+        return Some(id);
+    }
+    None
+}
+
+/// build (or fetch) the Opcode proto exposed as the global
+/// `Opcode`. has `:op` and `:operands` slot-getters so opcode-Forms
+/// dispatch nicely.
+fn ensure_opcode_proto(world: &mut World) -> crate::form::FormId {
+    let name_sym = world.intern("Opcode");
+    let global = world.global_env;
+    if let Some(existing) = world.env_lookup(global, name_sym) {
+        if let Some(id) = existing.as_form_id() {
+            return id;
+        }
+    }
+    // fresh proto with `op` and `operands` getters.
+    let proto_id = world.alloc(crate::form::Form::with_proto(Value::Form(
+        world.protos.object,
+    )));
+    let name_meta = world.intern("name");
+    world
+        .heap
+        .get_mut(proto_id)
+        .meta
+        .insert(name_meta, Value::Sym(name_sym));
+    world.env_bind(global, name_sym, Value::Form(proto_id));
+
+    // slot-getters for :op and :operands.
+    world.install_native(proto_id, "op", |w, self_, _| {
+        let id = self_.as_form_id().ok_or_else(|| {
+            RaiseError::new(w.intern("type-error"), "op: receiver not a Form")
+        })?;
+        let op_sym = w.intern("op");
+        Ok(w.heap.get(id).slot(op_sym))
+    });
+    world.install_native(proto_id, "operands", |w, self_, _| {
+        let id = self_.as_form_id().ok_or_else(|| {
+            RaiseError::new(w.intern("type-error"), "operands: receiver not a Form")
+        })?;
+        let operands_sym = w.intern("operands");
+        Ok(w.heap.get(id).slot(operands_sym))
+    });
+    // [opcode toString] → "<LoadConst 0>" etc.
+    world.install_native(proto_id, "toString", |w, self_, _| {
+        let id = self_.as_form_id().ok_or_else(|| {
+            RaiseError::new(w.intern("type-error"), "toString: receiver not a Form")
+        })?;
+        let op_sym = w.intern("op");
+        let operands_sym = w.intern("operands");
+        let name = match w.heap.get(id).slot(op_sym) {
+            Value::Sym(s) => w.resolve(s).to_string(),
+            _ => "?".to_string(),
+        };
+        let operands_v = w.heap.get(id).slot(operands_sym);
+        let mut parts = vec![name];
+        if let Some(r) = w.table_repr(operands_v) {
+            for v in r.positional.clone() {
+                parts.push(render_value(w, v));
+            }
+        }
+        let s = format!("<{}>", parts.join(" "));
+        Ok(w.make_string(&s))
+    });
+
+    proto_id
+}
+
+/// build an opcode-Form for a single `Op`. each form has slots
+/// `:op` (Sym) and `:operands` (Table) — operands are pushed in
+/// declaration order so positional access works. the form's proto
+/// is `Opcode`, which exposes `:op`, `:operands`, `:toString`.
+fn opcode_form(world: &mut World, op: crate::opcodes::Op) -> Value {
+    use crate::opcodes::Op;
+    let op_sym = world.intern("op");
+    let operands_sym = world.intern("operands");
+    let opcode_proto = ensure_opcode_proto(world);
+    let mut form = crate::form::Form::with_proto(Value::Form(opcode_proto));
+
+    let (name, operands): (&'static str, Vec<Value>) = match op {
+        Op::LoadConst(idx) => ("LoadConst", vec![Value::Int(idx as i64)]),
+        Op::PushNil => ("PushNil", vec![]),
+        Op::PushTrue => ("PushTrue", vec![]),
+        Op::PushFalse => ("PushFalse", vec![]),
+        Op::Pop => ("Pop", vec![]),
+        Op::Dup => ("Dup", vec![]),
+        Op::LoadName(s) => ("LoadName", vec![Value::Sym(s)]),
+        Op::StoreName(s) => ("StoreName", vec![Value::Sym(s)]),
+        Op::LoadSelf => ("LoadSelf", vec![]),
+        Op::DefineGlobal(s) => ("DefineGlobal", vec![Value::Sym(s)]),
+        Op::Send {
+            selector,
+            argc,
+            ic_idx,
+        } => (
+            "Send",
+            vec![
+                Value::Sym(selector),
+                Value::Int(argc as i64),
+                Value::Int(ic_idx as i64),
+            ],
+        ),
+        Op::TailSend { selector, argc } => (
+            "TailSend",
+            vec![Value::Sym(selector), Value::Int(argc as i64)],
+        ),
+        Op::SuperSend {
+            selector,
+            argc,
+            ic_idx,
+        } => (
+            "SuperSend",
+            vec![
+                Value::Sym(selector),
+                Value::Int(argc as i64),
+                Value::Int(ic_idx as i64),
+            ],
+        ),
+        Op::PushClosure { chunk } => ("PushClosure", vec![Value::Form(chunk)]),
+        Op::Jump(off) => ("Jump", vec![Value::Int(off as i64)]),
+        Op::JumpIfFalse(off) => ("JumpIfFalse", vec![Value::Int(off as i64)]),
+        Op::Return => ("Return", vec![]),
+    };
+
+    let name_sym = world.intern(name);
+    form.slots.insert(op_sym, Value::Sym(name_sym));
+    let operands_tbl = world.make_table();
+    if let Some(r) = world.table_repr_mut(operands_tbl) {
+        for v in operands {
+            r.positional.push(v);
+        }
+    }
+    form.slots.insert(operands_sym, operands_tbl);
+    Value::Form(world.alloc(form))
+}
+
+fn install_method_reflection(w: &mut World) {
+    // ensure the Opcode proto exists at install time, so global
+    // `Opcode` is bound from the start.
+    let _ = ensure_opcode_proto(w);
+    // [m body] — the chunk-Form (closure's `:body`, or self if a chunk).
+    w.install_native(w.protos.method, "body", |w, self_, _| {
+        let id = self_.as_form_id().ok_or_else(|| {
+            RaiseError::new(w.intern("type-error"), "body: receiver not a Form")
+        })?;
+        // Closure case: has a :body slot pointing at a chunk.
+        let body = w.heap.get(id).slot(w.body_sym);
+        if let Some(bid) = body.as_form_id() {
+            if w.chunk_ops.contains_key(&bid) {
+                return Ok(Value::Form(bid));
+            }
+        }
+        // chunk case: receiver is itself a chunk.
+        if w.chunk_ops.contains_key(&id) {
+            return Ok(Value::Form(id));
+        }
+        Ok(Value::Nil)
+    });
+
+    // [m source] — the source form stored in :source meta. nil if
+    // none (e.g. a bare-rust intrinsic).
+    w.install_native(w.protos.method, "source", |w, self_, _| {
+        let id = self_.as_form_id().ok_or_else(|| {
+            RaiseError::new(w.intern("type-error"), "source: receiver not a Form")
+        })?;
+        Ok(w.heap.get(id).meta_at(w.source_sym))
+    });
+
+    // [m params] — a Table of param symbols.
+    w.install_native(w.protos.method, "params", |w, self_, _| {
+        let id = match self_.as_form_id() {
+            Some(i) => i,
+            None => return Ok(w.make_table()),
+        };
+        // params live on the closure or on the chunk; check both.
+        let mut params = w.heap.get(id).slot(w.params_sym);
+        if params.is_nil() {
+            if let Some(cid) = chunk_id_of(w, self_) {
+                params = w.heap.get(cid).slot(w.params_sym);
+            }
+        }
+        // walk the params List up front so we don't fight the
+        // borrow checker once we hold the table-rep mut.
+        let head_sym = w.intern("head");
+        let tail_sym = w.intern("tail");
+        let list_proto = Value::Form(w.protos.list);
+        let mut items: Vec<Value> = Vec::new();
+        let mut cur = params;
+        while let Some(fid) = cur.as_form_id() {
+            let f = w.heap.get(fid);
+            if f.proto != list_proto {
+                break;
+            }
+            let head = f.slot(head_sym);
+            let tail = f.slot(tail_sym);
+            if head.is_nil() && tail.is_nil() {
+                break;
+            }
+            items.push(head);
+            cur = tail;
+        }
+        let tbl = w.make_table();
+        if let Some(r) = w.table_repr_mut(tbl) {
+            for v in items {
+                r.positional.push(v);
+            }
+        }
+        Ok(tbl)
+    });
+
+    // [m consts] — a Table of the chunk's constants.
+    w.install_native(w.protos.method, "consts", |w, self_, _| {
+        let cid = match chunk_id_of(w, self_) {
+            Some(c) => c,
+            None => return Ok(w.make_table()),
+        };
+        let consts = w.chunk_consts.get(&cid).cloned().unwrap_or_default();
+        let tbl = w.make_table();
+        if let Some(r) = w.table_repr_mut(tbl) {
+            for v in consts {
+                r.positional.push(v);
+            }
+        }
+        Ok(tbl)
+    });
+
+    // [m bytecodes] — a Table of opcode-Forms decoded from the chunk.
+    // edit source → substrate re-derives → :bytecodes reflects it.
+    w.install_native(w.protos.method, "bytecodes", |w, self_, _| {
+        let cid = match chunk_id_of(w, self_) {
+            Some(c) => c,
+            None => return Ok(w.make_table()),
+        };
+        let ops = w.chunk_ops.get(&cid).cloned().unwrap_or_default();
+        let tbl = w.make_table();
+        for op in ops {
+            let v = opcode_form(w, op);
+            if let Some(r) = w.table_repr_mut(tbl) {
+                r.positional.push(v);
+            }
+        }
+        Ok(tbl)
+    });
+
+    // [m disassemble] — a String human-readable rendering of the
+    // bytecode. one op per line, with constants interpolated.
+    w.install_native(w.protos.method, "disassemble", |w, self_, _| {
+        use crate::opcodes::Op;
+        let cid = match chunk_id_of(w, self_) {
+            Some(c) => c,
+            None => return Ok(w.make_string("<no bytecode>")),
+        };
+        let ops = w.chunk_ops.get(&cid).cloned().unwrap_or_default();
+        let consts = w.chunk_consts.get(&cid).cloned().unwrap_or_default();
+        let mut out = String::new();
+        for (i, op) in ops.iter().enumerate() {
+            let line = match *op {
+                Op::LoadConst(idx) => {
+                    let c = consts.get(idx as usize).copied().unwrap_or(Value::Nil);
+                    let rendered = render_value(w, c);
+                    format!("{:>3}  LoadConst    {:<3}  ; {}", i, idx, rendered)
+                }
+                Op::PushNil => format!("{:>3}  PushNil", i),
+                Op::PushTrue => format!("{:>3}  PushTrue", i),
+                Op::PushFalse => format!("{:>3}  PushFalse", i),
+                Op::Pop => format!("{:>3}  Pop", i),
+                Op::Dup => format!("{:>3}  Dup", i),
+                Op::LoadName(s) => format!("{:>3}  LoadName     {}", i, w.resolve(s)),
+                Op::StoreName(s) => format!("{:>3}  StoreName    {}", i, w.resolve(s)),
+                Op::LoadSelf => format!("{:>3}  LoadSelf", i),
+                Op::DefineGlobal(s) => format!("{:>3}  DefineGlobal {}", i, w.resolve(s)),
+                Op::Send {
+                    selector,
+                    argc,
+                    ic_idx,
+                } => format!(
+                    "{:>3}  Send         {}/{}  ; ic={}",
+                    i,
+                    w.resolve(selector),
+                    argc,
+                    ic_idx
+                ),
+                Op::TailSend { selector, argc } => format!(
+                    "{:>3}  TailSend     {}/{}",
+                    i,
+                    w.resolve(selector),
+                    argc
+                ),
+                Op::SuperSend {
+                    selector,
+                    argc,
+                    ic_idx,
+                } => format!(
+                    "{:>3}  SuperSend    {}/{}  ; ic={}",
+                    i,
+                    w.resolve(selector),
+                    argc,
+                    ic_idx
+                ),
+                Op::PushClosure { chunk } => {
+                    format!("{:>3}  PushClosure  <chunk #{}>", i, chunk.0)
+                }
+                Op::Jump(off) => format!("{:>3}  Jump         {:+}", i, off),
+                Op::JumpIfFalse(off) => format!("{:>3}  JumpIfFalse  {:+}", i, off),
+                Op::Return => format!("{:>3}  Return", i),
+            };
+            out.push_str(&line);
+            out.push('\n');
+        }
+        Ok(w.make_string(&out))
+    });
+}
+
+/// stringify a Value briefly (used in disassembly comments). we
+/// don't recurse into nested forms — just enough for a one-liner.
+fn render_value(w: &World, v: Value) -> String {
+    match v {
+        Value::Nil => "nil".to_string(),
+        Value::Bool(b) => if b { "#true" } else { "#false" }.to_string(),
+        Value::Int(n) => n.to_string(),
+        Value::Float(_) => v.as_float().map(|f| f.to_string()).unwrap_or_default(),
+        Value::Sym(s) => format!("'{}", w.resolve(s)),
+        Value::Char(c) => format!(
+            "#\\{}",
+            char::from_u32(c).map(|c| c.to_string()).unwrap_or_default()
+        ),
+        Value::Form(id) => {
+            // string?
+            if let Some(t) = w.string_text(v) {
+                return format!("\"{}\"", t);
+            }
+            format!("<Form#{}>", id.0)
+        }
+        Value::Foreign(_) => "<foreign>".to_string(),
+    }
+}
+
 /// expose the canonical protos as moof globals (`Object`, `List`,
 /// `Integer`, …). user code can refer to them by name to install
 /// handlers, allocate instances, and inspect the proto chain.
@@ -1486,6 +1856,31 @@ fn install_object_reflection(w: &mut World) {
                 }
                 Ok(w.make_list(&entries))
             }
+            _ => Ok(Value::Nil),
+        }
+    });
+
+    // [proto handlerAt: 'sel] — the method-Form installed for `sel`
+    // on this proto (NOT inherited). nil if absent. lets you get
+    // a handle to any method without walking :handlers.
+    w.install_native(w.protos.object, "handlerAt:", |w, self_, args| {
+        let sel = match args[0] {
+            Value::Sym(s) => s,
+            _ => {
+                return Err(RaiseError::new(
+                    w.intern("type-error"),
+                    "handlerAt: expects a symbol",
+                ))
+            }
+        };
+        match self_ {
+            Value::Form(id) => Ok(w
+                .heap
+                .get(id)
+                .handlers
+                .get(&sel)
+                .copied()
+                .unwrap_or(Value::Nil)),
             _ => Ok(Value::Nil),
         }
     });
