@@ -436,6 +436,77 @@
        ,(__match-build clauses '__match-subj__))))
 
 ;; ─────────────────────────────────────────────────────────────────
+;; defn — multi-clause pattern-matched function definitions.
+;;
+;; (defn name
+;;   |pat₁₁ pat₁₂ …| body₁
+;;   |pat₂₁ pat₂₂ …| body₂
+;;   …)
+;;
+;; each `|pats| body` is a clause (the reader's block-sugar already
+;; lowered `|pats| body` to `(fn (pats) body)`, so this macro
+;; receives a list of fn-shaped clause-Forms after the name).
+;;
+;; expands to:
+;;
+;; (def name
+;;   (fn (__a0 __a1 …)
+;;     (match (list __a0 __a1 …)
+;;       'quoted-clause-1-pats body₁
+;;       'quoted-clause-2-pats body₂
+;;       …)))
+;;
+;; arity is taken from the first clause; v1 assumes all clauses
+;; share that arity (variadic / different-arity dispatch is a
+;; phase-2 layer once the substrate's `fn` learns the rest-marker
+;; calling convention).
+;;
+;; the docs (`docs/syntax/binding-and-defs.md`) ultimately want
+;; `def` itself to be multi-clause. that requires reordering the
+;; compiler's macro / special-form precedence, which is a heavier
+;; surgical move; `defn` exists as the user-facing surface for
+;; multi-clause defs while `def` keeps its single-binding shape.
+;; ─────────────────────────────────────────────────────────────────
+
+;; build (__a0 __a1 … __a{n-1}) for synthetic argument names.
+(def __defn-argnames
+  (fn (n i)
+    (if [n = 0]
+        nil
+        (cons (intern ["__a" + [i toString]])
+              (__defn-argnames [n - 1] [i + 1])))))
+
+;; given a list of fn-shaped clauses ((fn (pats) body) …), produce
+;; a flat list of (quote pats) body (quote pats) body … suitable
+;; as match clauses.
+(def __defn-match-clauses
+  (fn (clauses)
+    (if [clauses empty?]
+        nil
+        (let ((clause [clauses head])
+              (rest [clauses tail]))
+          ;; clause = (fn (pats…) body)
+          ;; tail   = ((pats…) body)
+          (let ((params [[clause tail] head])
+                (body   [[[clause tail] tail] head]))
+            (cons (list 'quote params)
+                  (cons body
+                        (__defn-match-clauses rest))))))))
+
+(defmacro defn (args)
+  (let ((name [args head])
+        (clauses [args tail]))
+    (if [clauses empty?]
+        (raise: 'defn-empty "defn: must have at least one clause")
+        (let ((first-clause [clauses head])
+              (first-params [[[clauses head] tail] head]))
+          (let ((argnames (__defn-argnames [first-params length] 0))
+                (mclauses (__defn-match-clauses clauses)))
+            `(def ,name
+               (fn ,argnames
+                 (match (list ,@argnames) ,@mclauses))))))))
+
+;; ─────────────────────────────────────────────────────────────────
 ;; defmethod — moof-side macro that desugars to setHandler!.
 ;;
 ;; the header decoder mirrors the send-bracket grammar

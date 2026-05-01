@@ -659,6 +659,66 @@ fn block_sugar_does_not_eat_binary_pipe() {
     assert_eq!(moof::eval(&mut w, "[3 | 4]").unwrap(), Value::Int(7));
 }
 
+// ─────────────────────────────────────────────────────────────────
+// concepts/blocks-and-patterns.md / syntax/binding-and-defs.md —
+// `defn` for multi-clause pattern-matched function definitions.
+// ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn defn_factorial() {
+    // the canonical forcing function (concepts/blocks-and-patterns.md):
+    //   (defn fact |0| 1 |n| [n * (fact [n - 1])])
+    // → (fact 5) returns 120.
+    let mut w = moof::new_world();
+    moof::eval(
+        &mut w,
+        "(defn fact
+           |0| 1
+           |n| [n * (fact [n - 1])])",
+    )
+    .unwrap();
+    assert_eq!(moof::eval(&mut w, "(fact 0)").unwrap(), Value::Int(1));
+    assert_eq!(moof::eval(&mut w, "(fact 5)").unwrap(), Value::Int(120));
+    assert_eq!(moof::eval(&mut w, "(fact 6)").unwrap(), Value::Int(720));
+}
+
+#[test]
+fn defn_two_arg_safe_divide() {
+    let mut w = moof::new_world();
+    moof::eval(
+        &mut w,
+        "(defn safe-divide
+           |a 0|  nil
+           |a b|  [a / b])",
+    )
+    .unwrap();
+    assert_eq!(
+        moof::eval(&mut w, "(safe-divide 10 0)").unwrap(),
+        Value::Nil
+    );
+    assert_eq!(
+        moof::eval(&mut w, "(safe-divide 10 2)").unwrap(),
+        Value::Int(5),
+    );
+}
+
+#[test]
+fn defn_list_destructure() {
+    let mut w = moof::new_world();
+    moof::eval(
+        &mut w,
+        "(defn length
+           |'()|         0
+           |'(_ …rest)| [1 + (length rest)])",
+    )
+    .unwrap();
+    assert_eq!(moof::eval(&mut w, "(length nil)").unwrap(), Value::Int(0));
+    assert_eq!(
+        moof::eval(&mut w, "(length (list 1 2 3 4 5))").unwrap(),
+        Value::Int(5),
+    );
+}
+
 #[test]
 fn block_sugar_with_match_yields_factorial_via_match() {
     // bigger forcing function: a closure literal whose body uses

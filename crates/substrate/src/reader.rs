@@ -293,7 +293,9 @@ fn read_form(c: &mut Cursor, ctx: &mut ReadCtx) -> Result<Value, ReadError> {
 /// `true` if the cursor is at `|` and the lookahead suggests a
 /// `|args| body` block. discriminates from the `[a | b]` binary
 /// operator: a block has a *closing* `|` before any structural
-/// terminator (`]`, `)`, `}`, `;`).
+/// terminator (`]`, `)`, `}`, `;`) at the *outer* nesting level.
+/// balanced parens/brackets/braces inside the params are fine —
+/// they appear in patterns like `|'(h …t)|` or `|n :: (Foo Bar)|`.
 fn looks_like_block(c: &Cursor) -> bool {
     debug_assert_eq!(c.peek(), Some(b'|'));
     // scan from the byte after the opening `|`.
@@ -301,11 +303,19 @@ fn looks_like_block(c: &Cursor) -> bool {
         Some(b) => b,
         None => return false,
     };
+    let mut depth: i32 = 0;
     for &b in bytes {
         match b {
-            b'|' => return true,
-            b']' | b')' | b'}' | b';' => return false,
-            _ => continue,
+            b'|' if depth == 0 => return true,
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                if depth == 0 {
+                    return false;
+                }
+                depth -= 1;
+            }
+            b';' if depth == 0 => return false,
+            _ => {}
         }
     }
     false
