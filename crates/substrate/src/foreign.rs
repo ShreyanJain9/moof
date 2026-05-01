@@ -30,6 +30,29 @@
 
 use std::ffi::c_void;
 
+// ─────────────────────────────────────────────────────────────────
+// substrate-internal foreign-handle tags.
+//
+// every foreign handle carries a u32 `tag` identifying its kind.
+// mco-supplied tags live in their respective mcos (via the abi
+// crate). substrate-supplied tags live here, in one place, so
+// world.rs and reader.rs both reference *one* canonical literal
+// rather than duplicating it (an earlier `// must agree with
+// world.rs's constant` comment in reader.rs admitted the drift).
+//
+// the four-byte ascii encoding is purely a debugging aid: when
+// you `od` a heap dump, the tag reads as text. semantically it's
+// just an opaque u32.
+// ─────────────────────────────────────────────────────────────────
+
+/// the `:bytes` foreign-handle on a String form.
+/// payload: `Box<Vec<u8>>` of the utf-8 bytes.
+pub const TAG_STRING_BYTES: u32 = u32::from_be_bytes(*b"WRGU");
+
+/// the `:rep` foreign-handle on a Table form.
+/// payload: `Box<TableRepr>`.
+pub const TAG_TABLE_REPR: u32 = u32::from_be_bytes(*b"TBLE");
+
 /// a vat-local index into the foreign-handle table.
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub struct ForeignId(pub u32);

@@ -26,9 +26,6 @@ use indexmap::IndexMap;
 
 use crate::value::Value;
 
-/// kind tag for the Table `:rep` ForeignHandle.
-pub const TABLE_REPR_TAG: u32 = 0x_54_42_4C_45; // "TBLE"
-
 /// the rust-side payload owned by a Table form's `:rep`
 /// ForeignHandle.
 pub struct TableRepr {

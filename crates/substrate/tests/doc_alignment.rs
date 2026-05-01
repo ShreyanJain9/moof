@@ -322,9 +322,9 @@ fn when_unless_letstar_letrec_are_user_inspectable_macros() {
         let id = v
             .as_form_id()
             .unwrap_or_else(|| panic!("`{}` is not a Form", name));
-        // the macro is registered on the world's macro table.
+        // the macro is registered in the canonical Macros Form.
         assert!(
-            w.macros.contains_key(&sym),
+            w.macro_at(sym).is_some(),
             "`{}` must be registered as a macro",
             name
         );
@@ -615,6 +615,174 @@ fn intern_constructs_symbols_from_strings() {
     )
     .unwrap();
     assert_eq!(v, Value::Sym(w.intern("at:put:")));
+}
+
+#[test]
+fn method_ics_are_reflectable() {
+    // reflection-contract.md R6: "an inline cache at a send-site
+    // is substrate-level state, but it's exposed as `[send-site
+    // cache-stats]` for inspection." we expose it via `[m ics]`
+    // returning a Table of cache-snapshot Forms — one entry per
+    // Send opcode in the chunk.
+    let mut w = moof::new_world();
+    moof::eval(
+        &mut w,
+        "(setHandler! Integer 'incr-twice (fn () [[self + 1] + 1]))",
+    )
+    .unwrap();
+    // run it once so each Send opcode populates its cache.
+    let v = moof::eval(&mut w, "[5 incr-twice]").unwrap();
+    assert_eq!(v, Value::Int(7));
+    // fetch the method-Form, then [m ics].
+    moof::eval(&mut w, "(def m [Integer handlerAt: 'incr-twice])").unwrap();
+    let ics = moof::eval(&mut w, "[m ics]").unwrap();
+    // it's a Table.
+    let id = ics.as_form_id().expect("[m ics] should return a Form");
+    assert_eq!(w.heap.get(id).proto, Value::Form(w.protos.table));
+    // there are two `+` Send sites in the body. each should have
+    // cached against Integer (after the test run resolved them).
+    let n_ics = moof::eval(&mut w, "[[m ics] length]").unwrap();
+    assert_eq!(n_ics, Value::Int(2));
+    // each entry is a Form with the four cache slots.
+    moof::eval(&mut w, "(def ic0 [[m ics] at: 0])").unwrap();
+    let cached_proto =
+        moof::eval(&mut w, "[[ic0 slots] at: 'cached-proto]").unwrap();
+    // `cached_proto` for `[self + 1]` resolved against Integer.
+    assert_eq!(cached_proto, Value::Form(w.protos.integer));
+}
+
+#[test]
+fn current_frame_is_a_form_with_r3_slots() {
+    // reflection-contract.md R3: a frame is a Form (proto: Frame)
+    // exposing :chunk :pc :env :self :stack-base :defining-proto.
+    // we materialize a snapshot mid-method, walk its slots, and
+    // confirm the proto is `Frame`.
+    let mut w = moof::new_world();
+    moof::eval(&mut w, "(defproto Counter (slots count))").unwrap();
+    moof::eval(
+        &mut w,
+        "(setHandler! Counter 'snap (fn () (currentFrame)))",
+    )
+    .unwrap();
+    let v = moof::eval(&mut w, "[[Counter new] snap]").unwrap();
+    let id = v.as_form_id().expect("currentFrame should return a Form");
+    // proto: Frame.
+    assert_eq!(w.heap.get(id).proto, Value::Form(w.protos.frame));
+    // R3: :chunk, :pc, :env, :self, :stack-base, :defining-proto
+    // are all populated.
+    let chunk_sym = w.intern("chunk");
+    let pc_sym = w.intern("pc");
+    let env_sym = w.intern("env");
+    let self_sym = w.intern("self");
+    let stack_base_sym = w.intern("stack-base");
+    let defining_sym = w.intern("defining-proto");
+    let f = w.heap.get(id);
+    assert!(f.slot_present(chunk_sym), ":chunk slot must be present");
+    assert!(f.slot_present(pc_sym), ":pc slot must be present");
+    assert!(f.slot_present(env_sym), ":env slot must be present");
+    assert!(f.slot_present(self_sym), ":self slot must be present");
+    assert!(
+        f.slot_present(stack_base_sym),
+        ":stack-base slot must be present"
+    );
+    assert!(
+        f.slot_present(defining_sym),
+        ":defining-proto slot must be present"
+    );
+    // :pc and :stack-base are Integers.
+    assert!(matches!(f.slot(pc_sym), Value::Int(_)));
+    assert!(matches!(f.slot(stack_base_sym), Value::Int(_)));
+    // :defining-proto resolves to the Counter proto, since the
+    // method was found there.
+    let counter = moof::eval(&mut w, "Counter").unwrap();
+    let f = w.heap.get(id);
+    assert_eq!(f.slot(defining_sym), counter);
+}
+
+#[test]
+fn call_stack_returns_a_list_of_frames() {
+    // R3: `(callStack)` materializes the entire frame stack.
+    // mid-method, the stack has at least one frame.
+    let mut w = moof::new_world();
+    moof::eval(&mut w, "(defproto Recorder (slots))").unwrap();
+    moof::eval(
+        &mut w,
+        "(setHandler! Recorder 'depth (fn () [(callStack) length]))",
+    )
+    .unwrap();
+    let v = moof::eval(&mut w, "[[Recorder new] depth]").unwrap();
+    // at least one frame: the depth-method itself. (the [length]
+    // send adds another, but that frame returns before our
+    // snapshot — :length is computed *over* the snapshot list.)
+    let n = match v {
+        Value::Int(n) => n,
+        _ => panic!("(callStack) length should be an Int"),
+    };
+    assert!(n >= 1, "call stack should have ≥1 frame, got {}", n);
+}
+
+#[test]
+fn macros_form_is_introspectable_from_moof() {
+    // reflection-contract.md R6: the macro registry lives on a Form,
+    // not in a rust HashMap. moof code can reach it through the
+    // global `Macros` and ask: "is X a macro?" "what's its source?"
+    let mut w = moof::new_world();
+    // `when` is shipped as a bootstrap macro.
+    let when_sym = w.intern("when");
+    // looking it up via `Macros at: …` returns the macro's
+    // method-Form. (the slot key is the macro's name symbol;
+    // `at:` on a Table-shaped Form goes through slot lookup —
+    // here we test the Form-as-slot-table path directly.)
+    assert!(
+        w.macro_at(when_sym).is_some(),
+        "`when` macro should be registered"
+    );
+    // the binding is also visible as a global named `Macros` —
+    // the same Form id as `world.macros_form`.
+    let macros_global = moof::eval(&mut w, "Macros").unwrap();
+    assert_eq!(macros_global, Value::Form(w.macros_form));
+    // and the slots of that Form contain `when` (and friends).
+    let macros_form = w.heap.get(w.macros_form);
+    assert!(
+        macros_form.slot_present(when_sym),
+        "Macros Form should have a `when` slot"
+    );
+}
+
+#[test]
+fn proto_generation_lives_in_meta() {
+    // reflection-contract.md R6: state-about-a-Form must be reflected.
+    // proto-generation counters used to live in a rust-side HashMap on
+    // World; they now live in each proto Form's :meta table under the
+    // 'generation key, so `[proto meta at: 'generation]` works from
+    // moof. set-handler! bumps the counter.
+    let mut w = moof::new_world();
+    moof::eval(&mut w, "(defproto Counter (slots count))").unwrap();
+    // defproto itself installs methods under the hood, so the
+    // counter has already advanced. capture the current value as
+    // the baseline.
+    let before = moof::eval(&mut w, "[[Counter meta] at: 'generation]").unwrap();
+    let n0 = match before {
+        Value::Int(n) => n,
+        Value::Nil => 0,
+        _ => panic!("generation should be Int or Nil, got {:?}", before),
+    };
+    // installing a handler bumps the counter by exactly one.
+    moof::eval(
+        &mut w,
+        "(setHandler! Counter 'incr (fn () [.count + 1]))",
+    )
+    .unwrap();
+    let after = moof::eval(&mut w, "[[Counter meta] at: 'generation]").unwrap();
+    assert_eq!(after, Value::Int(n0 + 1));
+    // a second mutation increments again.
+    moof::eval(
+        &mut w,
+        "(setHandler! Counter 'decr (fn () [.count - 1]))",
+    )
+    .unwrap();
+    let after2 = moof::eval(&mut w, "[[Counter meta] at: 'generation]").unwrap();
+    assert_eq!(after2, Value::Int(n0 + 2));
 }
 
 #[test]

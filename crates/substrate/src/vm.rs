@@ -128,14 +128,17 @@ impl World {
                         "handler is not a method-Form",
                     )
                 })?;
-                // populate the IC slot.
+                // populate the IC slot. read the generation first
+                // so we don't fight the borrow checker (the IC table
+                // mutable borrow can't co-exist with proto_generation's
+                // heap borrow).
+                let gen = self.proto_generation(receiver_proto);
                 if let Some(ics) = self.chunk_ics.get_mut(&chunk) {
                     if let Some(slot) = ics.get_mut(ic_idx as usize) {
                         slot.cached_proto = receiver_proto;
                         slot.cached_method = method;
                         slot.cached_defining = defining;
-                        slot.cached_generation =
-                            self.proto_generations.get(&receiver_proto).copied().unwrap_or(0);
+                        slot.cached_generation = gen;
                     }
                 }
                 self.invoke(method, receiver, args, defining)

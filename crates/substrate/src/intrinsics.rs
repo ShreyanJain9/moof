@@ -1093,6 +1093,66 @@ fn install_method_reflection(w: &mut World) {
         Ok(tbl)
     });
 
+    // [m ics] — inline-cache snapshot. closes reflection-contract
+    // R6's promise: "an inline cache at a send-site is substrate-
+    // level state, but it's exposed as `[send-site cache-stats]`
+    // for inspection." returns a Table where each entry is a small
+    // Form (proto: Object) carrying `:cached-proto :cached-method
+    // :cached-defining :cached-generation`. unresolved sites
+    // appear as Forms whose four slots are all nil.
+    //
+    // ICs are *substrate-internal cache* (L5/R6 explicitly permit
+    // derived caches as long as the canonical source is reflected
+    // — bytecode IS derived from source, the IC is a hot-path
+    // optimization). this method makes the cache observable for
+    // tooling: a moldable inspector can show "what protos has this
+    // method's send-site #3 been resolving against?" — useful for
+    // debugging dispatch and for teaching the dispatch model.
+    w.install_native(w.protos.method, "ics", |w, self_, _| {
+        let cid = match chunk_id_of(w, self_) {
+            Some(c) => c,
+            None => return Ok(w.make_table()),
+        };
+        let ics = w.chunk_ics.get(&cid).cloned().unwrap_or_default();
+        let cached_proto_sym = w.intern("cached-proto");
+        let cached_method_sym = w.intern("cached-method");
+        let cached_defining_sym = w.intern("cached-defining");
+        let cached_generation_sym = w.intern("cached-generation");
+        let object_proto = Value::Form(w.protos.object);
+        let mut entries = Vec::with_capacity(ics.len());
+        for ic in &ics {
+            let mut form = crate::form::Form::with_proto(object_proto);
+            let proto_v = if ic.cached_proto.is_none() {
+                Value::Nil
+            } else {
+                Value::Form(ic.cached_proto)
+            };
+            let method_v = if ic.cached_method.is_none() {
+                Value::Nil
+            } else {
+                Value::Form(ic.cached_method)
+            };
+            let defining_v = if ic.cached_defining.is_none() {
+                Value::Nil
+            } else {
+                Value::Form(ic.cached_defining)
+            };
+            form.slots.insert(cached_proto_sym, proto_v);
+            form.slots.insert(cached_method_sym, method_v);
+            form.slots.insert(cached_defining_sym, defining_v);
+            form.slots
+                .insert(cached_generation_sym, Value::Int(ic.cached_generation as i64));
+            entries.push(Value::Form(w.alloc(form)));
+        }
+        let tbl = w.make_table();
+        if let Some(r) = w.table_repr_mut(tbl) {
+            for v in entries {
+                r.positional.push(v);
+            }
+        }
+        Ok(tbl)
+    });
+
     // :disassemble is derived in lib/bootstrap.moof: one line per
     // entry of [m bytecodes], each rendered via the Opcode-Form's
     // own :toString.
@@ -1142,12 +1202,19 @@ fn install_proto_globals(w: &mut World) {
         ("Closure", w.protos.closure),
         ("Env", w.protos.env),
         ("ForeignHandle", w.protos.foreign),
+        ("Frame", w.protos.frame),
     ];
     let global = w.global_env;
     for (name, id) in bindings {
         let s = w.intern(name);
         w.env_bind(global, s, Value::Form(id));
     }
+    // also expose the canonical macro registry as `Macros`. moof
+    // code introspects via `[Macros slots]`, fetches via
+    // `[Macros at: 'when]`, etc. honors reflection-contract R6.
+    let macros_id = w.macros_form;
+    let macros_sym = w.intern("Macros");
+    w.env_bind(global, macros_sym, Value::Form(macros_id));
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1878,6 +1945,31 @@ fn install_globals(w: &mut World) {
         Ok(Value::Sym(world.intern(&text)))
     });
 
+    // (currentFrame) — returns a Form snapshot of the topmost
+    // running frame, or nil if not inside any frame. honors
+    // reflection-contract.md R3 — the moof view of a frame is a
+    // Form with proto `Frame` carrying `:chunk :pc :env :self
+    // :stack-base :defining-proto`.
+    install_global(w, "currentFrame", |world, _, args| {
+        if !args.is_empty() {
+            return Err(raise(world, "arity", "(currentFrame) takes no args"));
+        }
+        let n = world.vm.frames.len();
+        if n == 0 {
+            return Ok(Value::Nil);
+        }
+        Ok(world.frame_snapshot(n - 1).unwrap_or(Value::Nil))
+    });
+
+    // (callStack) — returns a List of Form snapshots, outermost
+    // first, of every frame on the runtime call stack.
+    install_global(w, "callStack", |world, _, args| {
+        if !args.is_empty() {
+            return Err(raise(world, "arity", "(callStack) takes no args"));
+        }
+        Ok(world.frame_stack_snapshot())
+    });
+
     // (cons head tail) — list constructor with no meaningful
     // receiver among args. lowers to `[tail cons: head]`.
     install_global(w, "cons", |world, _, args| {
@@ -1910,7 +2002,7 @@ fn install_globals(w: &mut World) {
         let head = elems[0]
             .as_sym()
             .ok_or_else(|| raise(world, "macroexpand", "form head is not a symbol"))?;
-        let macro_v = world.macros.get(&head).copied().ok_or_else(|| {
+        let macro_v = world.macro_at(head).ok_or_else(|| {
             raise(
                 world,
                 "macroexpand",

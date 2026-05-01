@@ -22,7 +22,7 @@
 //! `ForeignHandle` slot values, but the moof interface
 //! (`[m bytecodes]`, etc.) stays the same.
 
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 use crate::foreign::ForeignTable;
 use crate::form::{Form, FormId};
@@ -33,11 +33,6 @@ use crate::reader::{self, ReadCtx, ReadError};
 use crate::sym::{SymId, SymTable};
 use crate::value::Value;
 use crate::vm::Vm;
-
-/// kind tag for String's `:bytes` ForeignHandle. lets natives
-/// distinguish a real string-bytes handle from any other foreign
-/// payload that could end up in the slot.
-pub const STRING_BYTES_TAG: u32 = 0x_57_52_47_55; // "WRGU" — phase A.
 
 /// destructor for a `Box<Vec<u8>>` minted by `make_string`. runs
 /// when the gc collects the holding String form.
@@ -119,27 +114,36 @@ pub struct World {
     pub foreign: ForeignTable,
     pub protos: Protos,
 
-    /// chunk-FormId → its bytecode op vector.
-    pub chunk_ops: HashMap<FormId, Vec<Op>>,
+    /// chunk-FormId → its bytecode op vector. `IndexMap` so that
+    /// any iteration is deterministic per `laws/determinism-laws.md`
+    /// D5 — replicas must agree on iteration order even for
+    /// substrate-internal tables.
+    pub chunk_ops: IndexMap<FormId, Vec<Op>>,
     /// chunk-FormId → its constant pool.
-    pub chunk_consts: HashMap<FormId, Vec<Value>>,
+    pub chunk_consts: IndexMap<FormId, Vec<Value>>,
     /// chunk-FormId → its inline-cache slot table (one per Send op).
-    pub chunk_ics: HashMap<FormId, Vec<ICache>>,
+    pub chunk_ics: IndexMap<FormId, Vec<ICache>>,
 
     /// method-FormId → native function pointer.
-    pub native_fns: HashMap<FormId, NativeFn>,
+    pub native_fns: IndexMap<FormId, NativeFn>,
 
-    /// macro-name (sym) → macro closure (a Method-Form). when the
-    /// compiler sees `(name args…)` with `name` in this table, it
-    /// invokes the macro with the unevaluated arg-forms as a list,
-    /// then recursively compiles the returned form. macros run at
-    /// compile time only.
-    pub macros: HashMap<SymId, Value>,
+    /// the `Macros` Form — canonical store of registered macros.
+    /// each slot is `name -> method-Form`. exposed as a global so
+    /// moof code can do `[Macros slots]` to list all macros,
+    /// `[Macros at: 'when]` to fetch one, `[[Macros at: 'when]
+    /// source]` to read its source. honors reflection-contract R6:
+    /// the macro registry IS a Form, not a rust hash.
+    ///
+    /// the `:macro?` helper exists in moof; the rust line just owns
+    /// the slot table as the canonical lookup table — same shape as
+    /// any other Form's slots.
+    pub macros_form: FormId,
 
-    /// per-proto generation counters. bumped on `set-handler!` to
-    /// invalidate inline caches. ICs check the cached generation
-    /// against the current value; mismatch triggers re-resolution.
-    pub proto_generations: HashMap<FormId, u32>,
+    // proto generation counters live on each proto Form's `:meta`
+    // table under the `generation` key. honors reflection-contract
+    // R6 ("if the rust line stores state about a Form, it must be
+    // exposed through reflection"). reads via `proto_generation`,
+    // writes via `bump_proto_generation`.
 
     /// the world's global environment Form.
     pub global_env: FormId,
@@ -160,6 +164,7 @@ pub struct World {
     pub quote_sym: SymId,
     pub bytes_sym: SymId,
     pub rep_sym: SymId,
+    pub generation_sym: SymId,
 }
 
 impl World {
@@ -176,6 +181,11 @@ impl World {
         global_env_form.meta.insert(parent_sym, Value::Nil);
         let global_env = heap.alloc(global_env_form);
 
+        // the canonical macro registry: a plain Form (proto: Object)
+        // whose slots are macro-name -> method-Form. exposed as the
+        // `Macros` global so user code can introspect it.
+        let macros_form = heap.alloc(Form::with_proto(Value::Form(protos.object)));
+
         let head_sym = syms.intern("head");
         let tail_sym = syms.intern("tail");
         let body_sym = syms.intern("body");
@@ -187,18 +197,18 @@ impl World {
         let quote_sym = syms.intern("quote");
         let bytes_sym = syms.intern("bytes");
         let rep_sym = syms.intern("rep");
+        let generation_sym = syms.intern("generation");
 
         World {
             heap,
             syms,
             foreign,
             protos,
-            chunk_ops: HashMap::new(),
-            chunk_consts: HashMap::new(),
-            chunk_ics: HashMap::new(),
-            native_fns: HashMap::new(),
-            macros: HashMap::new(),
-            proto_generations: HashMap::new(),
+            chunk_ops: IndexMap::new(),
+            chunk_consts: IndexMap::new(),
+            chunk_ics: IndexMap::new(),
+            native_fns: IndexMap::new(),
+            macros_form,
             global_env,
             vm: Vm::default(),
             head_sym,
@@ -213,6 +223,7 @@ impl World {
             quote_sym,
             bytes_sym,
             rep_sym,
+            generation_sym,
         }
     }
 
@@ -236,7 +247,7 @@ impl World {
         let handle_id = self.foreign.alloc(ForeignHandle {
             ptr,
             destructor: Some(string_bytes_dtor),
-            tag: STRING_BYTES_TAG,
+            tag: crate::foreign::TAG_STRING_BYTES,
         });
         let mut form = Form::with_proto(Value::Form(self.protos.string));
         form.slots.insert(self.bytes_sym, Value::Foreign(handle_id));
@@ -256,7 +267,7 @@ impl World {
             _ => return None,
         };
         let handle = self.foreign.get(fid);
-        if handle.tag != STRING_BYTES_TAG {
+        if handle.tag != crate::foreign::TAG_STRING_BYTES {
             return None;
         }
         // SAFETY: tag-check confirms make_string minted this; cast
@@ -276,14 +287,14 @@ impl World {
     /// allocate a fresh empty Table form. the `:rep` slot holds a
     /// ForeignHandle wrapping a `Box<TableRepr>`.
     pub fn make_table(&mut self) -> Value {
-        use crate::foreign::ForeignHandle;
-        use crate::table::{table_repr_dtor, TableRepr, TABLE_REPR_TAG};
+        use crate::foreign::{ForeignHandle, TAG_TABLE_REPR};
+        use crate::table::{table_repr_dtor, TableRepr};
         let boxed: Box<TableRepr> = Box::new(TableRepr::new());
         let ptr = Box::into_raw(boxed) as *mut std::ffi::c_void;
         let handle_id = self.foreign.alloc(ForeignHandle {
             ptr,
             destructor: Some(table_repr_dtor),
-            tag: TABLE_REPR_TAG,
+            tag: TAG_TABLE_REPR,
         });
         let mut form = Form::with_proto(Value::Form(self.protos.table));
         form.slots.insert(self.rep_sym, Value::Foreign(handle_id));
@@ -293,7 +304,8 @@ impl World {
     /// borrow a Table form's `TableRepr`. returns `None` if `value`
     /// isn't a well-formed Table.
     pub fn table_repr(&self, value: Value) -> Option<&crate::table::TableRepr> {
-        use crate::table::{TableRepr, TABLE_REPR_TAG};
+        use crate::foreign::TAG_TABLE_REPR;
+        use crate::table::TableRepr;
         let id = value.as_form_id()?;
         let f = self.heap.get(id);
         if f.proto != Value::Form(self.protos.table) {
@@ -304,7 +316,7 @@ impl World {
             _ => return None,
         };
         let handle = self.foreign.get(fid);
-        if handle.tag != TABLE_REPR_TAG {
+        if handle.tag != TAG_TABLE_REPR {
             return None;
         }
         // SAFETY: tag confirms make_table minted this; cast back.
@@ -317,7 +329,8 @@ impl World {
         &mut self,
         value: Value,
     ) -> Option<&mut crate::table::TableRepr> {
-        use crate::table::{TableRepr, TABLE_REPR_TAG};
+        use crate::foreign::TAG_TABLE_REPR;
+        use crate::table::TableRepr;
         let id = value.as_form_id()?;
         if self.heap.get(id).proto != Value::Form(self.protos.table) {
             return None;
@@ -327,7 +340,7 @@ impl World {
             _ => return None,
         };
         let handle = self.foreign.get(fid);
-        if handle.tag != TABLE_REPR_TAG {
+        if handle.tag != TAG_TABLE_REPR {
             return None;
         }
         // SAFETY: same; we have exclusive access via &mut self.
@@ -494,17 +507,106 @@ impl World {
         reader::read_all(text, &mut ctx)
     }
 
+    /// materialize the rust `Vm::Frame` at index `idx` as a Form
+    /// snapshot. honors reflection-contract.md R3 — the moof view
+    /// of a frame is a Form with proto `Frame` carrying slots for
+    /// `chunk`, `pc`, `env`, `self`, `stack-base`, `defining-proto`.
+    ///
+    /// this is a snapshot (parallels the existing `:slots` /
+    /// `:handlers` / `:meta` pattern). live-views are a phase-C
+    /// follow-up. reading the snapshot tells you what the frame
+    /// looked like at the moment of materialization; mutations to
+    /// the snapshot do not propagate to the running frame.
+    ///
+    /// returns `None` if `idx` is out of bounds.
+    pub fn frame_snapshot(&mut self, idx: usize) -> Option<Value> {
+        let frame = self.vm.frames.get(idx)?.clone();
+        let chunk_sym = self.intern("chunk");
+        let pc_sym = self.intern("pc");
+        let env_sym = self.intern("env");
+        let self_sym = self.intern("self");
+        let stack_base_sym = self.intern("stack-base");
+        let defining_sym = self.intern("defining-proto");
+        let mut snap = Form::with_proto(Value::Form(self.protos.frame));
+        snap.slots.insert(chunk_sym, Value::Form(frame.chunk));
+        snap.slots.insert(pc_sym, Value::Int(frame.pc as i64));
+        snap.slots.insert(env_sym, Value::Form(frame.env));
+        snap.slots.insert(self_sym, frame.self_);
+        snap.slots
+            .insert(stack_base_sym, Value::Int(frame.stack_base as i64));
+        let defining = if frame.defining_proto.is_none() {
+            Value::Nil
+        } else {
+            Value::Form(frame.defining_proto)
+        };
+        snap.slots.insert(defining_sym, defining);
+        Some(Value::Form(self.heap.alloc(snap)))
+    }
+
+    /// snapshot the entire VM frame stack as a List of frame-Forms.
+    /// outermost (index 0) frame first. returns Nil for an empty
+    /// stack.
+    pub fn frame_stack_snapshot(&mut self) -> Value {
+        let n = self.vm.frames.len();
+        if n == 0 {
+            return Value::Nil;
+        }
+        let mut snaps = Vec::with_capacity(n);
+        for i in 0..n {
+            // frame_snapshot can't fail: i < n.
+            snaps.push(self.frame_snapshot(i).unwrap());
+        }
+        self.make_list(&snaps)
+    }
+
+    /// look up a macro by name. returns the method-Form Value
+    /// (a `Value::Form`), or `None` if no macro is registered.
+    ///
+    /// reads from the canonical `Macros` Form's slots — the same
+    /// table moof code reads via `[Macros at: name]`.
+    pub fn macro_at(&self, name: SymId) -> Option<Value> {
+        let f = self.heap.get(self.macros_form);
+        if f.slot_present(name) {
+            Some(f.slot(name))
+        } else {
+            None
+        }
+    }
+
+    /// register a macro: install `method` under `name` in the
+    /// canonical `Macros` Form.
+    pub fn macro_register(&mut self, name: SymId, method: Value) {
+        self.heap
+            .get_mut(self.macros_form)
+            .slots
+            .insert(name, method);
+    }
+
     /// the current generation for `proto_id`. zero is the default
     /// for a never-mutated proto.
+    ///
+    /// stored in the proto Form's `:meta` table under the
+    /// `generation` key (so reflection-contract R6 holds: this is
+    /// state-about-a-Form, exposed via the reflection protocol —
+    /// `[proto meta at: 'generation]` works from inside moof).
     pub fn proto_generation(&self, proto_id: FormId) -> u32 {
-        self.proto_generations.get(&proto_id).copied().unwrap_or(0)
+        match self.heap.get(proto_id).meta_at(self.generation_sym) {
+            Value::Int(n) => n as u32,
+            _ => 0,
+        }
     }
 
     /// bump a proto's generation counter. call after any handler-
     /// table mutation so existing inline caches invalidate.
+    ///
+    /// writes to the proto Form's `:meta at: 'generation` slot.
     pub fn bump_proto_generation(&mut self, proto_id: FormId) {
-        let entry = self.proto_generations.entry(proto_id).or_insert(0);
-        *entry = entry.wrapping_add(1);
+        let cur = self.proto_generation(proto_id);
+        let next = cur.wrapping_add(1);
+        self.heap
+            .get_mut(proto_id)
+            .meta
+            .insert(self.generation_sym, Value::Int(next as i64));
     }
 
     /// look up a handler by walking the proto chain. returns the

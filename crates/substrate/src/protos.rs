@@ -22,6 +22,7 @@
 //!  ├── Chunk           proto: Object
 //!  ├── Closure         proto: Method
 //!  ├── Env             proto: Object
+//!  ├── Frame           proto: Object   (R3 — running computation)
 //!  └── ForeignHandle   proto: Object
 //! ```
 //!
@@ -51,6 +52,12 @@ pub struct Protos {
     pub closure: FormId,
     pub env: FormId,
     pub foreign: FormId,
+    /// `Frame` proto — the "running computation" face of
+    /// reflection. instances are materialized snapshots of the
+    /// runtime call stack, populated on demand via
+    /// `(currentFrame)` / `(callStack)`. honors
+    /// reflection-contract.md R3.
+    pub frame: FormId,
 }
 
 impl Protos {
@@ -74,6 +81,7 @@ impl Protos {
         let chunk = mk(heap);
         let env = mk(heap);
         let foreign = mk(heap);
+        let frame = mk(heap);
         // Closure has Method as its parent.
         let closure = heap.alloc(Form::with_proto(Value::Form(method)));
 
@@ -93,6 +101,7 @@ impl Protos {
             closure,
             env,
             foreign,
+            frame,
         }
     }
 }

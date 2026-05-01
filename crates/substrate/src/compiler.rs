@@ -296,7 +296,7 @@ impl<'a> Compiler<'a> {
             // the list `(cond a b c)`. the macro body destructures
             // it with List ops, returning a Form to compile in the
             // call site's place. see lib/bootstrap.moof for examples.
-            if let Some(&macro_method) = self.world.macros.get(&s) {
+            if let Some(macro_method) = self.world.macro_at(s) {
                 let mid = match macro_method.as_form_id() {
                     Some(i) => i,
                     None => {
@@ -688,9 +688,10 @@ impl<'a> Compiler<'a> {
             .insert(macro_meta, Value::Sym(name));
         let method_id = self.world.alloc(method);
 
-        // register in the macro table — eagerly, so subsequent
-        // forms in this chunk see it.
-        self.world.macros.insert(name, Value::Form(method_id));
+        // register in the canonical Macros Form — eagerly, so
+        // subsequent forms in this chunk see it. moof code reads it
+        // via `[Macros at: name]`.
+        self.world.macro_register(name, Value::Form(method_id));
 
         // also bind in global env for `[name source]` reflection
         // and so the closure isn't gc'd if/when we have a gc.

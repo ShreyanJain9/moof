@@ -1049,10 +1049,10 @@ fn make_string_value(ctx: &mut ReadCtx, text: &str) -> Value {
         // legacy fallback for bare reader tests.
         return Value::Sym(ctx.syms.intern(text));
     }
-    // STRING_BYTES_TAG must agree with world.rs's constant. we
-    // duplicate the value here to avoid cross-module coupling
-    // (reader can't import from world without circularity).
-    const STRING_BYTES_TAG: u32 = 0x_57_52_47_55;
+    // tag is the canonical substrate constant from foreign.rs —
+    // both world.rs's `make_string` and this path mint string
+    // forms with the same tag, ensuring the heap looks identical
+    // regardless of which gateway built it.
     let boxed: Box<Vec<u8>> = Box::new(text.as_bytes().to_vec());
     let ptr = Box::into_raw(boxed) as *mut std::ffi::c_void;
     unsafe extern "C" fn dtor(ptr: *mut std::ffi::c_void) {
@@ -1063,7 +1063,7 @@ fn make_string_value(ctx: &mut ReadCtx, text: &str) -> Value {
     let handle_id = ctx.foreign.alloc(ForeignHandle {
         ptr,
         destructor: Some(dtor),
-        tag: STRING_BYTES_TAG,
+        tag: crate::foreign::TAG_STRING_BYTES,
     });
     let mut form = Form::with_proto(ctx.string_proto);
     form.slots.insert(ctx.bytes_sym, Value::Foreign(handle_id));
