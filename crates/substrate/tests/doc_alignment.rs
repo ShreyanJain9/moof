@@ -660,6 +660,80 @@ fn block_sugar_does_not_eat_binary_pipe() {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// concepts/blocks-and-patterns.md — patterns v2:
+// `|n :: Type|` type-guard, `|n where pred|` predicate-guard.
+// ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn match_typed_pattern() {
+    let mut w = moof::new_world();
+    moof::eval(
+        &mut w,
+        "(def kind
+           |n :: Integer| 'an-int
+           |s :: String|  'a-string
+           |_|            'other)",
+    )
+    .unwrap();
+    assert_eq!(
+        moof::eval(&mut w, "(kind 5)").unwrap(),
+        Value::Sym(w.intern("an-int"))
+    );
+    assert_eq!(
+        moof::eval(&mut w, "(kind \"hi\")").unwrap(),
+        Value::Sym(w.intern("a-string"))
+    );
+    assert_eq!(
+        moof::eval(&mut w, "(kind 'sym)").unwrap(),
+        Value::Sym(w.intern("other"))
+    );
+}
+
+#[test]
+fn match_where_pattern() {
+    let mut w = moof::new_world();
+    moof::eval(
+        &mut w,
+        "(def sign
+           |n where [n > 0]| 'positive
+           |n where [n < 0]| 'negative
+           |_|               'zero)",
+    )
+    .unwrap();
+    assert_eq!(
+        moof::eval(&mut w, "(sign 5)").unwrap(),
+        Value::Sym(w.intern("positive"))
+    );
+    assert_eq!(
+        moof::eval(&mut w, "(sign -3)").unwrap(),
+        Value::Sym(w.intern("negative"))
+    );
+    assert_eq!(
+        moof::eval(&mut w, "(sign 0)").unwrap(),
+        Value::Sym(w.intern("zero"))
+    );
+}
+
+#[test]
+fn satisfies_walks_proto_chain() {
+    // [T satisfies?: v] — v's proto chain reaches T.
+    let mut w = moof::new_world();
+    assert_eq!(
+        moof::eval(&mut w, "[Integer satisfies?: 5]").unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        moof::eval(&mut w, "[Integer satisfies?: \"hi\"]").unwrap(),
+        Value::Bool(false)
+    );
+    // Object satisfies everything (every proto chain bottoms there).
+    assert_eq!(
+        moof::eval(&mut w, "[Object satisfies?: 5]").unwrap(),
+        Value::Bool(true)
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────
 // concepts/blocks-and-patterns.md / syntax/binding-and-defs.md —
 // `defn` for multi-clause pattern-matched function definitions.
 // ─────────────────────────────────────────────────────────────────

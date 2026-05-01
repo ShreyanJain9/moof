@@ -309,6 +309,25 @@
         #true
         [[v proto] is List])))
 
+;; helper: is `pat` a 3-element list whose middle element is the
+;; symbol `mid-sym`? used to detect `(name :: Type)` and
+;; `(name where pred)` clause shapes.
+(def __match-3-mid?
+  (fn (pat mid-sym)
+    (if (__match-list? pat)
+        (if [pat is nil]
+            #false
+            (if [[pat length] = 3]
+                [[[pat tail] head] is mid-sym]
+                #false))
+        #false)))
+
+(def __match-typed?
+  (fn (pat) (__match-3-mid? pat '::)))
+
+(def __match-where?
+  (fn (pat) (__match-3-mid? pat 'where)))
+
 (def __match-symbol?
   (fn (pat)
     [[pat proto] is Symbol]))
@@ -368,10 +387,24 @@
         (if (__match-symbol? pat)
             ;; variable bind.
             `(let ((,pat ,subj-sym)) ,body)
-            (if (__match-quote? pat)
-                (__match-clause-quoted pat body subj-sym fail-form)
-                ;; bare literal — equality compare.
-                `(if [,subj-sym = ,pat] ,body ,fail-form))))))
+            (if (__match-typed? pat)
+                ;; `(name :: Type)` — bind name, then check
+                ;; [Type satisfies?: subj].
+                (let ((p-name [pat head])
+                      (p-type [[[pat tail] tail] head]))
+                  `(if [,p-type satisfies?: ,subj-sym]
+                       (let ((,p-name ,subj-sym)) ,body)
+                       ,fail-form))
+                (if (__match-where? pat)
+                    ;; `(name where pred)` — bind name, then check pred.
+                    (let ((p-name [pat head])
+                          (p-pred [[[pat tail] tail] head]))
+                      `(let ((,p-name ,subj-sym))
+                         (if ,p-pred ,body ,fail-form)))
+                    (if (__match-quote? pat)
+                        (__match-clause-quoted pat body subj-sym fail-form)
+                        ;; bare literal — equality compare.
+                        `(if [,subj-sym = ,pat] ,body ,fail-form))))))))
 
 ;; quoted patterns: the quoted value is either a Symbol (identity
 ;; compare), the empty list (nil compare), or a list (recursive
@@ -476,22 +509,53 @@
         (cons (intern ["__a" + [i toString]])
               (__defn-argnames [n - 1] [i + 1])))))
 
+;; group a flat params list into structured patterns. recognizes
+;; the multi-token clause-shapes:
+;;   `name :: Type`     — typed-pattern triple
+;;   `name where pred`  — predicate-pattern triple
+;; everything else is a single-token pattern. arity of the
+;; surrounding fn is the *count of grouped patterns*, not the raw
+;; token count.
+(def __defn-group-params
+  (fn (params)
+    (if [params empty?]
+        nil
+        (let ((p1 [params head])
+              (rest [params tail]))
+          (if [rest empty?]
+              (list p1)
+              (let ((p2 [rest head]))
+                (if (if [[p2 proto] is Symbol]
+                        (if [p2 is '::]
+                            #true
+                            [p2 is 'where])
+                        #false)
+                    (let ((rest2 [rest tail]))
+                      (if [rest2 empty?]
+                          ;; malformed — fall back to single-token.
+                          (cons p1 (__defn-group-params rest))
+                          (let ((p3 [rest2 head])
+                                (rest3 [rest2 tail]))
+                            (cons (list p1 p2 p3)
+                                  (__defn-group-params rest3)))))
+                    (cons p1 (__defn-group-params rest)))))))))
+
 ;; given a list of fn-shaped clauses ((fn (pats) body) …), produce
-;; a flat list of (quote pats) body (quote pats) body … suitable
-;; as match clauses.
+;; a flat list of (quote grouped-pats) body … suitable as match
+;; clauses. uses __defn-group-params so typed/where patterns
+;; arrive at match as recognizable triples.
 (def __defn-match-clauses
   (fn (clauses)
     (if [clauses empty?]
         nil
         (let ((clause [clauses head])
               (rest [clauses tail]))
-          ;; clause = (fn (pats…) body)
-          ;; tail   = ((pats…) body)
           (let ((params [[clause tail] head])
                 (body   [[[clause tail] tail] head]))
-            (cons (list 'quote params)
-                  (cons body
-                        (__defn-match-clauses rest))))))))
+            (let ((grouped (__defn-group-params params)))
+              (cons (list 'quote grouped)
+                    (cons body
+                          (__defn-match-clauses rest)))))))))
 
 (defmacro defn (args)
   (let ((name [args head])
@@ -500,11 +564,12 @@
         (raise: 'defn-empty "defn: must have at least one clause")
         (let ((first-clause [clauses head])
               (first-params [[[clauses head] tail] head]))
-          (let ((argnames (__defn-argnames [first-params length] 0))
-                (mclauses (__defn-match-clauses clauses)))
-            `(def ,name
-               (fn ,argnames
-                 (match (list ,@argnames) ,@mclauses))))))))
+          (let ((grouped-arity [(__defn-group-params first-params) length]))
+            (let ((argnames (__defn-argnames grouped-arity 0))
+                  (mclauses (__defn-match-clauses clauses)))
+              `(def ,name
+                 (fn ,argnames
+                   (match (list ,@argnames) ,@mclauses)))))))))
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; defmethod — moof-side macro that desugars to setHandler!.
@@ -606,6 +671,25 @@
       (if [p is nil]
           nil
           (cons p [p protos])))))
+
+;; [T satisfies?: v] — `#true` iff v's proto chain reaches T.
+;; the type-membership predicate. used by pattern matcher's
+;; typed-pattern shape `|n :: T|`. concepts/types.md.
+;;
+;; walks the chain via `:is` (identity) — `:contains?:` uses `=`
+;; which is structural and wouldn't reliably distinguish two
+;; proto-Forms whose meta tables happened to look alike.
+(setHandler! Object 'satisfies?:
+  (fn (v)
+    (__satisfies-walk self [v protos])))
+
+(def __satisfies-walk
+  (fn (target chain)
+    (if [chain is nil]
+        #false
+        (if [[chain head] is target]
+            #true
+            (__satisfies-walk target [chain tail])))))
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; Bool — convenience derived from the conditional primitive `if`.
