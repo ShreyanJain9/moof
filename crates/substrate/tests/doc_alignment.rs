@@ -666,6 +666,28 @@ fn block_sugar_does_not_eat_binary_pipe() {
 // ─────────────────────────────────────────────────────────────────
 
 #[test]
+fn let_is_a_moof_macro_now() {
+    // proof of moldability: `let` itself is registered as a moof
+    // macro (the rust special-form remains as a fallback for
+    // bootstrap forms compiled before the macro was installed).
+    // user code still writes `(let …)` and gets the expected
+    // semantics; the desugaring goes through `((fn …) …)` rather
+    // than the rust special-form path.
+    let mut w = moof::new_world();
+    // surface behavior unchanged.
+    assert_eq!(
+        moof::eval(&mut w, "(let ((a 1) (b 2)) [a + b])").unwrap(),
+        Value::Int(3)
+    );
+    // and `let` is now visible as a registered macro.
+    let let_sym = w.intern("let");
+    assert!(
+        w.macro_at(let_sym).is_some(),
+        "`let` should be registered as a macro after bootstrap"
+    );
+}
+
+#[test]
 fn user_macro_overrides_special_form() {
     // install a macro named `if-not` that desugars to `(if cond
     // else then)` (swapped branches). prove the compiler dispatches

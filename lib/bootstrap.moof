@@ -1264,3 +1264,30 @@
 ;; phase A.10's defprotocol + implement operatives will be sugar
 ;; over the setHandler! calls above. the substrate-level move is
 ;; already operational; the surface syntax catches up.
+
+;; ─────────────────────────────────────────────────────────────────
+;; let — the manifesto's "redefine a special form" claim cashed
+;; in. now lives as a moof macro, picked up by the compiler's
+;; macro-precedence path before the built-in let special-form
+;; fallback. the rust special-form remains as a safety net for
+;; any `let` compiled before this point in bootstrap.moof.
+;;
+;; desugaring:  (let ((a 1) (b 2)) body…) → ((fn (a b) body…) 1 2)
+;;
+;; `do` stays a built-in special form: `compile_fn` auto-wraps
+;; multi-form bodies in `(do …)`, and a moof `do` macro that
+;; expands to `((fn () …))` would re-trigger that wrapping and
+;; recurse. once we expose lower-level body-sequencing primitives
+;; (an internal `__do__` not subject to macro override), `do`
+;; can move too.
+;; ─────────────────────────────────────────────────────────────────
+
+(defmacro let (args)
+  (let ((bindings [args head])
+        (body [args tail]))
+    (let ((names [bindings map: |b| [b head]])
+          (vals  [bindings map: |b| [[b tail] head]]))
+      (if [[body tail] empty?]
+          ;; single-body: avoid an extra `do` wrap.
+          `((fn ,names ,[body head]) ,@vals)
+          `((fn ,names (do ,@body)) ,@vals)))))

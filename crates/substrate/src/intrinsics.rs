@@ -2038,6 +2038,14 @@ fn install_globals(w: &mut World) {
     // (append xs ys …) — concatenate lists left-to-right. used by
     // quasiquote splicing. (append) → '(); (append xs) → xs.
     install_global(w, "append", |world, _, args| {
+        // empty list is `Value::Nil`; a one-element list whose
+        // only element is `nil` is `Form(head=Nil, tail=Nil)`.
+        // iteration must distinguish those — the only termination
+        // signal is `cur` becoming `Value::Nil`. earlier code
+        // additionally broke on `head.is_nil() && tail.is_nil()`
+        // and ate the trailing nil-element; that broke
+        // `(append (list nil) …)` and quasiquote-splicing of
+        // single-nil-element lists, which match's macro relies on.
         let mut out: Vec<Value> = Vec::new();
         let head_sym = world.intern("head");
         let tail_sym = world.intern("tail");
@@ -2050,9 +2058,6 @@ fn install_globals(w: &mut World) {
                 }
                 let head = f.slot(head_sym);
                 let tail = f.slot(tail_sym);
-                if head.is_nil() && tail.is_nil() {
-                    break;
-                }
                 out.push(head);
                 cur = tail;
             }
