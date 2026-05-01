@@ -666,6 +666,22 @@ fn block_sugar_does_not_eat_binary_pipe() {
 // ─────────────────────────────────────────────────────────────────
 
 #[test]
+fn do_is_a_moof_macro_now() {
+    // `do` lives in lib/bootstrap.moof as `(cons '__do__ args)`.
+    // user code that overrides `do` re-routes (or wraps) without
+    // breaking compile_fn's auto-wrapping of multi-form bodies,
+    // which is keyed on the rust-internal `__do__` symbol.
+    let mut w = moof::new_world();
+    let do_sym = w.intern("do");
+    assert!(w.macro_at(do_sym).is_some());
+    // surface behavior: do sequences and yields the last value.
+    assert_eq!(
+        moof::eval(&mut w, "(do 1 2 3)").unwrap(),
+        Value::Int(3)
+    );
+}
+
+#[test]
 fn let_is_a_moof_macro_now() {
     // proof of moldability: `let` itself is registered as a moof
     // macro (the rust special-form remains as a fallback for

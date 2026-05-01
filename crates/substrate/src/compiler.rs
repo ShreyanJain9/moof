@@ -63,6 +63,13 @@ struct Compiler<'a> {
     if_sym: SymId,
     let_sym: SymId,
     do_sym: SymId,
+    /// internal `__do__` — the rust special-form name for body
+    /// sequencing. used by compile_fn / compile_let when wrapping
+    /// multi-form bodies, so it can't be macro-overridden by a
+    /// user-defined `do` (preventing the infinite-recursion the
+    /// naive port hit). user-facing `do` lives in
+    /// lib/bootstrap.moof as a macro that emits `__do__`.
+    do_internal_sym: SymId,
     quote_sym: SymId,
     set_sym: SymId,
     fn_sym: SymId,
@@ -80,6 +87,7 @@ impl<'a> Compiler<'a> {
         let if_sym = world.intern("if");
         let let_sym = world.intern("let");
         let do_sym = world.intern("do");
+        let do_internal_sym = world.intern("__do__");
         let quote_sym = world.intern("quote");
         let set_sym = world.intern("set!");
         let fn_sym = world.intern("fn");
@@ -100,6 +108,7 @@ impl<'a> Compiler<'a> {
             if_sym,
             let_sym,
             do_sym,
+            do_internal_sym,
             quote_sym,
             set_sym,
             fn_sym,
@@ -272,7 +281,7 @@ impl<'a> Compiler<'a> {
             // when, unless, let*, let-rec used to live as
             // hardcoded special forms here. they're now plain
             // macros in lib/bootstrap.moof.
-            if s == self.do_sym {
+            if s == self.do_sym || s == self.do_internal_sym {
                 return self.compile_do(&elems, tail);
             }
             if s == self.quote_sym {
@@ -508,7 +517,7 @@ impl<'a> Compiler<'a> {
         } else {
             // construct (do e1 e2 … eN) so multi-expression bodies
             // sequence properly.
-            let mut wrapped = vec![Value::Sym(self.do_sym)];
+            let mut wrapped = vec![Value::Sym(self.do_internal_sym)];
             wrapped.extend_from_slice(&elems[2..]);
             self.world.make_list(&wrapped)
         };
@@ -549,7 +558,7 @@ impl<'a> Compiler<'a> {
         let body_value = if elems.len() == 3 {
             elems[2]
         } else {
-            let mut wrapped = vec![Value::Sym(self.do_sym)];
+            let mut wrapped = vec![Value::Sym(self.do_internal_sym)];
             wrapped.extend_from_slice(&elems[2..]);
             self.world.make_list(&wrapped)
         };

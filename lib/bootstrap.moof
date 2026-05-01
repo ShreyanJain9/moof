@@ -1291,3 +1291,11 @@
           ;; single-body: avoid an extra `do` wrap.
           `((fn ,names ,[body head]) ,@vals)
           `((fn ,names (do ,@body)) ,@vals)))))
+
+;; (do e₁ e₂ … eₙ) — sequence body forms, value of the last.
+;; emits the rust-internal `__do__` (which compile_fn also uses
+;; when wrapping multi-form fn bodies); user code wanting to
+;; intercept `do` overrides *this* macro without triggering the
+;; compile_fn-wraps-body recursion that bit the v0 attempt.
+(defmacro do (args)
+  (cons '__do__ args))
