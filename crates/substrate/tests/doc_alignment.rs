@@ -617,6 +617,104 @@ fn intern_constructs_symbols_from_strings() {
     assert_eq!(v, Value::Sym(w.intern("at:put:")));
 }
 
+// ─────────────────────────────────────────────────────────────────
+// concepts/blocks-and-patterns.md — `match` as a moof macro.
+// ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn match_literal_int() {
+    let mut w = moof::new_world();
+    let v = moof::eval(&mut w, "(match 5 5 'matched 0 'zero)").unwrap();
+    assert_eq!(v, Value::Sym(w.intern("matched")));
+    let v = moof::eval(&mut w, "(match 0 5 'matched 0 'zero)").unwrap();
+    assert_eq!(v, Value::Sym(w.intern("zero")));
+}
+
+#[test]
+fn match_variable_binds_subject() {
+    let mut w = moof::new_world();
+    let v = moof::eval(&mut w, "(match 5 n [n + 1])").unwrap();
+    assert_eq!(v, Value::Int(6));
+}
+
+#[test]
+fn match_wildcard_falls_through() {
+    let mut w = moof::new_world();
+    let v = moof::eval(&mut w, "(match 7 0 'zero _ 'nonzero)").unwrap();
+    assert_eq!(v, Value::Sym(w.intern("nonzero")));
+}
+
+#[test]
+fn match_quoted_symbol_is_identity_compare() {
+    let mut w = moof::new_world();
+    let v = moof::eval(
+        &mut w,
+        "(match 'foo 'bar 'matched-bar 'foo 'matched-foo _ 'other)",
+    )
+    .unwrap();
+    assert_eq!(v, Value::Sym(w.intern("matched-foo")));
+}
+
+#[test]
+fn match_empty_list_pattern() {
+    let mut w = moof::new_world();
+    let v = moof::eval(&mut w, "(match nil '() 'empty _ 'cons)").unwrap();
+    assert_eq!(v, Value::Sym(w.intern("empty")));
+    let v = moof::eval(&mut w, "(match (list 1) '() 'empty _ 'cons)").unwrap();
+    assert_eq!(v, Value::Sym(w.intern("cons")));
+}
+
+#[test]
+fn match_cons_destructure() {
+    let mut w = moof::new_world();
+    // factorial via match — the canonical forcing function for
+    // pattern-matched defs (concepts/blocks-and-patterns.md).
+    moof::eval(
+        &mut w,
+        "(def fact
+           (fn (n)
+             (match n
+               0 1
+               n [n * (fact [n - 1])])))",
+    )
+    .unwrap();
+    let v = moof::eval(&mut w, "(fact 5)").unwrap();
+    assert_eq!(v, Value::Int(120));
+    // cons destructure: head/tail bindings.
+    let v = moof::eval(
+        &mut w,
+        "(match (list 1 2 3)
+           '() 'empty
+           '(h …rest) [h * 10])",
+    )
+    .unwrap();
+    assert_eq!(v, Value::Int(10));
+}
+
+#[test]
+fn match_no_clause_raises() {
+    let mut w = moof::new_world();
+    let res = moof::eval(&mut w, "(match 5 0 'zero 1 'one)");
+    assert!(res.is_err(), "match with no matching clause should raise");
+}
+
+#[test]
+fn user_can_introspect_match_macro() {
+    // moldability: `match` is a regular macro registered in the
+    // canonical Macros Form. user code can introspect it via the
+    // substrate's slot-lookup primitive.
+    let mut w = moof::new_world();
+    // sanity: it's a registered macro.
+    let match_sym = w.intern("match");
+    assert!(w.macro_at(match_sym).is_some());
+    // …and reachable from inside moof through `(slot Macros 'match)`.
+    let v = moof::eval(&mut w, "(slot Macros 'match)").unwrap();
+    let id = v.as_form_id().expect("match macro should be a Form");
+    // it's a method-Form (closure).
+    let proto = w.heap.get(id).proto;
+    assert_eq!(proto, Value::Form(w.protos.method));
+}
+
 #[test]
 fn method_ics_are_reflectable() {
     // reflection-contract.md R6: "an inline cache at a send-site

@@ -1970,6 +1970,25 @@ fn install_globals(w: &mut World) {
         Ok(world.frame_stack_snapshot())
     });
 
+    // (raise: kind message) — raise a moof-level error from inside
+    // moof. `kind` is a Symbol naming the error category; `message`
+    // is a String. caught by the same propagation machinery as
+    // rust-side raises. used by user-extensible failure paths
+    // (e.g., the `match` macro emits this when no clause matches).
+    install_global(w, "raise:", |world, _, args| {
+        if args.len() != 2 {
+            return Err(raise(world, "arity", "(raise: kind message)"));
+        }
+        let kind = args[0]
+            .as_sym()
+            .ok_or_else(|| type_error(world, "raise: kind must be a Symbol"))?;
+        let msg = world
+            .string_text(args[1])
+            .map(|s| s.to_string())
+            .ok_or_else(|| type_error(world, "raise: message must be a String"))?;
+        Err(RaiseError::new(kind, msg))
+    });
+
     // (cons head tail) — list constructor with no meaningful
     // receiver among args. lowers to `[tail cons: head]`.
     install_global(w, "cons", |world, _, args| {

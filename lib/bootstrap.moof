@@ -275,6 +275,167 @@
       `(let ,nil-bindings (do ,@sets ,@body)))))
 
 ;; ─────────────────────────────────────────────────────────────────
+;; match — pattern matching as a user-overridable macro.
+;;
+;; (match subj
+;;   pat₁ body₁
+;;   pat₂ body₂
+;;   …)
+;;
+;; v1 patterns (this file):
+;;   _              wildcard (no binding, matches anything)
+;;   <Symbol>       variable — binds the symbol to the subject
+;;   <literal>      Int / Bool / Nil / Char / Float / String —
+;;                  match by `=` (structural equality)
+;;   'sym           quoted Symbol — match by `is` (identity)
+;;   '()            the empty list (a.k.a. nil)
+;;   '(h …t)        cons destructure: bind h to head, t to tail
+;;   '(a b c)       fixed-length list: each elem matched recursively
+;;
+;; clauses are tried top-to-bottom; first match wins. fall-through
+;; with no match raises `'no-match`.
+;;
+;; the docs (`concepts/blocks-and-patterns.md`) describe richer
+;; patterns (`#[…]` table destructure, `n :: Type` ascription,
+;; `n where pred`, user-extensible Pattern protos). those layer in
+;; later — match's spine is the recursive walk below, and adding
+;; more pattern shapes is "another `if` arm in __match-clause".
+;; ─────────────────────────────────────────────────────────────────
+
+;; predicates over source-form patterns at expansion time.
+(def __match-list?
+  (fn (v)
+    (if [v is nil]
+        #true
+        [[v proto] is List])))
+
+(def __match-symbol?
+  (fn (pat)
+    [[pat proto] is Symbol]))
+
+(def __match-quote?
+  (fn (pat)
+    (if (__match-list? pat)
+        (if [pat is nil]
+            #false
+            [[pat head] is 'quote])
+        #false)))
+
+(def __match-wildcard?
+  (fn (pat)
+    (if (__match-symbol? pat)
+        [pat is '_]
+        #false)))
+
+;; given a quoted form `(quote X)`, return X.
+(def __match-quoted-value
+  (fn (pat) [[pat tail] head]))
+
+;; predicates on the *quoted value* X (which may be a literal or
+;; a list itself, when the pattern is `'(…)`).
+(def __match-quoted-empty-list?
+  (fn (pat)
+    (let ((qv (__match-quoted-value pat)))
+      [qv is nil])))
+
+(def __match-quoted-list?
+  (fn (pat)
+    (let ((qv (__match-quoted-value pat)))
+      (if [qv is nil]
+          #false
+          [[qv proto] is List]))))
+
+;; rest-marker recognition: a Symbol whose text starts with the
+;; ellipsis character `…`. moof's reader treats `…rest` as one
+;; symbol — its text is "…rest". used for cons-destructure tails.
+(def __match-rest-marker?
+  (fn (sym)
+    (if (__match-symbol? sym)
+        [[sym toString] startsWith?: "…"]
+        #false)))
+
+(def __match-rest-name
+  (fn (sym)
+    (intern [[sym toString] slice: 1 length: [[sym toString] length]])))
+
+;; compile one clause: produce a form that evaluates `body` when
+;; `pat` matches `subj-sym`, otherwise `fail-form`. recursive: list
+;; patterns split into head/tail subgoals.
+(def __match-clause
+  (fn (pat body subj-sym fail-form)
+    (if (__match-wildcard? pat)
+        body
+        (if (__match-symbol? pat)
+            ;; variable bind.
+            `(let ((,pat ,subj-sym)) ,body)
+            (if (__match-quote? pat)
+                (__match-clause-quoted pat body subj-sym fail-form)
+                ;; bare literal — equality compare.
+                `(if [,subj-sym = ,pat] ,body ,fail-form))))))
+
+;; quoted patterns: the quoted value is either a Symbol (identity
+;; compare), the empty list (nil compare), or a list (recursive
+;; destructure).
+(def __match-clause-quoted
+  (fn (pat body subj-sym fail-form)
+    (if (__match-quoted-empty-list? pat)
+        ;; '() — match nil exactly.
+        `(if [,subj-sym is nil] ,body ,fail-form)
+        (if (__match-quoted-list? pat)
+            (__match-clause-list (__match-quoted-value pat) body subj-sym fail-form)
+            ;; quoted Symbol (or other atomic) — identity compare.
+            `(if [,subj-sym is ,pat] ,body ,fail-form)))))
+
+;; destructure a cons-list pattern element-by-element. `pats` is
+;; the source-list of sub-patterns (taken from the quoted form).
+(def __match-clause-list
+  (fn (pats body subj-sym fail-form)
+    (if [pats empty?]
+        ;; reached the spine end: subject must be nil.
+        `(if [,subj-sym is nil] ,body ,fail-form)
+        (let ((p [pats head])
+              (rest [pats tail]))
+          (if (__match-rest-marker? p)
+              ;; tail-rest: bind the remaining list to a name.
+              (let ((rest-name (__match-rest-name p)))
+                `(let ((,rest-name ,subj-sym)) ,body))
+              ;; otherwise: subj must be a non-nil List; recurse on
+              ;; head and tail with fresh subject names.
+              (let ((head-sym (intern ["__mh" + [subj-sym toString]]))
+                    (tail-sym (intern ["__mt" + [subj-sym toString]])))
+                `(if (if [,subj-sym is nil]
+                         #false
+                         [[,subj-sym proto] is List])
+                     (let ((,head-sym [,subj-sym head])
+                           (,tail-sym [,subj-sym tail]))
+                       ,(__match-clause p
+                                        (__match-clause-list rest body tail-sym fail-form)
+                                        head-sym
+                                        fail-form))
+                     ,fail-form)))))))
+
+;; build the cascade of clauses. expects pat/body pairs.
+(def __match-build
+  (fn (clauses subj-sym)
+    (if [clauses empty?]
+        '(raise: 'no-match "match: no clause matched")
+        (let ((pat [clauses head])
+              (rest [clauses tail]))
+          (if [rest empty?]
+              '(raise: 'no-match "match: clauses must come in pat/body pairs")
+              (let ((body [rest head])
+                    (more [rest tail]))
+                (__match-clause pat body subj-sym
+                  (__match-build more subj-sym))))))))
+
+;; the macro itself.
+(defmacro match (args)
+  (let ((subj [args head])
+        (clauses [args tail]))
+    `(let ((__match-subj__ ,subj))
+       ,(__match-build clauses '__match-subj__))))
+
+;; ─────────────────────────────────────────────────────────────────
 ;; defmethod — moof-side macro that desugars to setHandler!.
 ;;
 ;; the header decoder mirrors the send-bracket grammar

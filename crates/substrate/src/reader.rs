@@ -1079,8 +1079,28 @@ fn read_atom(c: &mut Cursor, ctx: &mut ReadCtx) -> Result<Value, ReadError> {
         if is_delim(b) {
             break;
         }
-        text.push(b as char);
-        c.advance();
+        if b < 0x80 {
+            // ASCII fast path.
+            text.push(b as char);
+            c.advance();
+        } else {
+            // multi-byte UTF-8 codepoint. decode and advance by its
+            // byte length — matches the read_string discipline so
+            // that `'…rest` and `(intern "…rest")` produce the same
+            // symbol bytes.
+            let remaining = &c.bytes[c.pos..];
+            let decoded = std::str::from_utf8(remaining)
+                .map_err(|_| ReadError::at(c, "invalid UTF-8 in atom"))?;
+            let ch = decoded
+                .chars()
+                .next()
+                .ok_or_else(|| ReadError::at(c, "unexpected end of atom"))?;
+            let len = ch.len_utf8();
+            text.push(ch);
+            for _ in 0..len {
+                c.advance();
+            }
+        }
     }
     if text.is_empty() {
         return Err(ReadError {
