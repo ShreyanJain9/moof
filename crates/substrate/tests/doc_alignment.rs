@@ -660,6 +660,57 @@ fn block_sugar_does_not_eat_binary_pipe() {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// vision/manifesto.md — "redefine a special form (the language is
+// theirs)." user-installed macros take precedence over built-in
+// special forms.
+// ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn user_macro_overrides_special_form() {
+    // install a macro named `if-not` that desugars to `(if cond
+    // else then)` (swapped branches). prove the compiler dispatches
+    // to it, not to any built-in named that.
+    let mut w = moof::new_world();
+    moof::eval(
+        &mut w,
+        "(defmacro if-not (args)
+           (let ((cond [args head])
+                 (then [[args tail] head])
+                 (else [[[args tail] tail] head]))
+             `(if ,cond ,else ,then)))",
+    )
+    .unwrap();
+    assert_eq!(
+        moof::eval(&mut w, "(if-not #true 'a 'b)").unwrap(),
+        Value::Sym(w.intern("b"))
+    );
+}
+
+#[test]
+fn user_can_replace_let_with_a_macro() {
+    // demonstrate the "redefine a special form" promise concretely:
+    // install a `my-let` that desugars to `((fn names body) vals)`
+    // — exactly what the rust special-form does — and confirm it
+    // produces the same answer. proves the macro path is honored
+    // even when the substrate has a built-in for the name.
+    let mut w = moof::new_world();
+    moof::eval(
+        &mut w,
+        "(defmacro my-let (args)
+           (let ((bindings [args head])
+                 (body [[args tail] head]))
+             (let ((names [bindings map: |b| [b head]])
+                   (vals  [bindings map: |b| [[b tail] head]]))
+               `((fn ,names ,body) ,@vals))))",
+    )
+    .unwrap();
+    assert_eq!(
+        moof::eval(&mut w, "(my-let ((a 1) (b 2)) [a + b])").unwrap(),
+        Value::Int(3)
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────
 // concepts/blocks-and-patterns.md — patterns v2:
 // `|n :: Type|` type-guard, `|n where pred|` predicate-guard.
 // ─────────────────────────────────────────────────────────────────

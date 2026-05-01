@@ -234,61 +234,15 @@ impl<'a> Compiler<'a> {
             return Ok(());
         }
         if let Value::Sym(s) = elems[0] {
-            if s == self.if_sym {
-                return self.compile_if(&elems, tail);
-            }
-            if s == self.let_sym {
-                return self.compile_let(&elems, tail);
-            }
-            // when, unless, let*, let-rec used to live as
-            // hardcoded special forms here. they're now plain
-            // macros in lib/bootstrap.moof (the user-defined-macro
-            // path below picks them up). the substrate stays a
-            // smaller seed; the user can override or replace any
-            // of them by re-running `(defmacro …)` from inside.
-            if s == self.do_sym {
-                return self.compile_do(&elems, tail);
-            }
-            if s == self.quote_sym {
-                return self.compile_quote(&elems);
-            }
-            // quasiquote (`` ` ``), unquote (`,`), unquote-splicing
-            // (`,@`) used to be hardcoded here. they're now a moof
-            // macro `quasiquote` defined at the top of
-            // lib/bootstrap.moof. the macro's expander produces the
-            // runtime `(cons …)` / `(append …)` / `(quote …)`
-            // construction calls that this compiler then handles
-            // through the ordinary fn-call path.
+            // user-defined macros take precedence over built-in
+            // special forms. this honors the manifesto's "redefine
+            // a special form (the language is theirs)" promise:
+            // installing `(defmacro let …)` actually replaces the
+            // substrate's let, not just shadows it.
             //
-            // bare `(unquote x)` / `(unquote-splicing x)` outside a
-            // quasiquote no longer raise here — they fall through
-            // to compile_call, which will fail with "unbound
-            // `unquote`" at runtime. the docs are clear that
-            // unquote without an enclosing quasiquote is a user
-            // error; the diagnostic is now late but correct.
-            if s == self.set_sym {
-                return self.compile_set(&elems);
-            }
-            if s == self.fn_sym {
-                return self.compile_fn(&elems);
-            }
-            if s == self.def_sym {
-                return self.compile_def(&elems);
-            }
-            if s == self.send_sym {
-                return self.compile_send(&elems, tail);
-            }
-            // defproto used to be a hardcoded special form. it's
-            // now a `(defmacro defproto …)` in lib/bootstrap.moof.
-            // the user-defined-macro path below picks it up.
-            // defmethod used to be a hardcoded special form. it's
-            // now a macro in lib/bootstrap.moof — see the
-            // `(defmacro defmethod …)` there. the user-defined
-            // macro path below picks it up.
-            if s == self.defmacro_sym {
-                return self.compile_defmacro(&elems);
-            }
-            // user-defined macro? expand at compile time.
+            // bootstrap.moof loads top-to-bottom; built-in special
+            // forms used *before* a corresponding macro is
+            // registered fall through to the rust path below.
             //
             // calling convention (kernel/io tradition): macros take
             // *one* arg — the list of source-arg-forms. so for
@@ -309,9 +263,43 @@ impl<'a> Compiler<'a> {
                     .invoke(mid, Value::Nil, &[args_list], FormId::NONE)?;
                 return self.compile_expr(expanded, tail);
             }
-            // __table__ is now a moof macro in lib/bootstrap.moof.
-            // __obj__ is now a moof macro in lib/bootstrap.moof.
-            // __cascade__ is now a moof macro in lib/bootstrap.moof.
+            if s == self.if_sym {
+                return self.compile_if(&elems, tail);
+            }
+            if s == self.let_sym {
+                return self.compile_let(&elems, tail);
+            }
+            // when, unless, let*, let-rec used to live as
+            // hardcoded special forms here. they're now plain
+            // macros in lib/bootstrap.moof.
+            if s == self.do_sym {
+                return self.compile_do(&elems, tail);
+            }
+            if s == self.quote_sym {
+                return self.compile_quote(&elems);
+            }
+            // quasiquote (`` ` ``), unquote (`,`), unquote-splicing
+            // (`,@`) used to be hardcoded here. they're now a moof
+            // macro `quasiquote` defined at the top of
+            // lib/bootstrap.moof.
+            if s == self.set_sym {
+                return self.compile_set(&elems);
+            }
+            if s == self.fn_sym {
+                return self.compile_fn(&elems);
+            }
+            if s == self.def_sym {
+                return self.compile_def(&elems);
+            }
+            if s == self.send_sym {
+                return self.compile_send(&elems, tail);
+            }
+            if s == self.defmacro_sym {
+                return self.compile_defmacro(&elems);
+            }
+            // __table__ / __obj__ / __cascade__ are moof macros
+            // in lib/bootstrap.moof — picked up by the macro check
+            // above this block.
         }
         // fn-call: `(callable arg…)`
         self.compile_call(&elems, tail)
@@ -454,11 +442,13 @@ impl<'a> Compiler<'a> {
         // multi-clause shape per docs/syntax/binding-and-defs.md:
         //   (def name |pat₁| body₁ |pat₂| body₂ …)
         // the `|pats| body` reader-sugar already lowered each
-        // `|pats| body` to `(fn (pats) body)`, so multi-clause defs
-        // arrive here as `(def name (fn …) (fn …) …)`. we rewrite
-        // to `(defn name (fn …) (fn …) …)` and re-compile —
-        // `defn` is a moof macro (lib/bootstrap.moof) that emits
-        // the match-over-args expansion.
+        // `|pats| body` into a single `(fn (pats) body)` form, so
+        // multi-clause defs arrive here as
+        //   (def name (fn …) (fn …) (fn …))
+        // — N+1 elements for N clauses. we rewrite to
+        // `(defn name (fn …) (fn …) …)` and re-compile; `defn` is
+        // a moof macro (lib/bootstrap.moof) that emits the
+        // match-over-args expansion.
         if elems.len() >= 4 && self.is_multi_clause_def(elems) {
             let defn_sym = self.world.intern("defn");
             let mut rewritten = vec![Value::Sym(defn_sym)];
@@ -471,21 +461,16 @@ impl<'a> Compiler<'a> {
         ))
     }
 
-    /// detect the `|pat| body |pat| body …` shape: name followed
-    /// by an even number of (≥2) elements where every other
-    /// element starting at index 2 is a `(fn …)` form (the
-    /// reader-sugar artifact of `|pats|`).
+    /// detect the `|pat| body |pat| body …` multi-clause shape:
+    /// name followed by ≥2 elements where every element is a
+    /// `(fn …)` form (each `|pats| body` becomes one fn-form).
     fn is_multi_clause_def(&self, elems: &[Value]) -> bool {
-        // elems = [def, name, …]. body is elems[2..]. for multi-
-        // clause, body has ≥2 elements and elems[2], elems[4], …
-        // are `(fn …)` forms.
         let body = &elems[2..];
-        if body.len() < 2 || body.len() % 2 != 0 {
+        if body.len() < 2 {
             return false;
         }
-        for clause in body.chunks(2) {
-            // clause[0] should be a fn-form: a List with head 'fn.
-            let fid = match clause[0].as_form_id() {
+        for clause in body {
+            let fid = match clause.as_form_id() {
                 Some(id) => id,
                 None => return false,
             };
