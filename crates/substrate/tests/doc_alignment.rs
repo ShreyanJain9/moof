@@ -618,6 +618,65 @@ fn intern_constructs_symbols_from_strings() {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// concepts/blocks-and-patterns.md — `|args| body` block-sugar.
+// reader-side: `|x| body` lowers to `(fn (x) body)`. discriminates
+// from `[a | b]` binary-op via lookahead (no closing `|` before
+// `]` ⇒ binary-op interpretation).
+// ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn block_sugar_unary() {
+    let mut w = moof::new_world();
+    moof::eval(&mut w, "(def f |x| [x + 1])").unwrap();
+    assert_eq!(moof::eval(&mut w, "(f 5)").unwrap(), Value::Int(6));
+}
+
+#[test]
+fn block_sugar_two_args() {
+    let mut w = moof::new_world();
+    moof::eval(&mut w, "(def add |x y| [x + y])").unwrap();
+    assert_eq!(moof::eval(&mut w, "(add 3 4)").unwrap(), Value::Int(7));
+}
+
+#[test]
+fn block_sugar_nullary() {
+    let mut w = moof::new_world();
+    moof::eval(&mut w, "(def answer || 42)").unwrap();
+    assert_eq!(moof::eval(&mut w, "(answer)").unwrap(), Value::Int(42));
+}
+
+#[test]
+fn block_sugar_does_not_eat_binary_pipe() {
+    // `[a | b]` is a binary-op send (selector `|`), not a block.
+    // the lookahead must not trigger block-parse here.
+    let mut w = moof::new_world();
+    // install `|` on Integer so the send actually resolves.
+    moof::eval(
+        &mut w,
+        "(setHandler! Integer '| (fn (rhs) [self + rhs]))",
+    )
+    .unwrap();
+    assert_eq!(moof::eval(&mut w, "[3 | 4]").unwrap(), Value::Int(7));
+}
+
+#[test]
+fn block_sugar_with_match_yields_factorial_via_match() {
+    // bigger forcing function: a closure literal whose body uses
+    // match, used in a fn-call context. proves `|n| (match n …)`
+    // round-trips through the new sugar plus existing match.
+    let mut w = moof::new_world();
+    moof::eval(
+        &mut w,
+        "(def fact
+           |n| (match n
+                 0 1
+                 n [n * (fact [n - 1])]))",
+    )
+    .unwrap();
+    assert_eq!(moof::eval(&mut w, "(fact 6)").unwrap(), Value::Int(720));
+}
+
+// ─────────────────────────────────────────────────────────────────
 // concepts/blocks-and-patterns.md — `match` as a moof macro.
 // ─────────────────────────────────────────────────────────────────
 

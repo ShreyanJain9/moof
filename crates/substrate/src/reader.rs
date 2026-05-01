@@ -285,8 +285,74 @@ fn read_form(c: &mut Cursor, ctx: &mut ReadCtx) -> Result<Value, ReadError> {
         Some(b',') => read_unquote(c, ctx),
         Some(b'"') => read_string(c, ctx),
         Some(b'#') => read_hash(c, ctx),
+        Some(b'|') if looks_like_block(c) => read_block(c, ctx),
         _ => read_atom(c, ctx),
     }
+}
+
+/// `true` if the cursor is at `|` and the lookahead suggests a
+/// `|args| body` block. discriminates from the `[a | b]` binary
+/// operator: a block has a *closing* `|` before any structural
+/// terminator (`]`, `)`, `}`, `;`).
+fn looks_like_block(c: &Cursor) -> bool {
+    debug_assert_eq!(c.peek(), Some(b'|'));
+    // scan from the byte after the opening `|`.
+    let bytes = match c.bytes.get(c.pos + 1..) {
+        Some(b) => b,
+        None => return false,
+    };
+    for &b in bytes {
+        match b {
+            b'|' => return true,
+            b']' | b')' | b'}' | b';' => return false,
+            _ => continue,
+        }
+    }
+    false
+}
+
+/// `|args| body` — closure literal sugar. lowers to
+/// `(fn (args) body)`. params are read as ordinary forms (so v1
+/// supports plain names; pattern-matched params like `|0|`,
+/// `|n :: Nat|`, etc. layer on top once the block-arg pattern
+/// walker lands).
+///
+/// per `docs/concepts/blocks-and-patterns.md`:
+/// - `||`           → nullary block
+/// - `|x|`          → `(fn (x) body)`
+/// - `|x y|`        → `(fn (x y) body)`
+/// - `|x …rest|`    → `(fn (x …rest) body)` (variadic — `fn`
+///   handles the rest-marker convention)
+fn read_block(c: &mut Cursor, ctx: &mut ReadCtx) -> Result<Value, ReadError> {
+    debug_assert_eq!(c.peek(), Some(b'|'));
+    let start_line = c.line;
+    let start_col = c.col;
+    c.advance(); // consume opening `|`
+    let mut params: Vec<Value> = Vec::new();
+    loop {
+        skip_trivia(c);
+        match c.peek() {
+            Some(b'|') => {
+                c.advance();
+                break;
+            }
+            None => {
+                return Err(ReadError {
+                    message: "unterminated `|args|` block params".into(),
+                    line: start_line,
+                    col: start_col,
+                });
+            }
+            _ => {
+                params.push(read_form(c, ctx)?);
+            }
+        }
+    }
+    skip_trivia(c);
+    let body = read_form(c, ctx)?;
+    let params_list = build_list(ctx, &params);
+    let fn_sym = ctx.syms.intern("fn");
+    Ok(build_list(ctx, &[Value::Sym(fn_sym), params_list, body]))
 }
 
 fn read_list(c: &mut Cursor, ctx: &mut ReadCtx) -> Result<Value, ReadError> {
@@ -1074,9 +1140,23 @@ fn make_string_value(ctx: &mut ReadCtx, text: &str) -> Value {
 fn read_atom(c: &mut Cursor, ctx: &mut ReadCtx) -> Result<Value, ReadError> {
     let start_line = c.line;
     let start_col = c.col;
+    // pipe-character special case: `|` doubles as a binary
+    // operator (`[a | b]`) and as a block-bracket (`|x| body`).
+    // when we *start* at `|` we know we're not inside a block
+    // (read_form's looks_like_block discriminator already routed
+    // us here), so consume a maximal run of `|` chars as the
+    // operator selector. when we *encounter* `|` mid-atom, break.
+    if c.peek() == Some(b'|') {
+        let mut text = String::new();
+        while c.peek() == Some(b'|') {
+            text.push('|');
+            c.advance();
+        }
+        return Ok(Value::Sym(ctx.syms.intern(&text)));
+    }
     let mut text = String::new();
     while let Some(b) = c.peek() {
-        if is_delim(b) {
+        if is_delim(b) || b == b'|' {
             break;
         }
         if b < 0x80 {
