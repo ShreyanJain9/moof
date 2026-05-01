@@ -442,15 +442,63 @@ impl<'a> Compiler<'a> {
     }
 
     fn compile_def(&mut self, elems: &[Value]) -> Result<(), RaiseError> {
-        if elems.len() != 3 {
-            return Err(self.err("def requires 2 args: (def name expr)"));
+        // single-binding shape: (def name expr).
+        if elems.len() == 3 {
+            let name = elems[1].as_sym().ok_or_else(|| {
+                self.err("def's first arg must be a symbol")
+            })?;
+            self.compile_expr(elems[2], false)?;
+            self.emit(Op::DefineGlobal(name));
+            return Ok(());
         }
-        let name = elems[1].as_sym().ok_or_else(|| {
-            self.err("def's first arg must be a symbol")
-        })?;
-        self.compile_expr(elems[2], false)?;
-        self.emit(Op::DefineGlobal(name));
-        Ok(())
+        // multi-clause shape per docs/syntax/binding-and-defs.md:
+        //   (def name |pat₁| body₁ |pat₂| body₂ …)
+        // the `|pats| body` reader-sugar already lowered each
+        // `|pats| body` to `(fn (pats) body)`, so multi-clause defs
+        // arrive here as `(def name (fn …) (fn …) …)`. we rewrite
+        // to `(defn name (fn …) (fn …) …)` and re-compile —
+        // `defn` is a moof macro (lib/bootstrap.moof) that emits
+        // the match-over-args expansion.
+        if elems.len() >= 4 && self.is_multi_clause_def(elems) {
+            let defn_sym = self.world.intern("defn");
+            let mut rewritten = vec![Value::Sym(defn_sym)];
+            rewritten.extend_from_slice(&elems[1..]);
+            let form = self.world.make_list(&rewritten);
+            return self.compile_expr(form, false);
+        }
+        Err(self.err(
+            "def requires 2 args: (def name expr) — or multi-clause `|pat| body …` shape",
+        ))
+    }
+
+    /// detect the `|pat| body |pat| body …` shape: name followed
+    /// by an even number of (≥2) elements where every other
+    /// element starting at index 2 is a `(fn …)` form (the
+    /// reader-sugar artifact of `|pats|`).
+    fn is_multi_clause_def(&self, elems: &[Value]) -> bool {
+        // elems = [def, name, …]. body is elems[2..]. for multi-
+        // clause, body has ≥2 elements and elems[2], elems[4], …
+        // are `(fn …)` forms.
+        let body = &elems[2..];
+        if body.len() < 2 || body.len() % 2 != 0 {
+            return false;
+        }
+        for clause in body.chunks(2) {
+            // clause[0] should be a fn-form: a List with head 'fn.
+            let fid = match clause[0].as_form_id() {
+                Some(id) => id,
+                None => return false,
+            };
+            let f = self.world.heap.get(fid);
+            if f.proto != Value::Form(self.world.protos.list) {
+                return false;
+            }
+            let head = f.slot(self.world.head_sym);
+            if !matches!(head, Value::Sym(s) if s == self.fn_sym) {
+                return false;
+            }
+        }
+        true
     }
 
     fn compile_fn(&mut self, elems: &[Value]) -> Result<(), RaiseError> {

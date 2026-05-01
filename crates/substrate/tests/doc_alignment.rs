@@ -665,6 +665,26 @@ fn block_sugar_does_not_eat_binary_pipe() {
 // ─────────────────────────────────────────────────────────────────
 
 #[test]
+fn def_itself_supports_multi_clause() {
+    // syntax/binding-and-defs.md says `def` is multi-clause:
+    //   (def fact |0| 1 |n| [n * (fact [n - 1])])
+    // we implement this by detecting the multi-clause shape in
+    // the rust compiler and rerouting to the moof `defn` macro.
+    let mut w = moof::new_world();
+    moof::eval(
+        &mut w,
+        "(def fact
+           |0| 1
+           |n| [n * (fact [n - 1])])",
+    )
+    .unwrap();
+    assert_eq!(moof::eval(&mut w, "(fact 7)").unwrap(), Value::Int(5040));
+    // single-binding `def` still works (the unchanged path).
+    moof::eval(&mut w, "(def x 42)").unwrap();
+    assert_eq!(moof::eval(&mut w, "x").unwrap(), Value::Int(42));
+}
+
+#[test]
 fn defn_factorial() {
     // the canonical forcing function (concepts/blocks-and-patterns.md):
     //   (defn fact |0| 1 |n| [n * (fact [n - 1])])
