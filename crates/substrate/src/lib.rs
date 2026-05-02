@@ -37,8 +37,14 @@ pub mod world;
 /// binary so the seed boots self-contained.
 pub const BOOTSTRAP_SOURCE: &str = include_str!("../../../lib/bootstrap.moof");
 
+/// the moof-side bytecode compiler. loaded after bootstrap; defines
+/// `compile-form` and per-special-form helpers. track 3 will flip
+/// the `World::use_moof_compiler` flag so this becomes canonical.
+/// see `docs/reference/compiler-primitives.md`.
+pub const COMPILER_SOURCE: &str = include_str!("../../../lib/compiler.moof");
+
 /// build a fresh world with the phase-A intrinsics + bootstrap
-/// stdlib loaded.
+/// stdlib + moof-side compiler loaded.
 pub fn new_world() -> world::World {
     let mut w = world::World::new();
     intrinsics::install(&mut w);
@@ -46,6 +52,13 @@ pub fn new_world() -> world::World {
     // bugs, not user errors — bootstrap.moof ships with the seed.
     if let Err(e) = eval_program(&mut w, BOOTSTRAP_SOURCE) {
         panic!("bootstrap.moof failed to load: {}", e.message);
+    }
+    // load the moof-side compiler. same reasoning — substrate bug
+    // if this fails. the rust compiler stays as the bootstrap
+    // fallback (used to compile both bootstrap.moof and compiler.moof
+    // itself) until track 3 flips the canonical-path flag.
+    if let Err(e) = eval_program(&mut w, COMPILER_SOURCE) {
+        panic!("compiler.moof failed to load: {}", e.message);
     }
     w
 }

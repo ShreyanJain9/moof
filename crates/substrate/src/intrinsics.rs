@@ -2275,6 +2275,36 @@ fn install_globals(w: &mut World) {
         w.heap.get_mut(id).slots.insert(name, args[2]);
         Ok(args[2])
     });
+    // (metaSet! v 'name value) — analog of slotSet! for the meta
+    // table. used by compiler.moof to write `:source` / `:macro` /
+    // etc. metas at compile time.
+    install_global(w, "metaSet!", |w, _, args| {
+        if args.len() != 3 {
+            return Err(RaiseError::new(
+                w.intern("arity"),
+                "(meta-set! v 'name value)",
+            ));
+        }
+        let id = args[0].as_form_id().ok_or_else(|| {
+            type_error(w, "meta-set! on tagged-immediate")
+        })?;
+        let name = args[1].as_sym().ok_or_else(|| {
+            type_error(w, "meta-set!: name must be a symbol")
+        })?;
+        w.heap.get_mut(id).meta.insert(name, args[2]);
+        Ok(args[2])
+    });
+    // (globalEnv) — return the world's global env Form. used by
+    // compiler.moof's compile-defmacro to populate the method's
+    // `:env` slot, and anywhere else compile-time code needs the
+    // canonical top-level env. honors reflection-contract R6 (the
+    // env is just a Form; nothing hidden).
+    install_global(w, "globalEnv", |w, _, args| {
+        if !args.is_empty() {
+            return Err(raise(w, "arity", "(globalEnv) takes no args"));
+        }
+        Ok(Value::Form(w.global_env))
+    });
     // (getOrCreateProto 'Name Parent) — defproto's reopen helper.
     // - if Name is already bound in the global env to a Form,
     //   return that Form (reopen, preserving identity).

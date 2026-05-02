@@ -1,0 +1,401 @@
+;; compiler.moof — the moof-side bytecode compiler.
+;;
+;; loaded by `moof::new_world()` after bootstrap.moof, before any
+;; user code. defines `compile-form` plus per-special-form helpers
+;; that emit ops into a chunk via the primitives in
+;; `docs/reference/compiler-primitives.md`.
+;;
+;; per `docs/process/docs-driven.md`'s self-host rule, this file is
+;; the *canonical* compiler. the rust compiler in
+;; `crates/substrate/src/compiler.rs` stays as the bootstrap fallback
+;; until track 3 flips the `World::use_moof_compiler` flag.
+;;
+;; structure mirrors compiler.rs:
+;;   compile-form    — dispatcher: literal / symbol / list
+;;   compile-list    — list-form: macro? special form? call?
+;;   compile-quote   — (quote v)
+;;   compile-set     — (set! n v)
+;;   compile-def     — (def n v)
+;;   compile-send    — (__send__ recv sel args…)
+;;   compile-if      — (if c t e)
+;;   compile-fn      — (fn (params) body…)
+;;   compile-defmacro — (defmacro name (args) body)
+;;   compile-call    — (callable args…) — fn-call fallback.
+;;
+;; tail-position is threaded through. it controls Send vs TailSend;
+;; the rest of the cases ignore it.
+
+;; ─────────────────────────────────────────────────────────────────
+;; helpers
+;; ─────────────────────────────────────────────────────────────────
+
+(def __mc-list?
+  (fn (v)
+    (if [v is nil]
+        #true
+        [[v proto] is List])))
+
+(def __mc-symbol?
+  (fn (v)
+    [[v proto] is Symbol]))
+
+(def __mc-bool?
+  (fn (v)
+    [[v proto] is Bool]))
+
+;; macro registered in the canonical Macros Form? returns the
+;; method-Form value if so, nil otherwise. (slot returns nil when
+;; the slot is absent, and macros are always non-nil method-Forms,
+;; so this disambiguates cleanly.)
+(def __mc-macro-at
+  (fn (sym)
+    (slot Macros sym)))
+
+;; wrap multi-expression body in (do …); pass through single-expr;
+;; nil-out empty.
+(def __mc-wrap-body
+  (fn (body-forms)
+    (if [body-forms is nil]
+        nil
+        (if [[body-forms tail] is nil]
+            [body-forms head]
+            (cons 'do body-forms)))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; compile-form — the dispatcher
+;; ─────────────────────────────────────────────────────────────────
+
+(def compile-form
+  (fn (form chunk tail)
+    (if [form is nil]
+        ;; nil literal — PushNil
+        [chunk emit: [Opcode pushNil]]
+        (if (__mc-bool? form)
+            ;; PushTrue / PushFalse
+            (if form
+                [chunk emit: [Opcode pushTrue]]
+                [chunk emit: [Opcode pushFalse]])
+            (if (__mc-list? form)
+                (compile-list form chunk tail)
+                (if (__mc-symbol? form)
+                    (compile-load-name form chunk)
+                    ;; otherwise — Int / Float / Char / Foreign /
+                    ;; non-list Form (e.g. a String literal) — load
+                    ;; from the constant pool.
+                    (compile-const form chunk)))))))
+
+(def compile-const
+  (fn (form chunk)
+    (let ((idx [chunk addConst: form]))
+      [chunk emit: [Opcode loadConst: idx]])))
+
+(def compile-load-name
+  (fn (sym chunk)
+    (if [sym is 'self]
+        [chunk emit: [Opcode loadSelf]]
+        [chunk emit: [Opcode loadName: sym]])))
+
+(def compile-list
+  (fn (form chunk tail)
+    (if [form is nil]
+        ;; () → nil
+        [chunk emit: [Opcode pushNil]]
+        (let ((head [form head])
+              (rest [form tail]))
+          ;; user-defined macros take precedence over special forms
+          ;; (matching rust compiler semantics).
+          (let ((macro-method (if (__mc-symbol? head)
+                                  (__mc-macro-at head)
+                                  nil)))
+            (if [macro-method is nil]
+                ;; not a macro — try special forms, fall through to call.
+                (compile-special-or-call form head rest chunk tail)
+                ;; macro — expand and recurse.
+                (compile-form (macroexpand form) chunk tail)))))))
+
+(def compile-special-or-call
+  (fn (form head rest chunk tail)
+    (if (__mc-symbol? head)
+        (match head
+          'quote      (compile-quote rest chunk)
+          'set!       (compile-set rest chunk)
+          'def        (compile-def rest chunk)
+          '__send__   (compile-send rest chunk tail)
+          'if         (compile-if rest chunk tail)
+          'fn         (compile-fn rest chunk)
+          'defmacro   (compile-defmacro rest chunk)
+          'do         (compile-do rest chunk tail)
+          'let        (compile-let rest chunk tail)
+          _           (compile-call form chunk tail))
+        (compile-call form chunk tail))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; (quote v) — push the unevaluated form-value as a constant.
+;; ─────────────────────────────────────────────────────────────────
+
+(def compile-quote
+  (fn (rest chunk)
+    (if (if [rest is nil] #true [[rest tail] is nil])
+        ;; (quote v) has rest = (v); [rest head] is v.
+        ;; (quote) is malformed, but match rust: load nil.
+        (let ((v (if [rest is nil] nil [rest head])))
+          (let ((idx [chunk addConst: v]))
+            [chunk emit: [Opcode loadConst: idx]]))
+        (raise: 'compile-error "quote requires 1 arg: (quote v)"))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; (set! name expr) — eval expr, StoreName name.
+;; ─────────────────────────────────────────────────────────────────
+
+(def compile-set
+  (fn (rest chunk)
+    (let ((name [rest head])
+          (expr [[rest tail] head]))
+      (if (__mc-symbol? name)
+          (do
+            (compile-form expr chunk #false)
+            [chunk emit: [Opcode storeName: name]])
+          (raise: 'compile-error "set! first arg must be a symbol")))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; (def name expr) — eval expr, DefineGlobal name.
+;;
+;; only handles single-binding shape. multi-clause defs go through
+;; the `defn` macro at the call site (it's already in bootstrap.moof
+;; and rewrites to a single-binding (def name (fn …))).
+;; ─────────────────────────────────────────────────────────────────
+
+(def compile-def
+  (fn (rest chunk)
+    (let ((name [rest head])
+          (rhs [[rest tail] head]))
+      (if (__mc-symbol? name)
+          (do
+            (compile-form rhs chunk #false)
+            [chunk emit: [Opcode defineGlobal: name]])
+          (raise: 'compile-error "def first arg must be a symbol")))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; (__send__ receiver 'selector args…) — emit Send / SuperSend /
+;; TailSend.
+;; ─────────────────────────────────────────────────────────────────
+
+(def compile-send
+  (fn (rest chunk tail)
+    (let ((receiver [rest head])
+          (selector [[rest tail] head])
+          (args [[rest tail] tail]))
+      (if (__mc-symbol? selector)
+          (let ((is-super (if (__mc-symbol? receiver)
+                              [receiver is 'super]
+                              #false)))
+            ;; super: receiver is implicit (uses self_ at runtime).
+            ;; otherwise: push receiver first.
+            (if is-super
+                nil
+                (compile-form receiver chunk #false))
+            ;; push args.
+            (compile-form-list-as-args args chunk)
+            ;; emit the right send op.
+            (let ((argc [args length]))
+              (if is-super
+                  (let ((ic [chunk addIc]))
+                    [chunk emit: [Opcode superSend: selector
+                                         argc: argc
+                                         ic: ic]])
+                  (if tail
+                      [chunk emit: [Opcode tailSend: selector
+                                           argc: argc]]
+                      (let ((ic [chunk addIc]))
+                        [chunk emit: [Opcode send: selector
+                                             argc: argc
+                                             ic: ic]])))))
+          (raise: 'compile-error "__send__ selector must be a symbol")))))
+
+;; helper: walk a list of arg-forms and compile each in non-tail
+;; position. used by __send__ and the call path.
+(def compile-form-list-as-args
+  (fn (args chunk)
+    (if [args is nil]
+        nil
+        (do
+          (compile-form [args head] chunk #false)
+          (compile-form-list-as-args [args tail] chunk)))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; (if cond then [else]) — JumpIfFalse + Jump pair with patched
+;; offsets.
+;; ─────────────────────────────────────────────────────────────────
+
+(def compile-if
+  (fn (rest chunk tail)
+    (let ((cond-form [rest head])
+          (then-form [[rest tail] head])
+          (else-form (if [[[rest tail] tail] is nil]
+                         nil
+                         [[[rest tail] tail] head])))
+      ;; cond — non-tail.
+      (compile-form cond-form chunk #false)
+      ;; placeholder: jmp-to-else-if-false.
+      (let ((j-else [chunk emit: [Opcode jumpIfFalse: 0]]))
+        ;; then — tail iff if was tail.
+        (compile-form then-form chunk tail)
+        ;; placeholder: jmp-to-end.
+        (let ((j-end [chunk emit: [Opcode jump: 0]]))
+          ;; patch j-else to land here (start of else block).
+          [chunk patchJump: j-else to: [chunk jumpTarget]]
+          ;; else.
+          (compile-form else-form chunk tail)
+          ;; patch j-end to land here.
+          [chunk patchJump: j-end to: [chunk jumpTarget]])))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; (fn (params…) body…) — alloc sub-chunk, compile body in tail
+;; position, emit PushClosure.
+;; ─────────────────────────────────────────────────────────────────
+
+(def compile-fn
+  (fn (rest chunk)
+    (let ((params [rest head])
+          (body-forms [rest tail]))
+      (let ((body (__mc-wrap-body body-forms)))
+        (let ((sub-chunk [Chunk new: params source: body]))
+          (compile-form body sub-chunk #true)
+          [sub-chunk emit: [Opcode return]]
+          [chunk emit: [Opcode pushClosure: sub-chunk]])))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; (do e1 … eN) — compile each in sequence, popping intermediate
+;; values; last expression carries the form's value.
+;; ─────────────────────────────────────────────────────────────────
+
+(def compile-do
+  (fn (rest chunk tail)
+    (if [rest is nil]
+        ;; (do) → nil
+        [chunk emit: [Opcode pushNil]]
+        (compile-do-loop rest chunk tail))))
+
+(def compile-do-loop
+  (fn (forms chunk tail)
+    (let ((expr [forms head])
+          (rest [forms tail]))
+      (if [rest is nil]
+          ;; last expression — preserve its value, tail iff outer.
+          (compile-form expr chunk tail)
+          ;; not last — non-tail, then pop.
+          (do
+            (compile-form expr chunk #false)
+            [chunk emit: [Opcode pop]]
+            (compile-do-loop rest chunk tail))))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; (let ((a v1) (b v2) …) body…) — desugars to ((fn (a b…) body) v1 v2…).
+;;
+;; note: bootstrap.moof installs `let` as a macro that expands the
+;; same way, so when compile-list sees `(let …)` and looks it up in
+;; Macros, it's found and we go through the macro path. this branch
+;; is reachable only if `let` is *removed* from Macros (e.g. during
+;; bootstrap of a fresh world). we keep it as a fallback so the
+;; moof compiler doesn't depend on bootstrap state.
+;; ─────────────────────────────────────────────────────────────────
+
+(def compile-let
+  (fn (rest chunk tail)
+    (let ((bindings [rest head])
+          (body-forms [rest tail]))
+      ;; collect param-syms and value-forms in parallel.
+      (let ((params (__mc-let-params bindings))
+            (values (__mc-let-values bindings))
+            (body (__mc-wrap-body body-forms)))
+        ;; build the sub-chunk for the body.
+        (let ((sub-chunk [Chunk new: params source: body]))
+          (compile-form body sub-chunk #true)
+          [sub-chunk emit: [Opcode return]]
+          ;; push closure, then evaluate each value, then call.
+          [chunk emit: [Opcode pushClosure: sub-chunk]]
+          (compile-form-list-as-args values chunk)
+          (let ((argc [values length]))
+            (if tail
+                [chunk emit: [Opcode tailSend: 'call argc: argc]]
+                (let ((ic [chunk addIc]))
+                  [chunk emit: [Opcode send: 'call
+                                       argc: argc
+                                       ic: ic]]))))))))
+
+(def __mc-let-params
+  (fn (bindings)
+    (if [bindings is nil]
+        nil
+        (cons [[bindings head] head]
+              (__mc-let-params [bindings tail])))))
+
+(def __mc-let-values
+  (fn (bindings)
+    (if [bindings is nil]
+        nil
+        (cons [[[bindings head] tail] head]
+              (__mc-let-values [bindings tail])))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; (defmacro name (args-list-name) body) — compile body to a chunk,
+;; wrap as a method-Form, register in Macros eagerly so subsequent
+;; forms in the same chunk see it. emits at runtime: bind `name`
+;; globally (for reflection) and push nil as the form's value.
+;; ─────────────────────────────────────────────────────────────────
+
+(def compile-defmacro
+  (fn (rest chunk)
+    (let ((name [rest head])
+          (params-list [[rest tail] head])
+          (body [[[rest tail] tail] head]))
+      ;; sub-chunk for the body, in tail position.
+      (let ((sub-chunk [Chunk new: params-list source: body]))
+        (compile-form body sub-chunk #true)
+        [sub-chunk emit: [Opcode return]]
+        ;; build a method-Form wrapping the sub-chunk.
+        (let ((method [Method new]))
+          (slotSet! method 'body sub-chunk)
+          (slotSet! method 'params params-list)
+          (slotSet! method 'env (globalEnv))
+          (metaSet! method 'source params-list)
+          (metaSet! method 'macro name)
+          ;; eagerly register in the canonical Macros form so that
+          ;; subsequent forms in this same chunk can use the macro.
+          (slotSet! Macros name method)
+          ;; emit runtime ops: bind `name` globally + push nil.
+          (let ((idx [chunk addConst: method]))
+            [chunk emit: [Opcode loadConst: idx]])
+          [chunk emit: [Opcode defineGlobal: name]]
+          [chunk emit: [Opcode pushNil]])))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; (callable arg…) — fn-call fallback. lowers to `[callable call: arg…]`.
+;; ─────────────────────────────────────────────────────────────────
+
+(def compile-call
+  (fn (form chunk tail)
+    (let ((callable [form head])
+          (args [form tail]))
+      (compile-form callable chunk #false)
+      (compile-form-list-as-args args chunk)
+      (let ((argc [args length]))
+        (if tail
+            [chunk emit: [Opcode tailSend: 'call argc: argc]]
+            (let ((ic [chunk addIc]))
+              [chunk emit: [Opcode send: 'call
+                                   argc: argc
+                                   ic: ic]]))))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; testing helper: compile + run a top-level form. takes the
+;; source-form (already parsed by the rust reader), produces a value.
+;; this is the moof-side analogue of `crate::eval`.
+;; ─────────────────────────────────────────────────────────────────
+
+(def __mc-compile-and-run
+  (fn (form)
+    (let ((c [Chunk new: '() source: form]))
+      (compile-form form c #true)
+      [c emit: [Opcode return]]
+      [[c asClosure] call])))
