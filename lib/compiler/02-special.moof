@@ -1,0 +1,123 @@
+;; compiler/02-special.moof — special forms: quote, set!, def
+;; (+ multi-clause helpers), __send__, compileArgs.
+;;
+;; depends on: 00-helpers.moof (Compiler + predicates),
+;;             01-dispatch.moof (compileForm).
+
+;; ─────────────────────────────────────────────────────────────────
+;; compileQuote:chunk: — push the unevaluated form-value as a constant.
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! Compiler 'compileQuote:chunk:
+  (fn (rest chunk)
+    (if (if (__list-empty? rest) #true (__list-empty? (__list-cdr rest)))
+        ;; (quote v) has rest = (v); (__list-car rest) is v.
+        ;; (quote) is malformed, but match rust: load nil.
+        (let ((v (if (__list-empty? rest) nil (__list-car rest))))
+          (let ((idx [chunk addConst: v]))
+            [chunk emit: [Opcode loadConst: idx]]))
+        (raise: 'compile-error "quote requires 1 arg: (quote v)"))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; compileSet:chunk: — eval expr, StoreName name.
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! Compiler 'compileSet:chunk:
+  (fn (rest chunk)
+    (let ((name (__list-car rest))
+          (expr (__list-car (__list-cdr rest))))
+      (if [self symbol?: name]
+          (do
+            [self compileForm: expr chunk: chunk tail: #false]
+            [chunk emit: [Opcode storeName: name]])
+          (raise: 'compile-error "set! first arg must be a symbol")))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; compileDef:chunk:
+;;
+;; (def name expr)        — single binding: eval expr, DefineGlobal.
+;; (def name |p| b |p| b…) — multi-clause: reroute to `defn` macro.
+;; ─────────────────────────────────────────────────────────────────
+
+;; predicate: rest = (name clause₁ clause₂ …) where clauseᵢ is a
+;; `(fn …)` form. matches rust's `is_multi_clause_def`.
+(setHandler! Compiler 'multiClauseDef?:
+  (fn (rest)
+    (let ((tailAfterName (__list-cdr rest)))
+      (if (__list-empty? tailAfterName)
+          #false
+          (if (__list-empty? (__list-cdr tailAfterName))
+              #false
+              [self allFnForms?: tailAfterName])))))
+
+(setHandler! Compiler 'allFnForms?:
+  (fn (clauses)
+    (if (__list-empty? clauses)
+        #true
+        (let ((c (__list-car clauses)))
+          (if [self cons?: c]
+              (if (__list-empty? c)
+                  #false
+                  (let ((head (__list-car c)))
+                    (if [head is 'fn]
+                        [self allFnForms?: (__list-cdr clauses)]
+                        #false)))
+              #false)))))
+
+(setHandler! Compiler 'compileDef:chunk:
+  (fn (rest chunk)
+    (if [self multiClauseDef?: rest]
+        ;; rewrite to (defn name fn₁ fn₂ …) and recompile.
+        [self compileForm: (cons 'defn rest) chunk: chunk tail: #false]
+        (let ((name (__list-car rest))
+              (rhs (__list-car (__list-cdr rest))))
+          (if [self symbol?: name]
+              (do
+                [self compileForm: rhs chunk: chunk tail: #false]
+                [chunk emit: [Opcode defineGlobal: name]])
+              (raise: 'compile-error "def first arg must be a symbol"))))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; compileSend:chunk:tail:
+;; (__send__ receiver 'selector args…) — emit Send / SuperSend /
+;; TailSend.
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! Compiler 'compileSend:chunk:tail:
+  (fn (rest chunk tail)
+    (let ((receiver (__list-car rest))
+          (selector (__list-car (__list-cdr rest)))
+          (args (__list-cdr (__list-cdr rest))))
+      (if [self symbol?: selector]
+          (let ((isSuper (if [self symbol?: receiver]
+                             [receiver is 'super]
+                             #false)))
+            ;; super: receiver is implicit (uses self_ at runtime).
+            (if isSuper
+                nil
+                [self compileForm: receiver chunk: chunk tail: #false])
+            [self compileArgs: args chunk: chunk]
+            ;; ic slot reserved unconditionally (matches rust's
+            ;; `next_ic()` discipline) — chunk_ics byte-identity.
+            (let ((argc (__list-length args))
+                  (ic [chunk addIc]))
+              (if isSuper
+                  [chunk emit: [Opcode superSend: selector
+                                       argc: argc
+                                       ic: ic]]
+                  (if tail
+                      [chunk emit: [Opcode tailSend: selector argc: argc]]
+                      [chunk emit: [Opcode send: selector
+                                           argc: argc
+                                           ic: ic]]))))
+          (raise: 'compile-error "__send__ selector must be a symbol")))))
+
+;; helper: walk a list of arg-forms and compile each in non-tail
+;; position. used by compileSend and compileCall.
+(setHandler! Compiler 'compileArgs:chunk:
+  (fn (args chunk)
+    (if (__list-empty? args)
+        nil
+        (do
+          [self compileForm: (__list-car args) chunk: chunk tail: #false]
+          [self compileArgs: (__list-cdr args) chunk: chunk]))))

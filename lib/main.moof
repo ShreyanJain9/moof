@@ -8,7 +8,10 @@
 ;; stdlib/ subtrees and grow the load list accordingly.
 
 ;; phase 1: the moof compiler — compiled by the rust seed.
-[$transporter load: "compiler.moof"]
+[$transporter load: "compiler/00-helpers.moof"]
+[$transporter load: "compiler/01-dispatch.moof"]
+[$transporter load: "compiler/02-special.moof"]
+[$transporter load: "compiler/03-control.moof"]
 
 ;; flip — every subsequent compile routes through the Compiler singleton.
 [$compiler useMoof]

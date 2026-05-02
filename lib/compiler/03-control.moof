@@ -1,0 +1,175 @@
+;; compiler/03-control.moof — control flow + closure construction:
+;; if, fn, do, let, defmacro, compileCall, plus the
+;; __mc-compile-and-run test helper.
+;;
+;; depends on: 00-helpers.moof (Compiler + wrapBody:),
+;;             01-dispatch.moof (compileForm),
+;;             02-special.moof (compileArgs).
+
+;; ─────────────────────────────────────────────────────────────────
+;; compileIf:chunk:tail:
+;; (if cond then [else]) — JumpIfFalse + Jump pair, offsets patched.
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! Compiler 'compileIf:chunk:tail:
+  (fn (rest chunk tail)
+    (let ((condForm (__list-car rest))
+          (thenForm (__list-car (__list-cdr rest)))
+          (elseForm (if (__list-empty? (__list-cdr (__list-cdr rest)))
+                        nil
+                        (__list-car (__list-cdr (__list-cdr rest))))))
+      ;; cond — non-tail.
+      [self compileForm: condForm chunk: chunk tail: #false]
+      ;; placeholder: jmp-to-else-if-false.
+      (let ((jElse [chunk emit: [Opcode jumpIfFalse: 0]]))
+        ;; then — tail iff if was tail.
+        [self compileForm: thenForm chunk: chunk tail: tail]
+        ;; placeholder: jmp-to-end.
+        (let ((jEnd [chunk emit: [Opcode jump: 0]]))
+          ;; patch j-else to land here (start of else block).
+          [chunk patchJump: jElse to: [chunk jumpTarget]]
+          ;; else.
+          [self compileForm: elseForm chunk: chunk tail: tail]
+          ;; patch j-end to land here.
+          [chunk patchJump: jEnd to: [chunk jumpTarget]])))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; compileFn:chunk:
+;; (fn (params…) body…) — alloc sub-chunk, compile body in tail
+;; position, emit PushClosure.
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! Compiler 'compileFn:chunk:
+  (fn (rest chunk)
+    (let ((params (__list-car rest))
+          (bodyForms (__list-cdr rest)))
+      (let ((body [self wrapBody: bodyForms]))
+        (let ((subChunk [Chunk new: params source: body]))
+          [self compileForm: body chunk: subChunk tail: #true]
+          [subChunk emit: [Opcode return]]
+          [chunk emit: [Opcode pushClosure: subChunk]])))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; compileDo:chunk:tail:
+;; (do e1 … eN) — sequence body forms; pop intermediate values; last
+;; expression carries the form's value.
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! Compiler 'compileDo:chunk:tail:
+  (fn (rest chunk tail)
+    (if (__list-empty? rest)
+        [chunk emit: [Opcode pushNil]]
+        [self compileDoLoop: rest chunk: chunk tail: tail])))
+
+(setHandler! Compiler 'compileDoLoop:chunk:tail:
+  (fn (forms chunk tail)
+    (let ((expr (__list-car forms))
+          (rest (__list-cdr forms)))
+      (if (__list-empty? rest)
+          ;; last expression — preserve its value, tail iff outer.
+          [self compileForm: expr chunk: chunk tail: tail]
+          ;; not last — non-tail, then pop.
+          (do
+            [self compileForm: expr chunk: chunk tail: #false]
+            [chunk emit: [Opcode pop]]
+            [self compileDoLoop: rest chunk: chunk tail: tail])))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; compileLet:chunk:tail:
+;; (let ((a v1) (b v2) …) body…) — desugars to ((fn (a b…) body) v1 v2…).
+;;
+;; bootstrap.moof installs `let` as a macro that expands the same
+;; way; this handler is the fallback for when the macro isn't yet
+;; registered (during compiler.moof's own load).
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! Compiler 'compileLet:chunk:tail:
+  (fn (rest chunk tail)
+    (let ((bindings (__list-car rest))
+          (bodyForms (__list-cdr rest)))
+      (let ((params [self letParams: bindings])
+            (values [self letValues: bindings])
+            (body [self wrapBody: bodyForms]))
+        (let ((subChunk [Chunk new: params source: body]))
+          [self compileForm: body chunk: subChunk tail: #true]
+          [subChunk emit: [Opcode return]]
+          [chunk emit: [Opcode pushClosure: subChunk]]
+          [self compileArgs: values chunk: chunk]
+          (let ((argc (__list-length values))
+                (ic [chunk addIc]))
+            (if tail
+                [chunk emit: [Opcode tailSend: 'call argc: argc]]
+                [chunk emit: [Opcode send: 'call argc: argc ic: ic]])))))))
+
+(setHandler! Compiler 'letParams:
+  (fn (bindings)
+    (if (__list-empty? bindings)
+        nil
+        (cons (__list-car (__list-car bindings))
+              [self letParams: (__list-cdr bindings)]))))
+
+(setHandler! Compiler 'letValues:
+  (fn (bindings)
+    (if (__list-empty? bindings)
+        nil
+        (cons (__list-car (__list-cdr (__list-car bindings)))
+              [self letValues: (__list-cdr bindings)]))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; compileDefmacro:chunk:
+;; (defmacro name (args-list-name) body) — compile body to a chunk,
+;; wrap as a method-Form, register in Macros eagerly so subsequent
+;; forms in the same chunk see it. emits at runtime: bind `name`
+;; globally (for reflection) and push nil as the form's value.
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! Compiler 'compileDefmacro:chunk:
+  (fn (rest chunk)
+    (let ((name (__list-car rest))
+          (paramsList (__list-car (__list-cdr rest)))
+          (body (__list-car (__list-cdr (__list-cdr rest)))))
+      ;; sub-chunk for the body, in tail position.
+      (let ((subChunk [Chunk new: paramsList source: body]))
+        [self compileForm: body chunk: subChunk tail: #true]
+        [subChunk emit: [Opcode return]]
+        ;; build a method-Form wrapping the sub-chunk.
+        (let ((method [Method new]))
+          (slotSet! method 'body subChunk)
+          (slotSet! method 'params paramsList)
+          (slotSet! method 'env (globalEnv))
+          (metaSet! method 'source paramsList)
+          (metaSet! method 'macro name)
+          ;; eagerly register in the canonical Macros form.
+          (slotSet! Macros name method)
+          ;; emit runtime ops: bind `name` globally + push nil.
+          (let ((idx [chunk addConst: method]))
+            [chunk emit: [Opcode loadConst: idx]])
+          [chunk emit: [Opcode defineGlobal: name]]
+          [chunk emit: [Opcode pushNil]])))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; compileCall:chunk:tail:
+;; (callable arg…) — fn-call fallback. lowers to `[callable call: arg…]`.
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! Compiler 'compileCall:chunk:tail:
+  (fn (form chunk tail)
+    (let ((callable (__list-car form))
+          (args (__list-cdr form)))
+      [self compileForm: callable chunk: chunk tail: #false]
+      [self compileArgs: args chunk: chunk]
+      (let ((argc (__list-length args))
+            (ic [chunk addIc]))
+        (if tail
+            [chunk emit: [Opcode tailSend: 'call argc: argc]]
+            [chunk emit: [Opcode send: 'call argc: argc ic: ic]])))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; testing helper: compile a top-level form and run it. used by
+;; tests/moof_compiler.rs. lives at toplevel (not on Compiler) so
+;; the test harness can `env_lookup` it directly.
+;; ─────────────────────────────────────────────────────────────────
+
+(def __mc-compile-and-run
+  (fn (form)
+    [[[Compiler compileTop: form] asClosure] call]))

@@ -1,0 +1,81 @@
+;; compiler/00-helpers.moof — the Compiler singleton + small helpers
+;; (predicates, macroAt:, wrapBody:).
+;;
+;; loaded first by main.moof. defines `Compiler` (a singleton object
+;; hosting every compile-* method) plus the small utility methods
+;; internal to Compiler that the later files depend on.
+;;
+;; original file-level context (from compiler.moof):
+;;
+;; loaded by `moof::new_world()` after the rust intrinsics, *before*
+;; bootstrap.moof. defines `Compiler` (a singleton object hosting
+;; every compile-* method) plus the per-special-form helpers that
+;; emit ops into a chunk via the primitives in
+;; `docs/reference/compiler-primitives.md`.
+;;
+;; per `docs/process/docs-driven.md`'s self-host rule, this file is
+;; the *canonical* compiler. the rust seed in
+;; `crates/substrate/src/compiler.rs` stays as the bootstrap
+;; fallback that gets THIS file loaded; once compiler.moof's defs
+;; land, `World.use_moof_compiler` flips and every subsequent
+;; compile (including bootstrap.moof) routes through here.
+;;
+;; design — modules-as-singletons.
+;;   instead of a forest of top-level `(def compile-* …)`,
+;;   everything lives as methods on the `Compiler` singleton.
+;;   so `[Compiler compileTop: form]` rather than `(compile-top
+;;   form)`, and inside method bodies it's `[self compileForm: f
+;;   chunk: c tail: t]`.
+;;
+;;   compiler.moof predates the `defmethod` macro (which is defined
+;;   in bootstrap.moof, AFTER this file loads), so we use raw
+;;   `setHandler!` here. cosmetics layer: this file pays the
+;;   setHandler! tax to bootstrap; everything that loads after
+;;   gets the prettier defmethod surface.
+;;
+;; the public api the rust shim cares about is exactly one method:
+;;   [Compiler compileTop: form]   →   chunk-Form
+;; (see crates/substrate/src/compiler.rs `compile_via_moof`).
+;;
+;; tail-position is threaded through. it controls Send vs TailSend;
+;; the rest of the cases ignore it.
+
+(def Compiler [Object new])
+
+;; ─────────────────────────────────────────────────────────────────
+;; helpers — predicates and small utilities. internal to Compiler;
+;; the rust shim never calls these directly.
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! Compiler 'cons?:
+  (fn (v)
+    ;; nil identity — `cons?:` is a *type predicate*; v can be any
+    ;; value, and nil is a valid empty-list terminus, hence #true.
+    ;; not (__list-empty? v) because v isn't constrained to be a list.
+    (if [v is nil]
+        #true
+        [[v proto] is Cons])))
+
+(setHandler! Compiler 'symbol?:
+  (fn (v)
+    [[v proto] is Symbol]))
+
+(setHandler! Compiler 'bool?:
+  (fn (v)
+    [[v proto] is Bool]))
+
+;; macro registered in the canonical Macros Form? returns the
+;; method-Form value if so, nil otherwise.
+(setHandler! Compiler 'macroAt:
+  (fn (sym)
+    (slot Macros sym)))
+
+;; wrap multi-expression body in (do …); pass through single-expr;
+;; nil-out empty.
+(setHandler! Compiler 'wrapBody:
+  (fn (bodyForms)
+    (if (__list-empty? bodyForms)
+        nil
+        (if (__list-empty? (__list-cdr bodyForms))
+            (__list-car bodyForms)
+            (cons 'do bodyForms)))))

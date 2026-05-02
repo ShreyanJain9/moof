@@ -1,0 +1,94 @@
+;; compiler/01-dispatch.moof — the form dispatcher: compileTop,
+;; compileForm, compileList, compileConst, compileLoadName,
+;; compileSpecialOrCall.
+;;
+;; depends on: 00-helpers.moof (Compiler singleton + predicates).
+
+;; ─────────────────────────────────────────────────────────────────
+;; compileTop: form  — the canonical entry. allocate a fresh chunk,
+;; compile in tail position, emit Return, return the chunk-Form.
+;; the rust shim calls this when `use_moof_compiler` is on.
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! Compiler 'compileTop:
+  (fn (form)
+    (let ((c [Chunk new: '() source: form]))
+      [self compileForm: form chunk: c tail: #true]
+      [c emit: [Opcode return]]
+      c)))
+
+;; ─────────────────────────────────────────────────────────────────
+;; compileForm:chunk:tail: — the dispatcher. literal / symbol /
+;; list, with macro lookup via `[self macroAt: sym]` for list-heads.
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! Compiler 'compileForm:chunk:tail:
+  (fn (form chunk tail)
+    ;; nil identity — `form` is the general dispatch input (int,
+    ;; symbol, bool, cons, …); the nil singleton needs its own arm
+    ;; that emits pushNil. not list-emptiness.
+    (if [form is nil]
+        [chunk emit: [Opcode pushNil]]
+        (if [self bool?: form]
+            (if form
+                [chunk emit: [Opcode pushTrue]]
+                [chunk emit: [Opcode pushFalse]])
+            (if [self cons?: form]
+                [self compileList: form chunk: chunk tail: tail]
+                (if [self symbol?: form]
+                    [self compileLoadName: form chunk: chunk]
+                    ;; Int / Float / Char / Foreign / non-list Form
+                    ;; (e.g. a String literal) — load from the
+                    ;; constant pool.
+                    [self compileConst: form chunk: chunk]))))))
+
+(setHandler! Compiler 'compileConst:chunk:
+  (fn (form chunk)
+    (let ((idx [chunk addConst: form]))
+      [chunk emit: [Opcode loadConst: idx]])))
+
+(setHandler! Compiler 'compileLoadName:chunk:
+  (fn (sym chunk)
+    (if [sym is 'self]
+        [chunk emit: [Opcode loadSelf]]
+        [chunk emit: [Opcode loadName: sym]])))
+
+(setHandler! Compiler 'compileList:chunk:tail:
+  (fn (form chunk tail)
+    (if (__list-empty? form)
+        ;; () → nil
+        [chunk emit: [Opcode pushNil]]
+        (let ((head (__list-car form)))
+          ;; user-defined macros take precedence over special forms
+          ;; (matching the macro-precedence-flip in commit ddd54e4).
+          (let ((macroMethod (if [self symbol?: head]
+                                 [self macroAt: head]
+                                 nil)))
+            (if [macroMethod is nil]
+                ;; not a macro — try special forms, fall through to call.
+                [self compileSpecialOrCall: form chunk: chunk tail: tail]
+                ;; macro — expand and recurse.
+                [self compileForm: (macroexpand form)
+                         chunk: chunk
+                         tail: tail]))))))
+
+;; nested-if dispatch (rather than `match`) so compiler.moof has
+;; *zero* macro dependencies — and the rust seed compiler can drop
+;; its own user-macro expansion. once the flag flips and the moof
+;; compiler takes over, `match` is back on the table for user code.
+(setHandler! Compiler 'compileSpecialOrCall:chunk:tail:
+  (fn (form chunk tail)
+    (let ((head (__list-car form))
+          (rest (__list-cdr form)))
+      (if [self symbol?: head]
+          (if [head is 'quote]    [self compileQuote: rest chunk: chunk]
+          (if [head is 'set!]     [self compileSet: rest chunk: chunk]
+          (if [head is 'def]      [self compileDef: rest chunk: chunk]
+          (if [head is '__send__] [self compileSend: rest chunk: chunk tail: tail]
+          (if [head is 'if]       [self compileIf: rest chunk: chunk tail: tail]
+          (if [head is 'fn]       [self compileFn: rest chunk: chunk]
+          (if [head is 'defmacro] [self compileDefmacro: rest chunk: chunk]
+          (if [head is 'do]       [self compileDo: rest chunk: chunk tail: tail]
+          (if [head is 'let]      [self compileLet: rest chunk: chunk tail: tail]
+          [self compileCall: form chunk: chunk tail: tail])))))))))
+          [self compileCall: form chunk: chunk tail: tail]))))
