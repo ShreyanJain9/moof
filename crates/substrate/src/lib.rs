@@ -35,57 +35,51 @@ pub mod vm;
 pub mod wasm;
 pub mod world;
 
-/// the moof-side bootstrap stdlib. embedded in the substrate
-/// binary so the seed boots self-contained.
-pub const BOOTSTRAP_SOURCE: &str = include_str!("../../../lib/bootstrap.moof");
-
-/// the moof-side bytecode compiler. loaded after bootstrap; defines
-/// `compile-form` and per-special-form helpers. track 3 will flip
-/// the `World::use_moof_compiler` flag so this becomes canonical.
-/// see `docs/reference/compiler-primitives.md`.
-pub const COMPILER_SOURCE: &str = include_str!("../../../lib/compiler.moof");
-
-/// build a fresh world with the phase-A intrinsics, the moof-side
-/// compiler, and the bootstrap stdlib loaded — in that order.
+/// build a fresh world with the phase-A intrinsics, the $transporter
+/// cap populated, and `lib/main.moof` loaded — which itself orchestrates
+/// loading the rest of the std lib.
 ///
 /// the boot dance, per `docs/process/self-hosted-compiler.md`:
 ///
 /// 1. rust intrinsics (heap, OS i/o, arithmetic primitives, the
-///    chunk-construction api, etc).
-/// 2. **rust compiler compiles `compiler.moof`.** the rust
-///    compiler is sized to handle exactly the special forms that
-///    file uses: `def`, `fn`, `if`, `let`, `do`, `quote`,
-///    `__send__`. nothing else.
-/// 3. flip `use_moof_compiler` — from this point, every compile
-///    routes through moof's `compile-top`.
-/// 4. **moof compiler compiles `bootstrap.moof`.** all the macros
-///    (`when`, `match`, `defn`, `defmethod`, `defproto`, …) and
-///    method installations land via the canonical compiler.
+///    chunk-construction api, the `$transporter` and `$compiler` caps).
+/// 2. resolve the lib root via `transporter::resolve_lib_root` and
+///    bind it on `World.transporter_root`.
+/// 3. read `<root>/main.moof`. main.moof drives:
+///    a. `[$transporter load: "compiler.moof"]` — seed-compiled.
+///    b. `[$compiler useMoof]` — flag flip.
+///    c. `[$transporter load: "bootstrap.moof"]` — moof-compiled.
 ///
-/// failures at any step are substrate bugs (both files ship with
-/// the seed), so we panic.
+/// failures at any step are substrate bugs (lib/ ships with the
+/// substrate), so we panic.
 pub fn new_world() -> world::World {
     let mut w = world::World::new();
     w.transporter_root = transporter::resolve_lib_root();
     intrinsics::install(&mut w);
-    // step 2 — compile compiler.moof via the rust seed compiler.
-    if let Err(e) = eval_program(&mut w, COMPILER_SOURCE) {
-        panic!("compiler.moof failed to load: {}", e.message);
-    }
-    // step 3 — flip. all subsequent compiles go through moof.
-    w.use_moof_compiler = true;
-    // step 4 — compile bootstrap.moof via the moof compiler.
-    if let Err(e) = eval_program(&mut w, BOOTSTRAP_SOURCE) {
-        panic!("bootstrap.moof failed to load: {}", e.message);
+
+    let root = w.transporter_root.clone().unwrap_or_else(|| {
+        panic!(
+            "could not resolve moof lib root. tried MOOF_LIB env, \
+             <exe>/../lib, and ./lib. set MOOF_LIB to point at the \
+             moof lib directory."
+        )
+    });
+    let main_path = root.join("main.moof");
+    let main_source = std::fs::read_to_string(&main_path).unwrap_or_else(|e| {
+        panic!("failed to read {}: {}", main_path.display(), e)
+    });
+    if let Err(e) = eval_program(&mut w, &main_source) {
+        panic!("lib/main.moof failed to load: {}", e.message);
     }
     w
 }
 
-/// build a fresh world *without* loading bootstrap.moof. used by
+/// build a fresh world *without* loading any moof code. used by
 /// tests that exercise raw substrate behavior without the moof-side
 /// stdlib.
 pub fn new_world_bare() -> world::World {
     let mut w = world::World::new();
+    w.transporter_root = transporter::resolve_lib_root();
     intrinsics::install(&mut w);
     w
 }
@@ -100,7 +94,8 @@ pub fn eval(w: &mut world::World, source: &str) -> Result<value::Value, world::R
 }
 
 /// evaluate every top-level form in `source`, returning the value
-/// of the last. used to load multi-form scripts (incl. bootstrap.moof).
+/// of the last. used to load multi-form scripts (incl. lib/main.moof
+/// and the files it transitively loads).
 pub fn eval_program(
     w: &mut world::World,
     source: &str,

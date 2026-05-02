@@ -108,8 +108,12 @@ fn dump_to_file_is_unimplemented() {
 }
 
 #[test]
-fn root_raises_no_root_when_world_is_bare() {
-    let mut w = moof::new_world_bare();
+fn root_raises_no_root_when_no_root_configured() {
+    // use World::new() directly — new_world_bare() now sets transporter_root
+    // (so it resolves MOOF_LIB / exe/../lib / ./lib the same way new_world
+    // does). we need a world with no root at all to hit tx-no-root.
+    let mut w = moof::world::World::new();
+    moof::intrinsics::install(&mut w);
     let err = moof::eval(&mut w, "[$transporter root]")
         .expect_err(":root should raise tx-no-root when no root configured");
     let kind_str = w.resolve(err.kind).to_string();
