@@ -1462,9 +1462,15 @@ fn render_value(w: &World, v: Value) -> String {
 /// `Integer`, …). user code can refer to them by name to install
 /// handlers, allocate instances, and inspect the proto chain.
 fn install_proto_globals(w: &mut World) {
+    // Nil is the proto-Form for `nil`. exposed under the global
+    // `Nil` so bootstrap.moof can install handlers on it. but
+    // observationally it IS nil — `[Nil toString]` prints "nil"
+    // and `[nil proto]` returns nil. (a singleton object's type
+    // and value are the same thing; smalltalk's UndefinedObject /
+    // nil split inspired the model.)
     let bindings = [
         ("Object", w.protos.object),
-        ("Nil-proto", w.protos.nil),
+        ("Nil", w.protos.nil),
         ("Bool", w.protos.bool_),
         ("Integer", w.protos.integer),
         ("Float", w.protos.float),
@@ -1759,6 +1765,24 @@ fn install_nil_methods(w: &mut World) {
     w.install_native(w.protos.nil, "length", |_, _, _| Ok(Value::Int(0)));
     w.install_native(w.protos.nil, "head", |_, _, _| Ok(Value::Nil));
     w.install_native(w.protos.nil, "tail", |_, _, _| Ok(Value::Nil));
+
+    // nil is its own proto — singleton. there is no separate
+    // `Nil-proto` namespace pollution; from moof's view, `[nil proto]`
+    // returns nil itself. the substrate-level proto-Form
+    // (`world.protos.nil`) still exists internally to host nil's
+    // handlers, but it's not exposed as a global. observationally,
+    // nil is a singleton object that is its own proto.
+    w.install_native(w.protos.nil, "proto", |_, _, _| Ok(Value::Nil));
+    // toString/inspect: explicit "nil" so receiver-as-proto-Form
+    // (the rare `[[nil proto] toString]` path before the overridden
+    // :proto kicks in) still says "nil" rather than dispatching
+    // through Object's :name lookup.
+    w.install_native(w.protos.nil, "toString", |w, _, _| {
+        Ok(w.make_string("nil"))
+    });
+    w.install_native(w.protos.nil, "inspect", |w, _, _| {
+        Ok(w.make_string("nil"))
+    });
 }
 
 /// `(cons h tail)` — allocate a List cell. shared by Nil-proto
@@ -3232,6 +3256,28 @@ mod tests {
         assert_eq!(w.string_text(r).unwrap(), "nil");
         let r = ev(&mut w, "[nil inspect]").unwrap();
         assert_eq!(w.string_text(r).unwrap(), "nil");
+    }
+
+    #[test]
+    fn nil_is_its_own_proto() {
+        // observationally, nil is a singleton: `[nil proto]` is nil.
+        let mut w = fresh();
+        let r = ev(&mut w, "[nil proto]").unwrap();
+        assert_eq!(r, Value::Nil);
+        let r = ev(&mut w, "[[nil proto] toString]").unwrap();
+        assert_eq!(w.string_text(r).unwrap(), "nil");
+    }
+
+    #[test]
+    fn old_nil_proto_global_is_gone() {
+        // the awkward `Nil-proto` name is no longer in scope.
+        let mut w = fresh();
+        let nil_proto_sym = w.intern("Nil-proto");
+        assert!(w.env_lookup(w.global_env, nil_proto_sym).is_none());
+        // `Nil` is the new home for the proto-Form (so bootstrap.moof
+        // can install handlers on it).
+        let nil_sym = w.intern("Nil");
+        assert!(w.env_lookup(w.global_env, nil_sym).is_some());
     }
 
     #[test]

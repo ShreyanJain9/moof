@@ -712,20 +712,20 @@
   (fn (other) (if self #true other)))
 
 ;; ─────────────────────────────────────────────────────────────────
-;; Nil-proto — the proto of `nil`. cons: stays rust (heap alloc).
+;; Nil — the proto of `nil`. cons: stays rust (heap alloc).
 ;; ─────────────────────────────────────────────────────────────────
 
-(setHandler! Nil-proto 'toString
+(setHandler! Nil 'toString
   (fn () "nil"))
 
-(setHandler! Nil-proto 'head    (fn () nil))
-(setHandler! Nil-proto 'tail    (fn () nil))
-(setHandler! Nil-proto 'null?   (fn () #true))
-(setHandler! Nil-proto 'empty?  (fn () #true))
-(setHandler! Nil-proto 'length  (fn () 0))
-(setHandler! Nil-proto 'nonEmpty? (fn () #false))
+(setHandler! Nil 'head    (fn () nil))
+(setHandler! Nil 'tail    (fn () nil))
+(setHandler! Nil 'null?   (fn () #true))
+(setHandler! Nil 'empty?  (fn () #true))
+(setHandler! Nil 'length  (fn () 0))
+(setHandler! Nil 'nonEmpty? (fn () #false))
 
-;; Nil-proto inherits Object's identity `=`/`!=`. since
+;; Nil inherits Object's identity `=`/`!=`. since
 ;; `Value::Nil == Value::Nil`, that's exactly the right semantics
 ;; without any extra handlers here.
 
@@ -818,7 +818,7 @@
 ;; [xs count] — alias for :length, per docs-driven.md's Iterable
 ;; protocol table.
 (setHandler! List 'count (fn () [self length]))
-(setHandler! Nil-proto 'count (fn () 0))
+(setHandler! Nil 'count (fn () 0))
 
 ;; [xs zip: ys] — pairwise. ((a . a') (b . b') …). stops at shorter.
 (setHandler! List 'zip:
@@ -828,7 +828,7 @@
         (cons (cons .head (cons [ys head] nil))
               [.tail zip: [ys tail]]))))
 
-(setHandler! Nil-proto 'zip: (fn (ys) nil))
+(setHandler! Nil 'zip: (fn (ys) nil))
 
 ;; [xs scan: f from: init] — running fold, returning a list of all
 ;; intermediate accumulators. concepts/tables.md mentions :scan: for
@@ -838,7 +838,7 @@
     (let ((next (f init .head)))
       (cons next [.tail scan: f from: next]))))
 
-(setHandler! Nil-proto 'scan:from: (fn (f init) nil))
+(setHandler! Nil 'scan:from: (fn (f init) nil))
 
 ;; [xs at: i] — O(n) indexed access. concepts/lists.md spec'd this
 ;; alongside the obvious caveat (use a Table for random access).
@@ -848,7 +848,7 @@
         .head
         [.tail at: [i - 1]])))
 
-(setHandler! Nil-proto 'at:
+(setHandler! Nil 'at:
   (fn (i) nil))
 
 ;; [xs = ys] — structural element-wise equality. flows over the
@@ -868,21 +868,21 @@
 
 (setHandler! List '!= (fn (other) [[self = other] not]))
 
-(setHandler! Nil-proto 'append:    (fn (ys) ys))
-(setHandler! Nil-proto 'reverse    (fn () nil))
-(setHandler! Nil-proto 'map:       (fn (f) nil))
-(setHandler! Nil-proto 'filter:    (fn (pred) nil))
-(setHandler! Nil-proto 'reduce:from: (fn (f init) init))
-(setHandler! Nil-proto 'forEach:   (fn (blk) nil))
-(setHandler! Nil-proto 'take:      (fn (n) nil))
-(setHandler! Nil-proto 'drop:      (fn (n) nil))
-(setHandler! Nil-proto 'any?:      (fn (pred) #false))
-(setHandler! Nil-proto 'all?:      (fn (pred) #true))
-(setHandler! Nil-proto 'contains?: (fn (x) #false))
-(setHandler! Nil-proto 'sum        (fn () 0))
-(setHandler! Nil-proto 'product    (fn () 1))
-(setHandler! Nil-proto 'countWhere: (fn (pred) 0))
-(setHandler! Nil-proto 'last       (fn () nil))
+(setHandler! Nil 'append:    (fn (ys) ys))
+(setHandler! Nil 'reverse    (fn () nil))
+(setHandler! Nil 'map:       (fn (f) nil))
+(setHandler! Nil 'filter:    (fn (pred) nil))
+(setHandler! Nil 'reduce:from: (fn (f init) init))
+(setHandler! Nil 'forEach:   (fn (blk) nil))
+(setHandler! Nil 'take:      (fn (n) nil))
+(setHandler! Nil 'drop:      (fn (n) nil))
+(setHandler! Nil 'any?:      (fn (pred) #false))
+(setHandler! Nil 'all?:      (fn (pred) #true))
+(setHandler! Nil 'contains?: (fn (x) #false))
+(setHandler! Nil 'sum        (fn () 0))
+(setHandler! Nil 'product    (fn () 1))
+(setHandler! Nil 'countWhere: (fn (pred) 0))
+(setHandler! Nil 'last       (fn () nil))
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; Integer — derived comparisons + predicates.

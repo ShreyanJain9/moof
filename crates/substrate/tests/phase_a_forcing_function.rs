@@ -33,8 +33,10 @@ fn forcing_function_proto_reflection() {
     assert_eq!(r, Value::Form(w.protos.integer));
     let r = moof::eval(&mut w, "[#true proto]").unwrap();
     assert_eq!(r, Value::Form(w.protos.bool_));
+    // nil is its own proto (singleton), so `[nil proto]` returns
+    // nil itself — not the substrate-internal proto-Form.
     let r = moof::eval(&mut w, "[nil proto]").unwrap();
-    assert_eq!(r, Value::Form(w.protos.nil));
+    assert_eq!(r, Value::Nil);
     let r = moof::eval(&mut w, "['hello proto]").unwrap();
     assert_eq!(r, Value::Form(w.protos.symbol));
 }
