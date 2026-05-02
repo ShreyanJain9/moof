@@ -1,12 +1,12 @@
 //! `moof` cli — phase A.14 + REPL.
 //!
 //! two modes:
-//! - `moof '<expr>'` — eval one expression, print via `$out say:`.
+//! - `moof '<expr>'` — eval one expression, print via `:inspect` (re-readable).
 //! - `moof` (no args) — drop into a REPL.
 //!
 //! per `process/docs-driven.md`'s capability rule, the *only* path
 //! to stdout from moof code is `$out`. the cli pipes results
-//! through `[$out say:]` accordingly. no `print`, `println`,
+//! through `$out emit:` accordingly. no `print`, `println`,
 //! `puts` exist as moof-side bindings.
 
 use std::io::{self, BufRead, Write};
