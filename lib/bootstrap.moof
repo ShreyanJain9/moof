@@ -324,9 +324,8 @@
 ;; helper: is `pat` a 3-element list whose middle element is the
 ;; symbol `mid-sym`? used to detect `(name :: Type)` and
 ;; `(name where pred)` clause shapes.
-(def __match-3-mid?
-  (fn (pat mid-sym)
-    (if [Match list?: pat]
+(setHandler! Match 'threeMid?:sym:
+  (fn (pat mid-sym) (if [Match list?: pat]
         (if [pat is nil]
             #false
             (if [[pat length] = 3]
@@ -335,10 +334,10 @@
         #false)))
 
 (setHandler! Match 'typed?:
-  (fn (pat) (__match-3-mid? pat '::)))
+  (fn (pat) [Match threeMid?: pat sym: '::]))
 
 (setHandler! Match 'where?:
-  (fn (pat) (__match-3-mid? pat 'where)))
+  (fn (pat) [Match threeMid?: pat sym: 'where]))
 
 (setHandler! Match 'symbol?:
   (fn (pat) [[pat proto] is Symbol]))
@@ -385,9 +384,8 @@
 ;; compile one clause: produce a form that evaluates `body` when
 ;; `pat` matches `subj-sym`, otherwise `fail-form`. recursive: list
 ;; patterns split into head/tail subgoals.
-(def __match-clause
-  (fn (pat body subj-sym fail-form)
-    (if [Match wildcard?: pat]
+(setHandler! Match 'clause:body:subj:fail:
+  (fn (pat body subj-sym fail-form) (if [Match wildcard?: pat]
         body
         (if [Match symbol?: pat]
             ;; variable bind.
@@ -407,28 +405,26 @@
                       `(let ((,p-name ,subj-sym))
                          (if ,p-pred ,body ,fail-form)))
                     (if [Match quote?: pat]
-                        (__match-clause-quoted pat body subj-sym fail-form)
+                        [Match clauseQuoted: pat body: body subj: subj-sym fail: fail-form]
                         ;; bare literal — equality compare.
                         `(if [,subj-sym = ,pat] ,body ,fail-form))))))))
 
 ;; quoted patterns: the quoted value is either a Symbol (identity
 ;; compare), the empty list (nil compare), or a list (recursive
 ;; destructure).
-(def __match-clause-quoted
-  (fn (pat body subj-sym fail-form)
-    (if [Match quotedEmptyList?: pat]
+(setHandler! Match 'clauseQuoted:body:subj:fail:
+  (fn (pat body subj-sym fail-form) (if [Match quotedEmptyList?: pat]
         ;; '() — match nil exactly.
         `(if [,subj-sym is nil] ,body ,fail-form)
         (if [Match quotedList?: pat]
-            (__match-clause-list [Match quotedValue: pat] body subj-sym fail-form)
+            [Match clauseList: [Match quotedValue: pat] body: body subj: subj-sym fail: fail-form]
             ;; quoted Symbol (or other atomic) — identity compare.
             `(if [,subj-sym is ,pat] ,body ,fail-form)))))
 
 ;; destructure a cons-list pattern element-by-element. `pats` is
 ;; the source-list of sub-patterns (taken from the quoted form).
-(def __match-clause-list
-  (fn (pats body subj-sym fail-form)
-    (if [pats empty?]
+(setHandler! Match 'clauseList:body:subj:fail:
+  (fn (pats body subj-sym fail-form) (if [pats empty?]
         ;; reached the spine end: subject must be nil.
         `(if [,subj-sym is nil] ,body ,fail-form)
         (let ((p [pats car])
@@ -446,16 +442,12 @@
                          [[,subj-sym proto] is Cons])
                      (let ((,head-sym [,subj-sym car])
                            (,tail-sym [,subj-sym cdr]))
-                       ,(__match-clause p
-                                        (__match-clause-list rest body tail-sym fail-form)
-                                        head-sym
-                                        fail-form))
+                       ,[Match clause: p body: [Match clauseList: rest body: body subj: tail-sym fail: fail-form] subj: head-sym fail: fail-form])
                      ,fail-form)))))))
 
 ;; build the cascade of clauses. expects pat/body pairs.
-(def __match-build
-  (fn (clauses subj-sym)
-    (if [clauses empty?]
+(setHandler! Match 'build:subj:
+  (fn (clauses subj-sym) (if [clauses empty?]
         '(raise: 'no-match "match: no clause matched")
         (let ((pat [clauses car])
               (rest [clauses cdr]))
@@ -463,15 +455,14 @@
               '(raise: 'no-match "match: clauses must come in pat/body pairs")
               (let ((body [rest car])
                     (more [rest cdr]))
-                (__match-clause pat body subj-sym
-                  (__match-build more subj-sym))))))))
+                [Match clause: pat body: body subj: subj-sym fail: [Match build: more subj: subj-sym]]))))))
 
 ;; the macro itself.
 (defmacro match (args)
   (let ((subj [args car])
         (clauses [args cdr]))
     `(let ((__match-subj__ ,subj))
-       ,(__match-build clauses '__match-subj__))))
+       ,[Match build: clauses subj: '__match-subj__])))
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; defn — multi-clause pattern-matched function definitions.
@@ -507,12 +498,11 @@
 ;; ─────────────────────────────────────────────────────────────────
 
 ;; build (__a0 __a1 … __a{n-1}) for synthetic argument names.
-(def __defn-argnames
-  (fn (n i)
-    (if [n = 0]
+(setHandler! Defn 'argnames:i:
+  (fn (n i) (if [n = 0]
         nil
         (cons (intern ["__a" + [i toString]])
-              (__defn-argnames [n - 1] [i + 1])))))
+              [Defn argnames: [n - 1] i: [i + 1]]))))
 
 ;; group a flat params list into structured patterns. recognizes
 ;; the multi-token clause-shapes:
@@ -568,7 +558,7 @@
         (let ((first-clause [clauses car])
               (first-params [[[clauses car] cdr] car]))
           (let ((grouped-arity [[Defn groupParams: first-params] length]))
-            (let ((argnames (__defn-argnames grouped-arity 0))
+            (let ((argnames [Defn argnames: grouped-arity i: 0])
                   (mclauses [Defn matchClauses: clauses]))
               `(def ,name
                  (fn ,argnames
@@ -1101,48 +1091,40 @@
 
 ;; clause-walker. accumulates (parent, slot-names, handler-tuples)
 ;; and returns a 3-elem list at the end.
-(def __defproto-walk
-  (fn (clauses parent slots handlers)
-    (if [clauses empty?]
+(setHandler! DefProto 'walk:parent:slots:handlers:
+  (fn (clauses parent slots handlers) (if [clauses empty?]
         (list parent [slots reverse] [handlers reverse])
         (let ((c [clauses car])
               (rest [clauses cdr]))
           (let ((head-sym [c car]))
             (if [head-sym is 'proto]
-                (__defproto-walk rest [[c cdr] car] slots handlers)
+                [DefProto walk: rest parent: [[c cdr] car] slots: slots handlers: handlers]
             (if [head-sym is 'slots]
-                (__defproto-walk rest parent
-                                  [[[c cdr] reverse] append: slots]
-                                  handlers)
+                [DefProto walk: rest parent: parent slots: [[[c cdr] reverse] append: slots] handlers: handlers]
             (if [head-sym is 'handlers]
-                (__defproto-walk rest parent slots
-                                  [[[DefProto pairHandlers: [c cdr]] reverse]
-                                    append: handlers])
+                [DefProto walk: rest parent: parent slots: slots handlers: [[[DefProto pairHandlers: [c cdr]] reverse]
+                                    append: handlers]]
                 ;; bare header — pair with next clause as body.
                 (let ((decoded (__decode-header c))
                       (body [rest car])
                       (rest2 [rest cdr]))
                   (let ((sel [decoded car])
                         (params [[decoded cdr] car]))
-                    (__defproto-walk rest2 parent slots
-                                      (cons (list sel params body)
-                                            handlers))))))))))))
+                    [DefProto walk: rest2 parent: parent slots: slots handlers: (cons (list sel params body)
+                                            handlers)]))))))))))
 
 ;; build (setHandler! Name 'slot (fn () (slot self 'slot))) — getter.
-(def __defproto-slot-getter
-  (fn (proto-name slot-name)
-    `(defmethod ,proto-name (,slot-name) (slot self ',slot-name))))
+(setHandler! DefProto 'slotGetter:k:
+  (fn (proto-name slot-name) `(defmethod ,proto-name (,slot-name) (slot self ',slot-name))))
 
 ;; build (setHandler! Name 'slot: (fn (__v__) (slotSet! self 'slot __v__))) — setter.
-(def __defproto-slot-setter
-  (fn (proto-name slot-name)
-    (let ((setter-sel (intern [[slot-name toString] + ":"])))
+(setHandler! DefProto 'slotSetter:k:
+  (fn (proto-name slot-name) (let ((setter-sel (intern [[slot-name toString] + ":"])))
       `(defmethod ,proto-name (,setter-sel __v__) (slotSet! self ',slot-name __v__)))))
 
 ;; build (setHandler! Name 'sel (fn (params) body)) — user handler.
-(def __defproto-handler
-  (fn (proto-name h)
-    (let ((sel [h car])
+(setHandler! DefProto 'handler:decl:
+  (fn (proto-name h) (let ((sel [h car])
           (params [[h cdr] car])
           (body [[[h cdr] cdr] car]))
       `(setHandler! ,proto-name ',sel (fn ,params ,body)))))
@@ -1150,7 +1132,7 @@
 (defmacro defproto (args)
   (let ((name [args car])
         (clauses [args cdr]))
-    (let ((parsed (__defproto-walk clauses 'Object nil nil)))
+    (let ((parsed [DefProto walk: clauses parent: 'Object slots: nil handlers: nil]))
       (let ((parent [parsed car])
             (slots [[parsed cdr] car])
             (handlers [[[parsed cdr] cdr] car]))
@@ -1158,13 +1140,13 @@
                 `(def ,name (getOrCreateProto ',name ,parent)))
               (getters
                 [slots map:
-                  (fn (s) (__defproto-slot-getter name s))])
+                  (fn (s) [DefProto slotGetter: name k: s])])
               (setters
                 [slots map:
-                  (fn (s) (__defproto-slot-setter name s))])
+                  (fn (s) [DefProto slotSetter: name k: s])])
               (handler-forms
                 [handlers map:
-                  (fn (h) (__defproto-handler name h))]))
+                  (fn (h) [DefProto handler: name decl: h])]))
           `(do ,proto-decl
                ,@getters
                ,@setters
