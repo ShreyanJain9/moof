@@ -42,6 +42,9 @@
 
 (setHandler! Compiler 'cons?:
   (fn (v)
+    ;; nil identity — `cons?:` is a *type predicate*; v can be any
+    ;; value, and nil is a valid empty-list terminus, hence #true.
+    ;; not (__list-empty? v) because v isn't constrained to be a list.
     (if [v is nil]
         #true
         [[v proto] is Cons])))
@@ -90,6 +93,9 @@
 
 (setHandler! Compiler 'compileForm:chunk:tail:
   (fn (form chunk tail)
+    ;; nil identity — `form` is the general dispatch input (int,
+    ;; symbol, bool, cons, …); the nil singleton needs its own arm
+    ;; that emits pushNil. not list-emptiness.
     (if [form is nil]
         [chunk emit: [Opcode pushNil]]
         (if [self bool?: form]
@@ -210,9 +216,10 @@
           (if [self cons?: c]
               (if (__list-empty? c)
                   #false
-                  (if [(__list-car c) is 'fn]
-                      [self allFnForms?: (__list-cdr clauses)]
-                      #false))
+                  (let ((head (__list-car c)))
+                    (if [head is 'fn]
+                        [self allFnForms?: (__list-cdr clauses)]
+                        #false)))
               #false)))))
 
 (setHandler! Compiler 'compileDef:chunk:
