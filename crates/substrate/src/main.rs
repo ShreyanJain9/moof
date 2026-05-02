@@ -36,13 +36,11 @@ fn eval_one_shot(source: &str) -> ExitCode {
     let mut world = moof::new_world();
     match moof::eval(&mut world, source) {
         Ok(value) => {
-            // skip printing nil — matches lisp convention and the
-            // REPL's behavior; programs that want explicit nil
-            // output can `[$out say: nil]` themselves.
-            if value.is_nil() {
-                return ExitCode::SUCCESS;
-            }
-            match print_via_out(&mut world, value) {
+            // print every value via :inspect — including nil.
+            // moof's `:inspect` on nil returns `"nil"`. the REPL is
+            // the user's view into the running image; suppressing
+            // results would lie about what the expression yielded.
+            match print_via_out_inspect(&mut world, value) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("moof: {}", e.message);
@@ -89,14 +87,7 @@ fn repl() -> ExitCode {
         }
         match moof::eval(&mut world, trimmed) {
             Ok(value) => {
-                if !value.is_nil() {
-                    // REPL prints via :inspect (re-readable) rather
-                    // than :toString (display-friendly). matches the
-                    // smalltalk `printNl` convention. one-shot
-                    // `moof '<expr>'` keeps :toString — there the
-                    // user is producing output, not debugging.
-                    let _ = print_via_out_inspect(&mut world, value);
-                }
+                let _ = print_via_out_inspect(&mut world, value);
             }
             Err(err) => {
                 let _ = print_via_err(&mut world, &format!("! {}", err.message));
@@ -132,18 +123,6 @@ fn print_banner(world: &mut moof::world::World) {
 
 fn print_prompt(world: &mut moof::world::World) -> Result<(), moof::world::RaiseError> {
     print_via_out_text(world, "> ")
-}
-
-fn print_via_out(
-    world: &mut moof::world::World,
-    value: moof::value::Value,
-) -> Result<(), moof::world::RaiseError> {
-    let dollar_out = world.intern("$out");
-    let say = world.intern("say:");
-    let out = world.env_lookup(world.global_env, dollar_out).ok_or_else(|| {
-        moof::world::RaiseError::new(world.intern("missing-cap"), "$out unbound")
-    })?;
-    world.send(out, say, &[value]).map(|_| ())
 }
 
 fn print_via_out_text(
