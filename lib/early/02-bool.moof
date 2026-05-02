@@ -1,0 +1,8 @@
+;; lib/early/02-bool.moof
+;;
+;; Phase 3 placeholder. Bool methods (:not, :and:, :or:, :toString)
+;; currently live as `defmethod`s in bootstrap.moof and migrate to
+;; `stdlib/bool.moof` (NOT here) — this file stays empty unless a
+;; Phase 4 dependency forces a migration to setHandler! form.
+
+;; (intentionally empty.)
