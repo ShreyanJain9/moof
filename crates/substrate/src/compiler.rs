@@ -54,25 +54,25 @@ pub fn compile(world: &mut World, form: Value) -> Result<FormId, RaiseError> {
     c.finalize()
 }
 
-/// route the compile through moof's `compile-top`. assumes
-/// `compiler.moof` is loaded.
+/// route the compile through moof's `[Compiler compileTop: form]`.
+/// assumes `compiler.moof` is loaded.
 fn compile_via_moof(world: &mut World, form: Value) -> Result<FormId, RaiseError> {
-    let compile_top_sym = world.intern("compile-top");
-    let compile_top = world
-        .env_lookup(world.global_env, compile_top_sym)
+    let compiler_sym = world.intern("Compiler");
+    let compiler = world
+        .env_lookup(world.global_env, compiler_sym)
         .ok_or_else(|| {
             RaiseError::new(
                 world.intern("bootstrap-error"),
-                "use_moof_compiler is on but `compile-top` is unbound — \
+                "use_moof_compiler is on but `Compiler` is unbound — \
                  compiler.moof not loaded?",
             )
         })?;
-    let call_sym = world.intern("call");
-    let chunk_v = world.send(compile_top, call_sym, &[form])?;
+    let compile_top_sym = world.intern("compileTop:");
+    let chunk_v = world.send(compiler, compile_top_sym, &[form])?;
     chunk_v.as_form_id().ok_or_else(|| {
         RaiseError::new(
             world.intern("bootstrap-error"),
-            "compile-top returned a non-chunk-Form",
+            "[Compiler compileTop:] returned a non-chunk-Form",
         )
     })
 }
