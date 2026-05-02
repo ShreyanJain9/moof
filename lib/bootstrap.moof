@@ -703,14 +703,14 @@
 ;; Nil — the proto of `nil`. cons: stays rust (heap alloc).
 ;; ─────────────────────────────────────────────────────────────────
 
-(defmethod Nil (toString) "nil")
+(defmethod nil (toString) "nil")
 
-(defmethod Nil (head) nil)
-(defmethod Nil (tail) nil)
-(defmethod Nil (null?) #true)
-(defmethod Nil (empty?) #true)
-(defmethod Nil (length) 0)
-(defmethod Nil (nonEmpty?) #false)
+(defmethod nil (car) nil)
+(defmethod nil (cdr) nil)
+(defmethod nil (null?) #true)
+(defmethod nil (empty?) #true)
+(defmethod nil (length) 0)
+(defmethod nil (nonEmpty?) #false)
 
 ;; Nil inherits Object's identity `=`/`!=`. since
 ;; `Value::Nil == Value::Nil`, that's exactly the right semantics
@@ -776,7 +776,7 @@
 ;; [xs count] — alias for :length, per docs-driven.md's Iterable
 ;; protocol table.
 (defmethod Cons (count) [self length])
-(defmethod Nil (count) 0)
+(defmethod nil (count) 0)
 
 ;; [xs zip: ys] — pairwise. ((a . a') (b . b') …). stops at shorter.
 (defmethod Cons (zip: ys) (if [ys empty?]
@@ -784,7 +784,7 @@
         (cons (cons .car (cons [ys car] nil))
               [.cdr zip: [ys cdr]])))
 
-(defmethod Nil (zip: ys) nil)
+(defmethod nil (zip: ys) nil)
 
 ;; [xs scan: f from: init] — running fold, returning a list of all
 ;; intermediate accumulators. concepts/tables.md mentions :scan: for
@@ -792,7 +792,7 @@
 (defmethod Cons (scan: f from: init) (let ((next (f init .car)))
       (cons next [.cdr scan: f from: next])))
 
-(defmethod Nil (scan: f from: init) nil)
+(defmethod nil (scan: f from: init) nil)
 
 ;; [xs at: i] — O(n) indexed access. concepts/lists.md spec'd this
 ;; alongside the obvious caveat (use a Table for random access).
@@ -800,7 +800,7 @@
         .car
         [.cdr at: [i - 1]]))
 
-(defmethod Nil (at: i) nil)
+(defmethod nil (at: i) nil)
 
 ;; [xs = ys] — structural element-wise equality. flows over the
 ;; head/tail spine, terminating either when both reach nil
@@ -817,21 +817,21 @@
 
 (defmethod Cons (!= other) [[self = other] not])
 
-(defmethod Nil (append: ys) ys)
-(defmethod Nil (reverse) nil)
-(defmethod Nil (map: f) nil)
-(defmethod Nil (filter: pred) nil)
-(defmethod Nil (reduce: f from: init) init)
-(defmethod Nil (forEach: blk) nil)
-(defmethod Nil (take: n) nil)
-(defmethod Nil (drop: n) nil)
-(defmethod Nil (any?: pred) #false)
-(defmethod Nil (all?: pred) #true)
-(defmethod Nil (contains?: x) #false)
-(defmethod Nil (sum) 0)
-(defmethod Nil (product) 1)
-(defmethod Nil (countWhere: pred) 0)
-(defmethod Nil (last) nil)
+(defmethod nil (append: ys) ys)
+(defmethod nil (reverse) nil)
+(defmethod nil (map: f) nil)
+(defmethod nil (filter: pred) nil)
+(defmethod nil (reduce: f from: init) init)
+(defmethod nil (forEach: blk) nil)
+(defmethod nil (take: n) nil)
+(defmethod nil (drop: n) nil)
+(defmethod nil (any?: pred) #false)
+(defmethod nil (all?: pred) #true)
+(defmethod nil (contains?: x) #false)
+(defmethod nil (sum) 0)
+(defmethod nil (product) 1)
+(defmethod nil (countWhere: pred) 0)
+(defmethod nil (last) nil)
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; Integer — derived comparisons + predicates.

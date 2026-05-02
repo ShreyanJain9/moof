@@ -1405,6 +1405,20 @@ fn install_method_reflection(w: &mut World) {
     // own :toString.
 }
 
+/// recover a FormId from a value that may be a Form OR `nil`.
+/// nil is a singleton: there is no `Nil` global, but bootstrap
+/// (and user) code says `(defmethod nil (length) 0)` and similar.
+/// the substrate's setHandler! / slotSet! / metaSet! special-case
+/// nil-receivers, routing the write to a hidden nil-handlers form.
+/// `world.protos.nil` is that form.
+fn nil_or_form_id(w: &mut World, v: Value, op: &str) -> Result<FormId, RaiseError> {
+    if v.is_nil() {
+        return Ok(w.protos.nil);
+    }
+    v.as_form_id()
+        .ok_or_else(|| type_error(w, format!("{} on tagged-immediate", op)))
+}
+
 /// if `self_` is a Form whose `:name` meta is a Symbol, return
 /// that name's text. used by instance `:toString` / `:inspect`
 /// handlers to short-circuit when the receiver is a *proto-Form*
@@ -1485,15 +1499,15 @@ fn render_value(w: &World, v: Value) -> String {
 /// `Integer`, …). user code can refer to them by name to install
 /// handlers, allocate instances, and inspect the proto chain.
 fn install_proto_globals(w: &mut World) {
-    // Nil is the proto-Form for `nil`. exposed under the global
-    // `Nil` so bootstrap.moof can install handlers on it. but
-    // observationally it IS nil — `[Nil toString]` prints "nil"
-    // and `[nil proto]` returns nil. (a singleton object's type
-    // and value are the same thing; smalltalk's UndefinedObject /
-    // nil split inspired the model.)
+    // Nil is genuinely absent from the global env. nil is a true
+    // singleton — observationally and namespace-wise. handlers
+    // for nil (cons:, length, empty?, …) live on a hidden
+    // proto-Form (`world.protos.nil`); the substrate's setHandler!
+    // / slotSet! / metaSet! special-case Value::Nil receivers and
+    // route writes to that hidden form, so moof code does
+    // `(defmethod nil (length) 0)` directly. nil IS its proto.
     let bindings = [
         ("Object", w.protos.object),
-        ("Nil", w.protos.nil),
         ("Bool", w.protos.bool_),
         ("Integer", w.protos.integer),
         ("Float", w.protos.float),
@@ -2510,9 +2524,9 @@ fn install_globals(w: &mut World) {
                 "(slot-set! v 'name value)",
             ));
         }
-        let id = args[0].as_form_id().ok_or_else(|| {
-            RaiseError::new(w.intern("type-error"), "slot-set! on tagged-immediate")
-        })?;
+        // nil is a singleton — its writes route to the hidden
+        // nil-handlers form.
+        let id = nil_or_form_id(w, args[0], "slot-set!")?;
         let name = args[1].as_sym().ok_or_else(|| {
             RaiseError::new(w.intern("type-error"), "slot name must be a symbol")
         })?;
@@ -2529,9 +2543,7 @@ fn install_globals(w: &mut World) {
                 "(meta-set! v 'name value)",
             ));
         }
-        let id = args[0].as_form_id().ok_or_else(|| {
-            type_error(w, "meta-set! on tagged-immediate")
-        })?;
+        let id = nil_or_form_id(w, args[0], "meta-set!")?;
         let name = args[1].as_sym().ok_or_else(|| {
             type_error(w, "meta-set!: name must be a symbol")
         })?;
@@ -2589,6 +2601,10 @@ fn install_globals(w: &mut World) {
     // (set-handler! Proto 'sel fn) — moldable-substrate primitive.
     // bumps the proto's generation counter so existing inline
     // caches re-resolve on next dispatch.
+    //
+    // nil is a singleton: `(setHandler! nil 'foo fn)` routes to
+    // the hidden nil-handlers form. enables `(defmethod nil …)`
+    // in moof code without exposing the form under a name.
     install_global(w, "setHandler!", |w, _, args| {
         if args.len() != 3 {
             return Err(RaiseError::new(
@@ -2596,9 +2612,7 @@ fn install_globals(w: &mut World) {
                 "(set-handler! Proto 'sel fn)",
             ));
         }
-        let proto_id = args[0].as_form_id().ok_or_else(|| {
-            RaiseError::new(w.intern("type-error"), "set-handler! Proto must be a Form")
-        })?;
+        let proto_id = nil_or_form_id(w, args[0], "set-handler!")?;
         let sel = args[1].as_sym().ok_or_else(|| {
             RaiseError::new(w.intern("type-error"), "set-handler! selector must be a symbol")
         })?;
@@ -3337,15 +3351,36 @@ mod tests {
     }
 
     #[test]
-    fn old_nil_proto_global_is_gone() {
-        // the awkward `Nil-proto` name is no longer in scope.
+    fn nil_is_a_true_singleton_no_global() {
+        // nil is its own proto AND there's no `Nil` global pointing
+        // at the underlying proto-Form. moof code uses `nil`
+        // directly: `(defmethod nil (length) 0)`. setHandler!
+        // routes nil-receivers to the hidden nil-handlers form.
         let mut w = fresh();
         let nil_proto_sym = w.intern("Nil-proto");
-        assert!(w.env_lookup(w.global_env, nil_proto_sym).is_none());
-        // `Nil` is the new home for the proto-Form (so bootstrap.moof
-        // can install handlers on it).
         let nil_sym = w.intern("Nil");
-        assert!(w.env_lookup(w.global_env, nil_sym).is_some());
+        assert!(w.env_lookup(w.global_env, nil_proto_sym).is_none());
+        assert!(w.env_lookup(w.global_env, nil_sym).is_none());
+        // nil's proto IS nil.
+        let r = ev(&mut w, "[nil proto]").unwrap();
+        assert_eq!(r, Value::Nil);
+        // nil's installed methods (length, empty?, …) still work
+        // because dispatch routes through the hidden form.
+        let r = ev(&mut w, "[nil length]").unwrap();
+        assert_eq!(r, Value::Int(0));
+        let r = ev(&mut w, "[nil empty?]").unwrap();
+        assert_eq!(r, Value::Bool(true));
+    }
+
+    #[test]
+    fn defmethod_nil_works() {
+        // user-level: install a method on nil with `(defmethod nil
+        // …)`. dispatches normally afterwards.
+        let mut w = fresh();
+        ev(&mut w, "(defmethod nil (witness) 'nilmark)").unwrap();
+        let r = ev(&mut w, "[nil witness]").unwrap();
+        let mark = w.intern("nilmark");
+        assert_eq!(r, Value::Sym(mark));
     }
 
     #[test]
