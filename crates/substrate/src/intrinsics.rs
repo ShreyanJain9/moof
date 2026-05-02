@@ -135,6 +135,7 @@ pub fn install(w: &mut World) {
     install_method_methods(w);
     install_method_reflection(w);
     install_console_proto_and_caps(w);
+    install_compiler_cap(w);
     install_globals(w);
     install_compiler_primitives(w);
     install_proto_globals(w);
@@ -2356,6 +2357,28 @@ fn install_console_proto_and_caps(w: &mut World) {
     // when the mco loader exposes os-side primitives.)
     let console_name = w.intern("Console");
     w.env_bind(global, console_name, Value::Form(console_proto));
+}
+
+fn install_compiler_cap(w: &mut World) {
+    // `$compiler` — primordial cap that controls which compiler is
+    // canonical. one proto-Form, two methods. flipping useMoof
+    // routes every subsequent compile through the Compiler singleton
+    // defined in lib/compiler/. useSeed flips back (mostly a
+    // diagnostics knob).
+    let proto = w.alloc(Form::with_proto(Value::Form(w.protos.object)));
+
+    w.install_native(proto, "useMoof", |w, _self, _args| {
+        w.use_moof_compiler = true;
+        Ok(Value::Nil)
+    });
+    w.install_native(proto, "useSeed", |w, _self, _args| {
+        w.use_moof_compiler = false;
+        Ok(Value::Nil)
+    });
+
+    let global = w.global_env;
+    let dollar = w.intern("$compiler");
+    w.env_bind(global, dollar, Value::Form(proto));
 }
 
 // ─────────────────────────────────────────────────────────────────

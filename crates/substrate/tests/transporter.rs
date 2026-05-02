@@ -124,3 +124,19 @@ fn load_all_non_list_arg_raises_bad_arg() {
     let kind_str = w.resolve(err.kind).to_string();
     assert_eq!(kind_str, "tx-bad-arg");
 }
+
+#[test]
+fn compiler_use_moof_flips_flag() {
+    // build a bare world (no bootstrap), flip via moof, observe.
+    // after useMoof the flag is set — we verify then manually clear
+    // it before testing useSeed (bare world has no compiler.moof, so
+    // any eval while use_moof_compiler is true would crash).
+    let mut w = moof::new_world_bare();
+    assert!(!w.use_moof_compiler, "bare world starts with seed compiler");
+    moof::eval(&mut w, "[$compiler useMoof]").unwrap();
+    assert!(w.use_moof_compiler, "useMoof should flip the flag");
+    // reset manually so the next eval can compile via the seed.
+    w.use_moof_compiler = false;
+    moof::eval(&mut w, "[$compiler useSeed]").unwrap();
+    assert!(!w.use_moof_compiler, "useSeed should flip back");
+}
