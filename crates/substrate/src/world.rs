@@ -127,6 +127,18 @@ pub struct World {
     /// method-FormId → native function pointer.
     pub native_fns: IndexMap<FormId, NativeFn>,
 
+    /// proto-FormId → its instantiated wasm module + store. set by
+    /// the wasm mco loader (see `crate::wasm`). a moof-method
+    /// dispatch on this proto's handler table routes through the
+    /// wasm trampoline, which looks the proto up here.
+    pub wasm_instances: IndexMap<FormId, crate::wasm::WasmInstance>,
+
+    /// (proto-FormId, selector-SymId) → (export-name, shape). lets
+    /// the wasm trampoline figure out which wasm function to call
+    /// for the dispatched selector.
+    pub wasm_export_map:
+        IndexMap<(FormId, SymId), (String, crate::wasm::ExportShape)>,
+
     /// the `Macros` Form — canonical store of registered macros.
     /// each slot is `name -> method-Form`. exposed as a global so
     /// moof code can do `[Macros slots]` to list all macros,
@@ -224,6 +236,8 @@ impl World {
             chunk_consts: IndexMap::new(),
             chunk_ics: IndexMap::new(),
             native_fns: IndexMap::new(),
+            wasm_instances: IndexMap::new(),
+            wasm_export_map: IndexMap::new(),
             macros_form,
             global_env,
             use_moof_compiler: false,

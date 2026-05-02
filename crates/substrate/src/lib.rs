@@ -31,6 +31,7 @@ pub mod sym;
 pub mod table;
 pub mod value;
 pub mod vm;
+pub mod wasm;
 pub mod world;
 
 /// the moof-side bootstrap stdlib. embedded in the substrate

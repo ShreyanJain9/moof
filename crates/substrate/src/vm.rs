@@ -49,6 +49,13 @@ pub struct Frame {
 pub struct Vm {
     pub frames: Vec<Frame>,
     pub stack: Vec<Value>,
+    /// the selector of the *most recent* send that reached a native
+    /// handler. updated by `World::send` / `send_via_ic` just
+    /// before the native fn runs. lets generic trampolines (like
+    /// the wasm-method bridge in `crate::wasm`) recover the
+    /// selector since `NativeFn`'s signature doesn't include it.
+    /// reset to `None` at top-of-frame.
+    pub last_send_sel: Option<SymId>,
 }
 
 impl World {
@@ -69,6 +76,9 @@ impl World {
                         "handler is not a method-Form",
                     )
                 })?;
+                // record the dispatched selector so a generic
+                // native trampoline can recover it.
+                self.vm.last_send_sel = Some(selector);
                 self.invoke(method, receiver, args, defining)
             }
             None => self.dispatch_dnu(receiver, selector, args),
@@ -112,6 +122,7 @@ impl World {
             // cache hit — invoke the cached method directly with the
             // cached defining-proto so super-sends in the body
             // resolve correctly.
+            self.vm.last_send_sel = Some(selector);
             return self.invoke(
                 cached.cached_method,
                 receiver,
@@ -141,6 +152,7 @@ impl World {
                         slot.cached_generation = gen;
                     }
                 }
+                self.vm.last_send_sel = Some(selector);
                 self.invoke(method, receiver, args, defining)
             }
             None => self.dispatch_dnu(receiver, selector, args),
@@ -401,6 +413,7 @@ fn step(world: &mut World) -> Result<(), RaiseError> {
             // native? same as Send's native path; pop args and push
             // result; no frame replacement.
             if let Some(&native_fn) = world.native_fns.get(&resolved) {
+                world.vm.last_send_sel = Some(selector);
                 let result = native_fn(world, receiver, &args)?;
                 world.vm.stack.push(result);
                 return Ok(());

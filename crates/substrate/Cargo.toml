@@ -8,6 +8,11 @@ description = "moof v4 substrate seed — heap, dispatch, bytecode interp, mco l
 indexmap.workspace = true
 moof-abi = { path = "../abi" }
 moof-abi-rust = { path = "../abi-rust" }
+# wasm runtime — the substrate's mco interpreter. mcos are wasm
+# modules; loading and calling them goes through wasmtime.
+# default-features keeps wasmtime light(er); we don't need cache,
+# parallel-compilation, or component-model yet.
+wasmtime = { version = "26", default-features = false, features = ["cranelift", "runtime"] }
 
 [[bin]]
 name = "moof"
