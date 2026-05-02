@@ -1405,18 +1405,36 @@ fn install_method_reflection(w: &mut World) {
     // own :toString.
 }
 
-/// recover a FormId from a value that may be a Form OR `nil`.
-/// nil is a singleton: there is no `Nil` global, but bootstrap
-/// (and user) code says `(defmethod nil (length) 0)` and similar.
-/// the substrate's setHandler! / slotSet! / metaSet! special-case
-/// nil-receivers, routing the write to a hidden nil-handlers form.
-/// `world.protos.nil` is that form.
-fn nil_or_form_id(w: &mut World, v: Value, op: &str) -> Result<FormId, RaiseError> {
-    if v.is_nil() {
-        return Ok(w.protos.nil);
+/// recover the FormId where a value's Form-y state lives.
+///
+/// **for Form values** (`Value::Form(id)`): returns `id` directly.
+/// state lives on the receiver itself.
+///
+/// **for tagged immediates** (Nil, Bool, Int, Float, Sym, Char,
+/// Foreign): returns the proto-Form's id. tagged immediates
+/// have no per-instance heap state by design — they ARE their
+/// value — so any "Form-y operation" on them targets shared
+/// proto state. this is the smalltalk discipline: SmallInteger 5
+/// has no instance variables; its slots live on its class.
+///
+/// the user-visible consequence: `(slotSet! 5 'foo 42)` mutates
+/// `Integer`'s `:foo` slot. equivalent to `(slotSet! Integer
+/// 'foo 42)`. there's no "per-5 slot" because there's no per-5
+/// heap row. honest model, no special-cases, L1 holds: every
+/// value reflects through a Form, even if that Form is shared.
+///
+/// per L1 ("every value moof allocates is a Form"), tagged
+/// immediates remain a perf optimization for many-valued types
+/// (Int, Float, Sym, Char) but operationally they behave as
+/// Forms — same dispatch, same reflection, same write surface.
+fn target_form_id(w: &mut World, v: Value, _op: &str) -> FormId {
+    if let Value::Form(id) = v {
+        return id;
     }
-    v.as_form_id()
-        .ok_or_else(|| type_error(w, format!("{} on tagged-immediate", op)))
+    match w.proto_of(v) {
+        Value::Form(id) => id,
+        _ => w.protos.object, // shouldn't happen — every value has a proto
+    }
 }
 
 /// if `self_` is a Form whose `:name` meta is a Symbol, return
@@ -2001,14 +2019,21 @@ fn install_object_reflection(w: &mut World) {
     });
 
     // :slots, :handlers, :meta — return a Table (key → value) of
-    // the receiver's IndexMap, in insertion order. tagged immediates
-    // have no heap slot → empty Table. matches the contract in
-    // concepts/forms.md and laws/reflection-contract.md R7.
+    // the receiver's IndexMap, in insertion order. tagged
+    // immediates have no per-instance heap state, so they route
+    // to their proto-Form's table — the *same* state that other
+    // dispatch operations consult. honest model: `[5 handlers]`
+    // shows what `5` actually dispatches against.
+    //
+    // matches the contract in concepts/forms.md and
+    // laws/reflection-contract.md R7. **L1 holds operationally**:
+    // every value reflects through a Form, even if that Form is
+    // shared (which it is for tagged immediates).
     macro_rules! reflect_table {
         ($w:expr, $sel:literal, $field:ident) => {
-            $w.install_native($w.protos.object, $sel, |w, self_, _| match self_ {
-                Value::Form(id) => Ok(form_table_to_table(w, id, |f| &f.$field)),
-                _ => Ok(w.make_table()),
+            $w.install_native($w.protos.object, $sel, |w, self_, _| {
+                let id = target_form_id(w, self_, $sel);
+                Ok(form_table_to_table(w, id, |f| &f.$field))
             });
         };
     }
@@ -2024,16 +2049,10 @@ fn install_object_reflection(w: &mut World) {
             Value::Sym(s) => s,
             _ => return Err(type_error(w, "handlerAt: expects a symbol")),
         };
-        match self_ {
-            Value::Form(id) => Ok(w
-                .heap
-                .get(id)
-                .handlers
-                .get(&sel)
-                .copied()
-                .unwrap_or(Value::Nil)),
-            _ => Ok(Value::Nil),
-        }
+        // route through proto for tagged immediates — same
+        // discipline as `:handlers`/`:slots`.
+        let id = target_form_id(w, self_, "handlerAt:");
+        Ok(w.heap.get(id).handlers.get(&sel).copied().unwrap_or(Value::Nil))
     });
 
     w.install_native(w.protos.object, "source", |w, self_, _| match self_ {
@@ -2509,9 +2528,10 @@ fn install_globals(w: &mut World) {
         if args.len() != 2 {
             return Err(RaiseError::new(w.intern("arity"), "(slot v 'name)"));
         }
-        let id = args[0].as_form_id().ok_or_else(|| {
-            RaiseError::new(w.intern("type-error"), "slot on tagged-immediate")
-        })?;
+        // route through proto for tagged immediates — they have
+        // no per-instance state. matches slotSet! / setHandler!
+        // discipline; every Form-y operation is uniform.
+        let id = target_form_id(w, args[0], "slot");
         let name = args[1].as_sym().ok_or_else(|| {
             RaiseError::new(w.intern("type-error"), "slot name must be a symbol")
         })?;
@@ -2526,7 +2546,7 @@ fn install_globals(w: &mut World) {
         }
         // nil is a singleton — its writes route to the hidden
         // nil-handlers form.
-        let id = nil_or_form_id(w, args[0], "slot-set!")?;
+        let id = target_form_id(w, args[0], "slot-set!");
         let name = args[1].as_sym().ok_or_else(|| {
             RaiseError::new(w.intern("type-error"), "slot name must be a symbol")
         })?;
@@ -2543,7 +2563,7 @@ fn install_globals(w: &mut World) {
                 "(meta-set! v 'name value)",
             ));
         }
-        let id = nil_or_form_id(w, args[0], "meta-set!")?;
+        let id = target_form_id(w, args[0], "meta-set!");
         let name = args[1].as_sym().ok_or_else(|| {
             type_error(w, "meta-set!: name must be a symbol")
         })?;
@@ -2612,7 +2632,7 @@ fn install_globals(w: &mut World) {
                 "(set-handler! Proto 'sel fn)",
             ));
         }
-        let proto_id = nil_or_form_id(w, args[0], "set-handler!")?;
+        let proto_id = target_form_id(w, args[0], "set-handler!");
         let sel = args[1].as_sym().ok_or_else(|| {
             RaiseError::new(w.intern("type-error"), "set-handler! selector must be a symbol")
         })?;
@@ -3370,6 +3390,55 @@ mod tests {
         assert_eq!(r, Value::Int(0));
         let r = ev(&mut w, "[nil empty?]").unwrap();
         assert_eq!(r, Value::Bool(true));
+    }
+
+    #[test]
+    fn tagged_immediates_uniformly_form_like() {
+        // L1 promises every value reflects through a Form. tagged
+        // immediates (Int, Bool, Sym, Char, Float, Nil) have no
+        // per-instance heap state, so their Form-y operations
+        // route to their proto-Form. uniform: no special-cases.
+        let mut w = fresh();
+
+        // setHandler! / slotSet! / metaSet! all work on tagged
+        // immediates; writes route to the proto.
+        ev(&mut w, "(setHandler! 5 'inferred-method (fn () 'i-was-here))").unwrap();
+        let r = ev(&mut w, "[5 inferred-method]").unwrap();
+        assert_eq!(r, Value::Sym(w.intern("i-was-here")));
+        // and equivalently — the handler IS on Integer-proto:
+        let r = ev(&mut w, "[7 inferred-method]").unwrap();
+        assert_eq!(
+            r,
+            Value::Sym(w.intern("i-was-here")),
+            "writing on 5 should be visible on 7 — same proto",
+        );
+
+        // slot reads route too.
+        ev(&mut w, "(slotSet! #true 'flag 'set-via-tagged)").unwrap();
+        let r = ev(&mut w, "(slot #true 'flag)").unwrap();
+        assert_eq!(r, Value::Sym(w.intern("set-via-tagged")));
+
+        // metaSet! likewise.
+        ev(&mut w, "(metaSet! 'someSym 'tag 42)").unwrap();
+        let r = ev(&mut w, "[[Symbol meta] at: 'tag]").unwrap();
+        assert_eq!(r, Value::Int(42));
+    }
+
+    #[test]
+    fn handlers_reflection_routes_through_proto() {
+        // [5 handlers] returns Integer's handler table — the
+        // honest answer to "what does 5 dispatch against."
+        let mut w = fresh();
+        let direct = ev(&mut w, "[5 handlers]").unwrap();
+        let through_proto = ev(&mut w, "[Integer handlers]").unwrap();
+        // both return Tables. compare sizes — same handlers.
+        let d_size = w.table_repr(direct).unwrap().keyed.len();
+        let p_size = w.table_repr(through_proto).unwrap().keyed.len();
+        assert_eq!(
+            d_size, p_size,
+            "[5 handlers] and [Integer handlers] should reflect same table",
+        );
+        assert!(d_size > 0, "Integer should have handlers installed");
     }
 
     #[test]
