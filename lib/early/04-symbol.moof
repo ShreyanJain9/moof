@@ -1,0 +1,24 @@
+;; lib/early/04-symbol.moof
+;;
+;; Symbol primitives needed by __decode-header (and thus by the
+;; defmethod macro). these stay as setHandler! because defmethod
+;; doesn't exist yet at this point in the boot.
+
+;; these two stay as `setHandler!` because they're consumed by
+;; `__decode-header`, which is consumed by the `defmethod` macro
+;; itself — defining them via defmethod would be circular. once
+;; defmethod exists (in early/09-defmethod.moof), every other method
+;; uses it.
+(setHandler! Symbol 'endsWithColon?
+  (fn () [[self toString] endsWith?: ":"]))
+
+;; the operator-character set — used by header-decoding to spot
+;; binary operator headers like `(+ other)`. defined as a String
+;; we test membership against; cheaper to extend than a chain of
+;; nested `if`s.
+(def __operator-chars "+-*/<>=!?|&~^%")
+
+(setHandler! Symbol 'operatorOnly?
+  (fn ()
+    [[self toString] all?:
+      (fn (c) [__operator-chars contains?: [c toString]])]))

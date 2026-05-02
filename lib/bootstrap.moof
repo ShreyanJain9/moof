@@ -578,24 +578,6 @@
 ;; returns (sel . params-list).
 ;; ─────────────────────────────────────────────────────────────────
 
-;; these two stay as `setHandler!` because they're consumed by
-;; `__decode-header`, which is consumed by the `defmethod` macro
-;; itself — defining them via defmethod would be circular. once
-;; defmethod exists (below), every other method uses it.
-(setHandler! Symbol 'endsWithColon?
-  (fn () [[self toString] endsWith?: ":"]))
-
-;; the operator-character set — used by header-decoding to spot
-;; binary operator headers like `(+ other)`. defined as a String
-;; we test membership against; cheaper to extend than a chain of
-;; nested `if`s.
-(def __operator-chars "+-*/<>=!?|&~^%")
-
-(setHandler! Symbol 'operatorOnly?
-  (fn ()
-    [[self toString] all?:
-      (fn (c) [__operator-chars contains?: [c toString]])]))
-
 (def __decode-header
   (fn (header)
     (let ((first [header car])
