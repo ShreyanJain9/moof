@@ -32,18 +32,19 @@
 //! mco's proto is "called". the moof program names it by `def`.
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use wasmtime::{Engine, Instance, Linker, Module, Store};
+use wasmtime_wasi::preview1::WasiP1Ctx;
+use wasmtime_wasi::WasiCtxBuilder;
 
 use crate::form::Form;
 use crate::value::Value;
 use crate::world::{RaiseError, World};
 
 /// per-mco state: the wasmtime engine + instantiated module +
-/// store. wrapped in `Arc` because a single mco's instance may
-/// service many calls (each method-handler closure needs its own
-/// reference into the same instance).
+/// store. the store carries a WasiP1Ctx so mcos compiled for
+/// `wasm32-wasi` can access standard system services (time, fs,
+/// stdin/stdout, etc) through `wasi_snapshot_preview1` imports.
 ///
 /// parking the whole shape in a single Form's `:wasm-instance`
 /// foreign-handle slot would be cleaner (per L6, "nothing the
@@ -54,7 +55,7 @@ pub struct WasmInstance {
     pub _engine: Arc<Engine>,
     pub _module: Module,
     pub instance: Instance,
-    pub store: Store<()>,
+    pub store: Store<WasiP1Ctx>,
 }
 
 /// load a `.wasm` file from disk, instantiate it, return a fresh
@@ -86,12 +87,25 @@ pub fn load_wasm_bytes(
             format!("`{}` is not a valid wasm module: {}", label, e),
         )
     })?;
-    let mut store: Store<()> = Store::new(&engine, ());
 
-    // build the substrate-provided import surface. wasm modules
-    // import these as `extern "moof" fn name(...)` (zig syntax).
-    // grows as more substrate primitives become useful to mcos.
-    let mut linker: Linker<()> = Linker::new(&engine);
+    // build a WASI ctx — the wasm-side `clock_time_get`, `fd_write`,
+    // etc resolve through here. mcos compiled for `wasm32-wasi`
+    // get standard system access "for free." moof's own imports
+    // are namespaced separately under the "moof" wasm module.
+    let wasi = WasiCtxBuilder::new()
+        .inherit_stderr() // dev: inherit so panics show up
+        .build_p1();
+    let mut store: Store<WasiP1Ctx> = Store::new(&engine, wasi);
+
+    // build the import linker. wasi first (the standard), then
+    // moof-specific imports (substrate-native primitives).
+    let mut linker: Linker<WasiP1Ctx> = Linker::new(&engine);
+    wasmtime_wasi::preview1::add_to_linker_sync(&mut linker, |c| c).map_err(|e| {
+        RaiseError::new(
+            world.intern("wasm-link-error"),
+            format!("wasi linker setup failed: {}", e),
+        )
+    })?;
     install_moof_imports(&mut linker).map_err(|e| {
         RaiseError::new(
             world.intern("wasm-link-error"),
@@ -186,39 +200,27 @@ pub enum ExportShape {
 /// resolves through here.
 ///
 /// the names + signatures form a stable abi surface the substrate
-/// commits to. additions are non-breaking; removals or signature
-/// changes need an abi-version bump.
+/// commits to. **only moof-specific primitives go here** — things
+/// that have no POSIX equivalent. system services like clocks,
+/// filesystems, randomness, network: those are WASI's job; mcos
+/// import them through `wasi_snapshot_preview1` directly.
 ///
-/// minimum useful set right now:
-/// - `now_ns() -> i64` — wall-clock nanoseconds since unix epoch.
-///   *not* deterministic; mcos in replicated vats must avoid it
-///   (or accept replicas-may-disagree semantics).
-/// - `monotonic_ns() -> i64` — monotonic nanoseconds since some
-///   unspecified epoch. for measuring durations.
+/// the substrate doesn't fake-shim POSIX. clear separation:
+///   "wasi" namespace  → standard system services
+///   "moof" namespace  → moof-specific (slot, send, raise, …)
 ///
-/// next up (when richer methods need them):
+/// planned moof imports (coming as richer methods need them):
 /// - `intern(ptr, len) -> sym-handle`
 /// - `make_string(ptr, len) -> form-handle`
 /// - `slot(form-handle, sym-handle) -> value-handle`
 /// - `slot_set(form-handle, sym-handle, value-handle)`
 /// - `send(receiver, sel, args-ptr, argc) -> value-handle`
 /// - `raise(kind-sym, msg-ptr, msg-len) -> traps`
-fn install_moof_imports(linker: &mut Linker<()>) -> wasmtime::Result<()> {
-    linker.func_wrap("moof", "now_ns", || -> i64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos() as i64)
-            .unwrap_or(0)
-    })?;
-    linker.func_wrap("moof", "monotonic_ns", || -> i64 {
-        // std::time::Instant doesn't expose raw ns; use a process-
-        // relative epoch.
-        use std::sync::OnceLock;
-        use std::time::Instant;
-        static EPOCH: OnceLock<Instant> = OnceLock::new();
-        let epoch = EPOCH.get_or_init(Instant::now);
-        epoch.elapsed().as_nanos() as i64
-    })?;
+///
+/// the function is currently a no-op. left as a hook so the
+/// import-pipeline plumbing is in place; the first real moof-
+/// import lands when an mco needs slot access.
+fn install_moof_imports(_linker: &mut Linker<WasiP1Ctx>) -> wasmtime::Result<()> {
     Ok(())
 }
 

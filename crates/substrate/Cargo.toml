@@ -13,6 +13,13 @@ moof-abi-rust = { path = "../abi-rust" }
 # default-features keeps wasmtime light(er); we don't need cache,
 # parallel-compilation, or component-model yet.
 wasmtime = { version = "26", default-features = false, features = ["cranelift", "runtime"] }
+# WASI support — lets wasm modules access standard system services
+# (time, fs, network) through the wasi_snapshot_preview1 interface.
+# the substrate doesn't ship moof-shaped equivalents of POSIX
+# things; mcos that need them speak WASI directly. the substrate
+# provides ITS OWN imports namespace (under the "moof" wasm
+# module) for moof-specific primitives only.
+wasmtime-wasi = "26"
 
 [[bin]]
 name = "moof"

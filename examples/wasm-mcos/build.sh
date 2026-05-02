@@ -39,7 +39,7 @@ done
 echo "→ $OUT  exports: $(echo $EXPORTS | tr '\n' ' ')"
 
 zig build-exe \
-    -target wasm32-freestanding \
+    -target wasm32-wasi \
     -O ReleaseSmall \
     -fno-entry \
     "${EXPORT_FLAGS[@]}" \

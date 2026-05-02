@@ -2,67 +2,47 @@
 //!
 //! a wasm mco written in zig imports this module:
 //!
-//!     const moof = @import("moof");
+//!     const moof = @import("lib/moof.zig");
 //!
-//!     export fn now() i64 {
-//!         return moof.now_ns();
-//!     }
+//! the moof substrate provides imports under the "moof" wasm
+//! namespace — these are *moof-specific* primitives only (slot,
+//! slotSet, send, raise, intern, make-string, etc). standard
+//! system services (clocks, filesystems, network) come through
+//! WASI; mcos that need them speak WASI directly via
+//! `wasi_snapshot_preview1`.
 //!
-//! and that's it — `moof.now_ns()` resolves at instantiation time
-//! to the substrate's clock, the `export fn now` becomes a method
-//! on the proto-Form that `[$mco load:]` returns.
+//! see `crates/substrate/src/wasm.rs::install_moof_imports` for
+//! the substrate side. see `docs/reference/mco-format.md` for the
+//! full mco model.
 //!
-//! see `docs/reference/mco-format.md` for the full mco model.
-//! see `crates/substrate/src/wasm.rs` for the substrate side.
+//! THIS FILE IS CURRENTLY A STUB. moof-specific imports land here
+//! as the substrate exposes them. for the first wave (clock),
+//! WASI alone is sufficient; nothing in this file is needed yet.
 
-// ── substrate-provided imports ───────────────────────────────────
+// ── moof-namespaced imports (none yet) ───────────────────────────
 //
-// every fn here is a `func_wrap`-ed function in the substrate's
-// wasmtime Linker, namespaced under the "moof" wasm module.
-// declaring them as `extern "moof"` makes them resolve at
-// instantiation time.
+// future imports will be declared as:
 //
-// stable abi: this list grows monotonically; signatures are
-// versioned via abi-version in the mco manifest.
-
-/// wall-clock nanoseconds since unix epoch. NOT deterministic;
-/// avoid in replicated vats (or use the replication-friendly
-/// path that goes through a deterministic-time cap).
-pub extern "moof" fn now_ns() i64;
-
-/// monotonic nanoseconds since some unspecified process-local
-/// epoch. for measuring durations. must not be compared across
-/// vats.
-pub extern "moof" fn monotonic_ns() i64;
-
-// ── derived helpers (pure zig) ───────────────────────────────────
+//   pub extern "moof" fn slot(form_handle: u32, sym_handle: u32) u64;
+//   pub extern "moof" fn slot_set(form_handle: u32, sym_handle: u32, value_handle: u64) void;
+//   pub extern "moof" fn intern(ptr: [*]const u8, len: usize) u32;
+//   pub extern "moof" fn make_string(ptr: [*]const u8, len: usize) u32;
+//   pub extern "moof" fn send(receiver: u64, selector: u32, args: [*]const u64, argc: usize) u64;
+//   pub extern "moof" fn raise(kind: u32, msg_ptr: [*]const u8, msg_len: usize) noreturn;
 //
-// these add ergonomics on top of the raw imports. zero overhead
-// (zig inlines them when ReleaseSmall/ReleaseFast).
+// each grows the abi version (the substrate cross-checks).
 
-/// wall-clock microseconds since unix epoch. convenience wrapper
-/// for the common case where ns precision is overkill.
-pub inline fn now_us() i64 {
-    return @divTrunc(now_ns(), 1000);
-}
+// ── comptime helpers (zig-side, zero overhead) ───────────────────
 
-/// wall-clock milliseconds since unix epoch.
-pub inline fn now_ms() i64 {
-    return @divTrunc(now_ns(), 1_000_000);
-}
-
-/// duration in ns of executing a closure-shaped fn. returns the
-/// number of nanoseconds elapsed.
+/// duration in ns of executing a no-arg function. monotonic-clock
+/// based; uses WASI directly.
 pub inline fn timeFn(comptime f: anytype) i64 {
-    const start = monotonic_ns();
+    const std = @import("std");
+    const wasi = std.os.wasi;
+    var t0: wasi.timestamp_t = 0;
+    var t1: wasi.timestamp_t = 0;
+    _ = wasi.clock_time_get(.MONOTONIC, 1000, &t0);
     f();
-    return monotonic_ns() - start;
+    _ = wasi.clock_time_get(.MONOTONIC, 1000, &t1);
+    return @intCast(t1 - t0);
 }
-
-// ── method export macro ──────────────────────────────────────────
-//
-// zig doesn't have lisp-style macros but `comptime` + `inline fn`
-// gets close. for more elaborate "macro" surface (e.g. auto-
-// generating `extern "C"` boilerplate, validating method names,
-// emitting custom-section manifests at compile time), grow this
-// section. the simple `export fn` shape is enough for now.
