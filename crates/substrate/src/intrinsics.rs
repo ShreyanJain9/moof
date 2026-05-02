@@ -135,6 +135,7 @@ pub fn install(w: &mut World) {
     install_method_reflection(w);
     install_console_proto_and_caps(w);
     install_globals(w);
+    install_compiler_primitives(w);
     install_proto_globals(w);
 }
 
@@ -917,17 +918,32 @@ fn ensure_opcode_proto(world: &mut World) -> crate::form::FormId {
     proto_id
 }
 
+/// build an opcode-Form `{Opcode :op 'name :operands [args…]}`.
+/// shared by `opcode_form` (Op → Form, used by `[m bytecodes]`) and
+/// the per-variant moof constructors (`(op-load-const idx)` etc.,
+/// used by `compiler.moof`). encode/decode go through this so the
+/// shape stays canonical in both directions.
+fn mk_op_form(world: &mut World, name: &str, operands: &[Value]) -> Value {
+    let op_sym = world.intern("op");
+    let operands_sym = world.intern("operands");
+    let opcode_proto = ensure_opcode_proto(world);
+    let mut form = crate::form::Form::with_proto(Value::Form(opcode_proto));
+    let name_sym = world.intern(name);
+    form.slots.insert(op_sym, Value::Sym(name_sym));
+    let operands_tbl = world.make_table();
+    if let Some(r) = world.table_repr_mut(operands_tbl) {
+        r.positional.extend_from_slice(operands);
+    }
+    form.slots.insert(operands_sym, operands_tbl);
+    Value::Form(world.alloc(form))
+}
+
 /// build an opcode-Form for a single `Op`. each form has slots
 /// `:op` (Sym) and `:operands` (Table) — operands are pushed in
 /// declaration order so positional access works. the form's proto
 /// is `Opcode`, which exposes `:op`, `:operands`, `:toString`.
 fn opcode_form(world: &mut World, op: crate::opcodes::Op) -> Value {
     use crate::opcodes::Op;
-    let op_sym = world.intern("op");
-    let operands_sym = world.intern("operands");
-    let opcode_proto = ensure_opcode_proto(world);
-    let mut form = crate::form::Form::with_proto(Value::Form(opcode_proto));
-
     let (name, operands): (&'static str, Vec<Value>) = match op {
         Op::LoadConst(idx) => ("LoadConst", vec![Value::Int(idx as i64)]),
         Op::PushNil => ("PushNil", vec![]),
@@ -972,17 +988,174 @@ fn opcode_form(world: &mut World, op: crate::opcodes::Op) -> Value {
         Op::JumpIfFalse(off) => ("JumpIfFalse", vec![Value::Int(off as i64)]),
         Op::Return => ("Return", vec![]),
     };
+    mk_op_form(world, name, &operands)
+}
 
-    let name_sym = world.intern(name);
-    form.slots.insert(op_sym, Value::Sym(name_sym));
-    let operands_tbl = world.make_table();
-    if let Some(r) = world.table_repr_mut(operands_tbl) {
-        for v in operands {
-            r.positional.push(v);
+/// the inverse of `opcode_form`: read an opcode-Form's `:op` and
+/// `:operands` and rebuild an `Op` variant. range-checks the
+/// numeric operands against their bytecode bounds.
+///
+/// raises `'compile-error` for malformed forms, `'range-error` when
+/// an operand exceeds the variant's bound (e.g. `argc > 255` in a
+/// `Send`).
+fn decode_op_form(
+    world: &mut World,
+    v: Value,
+) -> Result<crate::opcodes::Op, RaiseError> {
+    use crate::opcodes::Op;
+    let id = v.as_form_id().ok_or_else(|| {
+        type_error(world, "chunk-emit: opcode must be a Form")
+    })?;
+    let op_sym = world.intern("op");
+    let operands_sym = world.intern("operands");
+    let name = match world.heap.get(id).slot(op_sym) {
+        Value::Sym(s) => s,
+        _ => return Err(raise(world, "compile-error", "opcode :op must be a Symbol")),
+    };
+    let operands_v = world.heap.get(id).slot(operands_sym);
+    let operands: Vec<Value> = world
+        .table_repr(operands_v)
+        .map(|r| r.positional.clone())
+        .unwrap_or_default();
+    let name_text = world.resolve(name).to_string();
+
+    fn need_int(
+        w: &mut World,
+        op: &str,
+        ops: &[Value],
+        i: usize,
+    ) -> Result<i64, RaiseError> {
+        match ops.get(i).and_then(|v| v.as_int()) {
+            Some(n) => Ok(n),
+            None => Err(raise(
+                w,
+                "compile-error",
+                format!("{}: expected Integer at operand {}", op, i),
+            )),
         }
     }
-    form.slots.insert(operands_sym, operands_tbl);
-    Value::Form(world.alloc(form))
+    fn need_sym(
+        w: &mut World,
+        op: &str,
+        ops: &[Value],
+        i: usize,
+    ) -> Result<SymId, RaiseError> {
+        match ops.get(i).and_then(|v| v.as_sym()) {
+            Some(s) => Ok(s),
+            None => Err(raise(
+                w,
+                "compile-error",
+                format!("{}: expected Symbol at operand {}", op, i),
+            )),
+        }
+    }
+    fn need_form(
+        w: &mut World,
+        op: &str,
+        ops: &[Value],
+        i: usize,
+    ) -> Result<crate::form::FormId, RaiseError> {
+        match ops.get(i).and_then(|v| v.as_form_id()) {
+            Some(f) => Ok(f),
+            None => Err(raise(
+                w,
+                "compile-error",
+                format!("{}: expected Form at operand {}", op, i),
+            )),
+        }
+    }
+    fn fit_u16(w: &mut World, op: &str, n: i64) -> Result<u16, RaiseError> {
+        u16::try_from(n).map_err(|_| {
+            raise(
+                w,
+                "range-error",
+                format!("{}: operand {} doesn't fit u16 (max 65535)", op, n),
+            )
+        })
+    }
+    fn fit_u8(w: &mut World, op: &str, n: i64) -> Result<u8, RaiseError> {
+        u8::try_from(n).map_err(|_| {
+            raise(
+                w,
+                "range-error",
+                format!("{}: argc {} doesn't fit u8 (max 255)", op, n),
+            )
+        })
+    }
+    fn fit_i16(w: &mut World, op: &str, n: i64) -> Result<i16, RaiseError> {
+        i16::try_from(n).map_err(|_| {
+            raise(
+                w,
+                "range-error",
+                format!("{}: jump offset {} doesn't fit i16", op, n),
+            )
+        })
+    }
+
+    Ok(match name_text.as_str() {
+        "LoadConst" => {
+            let n = need_int(world, "LoadConst", &operands, 0)?;
+            Op::LoadConst(fit_u16(world, "LoadConst", n)?)
+        }
+        "PushNil" => Op::PushNil,
+        "PushTrue" => Op::PushTrue,
+        "PushFalse" => Op::PushFalse,
+        "Pop" => Op::Pop,
+        "Dup" => Op::Dup,
+        "LoadName" => Op::LoadName(need_sym(world, "LoadName", &operands, 0)?),
+        "StoreName" => Op::StoreName(need_sym(world, "StoreName", &operands, 0)?),
+        "LoadSelf" => Op::LoadSelf,
+        "DefineGlobal" => {
+            Op::DefineGlobal(need_sym(world, "DefineGlobal", &operands, 0)?)
+        }
+        "Send" => {
+            let sel = need_sym(world, "Send", &operands, 0)?;
+            let argc_n = need_int(world, "Send", &operands, 1)?;
+            let ic_n = need_int(world, "Send", &operands, 2)?;
+            Op::Send {
+                selector: sel,
+                argc: fit_u8(world, "Send", argc_n)?,
+                ic_idx: fit_u16(world, "Send", ic_n)?,
+            }
+        }
+        "TailSend" => {
+            let sel = need_sym(world, "TailSend", &operands, 0)?;
+            let argc_n = need_int(world, "TailSend", &operands, 1)?;
+            Op::TailSend {
+                selector: sel,
+                argc: fit_u8(world, "TailSend", argc_n)?,
+            }
+        }
+        "SuperSend" => {
+            let sel = need_sym(world, "SuperSend", &operands, 0)?;
+            let argc_n = need_int(world, "SuperSend", &operands, 1)?;
+            let ic_n = need_int(world, "SuperSend", &operands, 2)?;
+            Op::SuperSend {
+                selector: sel,
+                argc: fit_u8(world, "SuperSend", argc_n)?,
+                ic_idx: fit_u16(world, "SuperSend", ic_n)?,
+            }
+        }
+        "PushClosure" => Op::PushClosure {
+            chunk: need_form(world, "PushClosure", &operands, 0)?,
+        },
+        "Jump" => {
+            let n = need_int(world, "Jump", &operands, 0)?;
+            Op::Jump(fit_i16(world, "Jump", n)?)
+        }
+        "JumpIfFalse" => {
+            let n = need_int(world, "JumpIfFalse", &operands, 0)?;
+            Op::JumpIfFalse(fit_i16(world, "JumpIfFalse", n)?)
+        }
+        "Return" => Op::Return,
+        other => {
+            return Err(raise(
+                world,
+                "compile-error",
+                format!("unknown opcode `{}`", other),
+            ));
+        }
+    })
 }
 
 fn install_method_reflection(w: &mut World) {
@@ -2163,6 +2336,373 @@ fn install_globals(w: &mut World) {
     });
 }
 
+// ─────────────────────────────────────────────────────────────────
+// compiler primitives — `docs/reference/compiler-primitives.md`
+//
+// the chunk-construction api exposed to moof. every entry here is
+// the moof-visible counterpart of one rust-side compiler operation;
+// `lib/compiler.moof` (when written) builds chunks by composing
+// these sends. paired with the read-side reflection api
+// (`[m bytecodes]`, `[m consts]`, `[m ics]`), they make bytecode
+// bidirectionally moldable — substrate-laws.md L5 holds in both
+// directions.
+//
+// shape: per `process/docs-driven.md`, sends-to-receivers, not
+// free functions. constructors live as class-side methods on the
+// `Opcode` proto (`[Opcode loadConst: 5]`); chunk lifecycle is a
+// mix of class-side (`[Chunk new: ps source: src]`) and
+// instance-side (`[c emit: op]`) methods on `Chunk`.
+//
+// validation discipline: per-variant constructors are pure value
+// builders; range checks and shape validation happen at *emit*
+// time, in `decode_op_form`. raises are tagged `'compile-error`
+// (shape) or `'range-error` (operand bounds).
+// ─────────────────────────────────────────────────────────────────
+
+/// helper: extract the chunk-FormId from a receiver (the `self_`
+/// of a `:emit:` / `:addConst:` / etc. send), raising a clean
+/// type-error if it isn't a registered chunk.
+fn chunk_self(world: &mut World, self_: Value, op: &str) -> Result<FormId, RaiseError> {
+    let id = self_.as_form_id().ok_or_else(|| {
+        type_error(world, format!("{}: receiver is not a Form", op))
+    })?;
+    if !world.chunk_ops.contains_key(&id) {
+        return Err(type_error(
+            world,
+            format!("{}: receiver is not a registered chunk", op),
+        ));
+    }
+    Ok(id)
+}
+
+fn install_compiler_primitives(w: &mut World) {
+    // ensure the Opcode proto exists (idempotent — also called from
+    // install_method_reflection; mk_op_form depends on it).
+    let opcode_proto = ensure_opcode_proto(w);
+
+    // ── opcode constructors — class-side on Opcode ───────────────
+    //
+    // sending one of these to `Opcode` returns a fresh opcode-Form.
+    // the receiver is the proto-Form `Opcode`; in moof's flat
+    // prototype model, "class-side" means handlers on the proto
+    // itself (consulted before walking up the proto chain). same
+    // pattern as `[Table new]`.
+    //
+    // each constructor stuffs its args into the Form's `:operands`
+    // table and is type-checked when the form meets a chunk via
+    // `[c emit: …]`.
+
+    // nullary `[Opcode foo]` constructors.
+    w.install_native(opcode_proto, "pushNil", |w, _self, args| {
+        if !args.is_empty() {
+            return Err(raise(w, "arity", "[Opcode pushNil] takes no args"));
+        }
+        Ok(mk_op_form(w, "PushNil", &[]))
+    });
+    w.install_native(opcode_proto, "pushTrue", |w, _self, args| {
+        if !args.is_empty() {
+            return Err(raise(w, "arity", "[Opcode pushTrue] takes no args"));
+        }
+        Ok(mk_op_form(w, "PushTrue", &[]))
+    });
+    w.install_native(opcode_proto, "pushFalse", |w, _self, args| {
+        if !args.is_empty() {
+            return Err(raise(w, "arity", "[Opcode pushFalse] takes no args"));
+        }
+        Ok(mk_op_form(w, "PushFalse", &[]))
+    });
+    w.install_native(opcode_proto, "pop", |w, _self, args| {
+        if !args.is_empty() {
+            return Err(raise(w, "arity", "[Opcode pop] takes no args"));
+        }
+        Ok(mk_op_form(w, "Pop", &[]))
+    });
+    w.install_native(opcode_proto, "dup", |w, _self, args| {
+        if !args.is_empty() {
+            return Err(raise(w, "arity", "[Opcode dup] takes no args"));
+        }
+        Ok(mk_op_form(w, "Dup", &[]))
+    });
+    w.install_native(opcode_proto, "loadSelf", |w, _self, args| {
+        if !args.is_empty() {
+            return Err(raise(w, "arity", "[Opcode loadSelf] takes no args"));
+        }
+        Ok(mk_op_form(w, "LoadSelf", &[]))
+    });
+    w.install_native(opcode_proto, "return", |w, _self, args| {
+        if !args.is_empty() {
+            return Err(raise(w, "arity", "[Opcode return] takes no args"));
+        }
+        Ok(mk_op_form(w, "Return", &[]))
+    });
+
+    // unary `[Opcode foo: x]` constructors.
+    w.install_native(opcode_proto, "loadConst:", |w, _self, args| {
+        if args.len() != 1 {
+            return Err(raise(w, "arity", "[Opcode loadConst: x] takes 1 arg"));
+        }
+        Ok(mk_op_form(w, "LoadConst", args))
+    });
+    w.install_native(opcode_proto, "loadName:", |w, _self, args| {
+        if args.len() != 1 {
+            return Err(raise(w, "arity", "[Opcode loadName: 'n] takes 1 arg"));
+        }
+        Ok(mk_op_form(w, "LoadName", args))
+    });
+    w.install_native(opcode_proto, "storeName:", |w, _self, args| {
+        if args.len() != 1 {
+            return Err(raise(w, "arity", "[Opcode storeName: 'n] takes 1 arg"));
+        }
+        Ok(mk_op_form(w, "StoreName", args))
+    });
+    w.install_native(opcode_proto, "defineGlobal:", |w, _self, args| {
+        if args.len() != 1 {
+            return Err(raise(
+                w,
+                "arity",
+                "[Opcode defineGlobal: 'n] takes 1 arg",
+            ));
+        }
+        Ok(mk_op_form(w, "DefineGlobal", args))
+    });
+    w.install_native(opcode_proto, "pushClosure:", |w, _self, args| {
+        if args.len() != 1 {
+            return Err(raise(
+                w,
+                "arity",
+                "[Opcode pushClosure: c] takes 1 arg",
+            ));
+        }
+        Ok(mk_op_form(w, "PushClosure", args))
+    });
+    w.install_native(opcode_proto, "jump:", |w, _self, args| {
+        if args.len() != 1 {
+            return Err(raise(w, "arity", "[Opcode jump: o] takes 1 arg"));
+        }
+        Ok(mk_op_form(w, "Jump", args))
+    });
+    w.install_native(opcode_proto, "jumpIfFalse:", |w, _self, args| {
+        if args.len() != 1 {
+            return Err(raise(
+                w,
+                "arity",
+                "[Opcode jumpIfFalse: o] takes 1 arg",
+            ));
+        }
+        Ok(mk_op_form(w, "JumpIfFalse", args))
+    });
+
+    // [Opcode send: 'sel argc: a ic: i]
+    w.install_native(opcode_proto, "send:argc:ic:", |w, _self, args| {
+        if args.len() != 3 {
+            return Err(raise(
+                w,
+                "arity",
+                "[Opcode send: 'sel argc: a ic: i] takes 3 args",
+            ));
+        }
+        Ok(mk_op_form(w, "Send", args))
+    });
+
+    // [Opcode tailSend: 'sel argc: a]
+    w.install_native(opcode_proto, "tailSend:argc:", |w, _self, args| {
+        if args.len() != 2 {
+            return Err(raise(
+                w,
+                "arity",
+                "[Opcode tailSend: 'sel argc: a] takes 2 args",
+            ));
+        }
+        Ok(mk_op_form(w, "TailSend", args))
+    });
+
+    // [Opcode superSend: 'sel argc: a ic: i]
+    w.install_native(opcode_proto, "superSend:argc:ic:", |w, _self, args| {
+        if args.len() != 3 {
+            return Err(raise(
+                w,
+                "arity",
+                "[Opcode superSend: 'sel argc: a ic: i] takes 3 args",
+            ));
+        }
+        Ok(mk_op_form(w, "SuperSend", args))
+    });
+
+    // ── chunk lifecycle — Chunk class-side and instance-side ─────
+
+    // [Chunk new: params source: source] — class-side constructor.
+    // installed on the Chunk proto-Form's own handler table; sending
+    // to `Chunk` consults it before walking up.
+    w.install_native(w.protos.chunk, "new:source:", |w, _self, args| {
+        if args.len() != 2 {
+            return Err(raise(
+                w,
+                "arity",
+                "[Chunk new: ps source: src] takes 2 args",
+            ));
+        }
+        let params_v = args[0];
+        let source_v = args[1];
+        let params_vec = w.list_to_vec(params_v).map_err(|_| {
+            type_error(w, "Chunk new:source:: params must be a list of Symbols")
+        })?;
+        for p in &params_vec {
+            if !matches!(p, Value::Sym(_)) {
+                return Err(type_error(
+                    w,
+                    "Chunk new:source:: each param must be a Symbol",
+                ));
+            }
+        }
+        let mut chunk_form = Form::with_proto(Value::Form(w.protos.chunk));
+        chunk_form.slots.insert(w.params_sym, params_v);
+        chunk_form.meta.insert(w.source_sym, source_v);
+        let chunk_id = w.alloc(chunk_form);
+        w.chunk_ops.insert(chunk_id, Vec::new());
+        w.chunk_consts.insert(chunk_id, Vec::new());
+        w.chunk_ics.insert(chunk_id, Vec::new());
+        Ok(Value::Form(chunk_id))
+    });
+
+    // [chunk emit: op-form] — append op; return its position.
+    w.install_native(w.protos.chunk, "emit:", |w, self_, args| {
+        if args.len() != 1 {
+            return Err(raise(w, "arity", "[chunk emit: op] takes 1 arg"));
+        }
+        let chunk_id = chunk_self(w, self_, "emit:")?;
+        let op = decode_op_form(w, args[0])?;
+        let ops = w.chunk_ops.get_mut(&chunk_id).unwrap();
+        let pos = ops.len();
+        ops.push(op);
+        Ok(Value::Int(pos as i64))
+    });
+
+    // [chunk addConst: value] — append; return its index.
+    w.install_native(w.protos.chunk, "addConst:", |w, self_, args| {
+        if args.len() != 1 {
+            return Err(raise(w, "arity", "[chunk addConst: v] takes 1 arg"));
+        }
+        let chunk_id = chunk_self(w, self_, "addConst:")?;
+        let consts = w.chunk_consts.get_mut(&chunk_id).unwrap();
+        let idx = consts.len();
+        if idx >= u16::MAX as usize {
+            return Err(raise(
+                w,
+                "range-error",
+                "addConst:: constant pool exceeds 65535",
+            ));
+        }
+        consts.push(args[0]);
+        Ok(Value::Int(idx as i64))
+    });
+
+    // [chunk addIc] — reserve an inline-cache slot; return idx.
+    w.install_native(w.protos.chunk, "addIc", |w, self_, args| {
+        if !args.is_empty() {
+            return Err(raise(w, "arity", "[chunk addIc] takes no args"));
+        }
+        let chunk_id = chunk_self(w, self_, "addIc")?;
+        let ics = w.chunk_ics.get_mut(&chunk_id).unwrap();
+        let idx = ics.len();
+        if idx >= u16::MAX as usize {
+            return Err(raise(
+                w,
+                "range-error",
+                "addIc: ic pool exceeds 65535",
+            ));
+        }
+        ics.push(crate::world::ICache::default());
+        Ok(Value::Int(idx as i64))
+    });
+
+    // [chunk jumpTarget] — current ops length.
+    w.install_native(w.protos.chunk, "jumpTarget", |w, self_, args| {
+        if !args.is_empty() {
+            return Err(raise(w, "arity", "[chunk jumpTarget] takes no args"));
+        }
+        let chunk_id = chunk_self(w, self_, "jumpTarget")?;
+        Ok(Value::Int(w.chunk_ops[&chunk_id].len() as i64))
+    });
+
+    // [chunk patchJump: pos to: target] — overwrite the offset of the
+    // jump already at `pos`. computes `target - pos` per the VM's
+    // `(pc - 1) + off` formula.
+    w.install_native(w.protos.chunk, "patchJump:to:", |w, self_, args| {
+        use crate::opcodes::Op;
+        if args.len() != 2 {
+            return Err(raise(
+                w,
+                "arity",
+                "[chunk patchJump: pos to: tgt] takes 2 args",
+            ));
+        }
+        let chunk_id = chunk_self(w, self_, "patchJump:to:")?;
+        let pos = args[0].as_int().ok_or_else(|| {
+            type_error(w, "patchJump:to:: pos must be Integer")
+        })?;
+        let tgt = args[1].as_int().ok_or_else(|| {
+            type_error(w, "patchJump:to:: target must be Integer")
+        })?;
+        let off = tgt - pos;
+        let off_i16 = i16::try_from(off).map_err(|_| {
+            raise(
+                w,
+                "range-error",
+                format!("patchJump:to:: offset {} doesn't fit i16", off),
+            )
+        })?;
+        let pos_idx: usize = pos.try_into().map_err(|_| {
+            raise(
+                w,
+                "range-error",
+                "patchJump:to:: pos must be non-negative",
+            )
+        })?;
+        if pos_idx >= w.chunk_ops[&chunk_id].len() {
+            return Err(raise(
+                w,
+                "range-error",
+                "patchJump:to:: pos out of range",
+            ));
+        }
+        let cur_op = w.chunk_ops[&chunk_id][pos_idx];
+        let new_op = match cur_op {
+            Op::Jump(_) => Op::Jump(off_i16),
+            Op::JumpIfFalse(_) => Op::JumpIfFalse(off_i16),
+            _ => {
+                return Err(raise(
+                    w,
+                    "compile-error",
+                    "patchJump:to:: op at pos is not a jump",
+                ));
+            }
+        };
+        w.chunk_ops.get_mut(&chunk_id).unwrap()[pos_idx] = new_op;
+        Ok(Value::Nil)
+    });
+
+    // [chunk asClosure] — wrap the chunk in a Closure-Form ready to
+    // call. captures the global env + nil self (top-level).
+    w.install_native(w.protos.chunk, "asClosure", |w, self_, args| {
+        if !args.is_empty() {
+            return Err(raise(w, "arity", "[chunk asClosure] takes no args"));
+        }
+        let chunk_id = chunk_self(w, self_, "asClosure")?;
+        let mut f = Form::with_proto(Value::Form(w.protos.closure));
+        f.slots.insert(w.body_sym, Value::Form(chunk_id));
+        f.slots.insert(w.env_sym, Value::Form(w.global_env));
+        let captured_self_sym = w.intern("captured-self");
+        f.slots.insert(captured_self_sym, Value::Nil);
+        let params = w.heap.get(chunk_id).slot(w.params_sym);
+        f.slots.insert(w.params_sym, params);
+        let source = w.heap.get(chunk_id).meta_at(w.source_sym);
+        if !source.is_nil() {
+            f.meta.insert(w.source_sym, source);
+        }
+        Ok(Value::Form(w.alloc(f)))
+    });
+}
+
 /// allocate a global-dispatcher Form (proto: Method, native fn
 /// recorded in side table) and bind it under `name` in the global
 /// env.
@@ -2478,6 +3018,161 @@ mod tests {
                 forbidden
             );
         }
+    }
+
+    // ── compiler primitives — `docs/reference/compiler-primitives.md`
+    //
+    // these tests exercise the moof-side chunk-construction api.
+    // the smoke test (push 1, push 2, send +, return) is the
+    // forcing function for track 1: if it returns 3, every
+    // primitive is honest end-to-end.
+
+    #[test]
+    fn compiler_primitives_smoke_test() {
+        // a 4-op chunk built from moof, run as a closure.
+        let mut w = fresh();
+        let r = ev(
+            &mut w,
+            "(let ((c [Chunk new: '() source: nil]))
+               [c addConst: 1]
+               [c addConst: 2]
+               [c emit: [Opcode loadConst: 0]]
+               [c emit: [Opcode loadConst: 1]]
+               [c emit: [Opcode send: '+ argc: 1 ic: [c addIc]]]
+               [c emit: [Opcode return]]
+               [[c asClosure] call])",
+        )
+        .unwrap();
+        assert_eq!(r, Value::Int(3));
+    }
+
+    #[test]
+    fn compiler_primitives_construct_opcode_form() {
+        // [Opcode loadConst: 5] builds a Form with proto Opcode and
+        // the expected :op / :operands shape.
+        let mut w = fresh();
+        let v = ev(&mut w, "[Opcode loadConst: 5]").unwrap();
+        let id = v.as_form_id().unwrap();
+        let opcode_sym = w.intern("Opcode");
+        let opcode_proto_v = w.env_lookup(w.global_env, opcode_sym).unwrap();
+        assert_eq!(w.heap.get(id).proto, opcode_proto_v);
+        // :op is the symbol 'LoadConst.
+        let op_sym = w.intern("op");
+        let load_const_sym = w.intern("LoadConst");
+        assert_eq!(w.heap.get(id).slot(op_sym), Value::Sym(load_const_sym));
+        // :operands is a Table whose [0] is 5.
+        let operands_sym = w.intern("operands");
+        let operands = w.heap.get(id).slot(operands_sym);
+        let r = w.table_repr(operands).unwrap();
+        assert_eq!(r.positional, vec![Value::Int(5)]);
+    }
+
+    #[test]
+    fn chunk_new_registers_side_tables() {
+        // a chunk allocated from moof shows up in chunk_ops/consts/ics
+        // and reflects through `[m bytecodes]` (currently empty).
+        let mut w = fresh();
+        let v = ev(&mut w, "[Chunk new: '() source: nil]").unwrap();
+        let id = v.as_form_id().unwrap();
+        assert!(w.chunk_ops.contains_key(&id));
+        assert!(w.chunk_consts.contains_key(&id));
+        assert!(w.chunk_ics.contains_key(&id));
+        assert!(w.chunk_ops[&id].is_empty());
+    }
+
+    #[test]
+    fn chunk_emit_returns_position() {
+        // each emit returns the index it was emitted at.
+        let mut w = fresh();
+        ev(&mut w, "(def c [Chunk new: '() source: nil])").unwrap();
+        let r0 = ev(&mut w, "[c emit: [Opcode pushNil]]").unwrap();
+        let r1 = ev(&mut w, "[c emit: [Opcode pop]]").unwrap();
+        assert_eq!(r0, Value::Int(0));
+        assert_eq!(r1, Value::Int(1));
+    }
+
+    #[test]
+    fn chunk_add_const_returns_index() {
+        let mut w = fresh();
+        ev(&mut w, "(def c [Chunk new: '() source: nil])").unwrap();
+        let r0 = ev(&mut w, "[c addConst: 7]").unwrap();
+        let r1 = ev(&mut w, "[c addConst: 'foo]").unwrap();
+        assert_eq!(r0, Value::Int(0));
+        assert_eq!(r1, Value::Int(1));
+    }
+
+    #[test]
+    fn chunk_emit_raises_on_bad_op() {
+        // a non-Opcode value emitted to a chunk raises 'compile-error.
+        let mut w = fresh();
+        ev(&mut w, "(def c [Chunk new: '() source: nil])").unwrap();
+        let err = ev(&mut w, "[c emit: 42]").unwrap_err();
+        assert_eq!(w.resolve(err.kind), "type-error");
+    }
+
+    #[test]
+    fn chunk_emit_raises_on_argc_overflow() {
+        // [Opcode send: 'foo argc: 999 ic: 0] doesn't fail at
+        // constructor time — but [c emit:] catches it as a range-error.
+        let mut w = fresh();
+        ev(&mut w, "(def c [Chunk new: '() source: nil])").unwrap();
+        let err = ev(
+            &mut w,
+            "[c emit: [Opcode send: 'foo argc: 999 ic: 0]]",
+        )
+        .unwrap_err();
+        assert_eq!(w.resolve(err.kind), "range-error");
+    }
+
+    #[test]
+    fn jump_target_and_patch_jump_round_trip() {
+        // build a chunk that does:
+        //   (if #true 1 2) → equivalent bytecode
+        // via the same patchJump dance compile_if uses.
+        // expects 1.
+        let mut w = fresh();
+        let r = ev(
+            &mut w,
+            "(let ((c [Chunk new: '() source: nil]))
+               ;; cond
+               [c emit: [Opcode pushTrue]]
+               ;; jmp-to-else placeholder (offset patched later)
+               (let ((j-else [c emit: [Opcode jumpIfFalse: 0]]))
+                 ;; then: push 1
+                 [c addConst: 1]
+                 [c emit: [Opcode loadConst: 0]]
+                 ;; jmp-to-end placeholder
+                 (let ((j-end [c emit: [Opcode jump: 0]]))
+                   ;; patch jmp-to-else here (else block start)
+                   [c patchJump: j-else to: [c jumpTarget]]
+                   ;; else: push 2
+                   [c addConst: 2]
+                   [c emit: [Opcode loadConst: 1]]
+                   ;; patch jmp-to-end here (end of if)
+                   [c patchJump: j-end to: [c jumpTarget]]
+                   ;; return
+                   [c emit: [Opcode return]]))
+               [[c asClosure] call])",
+        )
+        .unwrap();
+        assert_eq!(r, Value::Int(1));
+    }
+
+    #[test]
+    fn as_closure_round_trips_through_bytecodes_reflection() {
+        // a chunk built from moof reflects the same way one built
+        // by the rust compiler does. R2 holds bidirectionally.
+        // (reflection methods like :bytecodes live on Method, so we
+        // route through the closure — `[m bytecodes]` is the canonical
+        // entry point.)
+        let mut w = fresh();
+        ev(&mut w, "(def c [Chunk new: '() source: nil])").unwrap();
+        ev(&mut w, "[c emit: [Opcode pushNil]]").unwrap();
+        ev(&mut w, "[c emit: [Opcode return]]").unwrap();
+        ev(&mut w, "(def cl [c asClosure])").unwrap();
+        let bc = ev(&mut w, "[cl bytecodes]").unwrap();
+        let r = w.table_repr(bc).unwrap();
+        assert_eq!(r.positional.len(), 2);
     }
 
     #[test]
