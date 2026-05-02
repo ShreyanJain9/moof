@@ -197,6 +197,12 @@ pub struct World {
     /// quote, __send__) — minimal seed.
     pub use_moof_compiler: bool,
 
+    /// Resolved root for [$transporter load: ...] calls. Populated at
+    /// `new_world()` via `transporter::resolve_lib_root`. None means
+    /// the transporter cap will raise 'tx-no-root on every call —
+    /// used by `new_world_bare` for tests that don't need bootstrap.
+    pub transporter_root: Option<std::path::PathBuf>,
+
     /// the bytecode interpreter's per-vat state.
     pub vm: Vm,
 
@@ -262,6 +268,7 @@ impl World {
             wasm_export_map: IndexMap::new(),
             macros_form,
             global_env,
+            transporter_root: None,
             use_moof_compiler: false,
             vm: Vm::default(),
             car_sym,

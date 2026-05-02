@@ -29,6 +29,7 @@ pub mod protos;
 pub mod reader;
 pub mod sym;
 pub mod table;
+pub mod transporter;
 pub mod value;
 pub mod vm;
 pub mod wasm;
