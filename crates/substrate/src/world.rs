@@ -127,6 +127,27 @@ pub struct World {
     /// method-FormId → native function pointer.
     pub native_fns: IndexMap<FormId, NativeFn>,
 
+    /// per-tagged-immediate singleton-Forms (ruby/Self style).
+    /// when moof code first writes to a tagged immediate (`(slotSet!
+    /// 5 'foo 42)` / `(setHandler! 5 'sel fn)` / etc.), the
+    /// substrate lazily allocates a fresh Form whose proto is the
+    /// value's class-level proto (Integer / Bool / Char / …) and
+    /// records it here, keyed by the Value. subsequent reads and
+    /// writes target that Form. dispatch on the immediate also
+    /// consults its per-instance handler table first before
+    /// walking the proto chain.
+    ///
+    /// **the ruby move**: writing to `5` doesn't mutate `Integer`;
+    /// it mutates `5`'s singleton-Form. `5` and `7` are different
+    /// objects with different per-instance state, even though
+    /// they share the Integer class for inherited methods.
+    /// matches `5.define_singleton_method(:foo) { … }` semantics.
+    ///
+    /// memory note: allocated lazily, never garbage-collected
+    /// (phase G+ adds proper gc). user discipline needed if
+    /// large numbers of distinct Ints get singleton state.
+    pub tagged_storage: IndexMap<Value, FormId>,
+
     /// proto-FormId → its instantiated wasm module + store. set by
     /// the wasm mco loader (see `crate::wasm`). a moof-method
     /// dispatch on this proto's handler table routes through the
@@ -236,6 +257,7 @@ impl World {
             chunk_consts: IndexMap::new(),
             chunk_ics: IndexMap::new(),
             native_fns: IndexMap::new(),
+            tagged_storage: IndexMap::new(),
             wasm_instances: IndexMap::new(),
             wasm_export_map: IndexMap::new(),
             macros_form,
@@ -672,6 +694,59 @@ impl World {
             .insert(self.generation_sym, Value::Int(next as i64));
     }
 
+    /// the FormId where this value's per-instance state lives, if
+    /// it has any. for `Value::Form(id)`, that's `id` directly.
+    /// for tagged immediates, that's the lazily-allocated
+    /// singleton-Form recorded in `tagged_storage`, if it exists.
+    /// otherwise `None` — which means "no per-instance state yet."
+    ///
+    /// the read path (slot, slots, handlers, meta, dispatch's "own
+    /// handlers" check) consults this and returns empty/nil/falls-
+    /// through-to-proto when None. matches Ruby's distinction:
+    /// `5.instance_variables` is `[]` until you set one; reflection
+    /// shows the singleton's state, not the class's.
+    pub fn effective_form_id(&self, v: Value) -> Option<FormId> {
+        if let Value::Form(id) = v {
+            return Some(id);
+        }
+        // short-circuit: most programs never write to immediates.
+        if self.tagged_storage.is_empty() {
+            return None;
+        }
+        self.tagged_storage.get(&v).copied()
+    }
+
+    /// the FormId where this value's per-instance state should be
+    /// written. for `Value::Form(id)`, returns `id`. for tagged
+    /// immediates without a singleton-Form, **lazily allocates one**
+    /// — its proto is the value's class-level proto (Integer,
+    /// Bool, etc), so dispatch from the singleton walks: singleton
+    /// → class → Object. matches Ruby `define_singleton_method`.
+    ///
+    /// allocation is intentional and unbounded — phase A has no gc.
+    /// large numbers of singleton-Form'd Ints will accumulate.
+    /// phase G+ tackles gc.
+    pub fn ensure_writable_form_id(&mut self, v: Value) -> FormId {
+        if let Value::Form(id) = v {
+            return id;
+        }
+        if let Some(&id) = self.tagged_storage.get(&v) {
+            return id;
+        }
+        // allocate a fresh singleton-Form whose proto is `v`'s
+        // class-level proto.
+        let proto = self.proto_of(v);
+        let mut f = Form::with_proto(proto);
+        // tag the singleton-Form so reflection / debugging can
+        // recognize it. user code mostly doesn't care; the meta
+        // is informational.
+        let singleton_meta = self.intern("singleton-of");
+        f.meta.insert(singleton_meta, v);
+        let id = self.heap.alloc(f);
+        self.tagged_storage.insert(v, id);
+        id
+    }
+
     /// look up a handler by walking the proto chain. returns the
     /// (method-Form, defining-proto-FormId) pair, or `None` if no
     /// handler is found before the chain bottoms out.
@@ -687,21 +762,33 @@ impl World {
     /// be acyclic. this method aborts cleanly after `MAX_PROTO_DEPTH`
     /// hops. with no `set-proto!` primitive at phase A, cycles can
     /// only arise from rust-side mistakes; bound is purely defensive.
+    ///
+    /// when receiver is a tagged immediate that has a singleton-
+    /// Form (lazily allocated by past mutations), dispatch starts
+    /// at the singleton-Form — handlers installed via `(setHandler!
+    /// 5 …)` shadow inherited Integer methods. matches Ruby's
+    /// singleton-class lookup.
     pub fn lookup_handler(
         &self,
         receiver: Value,
         selector: SymId,
     ) -> Option<(Value, FormId)> {
-        // 1. receiver's own handlers (Form receivers only — tagged
-        //    immediates have no own table).
-        if let Value::Form(id) = receiver {
+        // 1. receiver's own (or singleton's own) handler table.
+        let own_id = self.effective_form_id(receiver);
+        if let Some(id) = own_id {
             if let Some(handler) = self.heap.get(id).handler(selector) {
                 return Some((handler, id));
             }
         }
-        // 2. walk the proto chain with a step bound for cycle safety.
+        // 2. walk the proto chain. starts from `own_id`'s proto
+        //    when it exists (so the singleton's class chain is
+        //    respected), else from `proto_of(receiver)` (the
+        //    classic tagged-immediate case).
+        let mut proto = match own_id {
+            Some(id) => self.heap.get(id).proto,
+            None => self.proto_of(receiver),
+        };
         const MAX_PROTO_DEPTH: usize = 256;
-        let mut proto = self.proto_of(receiver);
         for _ in 0..MAX_PROTO_DEPTH {
             match proto {
                 Value::Form(proto_id) => {

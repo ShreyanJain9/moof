@@ -1405,36 +1405,15 @@ fn install_method_reflection(w: &mut World) {
     // own :toString.
 }
 
-/// recover the FormId where a value's Form-y state lives.
+/// recover the FormId where a value's per-instance state should
+/// be **written** (lazy alloc for tagged immediates).
 ///
-/// **for Form values** (`Value::Form(id)`): returns `id` directly.
-/// state lives on the receiver itself.
-///
-/// **for tagged immediates** (Nil, Bool, Int, Float, Sym, Char,
-/// Foreign): returns the proto-Form's id. tagged immediates
-/// have no per-instance heap state by design — they ARE their
-/// value — so any "Form-y operation" on them targets shared
-/// proto state. this is the smalltalk discipline: SmallInteger 5
-/// has no instance variables; its slots live on its class.
-///
-/// the user-visible consequence: `(slotSet! 5 'foo 42)` mutates
-/// `Integer`'s `:foo` slot. equivalent to `(slotSet! Integer
-/// 'foo 42)`. there's no "per-5 slot" because there's no per-5
-/// heap row. honest model, no special-cases, L1 holds: every
-/// value reflects through a Form, even if that Form is shared.
-///
-/// per L1 ("every value moof allocates is a Form"), tagged
-/// immediates remain a perf optimization for many-valued types
-/// (Int, Float, Sym, Char) but operationally they behave as
-/// Forms — same dispatch, same reflection, same write surface.
+/// thin convenience wrapper over `World::ensure_writable_form_id`
+/// — kept here because the surrounding `install_global` callers
+/// already had a helper of this name; internal-call signatures
+/// stay tidy.
 fn target_form_id(w: &mut World, v: Value, _op: &str) -> FormId {
-    if let Value::Form(id) = v {
-        return id;
-    }
-    match w.proto_of(v) {
-        Value::Form(id) => id,
-        _ => w.protos.object, // shouldn't happen — every value has a proto
-    }
+    w.ensure_writable_form_id(v)
 }
 
 /// if `self_` is a Form whose `:name` meta is a Symbol, return
@@ -2019,21 +1998,22 @@ fn install_object_reflection(w: &mut World) {
     });
 
     // :slots, :handlers, :meta — return a Table (key → value) of
-    // the receiver's IndexMap, in insertion order. tagged
-    // immediates have no per-instance heap state, so they route
-    // to their proto-Form's table — the *same* state that other
-    // dispatch operations consult. honest model: `[5 handlers]`
-    // shows what `5` actually dispatches against.
+    // the receiver's IndexMap, in insertion order. the receiver
+    // is the *singleton-Form* for tagged immediates (lazily
+    // allocated, may not exist) — NOT the class-level proto.
+    // matches Ruby: `5.instance_variables` is `[]` until you set
+    // one; `5.singleton_methods` shows only methods specifically
+    // installed on `5`, not Integer's methods.
     //
     // matches the contract in concepts/forms.md and
-    // laws/reflection-contract.md R7. **L1 holds operationally**:
-    // every value reflects through a Form, even if that Form is
-    // shared (which it is for tagged immediates).
+    // laws/reflection-contract.md R7.
     macro_rules! reflect_table {
         ($w:expr, $sel:literal, $field:ident) => {
-            $w.install_native($w.protos.object, $sel, |w, self_, _| {
-                let id = target_form_id(w, self_, $sel);
-                Ok(form_table_to_table(w, id, |f| &f.$field))
+            $w.install_native($w.protos.object, $sel, |w, self_, _| match w
+                .effective_form_id(self_)
+            {
+                Some(id) => Ok(form_table_to_table(w, id, |f| &f.$field)),
+                None => Ok(w.make_table()),
             });
         };
     }
@@ -2049,10 +2029,20 @@ fn install_object_reflection(w: &mut World) {
             Value::Sym(s) => s,
             _ => return Err(type_error(w, "handlerAt: expects a symbol")),
         };
-        // route through proto for tagged immediates — same
-        // discipline as `:handlers`/`:slots`.
-        let id = target_form_id(w, self_, "handlerAt:");
-        Ok(w.heap.get(id).handlers.get(&sel).copied().unwrap_or(Value::Nil))
+        // singleton-only: this returns the receiver's own
+        // (singleton's own) handler for `sel`, NOT inherited.
+        // for tagged immediates without a singleton-Form, returns
+        // nil. matches Ruby `obj.singleton_methods.include?(:sel)`.
+        match w.effective_form_id(self_) {
+            Some(id) => Ok(w
+                .heap
+                .get(id)
+                .handlers
+                .get(&sel)
+                .copied()
+                .unwrap_or(Value::Nil)),
+            None => Ok(Value::Nil),
+        }
     });
 
     w.install_native(w.protos.object, "source", |w, self_, _| match self_ {
@@ -2528,14 +2518,15 @@ fn install_globals(w: &mut World) {
         if args.len() != 2 {
             return Err(RaiseError::new(w.intern("arity"), "(slot v 'name)"));
         }
-        // route through proto for tagged immediates — they have
-        // no per-instance state. matches slotSet! / setHandler!
-        // discipline; every Form-y operation is uniform.
-        let id = target_form_id(w, args[0], "slot");
         let name = args[1].as_sym().ok_or_else(|| {
             RaiseError::new(w.intern("type-error"), "slot name must be a symbol")
         })?;
-        Ok(w.heap.get(id).slot(name))
+        // singleton-only: tagged immediates without a singleton-
+        // Form have no per-instance slots; return nil.
+        match w.effective_form_id(args[0]) {
+            Some(id) => Ok(w.heap.get(id).slot(name)),
+            None => Ok(Value::Nil),
+        }
     });
     install_global(w, "slotSet!", |w, _, args| {
         if args.len() != 3 {
@@ -3393,52 +3384,87 @@ mod tests {
     }
 
     #[test]
-    fn tagged_immediates_uniformly_form_like() {
-        // L1 promises every value reflects through a Form. tagged
-        // immediates (Int, Bool, Sym, Char, Float, Nil) have no
-        // per-instance heap state, so their Form-y operations
-        // route to their proto-Form. uniform: no special-cases.
+    fn tagged_immediates_have_their_own_singleton_state() {
+        // ruby/Self model: writing on `5` allocates a singleton-
+        // Form for 5, NOT for Integer. `5` and `7` have separate
+        // per-instance state even though they share Integer for
+        // inherited methods.
         let mut w = fresh();
-
-        // setHandler! / slotSet! / metaSet! all work on tagged
-        // immediates; writes route to the proto.
-        ev(&mut w, "(setHandler! 5 'inferred-method (fn () 'i-was-here))").unwrap();
-        let r = ev(&mut w, "[5 inferred-method]").unwrap();
-        assert_eq!(r, Value::Sym(w.intern("i-was-here")));
-        // and equivalently — the handler IS on Integer-proto:
-        let r = ev(&mut w, "[7 inferred-method]").unwrap();
+        ev(
+            &mut w,
+            "(setHandler! 5 'witness (fn () 'set-on-5))",
+        )
+        .unwrap();
+        // `5` has the singleton method.
+        let r = ev(&mut w, "[5 witness]").unwrap();
+        assert_eq!(r, Value::Sym(w.intern("set-on-5")));
+        // `7` does NOT — it errors with doesNotUnderstand.
+        let err = ev(&mut w, "[7 witness]").unwrap_err();
         assert_eq!(
-            r,
-            Value::Sym(w.intern("i-was-here")),
-            "writing on 5 should be visible on 7 — same proto",
+            w.resolve(err.kind),
+            "doesNotUnderstand",
+            "writing on 5 should not affect 7 (got {:?})",
+            err.message
         );
-
-        // slot reads route too.
-        ev(&mut w, "(slotSet! #true 'flag 'set-via-tagged)").unwrap();
-        let r = ev(&mut w, "(slot #true 'flag)").unwrap();
-        assert_eq!(r, Value::Sym(w.intern("set-via-tagged")));
-
-        // metaSet! likewise.
-        ev(&mut w, "(metaSet! 'someSym 'tag 42)").unwrap();
-        let r = ev(&mut w, "[[Symbol meta] at: 'tag]").unwrap();
-        assert_eq!(r, Value::Int(42));
     }
 
     #[test]
-    fn handlers_reflection_routes_through_proto() {
-        // [5 handlers] returns Integer's handler table — the
-        // honest answer to "what does 5 dispatch against."
+    fn slots_are_per_immediate_not_per_proto() {
+        // (slotSet! #true 'flag …) sets a slot on #true's
+        // singleton-Form, not on Bool. #false doesn't see it.
         let mut w = fresh();
-        let direct = ev(&mut w, "[5 handlers]").unwrap();
-        let through_proto = ev(&mut w, "[Integer handlers]").unwrap();
-        // both return Tables. compare sizes — same handlers.
-        let d_size = w.table_repr(direct).unwrap().keyed.len();
-        let p_size = w.table_repr(through_proto).unwrap().keyed.len();
+        ev(&mut w, "(slotSet! #true 'pinned 'yes)").unwrap();
+        let r = ev(&mut w, "(slot #true 'pinned)").unwrap();
+        assert_eq!(r, Value::Sym(w.intern("yes")));
+        let r = ev(&mut w, "(slot #false 'pinned)").unwrap();
+        assert_eq!(r, Value::Nil, "#false should not share #true's slot");
+        // Bool itself also untouched.
+        let r = ev(&mut w, "(slot Bool 'pinned)").unwrap();
+        assert_eq!(r, Value::Nil, "writing on #true should not mutate Bool");
+    }
+
+    #[test]
+    fn reflection_shows_only_singleton_state() {
+        // [5 handlers] starts empty (no per-5 state yet).
+        let mut w = fresh();
+        let r = ev(&mut w, "[5 handlers]").unwrap();
+        let r_repr = w.table_repr(r).unwrap();
         assert_eq!(
-            d_size, p_size,
-            "[5 handlers] and [Integer handlers] should reflect same table",
+            r_repr.size(),
+            0,
+            "[5 handlers] before any singleton install should be empty"
         );
-        assert!(d_size > 0, "Integer should have handlers installed");
+        // after install, [5 handlers] shows the singleton handler.
+        ev(&mut w, "(setHandler! 5 'wave (fn () 'wavy))").unwrap();
+        let r = ev(&mut w, "[5 handlers]").unwrap();
+        let r_repr = w.table_repr(r).unwrap();
+        assert_eq!(
+            r_repr.size(),
+            1,
+            "[5 handlers] should now show exactly the singleton handler"
+        );
+        // Integer's own handler table is unaffected.
+        let r = ev(&mut w, "[Integer handlerAt: 'wave]").unwrap();
+        assert_eq!(
+            r, Value::Nil,
+            "Integer should not have :wave installed on it"
+        );
+    }
+
+    #[test]
+    fn lookup_falls_through_singleton_to_class() {
+        // a singleton with no `:foo` should still inherit class
+        // methods. install :foo on Integer, then on 5's singleton
+        // — no shadowing ought to happen since we install
+        // different methods. then verify both reachable.
+        let mut w = fresh();
+        // first allocate 5's singleton with an unrelated method.
+        ev(&mut w, "(setHandler! 5 'mine (fn () 'just-5))").unwrap();
+        // now Integer-class still wins for inherited methods.
+        let r = ev(&mut w, "[5 + 1]").unwrap();
+        assert_eq!(r, Value::Int(6), "inherited Integer :+ should still work");
+        let r = ev(&mut w, "[5 mine]").unwrap();
+        assert_eq!(r, Value::Sym(w.intern("just-5")));
     }
 
     #[test]
