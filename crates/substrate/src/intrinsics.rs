@@ -373,11 +373,24 @@ fn install_table_methods(w: &mut World) {
 
     // [t toString] — `#[1 2 'name => "ada"]`-shaped rendering.
     // proto-name short-circuit so `[Table toString]` → "Table".
+    // each value renders via its own :toString — strings without
+    // quotes, chars as just their character, etc.
     w.install_native(w.protos.table, "toString", |w, self_, _| {
         if let Some(name) = proto_name_for(w, self_) {
             return Ok(w.make_string(&name));
         }
-        render_table_to_string(w, self_).map(|s| w.make_string(&s))
+        render_table_with(w, self_, "toString").map(|s| w.make_string(&s))
+    });
+
+    // [t inspect] — like :toString but each value renders via its
+    // own :inspect. so `#[1 "hi" #\a]` inspects as `#[1 "hi" #\a]`
+    // (re-readable) rather than `#[1 hi a]` (display-friendly).
+    // proto-name short-circuit too.
+    w.install_native(w.protos.table, "inspect", |w, self_, _| {
+        if let Some(name) = proto_name_for(w, self_) {
+            return Ok(w.make_string(&name));
+        }
+        render_table_with(w, self_, "inspect").map(|s| w.make_string(&s))
     });
 
     // [t asString] — collect positional Chars into a String. raises
@@ -439,7 +452,14 @@ fn install_table_methods(w: &mut World) {
     });
 }
 
-fn render_table_to_string(w: &mut World, table: Value) -> Result<String, RaiseError> {
+/// recursive table rendering with a user-chosen per-element
+/// selector. `:toString` and `:inspect` differ only in which
+/// selector each element gets sent — the `#[…]` shape is shared.
+fn render_table_with(
+    w: &mut World,
+    table: Value,
+    elem_sel: &str,
+) -> Result<String, RaiseError> {
     let positional: Vec<Value>;
     let keyed_keys: Vec<Value>;
     let keyed_vals: Vec<Value>;
@@ -452,19 +472,19 @@ fn render_table_to_string(w: &mut World, table: Value) -> Result<String, RaiseEr
         None => {
             return Err(RaiseError::new(
                 w.intern("type-error"),
-                "toString on non-Table",
+                format!("{} on non-Table", elem_sel),
             ));
         }
     }
     let mut out = String::from("#[");
-    let to_string = w.intern("toString");
+    let elem_sym = w.intern(elem_sel);
     let mut first = true;
     for v in positional {
         if !first {
             out.push(' ');
         }
         first = false;
-        let s = w.send(v, to_string, &[])?;
+        let s = w.send(v, elem_sym, &[])?;
         let txt = w.string_text(s).map(|t| t.to_string());
         out.push_str(&txt.unwrap_or_else(|| "?".into()));
     }
@@ -473,14 +493,14 @@ fn render_table_to_string(w: &mut World, table: Value) -> Result<String, RaiseEr
             out.push(' ');
         }
         first = false;
-        let ks = w.send(k, to_string, &[])?;
+        let ks = w.send(k, elem_sym, &[])?;
         let kt = w.string_text(ks).map(|t| t.to_string());
         // symbols are rendered without the leading quote in
-        // table-toString — we render them as their text. that
+        // table-render — we render them as their text. that
         // matches how `'name => "ada"` shows up in the source.
         out.push_str(&kt.unwrap_or_else(|| "?".into()));
         out.push_str(" => ");
-        let vs = w.send(v, to_string, &[])?;
+        let vs = w.send(v, elem_sym, &[])?;
         let vt = w.string_text(vs).map(|t| t.to_string());
         out.push_str(&vt.unwrap_or_else(|| "?".into()));
     }
@@ -3368,6 +3388,35 @@ mod tests {
         // toString returns the raw text.
         let r = ev(&mut w, "[\"hello\" toString]").unwrap();
         assert_eq!(w.string_text(r).unwrap(), "hello");
+    }
+
+    #[test]
+    fn table_inspect_recursively_inspects() {
+        // Table :inspect distributes over positional + keyed
+        // entries, matching the Cons :inspect behavior.
+        let mut w = fresh();
+        // toString — bare elements (display-friendly).
+        let r = ev(&mut w, "[#[1 \"hi\" #\\a] toString]").unwrap();
+        assert_eq!(w.string_text(r).unwrap(), "#[1 hi a]");
+        // inspect — re-readable, per-element :inspect.
+        let r = ev(&mut w, "[#[1 \"hi\" #\\a] inspect]").unwrap();
+        assert_eq!(w.string_text(r).unwrap(), "#[1 \"hi\" #\\a]");
+    }
+
+    #[test]
+    fn nested_collection_inspect_propagates_all_the_way_down() {
+        // a list of tables of strings — every level uses :inspect
+        // recursively so the output is fully re-readable source.
+        let mut w = fresh();
+        let r = ev(
+            &mut w,
+            "[(list #[\"a\" \"b\"] #[\"c\" #\\x]) inspect]",
+        )
+        .unwrap();
+        assert_eq!(
+            w.string_text(r).unwrap(),
+            "(#[\"a\" \"b\"] #[\"c\" #\\x])"
+        );
     }
 
     #[test]
