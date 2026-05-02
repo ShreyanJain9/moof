@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/abi",
     "crates/abi-rust",
+    "crates/mco-pack",
     "crates/substrate",
 ]
 

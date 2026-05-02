@@ -1,0 +1,9 @@
+[package]
+name = "mco-pack"
+version.workspace = true
+edition.workspace = true
+description = "tiny tool: append the moof.manifest custom section to a .wasm file, producing a .mco."
+
+[[bin]]
+name = "mco-pack"
+path = "src/main.rs"

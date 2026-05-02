@@ -129,10 +129,24 @@ pub fn load_wasm_bytes(
     let proto_form = Form::with_proto(Value::Form(world.protos.object));
     let proto_id = world.alloc(proto_form);
 
-    // discover exported functions. for the MVP we only handle
-    // exports with shape `() -> i64`. richer signatures need
-    // linear-memory marshaling and come with the manifest spec.
-    let exports: Vec<(String, ExportShape)> = module
+    // ── manifest parsing ────────────────────────────────────────
+    //
+    // per `docs/reference/mco-format.md`, an `.mco` file is a
+    // wasm module with custom sections holding moof-specific
+    // metadata. the `moof.manifest` section, when present, is
+    // moof source-text — parseable by the substrate's reader.
+    // it declares which methods this mco exposes, the parent
+    // proto, the abi version, etc.
+    //
+    // when no manifest is present (raw `.wasm` dev case), we fall
+    // back to inferring from wasm exports (the MVP behavior).
+    let manifest = parse_manifest_section(world, bytes, label)?;
+
+    // discover exported functions. each function with `() -> i64`
+    // shape is eligible. the manifest (if present) cross-checks:
+    // declared methods MUST be a subset of the exports, with
+    // matching shape.
+    let all_exports: Vec<(String, ExportShape)> = module
         .exports()
         .filter_map(|exp| match exp.ty() {
             wasmtime::ExternType::Func(ft) => {
@@ -150,6 +164,31 @@ pub fn load_wasm_bytes(
             _ => None,
         })
         .collect();
+
+    // if a manifest was found, only install methods it declared.
+    // cross-validate: every declared method must exist as a wasm
+    // export with the expected shape.
+    let exports: Vec<(String, ExportShape)> = if let Some(m) = &manifest {
+        let mut chosen = Vec::with_capacity(m.methods.len());
+        for declared in &m.methods {
+            match all_exports.iter().find(|(n, _)| n == declared) {
+                Some((n, shape)) => chosen.push((n.clone(), *shape)),
+                None => {
+                    return Err(RaiseError::new(
+                        world.intern("mco-manifest-mismatch"),
+                        format!(
+                            "`{}` declares method `{}` but the wasm \
+                             module has no matching export",
+                            label, declared
+                        ),
+                    ));
+                }
+            }
+        }
+        chosen
+    } else {
+        all_exports
+    };
 
     // stash the wasm instance in a side table indexed by proto-id.
     // each handler closure captures `proto_id` and looks up the
@@ -186,6 +225,70 @@ pub fn load_wasm_bytes(
     Ok(Value::Form(proto_id))
 }
 
+/// walk a wasm binary's section headers; if a custom section
+/// named `name` is found, return its payload (the bytes AFTER the
+/// name). returns None if absent or if parsing fails partway —
+/// the loader treats that the same as "no manifest" and falls
+/// back to inferring exports.
+///
+/// wasm format reminder:
+///   header:    [0x00, 0x61, 0x73, 0x6d]  ("\0asm")
+///              [0x01, 0x00, 0x00, 0x00]  (version 1)
+///   sections:  [id: u8][size: ULEB128][...size bytes...]
+///   custom:    id=0; payload starts with [name_len: ULEB128][name]
+fn find_custom_section<'a>(wasm: &'a [u8], target_name: &str) -> Option<&'a [u8]> {
+    if wasm.len() < 8 || &wasm[..4] != b"\0asm" {
+        return None;
+    }
+    let mut i = 8usize;
+    while i < wasm.len() {
+        let section_id = *wasm.get(i)?;
+        i += 1;
+        let (section_size, consumed) = read_uleb128(&wasm[i..])?;
+        i += consumed;
+        let section_end = i.checked_add(section_size as usize)?;
+        if section_end > wasm.len() {
+            return None;
+        }
+        if section_id == 0 {
+            // custom section.
+            let body = &wasm[i..section_end];
+            let (name_len, name_consumed) = read_uleb128(body)?;
+            let name_end = name_consumed.checked_add(name_len as usize)?;
+            if name_end > body.len() {
+                return None;
+            }
+            let name_bytes = &body[name_consumed..name_end];
+            let payload = &body[name_end..];
+            if name_bytes == target_name.as_bytes() {
+                return Some(payload);
+            }
+        }
+        i = section_end;
+    }
+    None
+}
+
+/// read an unsigned LEB128 from the start of `bytes`. returns
+/// `(value, bytes-consumed)` or None on overrun / overflow.
+fn read_uleb128(bytes: &[u8]) -> Option<(u64, usize)> {
+    let mut result: u64 = 0;
+    let mut shift = 0u32;
+    let mut i = 0usize;
+    loop {
+        let byte = *bytes.get(i)?;
+        i += 1;
+        result |= ((byte & 0x7f) as u64) << shift;
+        if byte & 0x80 == 0 {
+            return Some((result, i));
+        }
+        shift = shift.checked_add(7)?;
+        if shift > 63 {
+            return None;
+        }
+    }
+}
+
 /// per-method shape — used by the trampoline to know how to
 /// marshal args and results. starts minimal; grows as we add
 /// signatures.
@@ -193,6 +296,104 @@ pub fn load_wasm_bytes(
 pub enum ExportShape {
     /// fn() -> i64. result becomes Value::Int.
     NoArgsToI64,
+}
+
+/// parsed `moof.manifest` custom-section contents. fields grow as
+/// the manifest schema does; for now we extract just the bits the
+/// loader cross-validates with: the abi-version and the method
+/// names. `parent` is captured but defaults to Object regardless
+/// (proper resolution comes with the dep-resolution pipeline).
+#[derive(Debug, Default)]
+pub struct McoManifest {
+    pub abi_version: i64,
+    pub methods: Vec<String>,
+}
+
+/// extract and parse the `moof.manifest` custom section, if any.
+/// returns `None` when no manifest is present (the dev/raw-.wasm
+/// case); returns `Some` after a successful parse; raises if a
+/// manifest IS present but malformed.
+///
+/// wasmtime 26 doesn't expose custom sections by name on `Module`,
+/// so we walk the raw wasm bytes ourselves. the format is
+/// straightforward — each section begins with `id (u8) + size
+/// (ULEB128)`; custom sections have id=0 and start with `name_len
+/// (ULEB128) + name (utf-8)` then arbitrary payload bytes.
+fn parse_manifest_section(
+    world: &mut World,
+    wasm_bytes: &[u8],
+    label: &str,
+) -> Result<Option<McoManifest>, RaiseError> {
+    let payload = match find_custom_section(wasm_bytes, "moof.manifest") {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+    let text = std::str::from_utf8(payload).map_err(|e| {
+        RaiseError::new(
+            world.intern("mco-manifest-parse-error"),
+            format!("`{}` moof.manifest is not utf-8: {}", label, e),
+        )
+    })?;
+    // parse the manifest as moof source-text. it's a list of
+    // (key value) pairs:
+    //   ((abi-version 1)
+    //    (parent Object)
+    //    (methods (now monotonic)))
+    let form = world.read(text).map_err(|e| {
+        RaiseError::new(
+            world.intern("mco-manifest-parse-error"),
+            format!("`{}` moof.manifest read error: {}", label, e.message),
+        )
+    })?;
+    decode_manifest_form(world, form, label)
+}
+
+/// walk a parsed manifest-Form and extract the typed fields.
+/// expected shape: a list of (key value) pairs.
+fn decode_manifest_form(
+    world: &mut World,
+    form: Value,
+    label: &str,
+) -> Result<Option<McoManifest>, RaiseError> {
+    let pairs = world.list_to_vec(form).map_err(|_| {
+        RaiseError::new(
+            world.intern("mco-manifest-parse-error"),
+            format!("`{}` moof.manifest must be a list of (key value) pairs", label),
+        )
+    })?;
+    let mut manifest = McoManifest::default();
+    let abi_version_sym = world.intern("abi-version");
+    let methods_sym = world.intern("methods");
+    for pair_v in pairs {
+        let pair = world.list_to_vec(pair_v).map_err(|_| {
+            RaiseError::new(
+                world.intern("mco-manifest-parse-error"),
+                format!("`{}` manifest entry isn't a list", label),
+            )
+        })?;
+        if pair.len() < 2 {
+            continue;
+        }
+        let key = match pair[0].as_sym() {
+            Some(s) => s,
+            None => continue,
+        };
+        if key == abi_version_sym {
+            if let Some(n) = pair[1].as_int() {
+                manifest.abi_version = n;
+            }
+        } else if key == methods_sym {
+            let method_list = world.list_to_vec(pair[1]).unwrap_or_default();
+            for m in method_list {
+                if let Some(s) = m.as_sym() {
+                    manifest.methods.push(world.resolve(s).to_string());
+                }
+            }
+        }
+        // parent: ignored for now — defaults to Object. proper
+        // dep-resolution comes in a later pass.
+    }
+    Ok(Some(manifest))
 }
 
 /// install substrate-provided functions into a wasmtime Linker.
