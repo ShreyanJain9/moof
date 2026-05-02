@@ -1,0 +1,15 @@
+;; lib/early/00-cons.moof
+;;
+;; setHandler!-driven Cons primitive methods. Phase 3 (file split)
+;; leaves this as a placeholder; Phase 4 (rust→moof migration) fills
+;; it in with `:length`, `:reverse`, `:empty?`, `:null?`, `:toString`,
+;; `:inspect`, plus any other Cons primitives that move out of
+;; intrinsics.rs.
+;;
+;; load order rationale: Cons methods are needed by `__qq-walk-elems`
+;; (uses `[forms car]` and `[forms cdr]` — free-function primitives,
+;; not method sends, so technically not blocking), and by the entire
+;; rest of bootstrap. installing them first keeps the load-order story
+;; clean for readers.
+
+;; (intentionally empty in Phase 3.)

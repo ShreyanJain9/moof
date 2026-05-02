@@ -16,5 +16,8 @@
 ;; flip — every subsequent compile routes through the Compiler singleton.
 [$compiler useMoof]
 
-;; phase 2-3: bootstrap stdlib + macros — compiled by the moof compiler.
+;; phase 2: early-stage primitives + macros — setHandler!-driven, predates defmethod.
+[$transporter load: "early/00-cons.moof"]
+
+;; phase 3: bootstrap stdlib + macros — compiled by the moof compiler.
 [$transporter load: "bootstrap.moof"]
