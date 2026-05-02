@@ -344,7 +344,7 @@ fn user_can_redefine_when() {
     moof::eval(
         &mut w,
         "(defmacro when (args)
-           (let ((body [args tail]))
+           (let ((body [args cdr]))
              `(do ,@body)))",
     )
     .unwrap();
@@ -702,11 +702,11 @@ fn do_is_a_pure_moof_macro_no_rust_fallback() {
     )
     .unwrap();
     let id = v.as_form_id().unwrap();
-    let head_sym = w.intern("head");
-    let tail_sym = w.intern("tail");
-    assert_eq!(w.heap.get(id).slot(head_sym), Value::Bool(true));
-    let t = w.heap.get(id).slot(tail_sym).as_form_id().unwrap();
-    assert_eq!(w.heap.get(t).slot(head_sym), Value::Bool(true));
+    let car_sym = w.intern("car");
+    let cdr_sym = w.intern("cdr");
+    assert_eq!(w.heap.get(id).slot(car_sym), Value::Bool(true));
+    let t = w.heap.get(id).slot(cdr_sym).as_form_id().unwrap();
+    assert_eq!(w.heap.get(t).slot(car_sym), Value::Bool(true));
 }
 
 #[test]
@@ -756,9 +756,9 @@ fn user_macro_overrides_special_form() {
     moof::eval(
         &mut w,
         "(defmacro if-not (args)
-           (let ((cond [args head])
-                 (then [[args tail] head])
-                 (else [[[args tail] tail] head]))
+           (let ((cond [args car])
+                 (then [[args cdr] car])
+                 (else [[[args cdr] cdr] car]))
              `(if ,cond ,else ,then)))",
     )
     .unwrap();
@@ -779,10 +779,10 @@ fn user_can_replace_let_with_a_macro() {
     moof::eval(
         &mut w,
         "(defmacro my-let (args)
-           (let ((bindings [args head])
-                 (body [[args tail] head]))
-             (let ((names [bindings map: |b| [b head]])
-                   (vals  [bindings map: |b| [[b tail] head]]))
+           (let ((bindings [args car])
+                 (body [[args cdr] car]))
+             (let ((names [bindings map: |b| [b car]])
+                   (vals  [bindings map: |b| [[b cdr] car]]))
                `((fn ,names ,body) ,@vals))))",
     )
     .unwrap();

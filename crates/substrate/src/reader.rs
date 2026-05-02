@@ -54,8 +54,8 @@ impl std::error::Error for ReadError {}
 /// the reader's slot symbols. cached as ids so we aren't
 /// re-interning on every cons-cell allocation.
 pub struct ReadCtx<'a> {
-    head_sym: SymId,
-    tail_sym: SymId,
+    car_sym: SymId,
+    cdr_sym: SymId,
     quote_sym: SymId,
     quasiquote_sym: SymId,
     unquote_sym: SymId,
@@ -89,8 +89,8 @@ impl<'a> ReadCtx<'a> {
         list_proto: Value,
         string_proto: Value,
     ) -> Self {
-        let head_sym = syms.intern("head");
-        let tail_sym = syms.intern("tail");
+        let car_sym = syms.intern("car");
+        let cdr_sym = syms.intern("cdr");
         let quote_sym = syms.intern("quote");
         let quasiquote_sym = syms.intern("quasiquote");
         let unquote_sym = syms.intern("unquote");
@@ -104,8 +104,8 @@ impl<'a> ReadCtx<'a> {
         let obj_slot_sym = syms.intern("__slot__");
         let obj_method_sym = syms.intern("__method__");
         ReadCtx {
-            head_sym,
-            tail_sym,
+            car_sym,
+            cdr_sym,
             quote_sym,
             quasiquote_sym,
             unquote_sym,
@@ -611,8 +611,8 @@ fn build_list(ctx: &mut ReadCtx, elements: &[Value]) -> Value {
     let mut tail = Value::Nil;
     for &v in elements.iter().rev() {
         let mut cell = Form::with_proto(ctx.list_proto);
-        cell.slots.insert(ctx.head_sym, v);
-        cell.slots.insert(ctx.tail_sym, tail);
+        cell.slots.insert(ctx.car_sym, v);
+        cell.slots.insert(ctx.cdr_sym, tail);
         let id = ctx.heap.alloc(cell);
         tail = Value::Form(id);
     }
@@ -1292,8 +1292,8 @@ pub fn list_to_vec(value: Value, ctx: &ReadCtx<'_>) -> Result<Vec<Value>, &'stat
             Value::Nil => return Ok(out),
             Value::Form(id) => {
                 let f = ctx.heap.get(id);
-                let head = f.slot(ctx.head_sym);
-                let tail = f.slot(ctx.tail_sym);
+                let head = f.slot(ctx.car_sym);
+                let tail = f.slot(ctx.cdr_sym);
                 out.push(head);
                 cur = tail;
             }
@@ -1304,13 +1304,13 @@ pub fn list_to_vec(value: Value, ctx: &ReadCtx<'_>) -> Result<Vec<Value>, &'stat
 
 /// `head` selector for the cons-cell convention. exposed for
 /// the compiler's convenience.
-pub fn head_sym(syms: &mut SymTable) -> SymId {
-    syms.intern("head")
+pub fn car_sym(syms: &mut SymTable) -> SymId {
+    syms.intern("car")
 }
 
 /// `tail` selector for the cons-cell convention.
-pub fn tail_sym(syms: &mut SymTable) -> SymId {
-    syms.intern("tail")
+pub fn cdr_sym(syms: &mut SymTable) -> SymId {
+    syms.intern("cdr")
 }
 
 #[cfg(test)]

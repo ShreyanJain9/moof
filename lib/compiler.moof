@@ -57,8 +57,8 @@
   (fn (body-forms)
     (if [body-forms is nil]
         nil
-        (if [[body-forms tail] is nil]
-            [body-forms head]
+        (if [[body-forms cdr] is nil]
+            [body-forms car]
             (cons 'do body-forms)))))
 
 ;; ─────────────────────────────────────────────────────────────────
@@ -100,8 +100,8 @@
     (if [form is nil]
         ;; () → nil
         [chunk emit: [Opcode pushNil]]
-        (let ((head [form head])
-              (rest [form tail]))
+        (let ((head [form car])
+              (rest [form cdr]))
           ;; user-defined macros take precedence over special forms
           ;; (matching rust compiler semantics).
           (let ((macro-method (if (__mc-symbol? head)
@@ -138,10 +138,10 @@
 
 (def compile-quote
   (fn (rest chunk)
-    (if (if [rest is nil] #true [[rest tail] is nil])
-        ;; (quote v) has rest = (v); [rest head] is v.
+    (if (if [rest is nil] #true [[rest cdr] is nil])
+        ;; (quote v) has rest = (v); [rest car] is v.
         ;; (quote) is malformed, but match rust: load nil.
-        (let ((v (if [rest is nil] nil [rest head])))
+        (let ((v (if [rest is nil] nil [rest car])))
           (let ((idx [chunk addConst: v]))
             [chunk emit: [Opcode loadConst: idx]]))
         (raise: 'compile-error "quote requires 1 arg: (quote v)"))))
@@ -152,8 +152,8 @@
 
 (def compile-set
   (fn (rest chunk)
-    (let ((name [rest head])
-          (expr [[rest tail] head]))
+    (let ((name [rest car])
+          (expr [[rest cdr] car]))
       (if (__mc-symbol? name)
           (do
             (compile-form expr chunk #false)
@@ -177,10 +177,10 @@
 ;; `(fn …)` form. matches rust's `is_multi_clause_def`.
 (def __mc-multi-clause-def?
   (fn (rest)
-    (let ((tail-after-name [rest tail]))
+    (let ((tail-after-name [rest cdr]))
       (if [tail-after-name is nil]
           #false
-          (if [[tail-after-name tail] is nil]
+          (if [[tail-after-name cdr] is nil]
               #false
               (__mc-all-fn-forms? tail-after-name))))))
 
@@ -188,12 +188,12 @@
   (fn (clauses)
     (if [clauses is nil]
         #true
-        (let ((c [clauses head]))
+        (let ((c [clauses car]))
           (if (__mc-list? c)
               (if [c is nil]
                   #false
-                  (if [[c head] is 'fn]
-                      (__mc-all-fn-forms? [clauses tail])
+                  (if [[c car] is 'fn]
+                      (__mc-all-fn-forms? [clauses cdr])
                       #false))
               #false)))))
 
@@ -202,8 +202,8 @@
     (if (__mc-multi-clause-def? rest)
         ;; rewrite to (defn name fn₁ fn₂ …) and recompile.
         (compile-form (cons 'defn rest) chunk #false)
-        (let ((name [rest head])
-              (rhs [[rest tail] head]))
+        (let ((name [rest car])
+              (rhs [[rest cdr] car]))
           (if (__mc-symbol? name)
               (do
                 (compile-form rhs chunk #false)
@@ -217,9 +217,9 @@
 
 (def compile-send
   (fn (rest chunk tail)
-    (let ((receiver [rest head])
-          (selector [[rest tail] head])
-          (args [[rest tail] tail]))
+    (let ((receiver [rest car])
+          (selector [[rest cdr] car])
+          (args [[rest cdr] cdr]))
       (if (__mc-symbol? selector)
           (let ((is-super (if (__mc-symbol? receiver)
                               [receiver is 'super]
@@ -257,8 +257,8 @@
     (if [args is nil]
         nil
         (do
-          (compile-form [args head] chunk #false)
-          (compile-form-list-as-args [args tail] chunk)))))
+          (compile-form [args car] chunk #false)
+          (compile-form-list-as-args [args cdr] chunk)))))
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; (if cond then [else]) — JumpIfFalse + Jump pair with patched
@@ -267,11 +267,11 @@
 
 (def compile-if
   (fn (rest chunk tail)
-    (let ((cond-form [rest head])
-          (then-form [[rest tail] head])
-          (else-form (if [[[rest tail] tail] is nil]
+    (let ((cond-form [rest car])
+          (then-form [[rest cdr] car])
+          (else-form (if [[[rest cdr] cdr] is nil]
                          nil
-                         [[[rest tail] tail] head])))
+                         [[[rest cdr] cdr] car])))
       ;; cond — non-tail.
       (compile-form cond-form chunk #false)
       ;; placeholder: jmp-to-else-if-false.
@@ -294,8 +294,8 @@
 
 (def compile-fn
   (fn (rest chunk)
-    (let ((params [rest head])
-          (body-forms [rest tail]))
+    (let ((params [rest car])
+          (body-forms [rest cdr]))
       (let ((body (__mc-wrap-body body-forms)))
         (let ((sub-chunk [Chunk new: params source: body]))
           (compile-form body sub-chunk #true)
@@ -316,8 +316,8 @@
 
 (def compile-do-loop
   (fn (forms chunk tail)
-    (let ((expr [forms head])
-          (rest [forms tail]))
+    (let ((expr [forms car])
+          (rest [forms cdr]))
       (if [rest is nil]
           ;; last expression — preserve its value, tail iff outer.
           (compile-form expr chunk tail)
@@ -340,8 +340,8 @@
 
 (def compile-let
   (fn (rest chunk tail)
-    (let ((bindings [rest head])
-          (body-forms [rest tail]))
+    (let ((bindings [rest car])
+          (body-forms [rest cdr]))
       ;; collect param-syms and value-forms in parallel.
       (let ((params (__mc-let-params bindings))
             (values (__mc-let-values bindings))
@@ -366,15 +366,15 @@
   (fn (bindings)
     (if [bindings is nil]
         nil
-        (cons [[bindings head] head]
-              (__mc-let-params [bindings tail])))))
+        (cons [[bindings car] car]
+              (__mc-let-params [bindings cdr])))))
 
 (def __mc-let-values
   (fn (bindings)
     (if [bindings is nil]
         nil
-        (cons [[[bindings head] tail] head]
-              (__mc-let-values [bindings tail])))))
+        (cons [[[bindings car] cdr] car]
+              (__mc-let-values [bindings cdr])))))
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; (defmacro name (args-list-name) body) — compile body to a chunk,
@@ -385,9 +385,9 @@
 
 (def compile-defmacro
   (fn (rest chunk)
-    (let ((name [rest head])
-          (params-list [[rest tail] head])
-          (body [[[rest tail] tail] head]))
+    (let ((name [rest car])
+          (params-list [[rest cdr] car])
+          (body [[[rest cdr] cdr] car]))
       ;; sub-chunk for the body, in tail position.
       (let ((sub-chunk [Chunk new: params-list source: body]))
         (compile-form body sub-chunk #true)
@@ -414,8 +414,8 @@
 
 (def compile-call
   (fn (form chunk tail)
-    (let ((callable [form head])
-          (args [form tail]))
+    (let ((callable [form car])
+          (args [form cdr]))
       (compile-form callable chunk #false)
       (compile-form-list-as-args args chunk)
       ;; ic reserved unconditionally — see compile-send.

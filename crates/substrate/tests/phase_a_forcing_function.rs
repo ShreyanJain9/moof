@@ -279,7 +279,7 @@ fn bootstrap_higher_order_ops() {
     .unwrap();
     assert_eq!(r, Value::Int(2));
     // reverse
-    let r = moof::eval(&mut w, "[[(list 1 2 3) reverse] head]").unwrap();
+    let r = moof::eval(&mut w, "[[(list 1 2 3) reverse] car]").unwrap();
     assert_eq!(r, Value::Int(3));
     // take
     let r = moof::eval(
@@ -507,13 +507,13 @@ fn super_send_delegates_to_parent() {
     .unwrap();
     // (loud unspecified) — verify by walking the cons chain.
     let id = r.as_form_id().unwrap();
-    let head_sym = w.intern("head");
-    let tail_sym = w.intern("tail");
-    let h0 = w.heap.get(id).slot(head_sym);
+    let car_sym = w.intern("car");
+    let cdr_sym = w.intern("cdr");
+    let h0 = w.heap.get(id).slot(car_sym);
     assert_eq!(w.resolve(h0.as_sym().unwrap()), "loud");
-    let t0 = w.heap.get(id).slot(tail_sym);
+    let t0 = w.heap.get(id).slot(cdr_sym);
     let t0_id = t0.as_form_id().unwrap();
-    let h1 = w.heap.get(t0_id).slot(head_sym);
+    let h1 = w.heap.get(t0_id).slot(car_sym);
     assert_eq!(w.resolve(h1.as_sym().unwrap()), "unspecified");
 }
 
@@ -1209,11 +1209,11 @@ fn when_unless_let_rec() {
     )
     .unwrap();
     let id = r.as_form_id().unwrap();
-    let head_sym = w.intern("head");
-    let tail_sym = w.intern("tail");
-    assert_eq!(w.heap.get(id).slot(head_sym), Value::Bool(true));
-    let t = w.heap.get(id).slot(tail_sym).as_form_id().unwrap();
-    assert_eq!(w.heap.get(t).slot(head_sym), Value::Bool(true));
+    let car_sym = w.intern("car");
+    let cdr_sym = w.intern("cdr");
+    assert_eq!(w.heap.get(id).slot(car_sym), Value::Bool(true));
+    let t = w.heap.get(id).slot(cdr_sym).as_form_id().unwrap();
+    assert_eq!(w.heap.get(t).slot(car_sym), Value::Bool(true));
 }
 
 #[test]

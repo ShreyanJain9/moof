@@ -168,8 +168,8 @@ pub struct World {
     pub vm: Vm,
 
     // cached SymIds for hot paths.
-    pub head_sym: SymId,
-    pub tail_sym: SymId,
+    pub car_sym: SymId,
+    pub cdr_sym: SymId,
     pub body_sym: SymId,
     pub source_sym: SymId,
     pub params_sym: SymId,
@@ -202,8 +202,8 @@ impl World {
         // `Macros` global so user code can introspect it.
         let macros_form = heap.alloc(Form::with_proto(Value::Form(protos.object)));
 
-        let head_sym = syms.intern("head");
-        let tail_sym = syms.intern("tail");
+        let car_sym = syms.intern("car");
+        let cdr_sym = syms.intern("cdr");
         let body_sym = syms.intern("body");
         let source_sym = syms.intern("source");
         let params_sym = syms.intern("params");
@@ -228,8 +228,8 @@ impl World {
             global_env,
             use_moof_compiler: false,
             vm: Vm::default(),
-            head_sym,
-            tail_sym,
+            car_sym,
+            cdr_sym,
             body_sym,
             source_sym,
             params_sym,
@@ -392,8 +392,8 @@ impl World {
         let list_proto = Value::Form(self.protos.list);
         for &v in values.iter().rev() {
             let mut cell = Form::with_proto(list_proto);
-            cell.slots.insert(self.head_sym, v);
-            cell.slots.insert(self.tail_sym, tail);
+            cell.slots.insert(self.car_sym, v);
+            cell.slots.insert(self.cdr_sym, tail);
             let id = self.heap.alloc(cell);
             tail = Value::Form(id);
         }
@@ -410,8 +410,8 @@ impl World {
                 Value::Nil => return Ok(out),
                 Value::Form(id) => {
                     let f = self.heap.get(id);
-                    out.push(f.slot(self.head_sym));
-                    cur = f.slot(self.tail_sym);
+                    out.push(f.slot(self.car_sym));
+                    cur = f.slot(self.cdr_sym);
                 }
                 _ => return Err("not a list"),
             }
@@ -427,7 +427,7 @@ impl World {
                 Value::Nil => return Ok(n),
                 Value::Form(id) => {
                     n += 1;
-                    cur = self.heap.get(id).slot(self.tail_sym);
+                    cur = self.heap.get(id).slot(self.cdr_sym);
                 }
                 _ => return Err("not a list"),
             }

@@ -1259,8 +1259,8 @@ fn install_method_reflection(w: &mut World) {
         }
         // walk the params List up front so we don't fight the
         // borrow checker once we hold the table-rep mut.
-        let head_sym = w.intern("head");
-        let tail_sym = w.intern("tail");
+        let car_sym = w.intern("car");
+        let cdr_sym = w.intern("cdr");
         let list_proto = Value::Form(w.protos.list);
         let mut items: Vec<Value> = Vec::new();
         let mut cur = params;
@@ -1269,8 +1269,8 @@ fn install_method_reflection(w: &mut World) {
             if f.proto != list_proto {
                 break;
             }
-            let head = f.slot(head_sym);
-            let tail = f.slot(tail_sym);
+            let head = f.slot(car_sym);
+            let tail = f.slot(cdr_sym);
             if head.is_nil() && tail.is_nil() {
                 break;
             }
@@ -1769,8 +1769,8 @@ fn install_nil_methods(w: &mut World) {
     // depends on — so :empty? must exist before any `(defmethod …)`
     // runs.
     w.install_native(w.protos.nil, "length", |_, _, _| Ok(Value::Int(0)));
-    w.install_native(w.protos.nil, "head", |_, _, _| Ok(Value::Nil));
-    w.install_native(w.protos.nil, "tail", |_, _, _| Ok(Value::Nil));
+    w.install_native(w.protos.nil, "car", |_, _, _| Ok(Value::Nil));
+    w.install_native(w.protos.nil, "cdr", |_, _, _| Ok(Value::Nil));
     w.install_native(w.protos.nil, "empty?", |_, _, _| Ok(Value::Bool(true)));
     // nil-as-empty-list: reverse of nothing is nothing.
     w.install_native(w.protos.nil, "reverse", |_, _, _| Ok(Value::Nil));
@@ -1806,8 +1806,8 @@ fn install_nil_methods(w: &mut World) {
 /// in a fresh Form whose proto is List.
 fn make_cons_method(w: &mut World, self_: Value, args: &[Value]) -> Result<Value, RaiseError> {
     let mut cell = Form::with_proto(Value::Form(w.protos.list));
-    cell.slots.insert(w.head_sym, args[0]);
-    cell.slots.insert(w.tail_sym, self_);
+    cell.slots.insert(w.car_sym, args[0]);
+    cell.slots.insert(w.cdr_sym, self_);
     Ok(Value::Form(w.alloc(cell)))
 }
 
@@ -1819,19 +1819,19 @@ fn install_list_methods(w: &mut World) {
     // we read the head/tail SymIds from the world *inside* each
     // native (they're already cached on `World`, not allocated per
     // call). this lets the closures be `fn` pointers (no capture).
-    w.install_native(w.protos.list, "head", |w, self_, _| {
+    w.install_native(w.protos.list, "car", |w, self_, _| {
         let id = self_.as_form_id().ok_or_else(|| {
-            RaiseError::new(w.intern("type-error"), "head on non-List")
+            RaiseError::new(w.intern("type-error"), "car on non-List")
         })?;
-        let head_sym = w.head_sym;
-        Ok(w.heap.get(id).slot(head_sym))
+        let car_sym = w.car_sym;
+        Ok(w.heap.get(id).slot(car_sym))
     });
-    w.install_native(w.protos.list, "tail", |w, self_, _| {
+    w.install_native(w.protos.list, "cdr", |w, self_, _| {
         let id = self_.as_form_id().ok_or_else(|| {
-            RaiseError::new(w.intern("type-error"), "tail on non-List")
+            RaiseError::new(w.intern("type-error"), "cdr on non-List")
         })?;
-        let tail_sym = w.tail_sym;
-        Ok(w.heap.get(id).slot(tail_sym))
+        let cdr_sym = w.cdr_sym;
+        Ok(w.heap.get(id).slot(cdr_sym))
     });
     w.install_native(w.protos.list, "null?", |_, _, _| Ok(Value::Bool(false)));
     // [list empty?] — false (a List cell is always non-empty;
@@ -1861,11 +1861,11 @@ fn install_list_methods(w: &mut World) {
         Ok(Value::Int(n as i64))
     });
     w.install_native(w.protos.list, "cons:", |w, self_, args| {
-        let head_sym = w.head_sym;
-        let tail_sym = w.tail_sym;
+        let car_sym = w.car_sym;
+        let cdr_sym = w.cdr_sym;
         let mut cell = Form::with_proto(Value::Form(w.protos.list));
-        cell.slots.insert(head_sym, args[0]);
-        cell.slots.insert(tail_sym, self_);
+        cell.slots.insert(car_sym, args[0]);
+        cell.slots.insert(cdr_sym, self_);
         let id = w.alloc(cell);
         Ok(Value::Form(id))
     });
@@ -1904,8 +1904,8 @@ fn render_list_with(
     let mut cur = list;
     let mut first = true;
     let elem_sym = w.intern(elem_sel);
-    let head_sym = w.head_sym;
-    let tail_sym = w.tail_sym;
+    let car_sym = w.car_sym;
+    let cdr_sym = w.cdr_sym;
     loop {
         match cur {
             Value::Nil => break,
@@ -1914,8 +1914,8 @@ fn render_list_with(
                     out.push(' ');
                 }
                 first = false;
-                let head = w.heap.get(id).slot(head_sym);
-                let tail = w.heap.get(id).slot(tail_sym);
+                let head = w.heap.get(id).slot(car_sym);
+                let tail = w.heap.get(id).slot(cdr_sym);
                 let head_str_v = w.send(head, elem_sym, &[])?;
                 push_string_value(w, &mut out, head_str_v)?;
                 cur = tail;
@@ -2387,7 +2387,7 @@ fn install_globals(w: &mut World) {
     });
 
     // (cons head tail) — list constructor with no meaningful
-    // receiver among args. lowers to `[tail cons: head]`.
+    // receiver among args. lowers to `[tail cons: car]`.
     install_global(w, "cons", |world, _, args| {
         if args.len() != 2 {
             return Err(RaiseError::new(world.intern("arity"), "cons takes 2 args"));
@@ -2444,8 +2444,8 @@ fn install_globals(w: &mut World) {
         // `(append (list nil) …)` and quasiquote-splicing of
         // single-nil-element lists, which match's macro relies on.
         let mut out: Vec<Value> = Vec::new();
-        let head_sym = world.intern("head");
-        let tail_sym = world.intern("tail");
+        let car_sym = world.intern("car");
+        let cdr_sym = world.intern("cdr");
         for &arg in args {
             let mut cur = arg;
             while let Some(fid) = cur.as_form_id() {
@@ -2453,8 +2453,8 @@ fn install_globals(w: &mut World) {
                 if f.proto != Value::Form(world.protos.list) {
                     break;
                 }
-                let head = f.slot(head_sym);
-                let tail = f.slot(tail_sym);
+                let head = f.slot(car_sym);
+                let tail = f.slot(cdr_sym);
                 out.push(head);
                 cur = tail;
             }
@@ -3063,16 +3063,16 @@ mod tests {
     #[test]
     fn list_head_tail_cons() {
         let mut w = fresh();
-        let head_sym = w.intern("head");
+        let car_sym = w.intern("car");
         // build (1 2 3) and inspect
         let v = ev(&mut w, "(list 1 2 3)").unwrap();
-        assert_eq!(w.send(v, head_sym, &[]).unwrap(), Value::Int(1));
-        let tail_sym = w.intern("tail");
-        let tail = w.send(v, tail_sym, &[]).unwrap();
-        assert_eq!(w.send(tail, head_sym, &[]).unwrap(), Value::Int(2));
+        assert_eq!(w.send(v, car_sym, &[]).unwrap(), Value::Int(1));
+        let cdr_sym = w.intern("cdr");
+        let tail = w.send(v, cdr_sym, &[]).unwrap();
+        assert_eq!(w.send(tail, car_sym, &[]).unwrap(), Value::Int(2));
         // (cons 0 (list 1 2 3)) → list with first element 0
         let consed = ev(&mut w, "(cons 0 (list 1 2 3))").unwrap();
-        assert_eq!(w.send(consed, head_sym, &[]).unwrap(), Value::Int(0));
+        assert_eq!(w.send(consed, car_sym, &[]).unwrap(), Value::Int(0));
     }
 
     #[test]

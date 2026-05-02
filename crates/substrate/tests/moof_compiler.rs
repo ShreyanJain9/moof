@@ -286,10 +286,10 @@ fn agrees_on_defmacro_then_use() {
     // a tiny user macro that swaps two args.
     assert_compilers_agree(
         &mut w,
-        "(defmacro swap2 (args) (list (list 'fn '(a b) '(list b a)) [args head] [[args tail] head]))",
+        "(defmacro swap2 (args) (list (list 'fn '(a b) '(list b a)) [args car] [[args cdr] car]))",
     );
     // (swap2 1 2) expands to ((fn (a b) (list b a)) 1 2) → (2 1) as a list.
-    let r = moof::eval(&mut w, "[(swap2 1 2) head]").unwrap();
+    let r = moof::eval(&mut w, "[(swap2 1 2) car]").unwrap();
     assert_eq!(r, Value::Int(2));
 }
 
@@ -315,5 +315,5 @@ fn agrees_on_match_macro() {
 fn agrees_on_cascade_via_macro() {
     // cascade is a moof macro that desugars to the same shape both
     // compilers see — exercises macroexpand + send + let + do.
-    agree_fresh("(let ((c (list 1 2 3))) [c head])");
+    agree_fresh("(let ((c (list 1 2 3))) [c car])");
 }

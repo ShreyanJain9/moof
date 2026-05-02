@@ -79,19 +79,19 @@
     (if (__qq-list? form)
         (if [form is nil]
             #false
-            [[form head] is sym])
+            [[form car] is sym])
         #false)))
 
 (def __qq-walk-elems
   (fn (elems depth)
     (if [elems is nil]
         (list 'quote nil)
-        (let ((elem [elems head])
-              (acc (__qq-walk-elems [elems tail] depth)))
+        (let ((elem [elems car])
+              (acc (__qq-walk-elems [elems cdr] depth)))
           (if (if [depth = 1]
                   (__qq-marker? elem 'unquote-splicing)
                   #false)
-              (list 'append [[elem tail] head] acc)
+              (list 'append [[elem cdr] car] acc)
               (list 'cons (__qq-expand elem depth) acc))))))
 
 (def __qq-expand
@@ -99,24 +99,24 @@
     (if (__qq-list? form)
         (if [form is nil]
             (list 'quote form)
-            (let ((first [form head]))
+            (let ((first [form car]))
               (if [first is 'unquote]
                   (if [depth = 1]
-                      [[form tail] head]
+                      [[form cdr] car]
                       (list 'list
                             (list 'quote 'unquote)
-                            (__qq-expand [[form tail] head]
+                            (__qq-expand [[form cdr] car]
                                          [depth - 1])))
               (if [first is 'quasiquote]
                   (list 'list
                         (list 'quote 'quasiquote)
-                        (__qq-expand [[form tail] head]
+                        (__qq-expand [[form cdr] car]
                                      [depth + 1]))
                   (__qq-walk-elems form depth)))))
         (list 'quote form))))
 
 (defmacro quasiquote (args)
-  (__qq-expand [args head] 1))
+  (__qq-expand [args car] 1))
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; reader-emitted markers — these are the head-symbols the reader
@@ -144,8 +144,8 @@
 ;; cascade returns the receiver (smalltalk semantics). each
 ;; segment's value is discarded.
 (defmacro __cascade__ (args)
-  (let ((receiver [args head])
-        (segments [args tail]))
+  (let ((receiver [args car])
+        (segments [args cdr]))
     (let ((sends
             [segments map:
               (fn (seg)
@@ -166,8 +166,8 @@
           [args map:
             (fn (entry)
               (if (__qq-marker? entry '__entry__)
-                  (let ((k [[entry tail] head])
-                        (v [[[entry tail] tail] head]))
+                  (let ((k [[entry cdr] car])
+                        (v [[[entry cdr] cdr] car]))
                     `[__t at: ,k put: ,v])
                   `[__t push: ,entry]))]))
     `(let ((__t [Table new]))
@@ -191,38 +191,38 @@
 ;;         __objLit__))                           ;    accessors so
 ;;                                                ;    they override)
 (defmacro __obj__ (args)
-  (let ((proto-sym [args head])
-        (entries [args tail]))
+  (let ((proto-sym [args car])
+        (entries [args cdr]))
     (let ((slot-entries
             [entries filter:
-              (fn (e) [[e head] is '__slot__])])
+              (fn (e) [[e car] is '__slot__])])
           (method-entries
             [entries filter:
-              (fn (e) [[e head] is '__method__])]))
+              (fn (e) [[e car] is '__method__])]))
       (let ((slot-inits
               [slot-entries map:
                 (fn (e)
-                  (let ((k [[e tail] head])
-                        (v [[[e tail] tail] head]))
+                  (let ((k [[e cdr] car])
+                        (v [[[e cdr] cdr] car]))
                     `(slotSet! __objLit__ ',k ,v)))])
             (slot-getters
               [slot-entries map:
                 (fn (e)
-                  (let ((k [[e tail] head]))
+                  (let ((k [[e cdr] car]))
                     `(defmethod __objLit__ (,k) (slot self ',k))))])
             (slot-setters
               [slot-entries map:
                 (fn (e)
-                  (let ((k [[e tail] head]))
+                  (let ((k [[e cdr] car]))
                     (let ((setter-sel
                             (intern [[k toString] + ":"])))
                       `(defmethod __objLit__ (,setter-sel __v__) (slotSet! self ',k __v__)))))])
             (user-methods
               [method-entries map:
                 (fn (e)
-                  (let ((sel [[e tail] head])
-                        (params [[[e tail] tail] head])
-                        (body [[[[e tail] tail] tail] head]))
+                  (let ((sel [[e cdr] car])
+                        (params [[[e cdr] cdr] car])
+                        (body [[[[e cdr] cdr] cdr] car]))
                     `(setHandler! __objLit__ ',sel
                                    (fn ,params ,body))))]))
         `(let ((__objLit__ [,proto-sym new]))
@@ -234,26 +234,26 @@
 
 ;; (when cond body...) ≡ (if cond (do body...) nil)
 (defmacro when (args)
-  (let ((cond [args head])
-        (body [args tail]))
+  (let ((cond [args car])
+        (body [args cdr]))
     `(if ,cond (do ,@body) nil)))
 
 ;; (unless cond body...) ≡ (if cond nil (do body...))
 (defmacro unless (args)
-  (let ((cond [args head])
-        (body [args tail]))
+  (let ((cond [args car])
+        (body [args cdr]))
     `(if ,cond nil (do ,@body))))
 
 ;; (let* ((a 1) (b a) ...) body...) — nested single-binding lets.
 ;; expands recursively: empty bindings → wrap body in (do …);
 ;; otherwise peel one binding, nest the rest.
 (defmacro let* (args)
-  (let ((bindings [args head])
-        (body [args tail]))
+  (let ((bindings [args car])
+        (body [args cdr]))
     (if [bindings empty?]
         (cons 'do body)
-        `(let (,[bindings head])
-           (let* ,[bindings tail] ,@body)))))
+        `(let (,[bindings car])
+           (let* ,[bindings cdr] ,@body)))))
 
 ;; (let-rec ((f (fn …)) (g (fn …))) body) — bindings may refer to
 ;; each other (including recursively). desugars to:
@@ -262,13 +262,13 @@
 ;; later set!s mutate those slots; lookups inside the closures
 ;; see whichever value is current at call time.
 (defmacro let-rec (args)
-  (let ((bindings [args head])
-        (body [args tail]))
+  (let ((bindings [args car])
+        (body [args cdr]))
     (let ((nil-bindings
-            [bindings map: (fn (b) (list [b head] nil))])
+            [bindings map: (fn (b) (list [b car] nil))])
           (sets
             [bindings map:
-              (fn (b) (list 'set! [b head] [[b tail] head]))]))
+              (fn (b) (list 'set! [b car] [[b cdr] car]))]))
       `(let ,nil-bindings (do ,@sets ,@body)))))
 
 ;; ─────────────────────────────────────────────────────────────────
@@ -315,7 +315,7 @@
         (if [pat is nil]
             #false
             (if [[pat length] = 3]
-                [[[pat tail] head] is mid-sym]
+                [[[pat cdr] car] is mid-sym]
                 #false))
         #false)))
 
@@ -334,7 +334,7 @@
     (if (__match-list? pat)
         (if [pat is nil]
             #false
-            [[pat head] is 'quote])
+            [[pat car] is 'quote])
         #false)))
 
 (def __match-wildcard?
@@ -345,7 +345,7 @@
 
 ;; given a quoted form `(quote X)`, return X.
 (def __match-quoted-value
-  (fn (pat) [[pat tail] head]))
+  (fn (pat) [[pat cdr] car]))
 
 ;; predicates on the *quoted value* X (which may be a literal or
 ;; a list itself, when the pattern is `'(…)`).
@@ -387,15 +387,15 @@
             (if (__match-typed? pat)
                 ;; `(name :: Type)` — bind name, then check
                 ;; [Type satisfies?: subj].
-                (let ((p-name [pat head])
-                      (p-type [[[pat tail] tail] head]))
+                (let ((p-name [pat car])
+                      (p-type [[[pat cdr] cdr] car]))
                   `(if [,p-type satisfies?: ,subj-sym]
                        (let ((,p-name ,subj-sym)) ,body)
                        ,fail-form))
                 (if (__match-where? pat)
                     ;; `(name where pred)` — bind name, then check pred.
-                    (let ((p-name [pat head])
-                          (p-pred [[[pat tail] tail] head]))
+                    (let ((p-name [pat car])
+                          (p-pred [[[pat cdr] cdr] car]))
                       `(let ((,p-name ,subj-sym))
                          (if ,p-pred ,body ,fail-form)))
                     (if (__match-quote? pat)
@@ -423,8 +423,8 @@
     (if [pats empty?]
         ;; reached the spine end: subject must be nil.
         `(if [,subj-sym is nil] ,body ,fail-form)
-        (let ((p [pats head])
-              (rest [pats tail]))
+        (let ((p [pats car])
+              (rest [pats cdr]))
           (if (__match-rest-marker? p)
               ;; tail-rest: bind the remaining list to a name.
               (let ((rest-name (__match-rest-name p)))
@@ -436,8 +436,8 @@
                 `(if (if [,subj-sym is nil]
                          #false
                          [[,subj-sym proto] is List])
-                     (let ((,head-sym [,subj-sym head])
-                           (,tail-sym [,subj-sym tail]))
+                     (let ((,head-sym [,subj-sym car])
+                           (,tail-sym [,subj-sym cdr]))
                        ,(__match-clause p
                                         (__match-clause-list rest body tail-sym fail-form)
                                         head-sym
@@ -449,19 +449,19 @@
   (fn (clauses subj-sym)
     (if [clauses empty?]
         '(raise: 'no-match "match: no clause matched")
-        (let ((pat [clauses head])
-              (rest [clauses tail]))
+        (let ((pat [clauses car])
+              (rest [clauses cdr]))
           (if [rest empty?]
               '(raise: 'no-match "match: clauses must come in pat/body pairs")
-              (let ((body [rest head])
-                    (more [rest tail]))
+              (let ((body [rest car])
+                    (more [rest cdr]))
                 (__match-clause pat body subj-sym
                   (__match-build more subj-sym))))))))
 
 ;; the macro itself.
 (defmacro match (args)
-  (let ((subj [args head])
-        (clauses [args tail]))
+  (let ((subj [args car])
+        (clauses [args cdr]))
     `(let ((__match-subj__ ,subj))
        ,(__match-build clauses '__match-subj__))))
 
@@ -517,22 +517,22 @@
   (fn (params)
     (if [params empty?]
         nil
-        (let ((p1 [params head])
-              (rest [params tail]))
+        (let ((p1 [params car])
+              (rest [params cdr]))
           (if [rest empty?]
               (list p1)
-              (let ((p2 [rest head]))
+              (let ((p2 [rest car]))
                 (if (if [[p2 proto] is Symbol]
                         (if [p2 is '::]
                             #true
                             [p2 is 'where])
                         #false)
-                    (let ((rest2 [rest tail]))
+                    (let ((rest2 [rest cdr]))
                       (if [rest2 empty?]
                           ;; malformed — fall back to single-token.
                           (cons p1 (__defn-group-params rest))
-                          (let ((p3 [rest2 head])
-                                (rest3 [rest2 tail]))
+                          (let ((p3 [rest2 car])
+                                (rest3 [rest2 cdr]))
                             (cons (list p1 p2 p3)
                                   (__defn-group-params rest3)))))
                     (cons p1 (__defn-group-params rest)))))))))
@@ -545,22 +545,22 @@
   (fn (clauses)
     (if [clauses empty?]
         nil
-        (let ((clause [clauses head])
-              (rest [clauses tail]))
-          (let ((params [[clause tail] head])
-                (body   [[[clause tail] tail] head]))
+        (let ((clause [clauses car])
+              (rest [clauses cdr]))
+          (let ((params [[clause cdr] car])
+                (body   [[[clause cdr] cdr] car]))
             (let ((grouped (__defn-group-params params)))
               (cons (list 'quote grouped)
                     (cons body
                           (__defn-match-clauses rest)))))))))
 
 (defmacro defn (args)
-  (let ((name [args head])
-        (clauses [args tail]))
+  (let ((name [args car])
+        (clauses [args cdr]))
     (if [clauses empty?]
         (raise: 'defn-empty "defn: must have at least one clause")
-        (let ((first-clause [clauses head])
-              (first-params [[[clauses head] tail] head]))
+        (let ((first-clause [clauses car])
+              (first-params [[[clauses car] cdr] car]))
           (let ((grouped-arity [(__defn-group-params first-params) length]))
             (let ((argnames (__defn-argnames grouped-arity 0))
                   (mclauses (__defn-match-clauses clauses)))
@@ -602,8 +602,8 @@
 
 (def __decode-header
   (fn (header)
-    (let ((first [header head])
-          (rest [header tail]))
+    (let ((first [header car])
+          (rest [header cdr]))
       (if (if [rest empty?] #false [first endsWithColon?])
           ;; keyword form. concatenate alternating kws into one
           ;; selector text; pull params from the slots between.
@@ -616,14 +616,14 @@
   (fn (remaining acc-sel acc-params)
     (if [remaining empty?]
         (cons (intern acc-sel) (cons [acc-params reverse] nil))
-        (let ((kw [remaining head])
-              (after-kw [remaining tail]))
+        (let ((kw [remaining car])
+              (after-kw [remaining cdr]))
           (if [after-kw empty?]
               ;; keyword without a following param — error path,
               ;; left to the resulting (fn …) compilation to catch.
               (cons (intern acc-sel) (cons [acc-params reverse] nil))
-              (let ((param [after-kw head])
-                    (rest-elems [after-kw tail])
+              (let ((param [after-kw car])
+                    (rest-elems [after-kw cdr])
                     (next-sel [acc-sel + [kw toString]]))
                 (__decode-keyword
                   rest-elems
@@ -631,13 +631,13 @@
                   (cons param acc-params))))))))
 
 (defmacro defmethod (args)
-  (let ((proto-expr [args head])
-        (rest [args tail]))
-    (let ((header [rest head])
-          (body [[rest tail] head]))
+  (let ((proto-expr [args car])
+        (rest [args cdr]))
+    (let ((header [rest car])
+          (body [[rest cdr] car]))
       (let ((decoded (__decode-header header)))
-        (let ((sel [decoded head])
-              (params [[decoded tail] head]))
+        (let ((sel [decoded car])
+              (params [[decoded cdr] car]))
           `(setHandler! ,proto-expr (quote ,sel) (fn ,params ,body)))))))
 
 ;; ─────────────────────────────────────────────────────────────────
@@ -684,9 +684,9 @@
   (fn (target chain)
     (if [chain is nil]
         #false
-        (if [[chain head] is target]
+        (if [[chain car] is target]
             #true
-            (__satisfies-walk target [chain tail])))))
+            (__satisfies-walk target [chain cdr])))))
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; Bool — convenience derived from the conditional primitive `if`.
@@ -724,45 +724,45 @@
 ;; List — Enumerable. primitives: head, tail, cons:, null?
 ;; ─────────────────────────────────────────────────────────────────
 
-(defmethod List (length) [1 + [.tail length]])
+(defmethod List (length) [1 + [.cdr length]])
 
 (defmethod List (empty?) #false)
 (defmethod List (nonEmpty?) #true)
 
 ;; (defn append: ys) — concatenate two lists.
-(defmethod List (append: ys) (cons .head [.tail append: ys]))
+(defmethod List (append: ys) (cons .car [.cdr append: ys]))
 
 ;; (reverse) — O(n²) naive; phase C's pattern matching gives us a
 ;; cleaner accumulator-form.
-(defmethod List (reverse) [[.tail reverse] append: (cons .head nil)])
+(defmethod List (reverse) [[.cdr reverse] append: (cons .car nil)])
 
 ;; (map: f) — element-wise.
-(defmethod List (map: f) (cons (f .head) [.tail map: f]))
+(defmethod List (map: f) (cons (f .car) [.cdr map: f]))
 
-(defmethod List (filter: pred) (if (pred .head)
-        (cons .head [.tail filter: pred])
-        [.tail filter: pred]))
+(defmethod List (filter: pred) (if (pred .car)
+        (cons .car [.cdr filter: pred])
+        [.cdr filter: pred]))
 
-(defmethod List (reduce: f from: init) [.tail reduce: f from: (f init .head)])
+(defmethod List (reduce: f from: init) [.cdr reduce: f from: (f init .car)])
 
 (defmethod List (forEach: blk) (do
-      (blk .head)
-      [.tail forEach: blk]))
+      (blk .car)
+      [.cdr forEach: blk]))
 
 (defmethod List (take: n) (if [n = 0]
         nil
-        (cons .head [.tail take: [n - 1]])))
+        (cons .car [.cdr take: [n - 1]])))
 
 (defmethod List (drop: n) (if [n = 0]
         self
-        [.tail drop: [n - 1]]))
+        [.cdr drop: [n - 1]]))
 
-(defmethod List (any?: pred) (if (pred .head)
+(defmethod List (any?: pred) (if (pred .car)
         #true
-        [.tail any?: pred]))
+        [.cdr any?: pred]))
 
-(defmethod List (all?: pred) (if (pred .head)
-        [.tail all?: pred]
+(defmethod List (all?: pred) (if (pred .car)
+        [.cdr all?: pred]
         #false))
 
 (defmethod List (contains?: x) [self any?: (fn (y) [x = y])])
@@ -773,9 +773,9 @@
 
 (defmethod List (countWhere: pred) [[self filter: pred] length])
 
-(defmethod List (last) (if [.tail empty?]
-        .head
-        [.tail last]))
+(defmethod List (last) (if [.cdr empty?]
+        .car
+        [.cdr last]))
 
 ;; [xs count] — alias for :length, per docs-driven.md's Iterable
 ;; protocol table.
@@ -785,24 +785,24 @@
 ;; [xs zip: ys] — pairwise. ((a . a') (b . b') …). stops at shorter.
 (defmethod List (zip: ys) (if [ys empty?]
         nil
-        (cons (cons .head (cons [ys head] nil))
-              [.tail zip: [ys tail]])))
+        (cons (cons .car (cons [ys car] nil))
+              [.cdr zip: [ys cdr]])))
 
 (defmethod Nil (zip: ys) nil)
 
 ;; [xs scan: f from: init] — running fold, returning a list of all
 ;; intermediate accumulators. concepts/tables.md mentions :scan: for
 ;; Tables; same shape derives for Lists.
-(defmethod List (scan: f from: init) (let ((next (f init .head)))
-      (cons next [.tail scan: f from: next])))
+(defmethod List (scan: f from: init) (let ((next (f init .car)))
+      (cons next [.cdr scan: f from: next])))
 
 (defmethod Nil (scan: f from: init) nil)
 
 ;; [xs at: i] — O(n) indexed access. concepts/lists.md spec'd this
 ;; alongside the obvious caveat (use a Table for random access).
 (defmethod List (at: i) (if [i = 0]
-        .head
-        [.tail at: [i - 1]]))
+        .car
+        [.cdr at: [i - 1]]))
 
 (defmethod Nil (at: i) nil)
 
@@ -815,8 +815,8 @@
 ;; compare equal — matching concepts/lists.md's `Equatable` impl.
 (defmethod List (= other) (if [other empty?]
         #false
-        (if [.head = [other head]]
-            [.tail = [other tail]]
+        (if [.car = [other car]]
+            [.cdr = [other cdr]]
             #false)))
 
 (defmethod List (!= other) [[self = other] not])
@@ -1001,7 +1001,7 @@
 (defmethod Table (reduce: f) (let ((vs [self values]))
       (if [vs empty?]
           nil
-          [[vs tail] reduce: f from: [vs head]])))
+          [[vs cdr] reduce: f from: [vs car]])))
 
 ;; [t at-or: k default: d] — keyed lookup with a fallback.
 ;; concepts/tables.md.
@@ -1085,12 +1085,12 @@
   (fn (pairs)
     (if [pairs empty?]
         nil
-        (let ((header [pairs head])
-              (body [[pairs tail] head])
-              (rest [[pairs tail] tail]))
+        (let ((header [pairs car])
+              (body [[pairs cdr] car])
+              (rest [[pairs cdr] cdr]))
           (let ((decoded (__decode-header header)))
-            (let ((sel [decoded head])
-                  (params [[decoded tail] head]))
+            (let ((sel [decoded car])
+                  (params [[decoded cdr] car]))
               (cons (list sel params body)
                     (__defproto-pair-handlers rest))))))))
 
@@ -1100,25 +1100,25 @@
   (fn (clauses parent slots handlers)
     (if [clauses empty?]
         (list parent [slots reverse] [handlers reverse])
-        (let ((c [clauses head])
-              (rest [clauses tail]))
-          (let ((head-sym [c head]))
+        (let ((c [clauses car])
+              (rest [clauses cdr]))
+          (let ((head-sym [c car]))
             (if [head-sym is 'proto]
-                (__defproto-walk rest [[c tail] head] slots handlers)
+                (__defproto-walk rest [[c cdr] car] slots handlers)
             (if [head-sym is 'slots]
                 (__defproto-walk rest parent
-                                  [[[c tail] reverse] append: slots]
+                                  [[[c cdr] reverse] append: slots]
                                   handlers)
             (if [head-sym is 'handlers]
                 (__defproto-walk rest parent slots
-                                  [[(__defproto-pair-handlers [c tail]) reverse]
+                                  [[(__defproto-pair-handlers [c cdr]) reverse]
                                     append: handlers])
                 ;; bare header — pair with next clause as body.
                 (let ((decoded (__decode-header c))
-                      (body [rest head])
-                      (rest2 [rest tail]))
-                  (let ((sel [decoded head])
-                        (params [[decoded tail] head]))
+                      (body [rest car])
+                      (rest2 [rest cdr]))
+                  (let ((sel [decoded car])
+                        (params [[decoded cdr] car]))
                     (__defproto-walk rest2 parent slots
                                       (cons (list sel params body)
                                             handlers))))))))))))
@@ -1137,18 +1137,18 @@
 ;; build (setHandler! Name 'sel (fn (params) body)) — user handler.
 (def __defproto-handler
   (fn (proto-name h)
-    (let ((sel [h head])
-          (params [[h tail] head])
-          (body [[[h tail] tail] head]))
+    (let ((sel [h car])
+          (params [[h cdr] car])
+          (body [[[h cdr] cdr] car]))
       `(setHandler! ,proto-name ',sel (fn ,params ,body)))))
 
 (defmacro defproto (args)
-  (let ((name [args head])
-        (clauses [args tail]))
+  (let ((name [args car])
+        (clauses [args cdr]))
     (let ((parsed (__defproto-walk clauses 'Object nil nil)))
-      (let ((parent [parsed head])
-            (slots [[parsed tail] head])
-            (handlers [[[parsed tail] tail] head]))
+      (let ((parent [parsed car])
+            (slots [[parsed cdr] car])
+            (handlers [[[parsed cdr] cdr] car]))
         (let ((proto-decl
                 `(def ,name (getOrCreateProto ',name ,parent)))
               (getters
@@ -1188,13 +1188,13 @@
 ;; ─────────────────────────────────────────────────────────────────
 
 (defmacro let (args)
-  (let ((bindings [args head])
-        (body [args tail]))
-    (let ((names [bindings map: |b| [b head]])
-          (vals  [bindings map: |b| [[b tail] head]]))
-      (if [[body tail] empty?]
+  (let ((bindings [args car])
+        (body [args cdr]))
+    (let ((names [bindings map: |b| [b car]])
+          (vals  [bindings map: |b| [[b cdr] car]]))
+      (if [[body cdr] empty?]
           ;; single-body: avoid an extra `do` wrap.
-          `((fn ,names ,[body head]) ,@vals)
+          `((fn ,names ,[body car]) ,@vals)
           `((fn ,names (do ,@body)) ,@vals)))))
 
 ;; (do e₁ e₂ … eₙ) — sequence body forms, value of the last.
@@ -1219,6 +1219,6 @@
 (defmacro do (args)
   (if [args empty?]
       'nil
-      (if [[args tail] empty?]
-          [args head]
-          `(let ((__ ,[args head])) (do ,@[args tail])))))
+      (if [[args cdr] empty?]
+          [args car]
+          `(let ((__ ,[args car])) (do ,@[args cdr])))))
