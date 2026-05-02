@@ -1,6 +1,9 @@
-//! `$transporter` capability tests. exercises the four error symbols
-//! plus the happy path. tests assume `MOOF_LIB` is set in the test
-//! harness via env (handled by setting it in each test).
+//! `$transporter` capability tests — happy path plus every defined
+//! error symbol (`tx-bad-arg`, `tx-bad-path`, `tx-no-root`,
+//! `tx-not-found`, `tx-unimplemented`). `tx-read-error` is reachable
+//! only via fragile filesystem permission setups and is left untested.
+//! tests assume `MOOF_LIB` is set in the test harness via env (handled
+//! by setting it in each test).
 
 use moof::value::Value;
 use std::path::PathBuf;
@@ -86,7 +89,7 @@ fn load_all_walks_a_list() {
 #[test]
 fn load_all_non_string_element_raises() {
     let mut w = fresh_world();
-    let err = moof::eval(&mut w, "[$transporter loadAll: '(\"bootstrap.moof\" 42)]")
+    let err = moof::eval(&mut w, "[$transporter loadAll: '(42)]")
         .expect_err(":loadAll: should reject non-String element");
     let kind_str = w.resolve(err.kind).to_string();
     assert_eq!(kind_str, "tx-bad-arg");
@@ -102,4 +105,22 @@ fn dump_to_file_is_unimplemented() {
     .expect_err(":dump:toFile: stub should raise");
     let kind_str = w.resolve(err.kind).to_string();
     assert_eq!(kind_str, "tx-unimplemented");
+}
+
+#[test]
+fn root_raises_no_root_when_world_is_bare() {
+    let mut w = moof::new_world_bare();
+    let err = moof::eval(&mut w, "[$transporter root]")
+        .expect_err(":root should raise tx-no-root when no root configured");
+    let kind_str = w.resolve(err.kind).to_string();
+    assert_eq!(kind_str, "tx-no-root");
+}
+
+#[test]
+fn load_all_non_list_arg_raises_bad_arg() {
+    let mut w = fresh_world();
+    let err = moof::eval(&mut w, "[$transporter loadAll: 42]")
+        .expect_err(":loadAll: should reject non-list arg");
+    let kind_str = w.resolve(err.kind).to_string();
+    assert_eq!(kind_str, "tx-bad-arg");
 }
