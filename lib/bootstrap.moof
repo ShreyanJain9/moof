@@ -1293,9 +1293,27 @@
           `((fn ,names (do ,@body)) ,@vals)))))
 
 ;; (do e₁ e₂ … eₙ) — sequence body forms, value of the last.
-;; emits the rust-internal `__do__` (which compile_fn also uses
-;; when wrapping multi-form fn bodies); user code wanting to
-;; intercept `do` overrides *this* macro without triggering the
-;; compile_fn-wraps-body recursion that bit the v0 attempt.
+;;
+;; the desugaring threads a chain of single-binding lets:
+;;
+;;   ()                  →  nil
+;;   (e₁)                →  e₁
+;;   (e₁ e₂)             →  (let ((__ e₁)) e₂)
+;;   (e₁ e₂ e₃)          →  (let ((__ e₁)) (do e₂ e₃))
+;;                       →  (let ((__ e₁)) (let ((__ e₂)) e₃))
+;;
+;; each `let` expands (via the moof let macro) to a *single-body*
+;; fn-call — `((fn (__) body) val)` — so compile_fn's auto-wrap-
+;; multi-form-bodies-in-(do) discipline never re-triggers `do`.
+;; that's the only reason the previous attempt needed an `__do__`
+;; rust escape hatch; this one doesn't.
+;;
+;; `__` shadows on each step; rebinding the same name across nested
+;; lets is fine because lexical scoping makes the outer one
+;; unreachable from the inner body anyway.
 (defmacro do (args)
-  (cons '__do__ args))
+  (if [args empty?]
+      'nil
+      (if [[args tail] empty?]
+          [args head]
+          `(let ((__ ,[args head])) (do ,@[args tail])))))

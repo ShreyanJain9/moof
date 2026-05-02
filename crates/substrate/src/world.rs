@@ -440,6 +440,38 @@ impl World {
         self.heap.get_mut(env).slots.insert(name, value);
     }
 
+    /// `set!` semantics: walk the parent chain looking for an
+    /// existing binding of `name`; if found, mutate it in place and
+    /// return `true`. if not found anywhere, return `false` —
+    /// the caller decides whether to define-locally or raise.
+    ///
+    /// matches scheme's classical set! (where set!ing an unbound
+    /// name is undefined-behavior / error). load-bearing for
+    /// closures-capture-env-by-reference: the environment frame
+    /// where a name *was originally bound* is what `set!` must
+    /// touch, not whatever frame happens to be active at the call
+    /// site (which may shadow the original).
+    pub fn env_set(&mut self, env: FormId, name: SymId, value: Value) -> bool {
+        let mut cur = env;
+        loop {
+            if self.heap.get(cur).slots.contains_key(&name) {
+                self.heap.get_mut(cur).slots.insert(name, value);
+                return true;
+            }
+            let parent = self
+                .heap
+                .get(cur)
+                .meta
+                .get(&self.parent_sym)
+                .copied()
+                .unwrap_or(Value::Nil);
+            match parent {
+                Value::Form(id) => cur = id,
+                _ => return false,
+            }
+        }
+    }
+
     /// allocate a fresh env-Form chained off `parent` (or `Nil`
     /// for a root env).
     pub fn alloc_env(&mut self, parent: Option<FormId>) -> FormId {

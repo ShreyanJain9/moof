@@ -334,9 +334,22 @@ fn step(world: &mut World) -> Result<(), RaiseError> {
             world.vm.stack.push(v);
         }
         Op::StoreName(name) => {
+            // `set!` walks the env chain to mutate the *original*
+            // binding (scheme/CL semantics). without this, a set!
+            // inside a nested scope that doesn't lexically bind
+            // `name` would shadow the outer binding instead of
+            // updating it — breaking closures that captured the
+            // outer env by reference. critical for the moof-side
+            // do/let macros' chain-of-let desugar to keep let-rec
+            // mutual-recursion working.
             let v = pop(world)?;
             let env = world.vm.frames[frame_idx].env;
-            world.env_bind(env, name, v);
+            if !world.env_set(env, name, v) {
+                // no existing binding anywhere — fall back to the
+                // global env. this matches the old behavior for
+                // `(set! …)` outside any let.
+                world.env_bind(world.global_env, name, v);
+            }
             // stores leave nil — `(set! x v)` expressions evaluate to nil.
             world.vm.stack.push(Value::Nil);
         }

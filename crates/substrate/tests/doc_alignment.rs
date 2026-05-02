@@ -666,6 +666,50 @@ fn block_sugar_does_not_eat_binary_pipe() {
 // ─────────────────────────────────────────────────────────────────
 
 #[test]
+fn set_walks_parent_chain() {
+    // scheme/CL semantics: (set! x v) mutates the *original*
+    // binding, not the local one. critical so that closures
+    // captured against an outer env see updates made from a
+    // deeper scope. moof's `do` macro relies on this — the
+    // chain-of-let desugar means set!s often happen one or
+    // more env-frames deeper than the binding.
+    let mut w = moof::new_world();
+    let v = moof::eval(
+        &mut w,
+        "(let ((x 1))
+           ((fn ()
+              (set! x 99)))   ;; set! inside a deeper env
+           x)",
+    )
+    .unwrap();
+    assert_eq!(v, Value::Int(99));
+}
+
+#[test]
+fn do_is_a_pure_moof_macro_no_rust_fallback() {
+    // `do` is a moof macro that desugars to nested lets; there's
+    // no rust `__do__` escape hatch any more. mutual recursion
+    // via let-rec round-trips through the new macro chain
+    // because set! walks the parent env to find the original
+    // binding.
+    let mut w = moof::new_world();
+    let v = moof::eval(
+        &mut w,
+        "(let-rec
+           ((even? (fn (n) (if [n = 0] #true (odd? [n - 1]))))
+            (odd?  (fn (n) (if [n = 0] #false (even? [n - 1])))))
+          (list (even? 8) (odd? 5)))",
+    )
+    .unwrap();
+    let id = v.as_form_id().unwrap();
+    let head_sym = w.intern("head");
+    let tail_sym = w.intern("tail");
+    assert_eq!(w.heap.get(id).slot(head_sym), Value::Bool(true));
+    let t = w.heap.get(id).slot(tail_sym).as_form_id().unwrap();
+    assert_eq!(w.heap.get(t).slot(head_sym), Value::Bool(true));
+}
+
+#[test]
 fn do_is_a_moof_macro_now() {
     // `do` lives in lib/bootstrap.moof as `(cons '__do__ args)`.
     // user code that overrides `do` re-routes (or wraps) without
