@@ -234,9 +234,9 @@ impl<'a> Compiler<'a> {
                 }
             }
             Value::Form(id) => {
-                // List-Forms are code; any other Form is a literal.
+                // Cons-Forms are code; any other Form is a literal.
                 let proto = self.world.heap.get(id).proto;
-                if proto == Value::Form(self.world.protos.list) {
+                if proto == Value::Form(self.world.protos.cons) {
                     self.compile_form(form, tail)?;
                 } else {
                     let idx = self.add_const(form);

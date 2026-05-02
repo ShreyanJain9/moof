@@ -135,7 +135,7 @@ fn forcing_function_quote_returns_form() {
     // (quote (1 2 3)) → a list-Form
     let r = moof::eval(&mut w, "'(1 2 3)").unwrap();
     let id = r.as_form_id().unwrap();
-    assert_eq!(w.heap.get(id).proto, Value::Form(w.protos.list));
+    assert_eq!(w.heap.get(id).proto, Value::Form(w.protos.cons));
 }
 
 #[test]

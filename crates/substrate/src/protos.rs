@@ -45,7 +45,7 @@ pub struct Protos {
     pub symbol: FormId,
     pub char_: FormId,
     pub string: FormId,
-    pub list: FormId,
+    pub cons: FormId,
     pub table: FormId,
     pub method: FormId,
     pub chunk: FormId,
@@ -75,7 +75,7 @@ impl Protos {
         let symbol = mk(heap);
         let char_ = mk(heap);
         let string = mk(heap);
-        let list = mk(heap);
+        let cons = mk(heap);
         let table = mk(heap);
         let method = mk(heap);
         let chunk = mk(heap);
@@ -94,7 +94,7 @@ impl Protos {
             symbol,
             char_,
             string,
-            list,
+            cons,
             table,
             method,
             chunk,
@@ -115,7 +115,7 @@ mod tests {
         let mut h = Heap::new();
         let p = Protos::bootstrap(&mut h);
         let ids = [
-            p.object, p.nil, p.bool_, p.integer, p.symbol, p.list,
+            p.object, p.nil, p.bool_, p.integer, p.symbol, p.cons,
             p.method, p.chunk, p.closure, p.env, p.foreign,
         ];
         // each proto-Form is distinct.
@@ -153,7 +153,7 @@ mod tests {
         let p = Protos::bootstrap(&mut h);
         // List is direct child of Object until phase A.10
         // introduces Iterable/Sized/etc. mixins.
-        assert_eq!(h.get(p.list).proto, Value::Form(p.object));
+        assert_eq!(h.get(p.cons).proto, Value::Form(p.object));
     }
 
     #[test]
@@ -162,7 +162,7 @@ mod tests {
         // whose proto is `nil`. there are no cycles.
         let mut h = Heap::new();
         let p = Protos::bootstrap(&mut h);
-        for proto_id in [p.integer, p.bool_, p.symbol, p.list, p.method, p.chunk, p.closure, p.env, p.foreign] {
+        for proto_id in [p.integer, p.bool_, p.symbol, p.cons, p.method, p.chunk, p.closure, p.env, p.foreign] {
             let mut current = Value::Form(proto_id);
             let mut visited = std::collections::HashSet::new();
             loop {

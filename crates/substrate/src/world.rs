@@ -389,7 +389,7 @@ impl World {
     /// canonical shape.
     pub fn make_list(&mut self, values: &[Value]) -> Value {
         let mut tail = Value::Nil;
-        let list_proto = Value::Form(self.protos.list);
+        let list_proto = Value::Form(self.protos.cons);
         for &v in values.iter().rev() {
             let mut cell = Form::with_proto(list_proto);
             cell.slots.insert(self.car_sym, v);
@@ -530,7 +530,7 @@ impl World {
 
     /// reader entry — uses the canonical List + String protos.
     pub fn read(&mut self, text: &str) -> Result<Value, ReadError> {
-        let list_proto = Value::Form(self.protos.list);
+        let list_proto = Value::Form(self.protos.cons);
         let string_proto = Value::Form(self.protos.string);
         let mut ctx = ReadCtx::new(
             &mut self.heap,
@@ -544,7 +544,7 @@ impl World {
 
     /// reader-all entry.
     pub fn read_all(&mut self, text: &str) -> Result<Vec<Value>, ReadError> {
-        let list_proto = Value::Form(self.protos.list);
+        let list_proto = Value::Form(self.protos.cons);
         let string_proto = Value::Form(self.protos.string);
         let mut ctx = ReadCtx::new(
             &mut self.heap,
@@ -744,7 +744,7 @@ mod tests {
         let w = World::new();
         // every proto resolves to a real Form.
         let p = w.protos;
-        for id in [p.object, p.nil, p.bool_, p.integer, p.symbol, p.list,
+        for id in [p.object, p.nil, p.bool_, p.integer, p.symbol, p.cons,
                    p.method, p.chunk, p.closure, p.env, p.foreign] {
             assert!(!id.is_none());
         }
@@ -773,8 +773,8 @@ mod tests {
     fn make_list_and_list_to_vec_roundtrip() {
         let mut w = World::new();
         let xs = vec![Value::Int(1), Value::Int(2), Value::Int(3)];
-        let list = w.make_list(&xs);
-        let back = w.list_to_vec(list).unwrap();
+        let cons = w.make_list(&xs);
+        let back = w.list_to_vec(cons).unwrap();
         assert_eq!(xs, back);
     }
 
@@ -782,8 +782,8 @@ mod tests {
     fn list_len_works() {
         let mut w = World::new();
         let xs = vec![Value::Int(1), Value::Int(2), Value::Int(3)];
-        let list = w.make_list(&xs);
-        assert_eq!(w.list_len(list).unwrap(), 3);
+        let cons = w.make_list(&xs);
+        assert_eq!(w.list_len(cons).unwrap(), 3);
         assert_eq!(w.list_len(Value::Nil).unwrap(), 0);
     }
 
@@ -873,6 +873,6 @@ mod tests {
         let mut w = World::new();
         let v = w.read("(1 2 3)").unwrap();
         let id = v.as_form_id().unwrap();
-        assert_eq!(w.heap.get(id).proto, Value::Form(w.protos.list));
+        assert_eq!(w.heap.get(id).proto, Value::Form(w.protos.cons));
     }
 }

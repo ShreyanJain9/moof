@@ -30,8 +30,8 @@
 ;; everything else.
 ;;
 ;; the macro calling convention: a macro receives ONE arg — the
-;; List of unevaluated source-arg-Forms. `(when c a b)` calls the
-;; `when` macro with `(c a b)`. macros destructure with List ops
+;; Cons of unevaluated source-arg-Forms. `(when c a b)` calls the
+;; `when` macro with `(c a b)`. macros destructure with Cons ops
 ;; and return a Form, which the compiler then compiles in-place.
 ;;
 ;; the only true compiler-level special forms remaining (after these
@@ -66,7 +66,7 @@
   (fn (v)
     (if [v is nil]
         #true
-        (if [[v proto] is List] #true #false))))
+        (if [[v proto] is Cons] #true #false))))
 
 ;; pre-bootstrap, the only "is this an empty list?" predicate
 ;; that's reachable is `[v is nil]` (Object's identity-eq to nil).
@@ -304,7 +304,7 @@
   (fn (v)
     (if [v is nil]
         #true
-        [[v proto] is List])))
+        [[v proto] is Cons])))
 
 ;; helper: is `pat` a 3-element list whose middle element is the
 ;; symbol `mid-sym`? used to detect `(name :: Type)` and
@@ -359,7 +359,7 @@
     (let ((qv (__match-quoted-value pat)))
       (if [qv is nil]
           #false
-          [[qv proto] is List]))))
+          [[qv proto] is Cons]))))
 
 ;; rest-marker recognition: a Symbol whose text starts with the
 ;; ellipsis character `…`. moof's reader treats `…rest` as one
@@ -435,7 +435,7 @@
                     (tail-sym (intern ["__mt" + [subj-sym toString]])))
                 `(if (if [,subj-sym is nil]
                          #false
-                         [[,subj-sym proto] is List])
+                         [[,subj-sym proto] is Cons])
                      (let ((,head-sym [,subj-sym car])
                            (,tail-sym [,subj-sym cdr]))
                        ,(__match-clause p
@@ -652,13 +652,13 @@
 (defmethod Object (initialize) self)
 
 ;; :inspect is the REPL-readable rendering. defaults to :toString
-;; (installed in rust); String / Char / List / Method override it
+;; (installed in rust); String / Char / Cons / Method override it
 ;; to produce re-readable output ("hello", #\a, (1 "hi" #\a), etc).
 ;; phase C swaps in a richer moof-side Inspector view by overriding
 ;; this here for richer output.
 
-;; :protos — full delegation chain as a List. honors
-;; laws/reflection-contract.md R1: `[v protos]` returns a List of
+;; :protos — full delegation chain as a Cons. honors
+;; laws/reflection-contract.md R1: `[v protos]` returns a Cons of
 ;; all protos walked from `self.proto` up to (but not including)
 ;; nil. starts with the immediate proto; ends with Object.
 ;;
@@ -721,69 +721,69 @@
 ;; without any extra handlers here.
 
 ;; ─────────────────────────────────────────────────────────────────
-;; List — Enumerable. primitives: head, tail, cons:, null?
+;; Cons — Enumerable. primitives: head, tail, cons:, null?
 ;; ─────────────────────────────────────────────────────────────────
 
-(defmethod List (length) [1 + [.cdr length]])
+(defmethod Cons (length) [1 + [.cdr length]])
 
-(defmethod List (empty?) #false)
-(defmethod List (nonEmpty?) #true)
+(defmethod Cons (empty?) #false)
+(defmethod Cons (nonEmpty?) #true)
 
 ;; (defn append: ys) — concatenate two lists.
-(defmethod List (append: ys) (cons .car [.cdr append: ys]))
+(defmethod Cons (append: ys) (cons .car [.cdr append: ys]))
 
 ;; (reverse) — O(n²) naive; phase C's pattern matching gives us a
 ;; cleaner accumulator-form.
-(defmethod List (reverse) [[.cdr reverse] append: (cons .car nil)])
+(defmethod Cons (reverse) [[.cdr reverse] append: (cons .car nil)])
 
 ;; (map: f) — element-wise.
-(defmethod List (map: f) (cons (f .car) [.cdr map: f]))
+(defmethod Cons (map: f) (cons (f .car) [.cdr map: f]))
 
-(defmethod List (filter: pred) (if (pred .car)
+(defmethod Cons (filter: pred) (if (pred .car)
         (cons .car [.cdr filter: pred])
         [.cdr filter: pred]))
 
-(defmethod List (reduce: f from: init) [.cdr reduce: f from: (f init .car)])
+(defmethod Cons (reduce: f from: init) [.cdr reduce: f from: (f init .car)])
 
-(defmethod List (forEach: blk) (do
+(defmethod Cons (forEach: blk) (do
       (blk .car)
       [.cdr forEach: blk]))
 
-(defmethod List (take: n) (if [n = 0]
+(defmethod Cons (take: n) (if [n = 0]
         nil
         (cons .car [.cdr take: [n - 1]])))
 
-(defmethod List (drop: n) (if [n = 0]
+(defmethod Cons (drop: n) (if [n = 0]
         self
         [.cdr drop: [n - 1]]))
 
-(defmethod List (any?: pred) (if (pred .car)
+(defmethod Cons (any?: pred) (if (pred .car)
         #true
         [.cdr any?: pred]))
 
-(defmethod List (all?: pred) (if (pred .car)
+(defmethod Cons (all?: pred) (if (pred .car)
         [.cdr all?: pred]
         #false))
 
-(defmethod List (contains?: x) [self any?: (fn (y) [x = y])])
+(defmethod Cons (contains?: x) [self any?: (fn (y) [x = y])])
 
-(defmethod List (sum) [self reduce: (fn (a b) [a + b]) from: 0])
+(defmethod Cons (sum) [self reduce: (fn (a b) [a + b]) from: 0])
 
-(defmethod List (product) [self reduce: (fn (a b) [a * b]) from: 1])
+(defmethod Cons (product) [self reduce: (fn (a b) [a * b]) from: 1])
 
-(defmethod List (countWhere: pred) [[self filter: pred] length])
+(defmethod Cons (countWhere: pred) [[self filter: pred] length])
 
-(defmethod List (last) (if [.cdr empty?]
+(defmethod Cons (last) (if [.cdr empty?]
         .car
         [.cdr last]))
 
 ;; [xs count] — alias for :length, per docs-driven.md's Iterable
 ;; protocol table.
-(defmethod List (count) [self length])
+(defmethod Cons (count) [self length])
 (defmethod Nil (count) 0)
 
 ;; [xs zip: ys] — pairwise. ((a . a') (b . b') …). stops at shorter.
-(defmethod List (zip: ys) (if [ys empty?]
+(defmethod Cons (zip: ys) (if [ys empty?]
         nil
         (cons (cons .car (cons [ys car] nil))
               [.cdr zip: [ys cdr]])))
@@ -793,14 +793,14 @@
 ;; [xs scan: f from: init] — running fold, returning a list of all
 ;; intermediate accumulators. concepts/tables.md mentions :scan: for
 ;; Tables; same shape derives for Lists.
-(defmethod List (scan: f from: init) (let ((next (f init .car)))
+(defmethod Cons (scan: f from: init) (let ((next (f init .car)))
       (cons next [.cdr scan: f from: next])))
 
 (defmethod Nil (scan: f from: init) nil)
 
 ;; [xs at: i] — O(n) indexed access. concepts/lists.md spec'd this
 ;; alongside the obvious caveat (use a Table for random access).
-(defmethod List (at: i) (if [i = 0]
+(defmethod Cons (at: i) (if [i = 0]
         .car
         [.cdr at: [i - 1]]))
 
@@ -810,16 +810,16 @@
 ;; head/tail spine, terminating either when both reach nil
 ;; (→ #true) or when a head pair differs (→ #false).
 ;;
-;; List inherits Object's identity `:=` by default; this overrides
+;; Cons inherits Object's identity `:=` by default; this overrides
 ;; with structural so two distinct cons-cells with the same content
 ;; compare equal — matching concepts/lists.md's `Equatable` impl.
-(defmethod List (= other) (if [other empty?]
+(defmethod Cons (= other) (if [other empty?]
         #false
         (if [.car = [other car]]
             [.cdr = [other cdr]]
             #false)))
 
-(defmethod List (!= other) [[self = other] not])
+(defmethod Cons (!= other) [[self = other] not])
 
 (defmethod Nil (append: ys) ys)
 (defmethod Nil (reverse) nil)
@@ -926,7 +926,7 @@
 (defmethod String (empty?) [[self byteLength] = 0])
 
 ;; :asList is an alias for :toList — both walk the String into a
-;; List of Chars.
+;; Cons of Chars.
 (defmethod String (asList) [self toList])
 
 ;; iterate over chars by walking the Char list.

@@ -33,7 +33,7 @@
   (fn (v)
     (if [v is nil]
         #true
-        [[v proto] is List])))
+        [[v proto] is Cons])))
 
 (def __mc-symbol?
   (fn (v)

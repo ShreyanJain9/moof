@@ -416,7 +416,7 @@ fn install_table_methods(w: &mut World) {
         let target = args.first().copied().unwrap_or(Value::Nil);
         let table_proto = Value::Form(w.protos.table);
         let string_proto = Value::Form(w.protos.string);
-        let list_proto = Value::Form(w.protos.list);
+        let list_proto = Value::Form(w.protos.cons);
         if target == string_proto {
             let sel = w.intern("asString");
             return w.send(self_, sel, &[]);
@@ -756,7 +756,7 @@ fn install_string_methods(w: &mut World) {
     w.install_native(w.protos.string, "as:", |w, self_, args| {
         let target = args.first().copied().unwrap_or(Value::Nil);
         let table_proto = Value::Form(w.protos.table);
-        let list_proto = Value::Form(w.protos.list);
+        let list_proto = Value::Form(w.protos.cons);
         let string_proto = Value::Form(w.protos.string);
         if target == table_proto {
             let sel = w.intern("asTable");
@@ -1261,7 +1261,7 @@ fn install_method_reflection(w: &mut World) {
         // borrow checker once we hold the table-rep mut.
         let car_sym = w.intern("car");
         let cdr_sym = w.intern("cdr");
-        let list_proto = Value::Form(w.protos.list);
+        let list_proto = Value::Form(w.protos.cons);
         let mut items: Vec<Value> = Vec::new();
         let mut cur = params;
         while let Some(fid) = cur.as_form_id() {
@@ -1480,7 +1480,7 @@ fn install_proto_globals(w: &mut World) {
         ("Symbol", w.protos.symbol),
         ("Char", w.protos.char_),
         ("String", w.protos.string),
-        ("List", w.protos.list),
+        ("Cons", w.protos.cons),
         ("Table", w.protos.table),
         ("Method", w.protos.method),
         ("Chunk", w.protos.chunk),
@@ -1805,7 +1805,7 @@ fn install_nil_methods(w: &mut World) {
 /// and List, since the heap operation is identical: head + tail
 /// in a fresh Form whose proto is List.
 fn make_cons_method(w: &mut World, self_: Value, args: &[Value]) -> Result<Value, RaiseError> {
-    let mut cell = Form::with_proto(Value::Form(w.protos.list));
+    let mut cell = Form::with_proto(Value::Form(w.protos.cons));
     cell.slots.insert(w.car_sym, args[0]);
     cell.slots.insert(w.cdr_sym, self_);
     Ok(Value::Form(w.alloc(cell)))
@@ -1819,34 +1819,34 @@ fn install_list_methods(w: &mut World) {
     // we read the head/tail SymIds from the world *inside* each
     // native (they're already cached on `World`, not allocated per
     // call). this lets the closures be `fn` pointers (no capture).
-    w.install_native(w.protos.list, "car", |w, self_, _| {
+    w.install_native(w.protos.cons, "car", |w, self_, _| {
         let id = self_.as_form_id().ok_or_else(|| {
-            RaiseError::new(w.intern("type-error"), "car on non-List")
+            RaiseError::new(w.intern("type-error"), "car on non-Cons")
         })?;
         let car_sym = w.car_sym;
         Ok(w.heap.get(id).slot(car_sym))
     });
-    w.install_native(w.protos.list, "cdr", |w, self_, _| {
+    w.install_native(w.protos.cons, "cdr", |w, self_, _| {
         let id = self_.as_form_id().ok_or_else(|| {
-            RaiseError::new(w.intern("type-error"), "cdr on non-List")
+            RaiseError::new(w.intern("type-error"), "cdr on non-Cons")
         })?;
         let cdr_sym = w.cdr_sym;
         Ok(w.heap.get(id).slot(cdr_sym))
     });
-    w.install_native(w.protos.list, "null?", |_, _, _| Ok(Value::Bool(false)));
+    w.install_native(w.protos.cons, "null?", |_, _, _| Ok(Value::Bool(false)));
     // [list empty?] — false (a List cell is always non-empty;
     // emptiness is the Nil case). promoted to rust because
     // `__decode-header` depends on `:empty?` and the bootstrap
     // would otherwise be circular.
-    w.install_native(w.protos.list, "empty?", |_, _, _| Ok(Value::Bool(false)));
+    w.install_native(w.protos.cons, "empty?", |_, _, _| Ok(Value::Bool(false)));
     // [list reverse] — used by __decode-keyword (kw-shape headers
     // are decoded by accumulating params front-to-back, then
     // reversing). promoted to rust to break the same defmethod
     // bootstrap circularity.
-    w.install_native(w.protos.list, "reverse", |w, self_, _| {
+    w.install_native(w.protos.cons, "reverse", |w, self_, _| {
         let elems = w
             .list_to_vec(self_)
-            .map_err(|_| type_error(w, "reverse on non-List"))?;
+            .map_err(|_| type_error(w, "reverse on non-Cons"))?;
         let rev: Vec<Value> = elems.into_iter().rev().collect();
         Ok(w.make_list(&rev))
     });
@@ -1854,16 +1854,16 @@ fn install_list_methods(w: &mut World) {
     // compile-send (`[args length]` for argc), so `:length` must be
     // available on List from rust *before* bootstrap.moof loads
     // through the moof compiler.
-    w.install_native(w.protos.list, "length", |w, self_, _| {
+    w.install_native(w.protos.cons, "length", |w, self_, _| {
         let n = w
             .list_len(self_)
-            .map_err(|_| type_error(w, "length on non-List"))?;
+            .map_err(|_| type_error(w, "length on non-Cons"))?;
         Ok(Value::Int(n as i64))
     });
-    w.install_native(w.protos.list, "cons:", |w, self_, args| {
+    w.install_native(w.protos.cons, "cons:", |w, self_, args| {
         let car_sym = w.car_sym;
         let cdr_sym = w.cdr_sym;
-        let mut cell = Form::with_proto(Value::Form(w.protos.list));
+        let mut cell = Form::with_proto(Value::Form(w.protos.cons));
         cell.slots.insert(car_sym, args[0]);
         cell.slots.insert(cdr_sym, self_);
         let id = w.alloc(cell);
@@ -1872,7 +1872,7 @@ fn install_list_methods(w: &mut World) {
     // List :toString — recursive `(elem1 elem2 ...)` rendering.
     // each element renders via its own :toString. proto-name
     // short-circuit so `[List toString]` → "List" (not "()").
-    w.install_native(w.protos.list, "toString", |w, self_, _| {
+    w.install_native(w.protos.cons, "toString", |w, self_, _| {
         if let Some(name) = proto_name_for(w, self_) {
             return Ok(w.make_string(&name));
         }
@@ -1883,7 +1883,7 @@ fn install_list_methods(w: &mut World) {
     // List :inspect — like :toString but each element renders via
     // its own :inspect. so `(1 "hi" #\a)` inspects as `(1 "hi" #\a)`
     // (re-readable) rather than `(1 hi a)`.
-    w.install_native(w.protos.list, "inspect", |w, self_, _| {
+    w.install_native(w.protos.cons, "inspect", |w, self_, _| {
         if let Some(name) = proto_name_for(w, self_) {
             return Ok(w.make_string(&name));
         }
@@ -2450,7 +2450,7 @@ fn install_globals(w: &mut World) {
             let mut cur = arg;
             while let Some(fid) = cur.as_form_id() {
                 let f = world.heap.get(fid);
-                if f.proto != Value::Form(world.protos.list) {
+                if f.proto != Value::Form(world.protos.cons) {
                     break;
                 }
                 let head = f.slot(car_sym);

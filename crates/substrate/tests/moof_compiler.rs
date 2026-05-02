@@ -77,8 +77,8 @@ fn values_equal_deep(w: &World, a: Value, b: Value) -> bool {
         return sa == sb;
     }
     // both lists?
-    if matches!(w.proto_of(a), Value::Form(p) if p == w.protos.list)
-        && matches!(w.proto_of(b), Value::Form(p) if p == w.protos.list)
+    if matches!(w.proto_of(a), Value::Form(p) if p == w.protos.cons)
+        && matches!(w.proto_of(b), Value::Form(p) if p == w.protos.cons)
     {
         let va = match w.list_to_vec(a) {
             Ok(v) => v,

@@ -38,7 +38,7 @@ bootstrap. the moof line owns compilation.
 
 step 1: rust intrinsics are installed (heap, OS i/o, arithmetic
 primitives, the chunk-construction api in
-`docs/reference/compiler-primitives.md`, plus `:length` on List /
+`docs/reference/compiler-primitives.md`, plus `:length` on Cons /
 Nil and `:initialize` on Object — both load-bearing for the moof
 compiler at boot).
 

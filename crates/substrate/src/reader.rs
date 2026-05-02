@@ -70,7 +70,7 @@ pub struct ReadCtx<'a> {
     obj_method_sym: SymId,
     /// the proto FormId to assign to every cons cell. typically
     /// `Value::Form(list_proto)`. phase-A clients that don't yet
-    /// have a List proto pass `Value::Nil`.
+    /// have a Cons proto pass `Value::Nil`.
     pub list_proto: Value,
     /// the proto FormId to assign to every String literal. when
     /// `Nil` (e.g., bare reader unit tests), `"…"` falls back to
@@ -589,7 +589,7 @@ fn emit_cascade(
     build_list(ctx, &parts)
 }
 
-/// build the marker-tagged list: `(__send__ recv 'sel args…)`.
+/// build the marker-tagged cons: `(__send__ recv 'sel args…)`.
 fn emit_send(
     ctx: &mut ReadCtx,
     receiver: Value,
