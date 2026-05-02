@@ -76,7 +76,7 @@ pub fn install(w: &mut World) {
             let rel = w.string_text(*v).map(|s| s.to_string()).ok_or_else(|| {
                 RaiseError::new(
                     w.intern("tx-bad-arg"),
-                    format!(":loadAll: element {} is not a String", i),
+                    format!(":loadAll: element {} is not a String", i + 1),
                 )
             })?;
             last = load_relative(w, &rel)?;
@@ -136,7 +136,7 @@ fn load_relative(w: &mut World, rel: &str) -> Result<Value, RaiseError> {
         )
     })?;
     let abs = root.join(rel);
-    if !abs.exists() {
+    if !abs.is_file() {
         return Err(RaiseError::new(
             w.intern("tx-not-found"),
             format!("not found: {} (resolved as {})", rel, abs.display()),
