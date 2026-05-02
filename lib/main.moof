@@ -18,6 +18,7 @@
 
 ;; phase 2: early-stage primitives + macros — setHandler!-driven, predates defmethod.
 [$transporter load: "early/00-cons.moof"]
+[$transporter load: "early/01-nil.moof"]
 
 ;; phase 3: bootstrap stdlib + macros — compiled by the moof compiler.
 [$transporter load: "bootstrap.moof"]

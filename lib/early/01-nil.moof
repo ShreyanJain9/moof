@@ -1,0 +1,9 @@
+;; lib/early/01-nil.moof
+;;
+;; setHandler!-driven nil primitive methods. Phase 3 placeholder;
+;; Phase 4 fills in `:length, :car, :cdr, :empty?, :reverse, :append:,
+;; :proto, :toString, :inspect, :cons:` — the canonical nil methods
+;; that supersede both the rust shadow installs in intrinsics.rs AND
+;; the bootstrap.moof defmethod shadows further down.
+
+;; (intentionally empty in Phase 3.)
