@@ -272,6 +272,22 @@
       `(let ,nil-bindings (do ,@sets ,@body)))))
 
 ;; ─────────────────────────────────────────────────────────────────
+;; modules — singleton objects host macro-internal helpers as
+;; methods, pulling reader-internal helper names out of the
+;; toplevel namespace. cosmetic-but-important: a fresh world's
+;; global env shows `Match`, `Defn`, `DefProto` — not `__match-*`
+;; etc cluttering autocomplete.
+;;
+;; multi-arg helpers stay as `(def __FOO …)` toplevel for now —
+;; the keyword-send shape they'd need to migrate cleanly is a
+;; bigger refactor (kw segments per helper).
+;; ─────────────────────────────────────────────────────────────────
+
+(def DefProto [Object new])
+(def Defn [Object new])
+(def Match [Object new])
+
+;; ─────────────────────────────────────────────────────────────────
 ;; match — pattern matching as a user-overridable macro.
 ;;
 ;; (match subj
@@ -300,9 +316,8 @@
 ;; ─────────────────────────────────────────────────────────────────
 
 ;; predicates over source-form patterns at expansion time.
-(def __match-list?
-  (fn (v)
-    (if [v is nil]
+(setHandler! Match 'list?:
+  (fn (v) (if [v is nil]
         #true
         [[v proto] is Cons])))
 
@@ -311,7 +326,7 @@
 ;; `(name where pred)` clause shapes.
 (def __match-3-mid?
   (fn (pat mid-sym)
-    (if (__match-list? pat)
+    (if [Match list?: pat]
         (if [pat is nil]
             #false
             (if [[pat length] = 3]
@@ -319,44 +334,39 @@
                 #false))
         #false)))
 
-(def __match-typed?
+(setHandler! Match 'typed?:
   (fn (pat) (__match-3-mid? pat '::)))
 
-(def __match-where?
+(setHandler! Match 'where?:
   (fn (pat) (__match-3-mid? pat 'where)))
 
-(def __match-symbol?
-  (fn (pat)
-    [[pat proto] is Symbol]))
+(setHandler! Match 'symbol?:
+  (fn (pat) [[pat proto] is Symbol]))
 
-(def __match-quote?
-  (fn (pat)
-    (if (__match-list? pat)
+(setHandler! Match 'quote?:
+  (fn (pat) (if [Match list?: pat]
         (if [pat is nil]
             #false
             [[pat car] is 'quote])
         #false)))
 
-(def __match-wildcard?
-  (fn (pat)
-    (if (__match-symbol? pat)
+(setHandler! Match 'wildcard?:
+  (fn (pat) (if [Match symbol?: pat]
         [pat is '_]
         #false)))
 
 ;; given a quoted form `(quote X)`, return X.
-(def __match-quoted-value
+(setHandler! Match 'quotedValue:
   (fn (pat) [[pat cdr] car]))
 
 ;; predicates on the *quoted value* X (which may be a literal or
 ;; a list itself, when the pattern is `'(…)`).
-(def __match-quoted-empty-list?
-  (fn (pat)
-    (let ((qv (__match-quoted-value pat)))
+(setHandler! Match 'quotedEmptyList?:
+  (fn (pat) (let ((qv [Match quotedValue: pat]))
       [qv is nil])))
 
-(def __match-quoted-list?
-  (fn (pat)
-    (let ((qv (__match-quoted-value pat)))
+(setHandler! Match 'quotedList?:
+  (fn (pat) (let ((qv [Match quotedValue: pat]))
       (if [qv is nil]
           #false
           [[qv proto] is Cons]))))
@@ -364,27 +374,25 @@
 ;; rest-marker recognition: a Symbol whose text starts with the
 ;; ellipsis character `…`. moof's reader treats `…rest` as one
 ;; symbol — its text is "…rest". used for cons-destructure tails.
-(def __match-rest-marker?
-  (fn (sym)
-    (if (__match-symbol? sym)
+(setHandler! Match 'restMarker?:
+  (fn (sym) (if [Match symbol?: sym]
         [[sym toString] startsWith?: "…"]
         #false)))
 
-(def __match-rest-name
-  (fn (sym)
-    (intern [[sym toString] slice: 1 length: [[sym toString] length]])))
+(setHandler! Match 'restName:
+  (fn (sym) (intern [[sym toString] slice: 1 length: [[sym toString] length]])))
 
 ;; compile one clause: produce a form that evaluates `body` when
 ;; `pat` matches `subj-sym`, otherwise `fail-form`. recursive: list
 ;; patterns split into head/tail subgoals.
 (def __match-clause
   (fn (pat body subj-sym fail-form)
-    (if (__match-wildcard? pat)
+    (if [Match wildcard?: pat]
         body
-        (if (__match-symbol? pat)
+        (if [Match symbol?: pat]
             ;; variable bind.
             `(let ((,pat ,subj-sym)) ,body)
-            (if (__match-typed? pat)
+            (if [Match typed?: pat]
                 ;; `(name :: Type)` — bind name, then check
                 ;; [Type satisfies?: subj].
                 (let ((p-name [pat car])
@@ -392,13 +400,13 @@
                   `(if [,p-type satisfies?: ,subj-sym]
                        (let ((,p-name ,subj-sym)) ,body)
                        ,fail-form))
-                (if (__match-where? pat)
+                (if [Match where?: pat]
                     ;; `(name where pred)` — bind name, then check pred.
                     (let ((p-name [pat car])
                           (p-pred [[[pat cdr] cdr] car]))
                       `(let ((,p-name ,subj-sym))
                          (if ,p-pred ,body ,fail-form)))
-                    (if (__match-quote? pat)
+                    (if [Match quote?: pat]
                         (__match-clause-quoted pat body subj-sym fail-form)
                         ;; bare literal — equality compare.
                         `(if [,subj-sym = ,pat] ,body ,fail-form))))))))
@@ -408,11 +416,11 @@
 ;; destructure).
 (def __match-clause-quoted
   (fn (pat body subj-sym fail-form)
-    (if (__match-quoted-empty-list? pat)
+    (if [Match quotedEmptyList?: pat]
         ;; '() — match nil exactly.
         `(if [,subj-sym is nil] ,body ,fail-form)
-        (if (__match-quoted-list? pat)
-            (__match-clause-list (__match-quoted-value pat) body subj-sym fail-form)
+        (if [Match quotedList?: pat]
+            (__match-clause-list [Match quotedValue: pat] body subj-sym fail-form)
             ;; quoted Symbol (or other atomic) — identity compare.
             `(if [,subj-sym is ,pat] ,body ,fail-form)))))
 
@@ -425,9 +433,9 @@
         `(if [,subj-sym is nil] ,body ,fail-form)
         (let ((p [pats car])
               (rest [pats cdr]))
-          (if (__match-rest-marker? p)
+          (if [Match restMarker?: p]
               ;; tail-rest: bind the remaining list to a name.
-              (let ((rest-name (__match-rest-name p)))
+              (let ((rest-name [Match restName: p]))
                 `(let ((,rest-name ,subj-sym)) ,body))
               ;; otherwise: subj must be a non-nil List; recurse on
               ;; head and tail with fresh subject names.
@@ -513,9 +521,8 @@
 ;; everything else is a single-token pattern. arity of the
 ;; surrounding fn is the *count of grouped patterns*, not the raw
 ;; token count.
-(def __defn-group-params
-  (fn (params)
-    (if [params empty?]
+(setHandler! Defn 'groupParams:
+  (fn (params) (if [params empty?]
         nil
         (let ((p1 [params car])
               (rest [params cdr]))
@@ -530,29 +537,28 @@
                     (let ((rest2 [rest cdr]))
                       (if [rest2 empty?]
                           ;; malformed — fall back to single-token.
-                          (cons p1 (__defn-group-params rest))
+                          (cons p1 [Defn groupParams: rest])
                           (let ((p3 [rest2 car])
                                 (rest3 [rest2 cdr]))
                             (cons (list p1 p2 p3)
-                                  (__defn-group-params rest3)))))
-                    (cons p1 (__defn-group-params rest)))))))))
+                                  [Defn groupParams: rest3]))))
+                    (cons p1 [Defn groupParams: rest]))))))))
 
 ;; given a list of fn-shaped clauses ((fn (pats) body) …), produce
 ;; a flat list of (quote grouped-pats) body … suitable as match
 ;; clauses. uses __defn-group-params so typed/where patterns
 ;; arrive at match as recognizable triples.
-(def __defn-match-clauses
-  (fn (clauses)
-    (if [clauses empty?]
+(setHandler! Defn 'matchClauses:
+  (fn (clauses) (if [clauses empty?]
         nil
         (let ((clause [clauses car])
               (rest [clauses cdr]))
           (let ((params [[clause cdr] car])
                 (body   [[[clause cdr] cdr] car]))
-            (let ((grouped (__defn-group-params params)))
+            (let ((grouped [Defn groupParams: params]))
               (cons (list 'quote grouped)
                     (cons body
-                          (__defn-match-clauses rest)))))))))
+                          [Defn matchClauses: rest]))))))))
 
 (defmacro defn (args)
   (let ((name [args car])
@@ -561,9 +567,9 @@
         (raise: 'defn-empty "defn: must have at least one clause")
         (let ((first-clause [clauses car])
               (first-params [[[clauses car] cdr] car]))
-          (let ((grouped-arity [(__defn-group-params first-params) length]))
+          (let ((grouped-arity [[Defn groupParams: first-params] length]))
             (let ((argnames (__defn-argnames grouped-arity 0))
-                  (mclauses (__defn-match-clauses clauses)))
+                  (mclauses [Defn matchClauses: clauses]))
               `(def ,name
                  (fn ,argnames
                    (match (list ,@argnames) ,@mclauses)))))))))
@@ -1081,9 +1087,8 @@
 ;; ─────────────────────────────────────────────────────────────────
 
 ;; pair up (h1) body1 (h2) body2 → ((sel1 params1 body1) (sel2 params2 body2)).
-(def __defproto-pair-handlers
-  (fn (pairs)
-    (if [pairs empty?]
+(setHandler! DefProto 'pairHandlers:
+  (fn (pairs) (if [pairs empty?]
         nil
         (let ((header [pairs car])
               (body [[pairs cdr] car])
@@ -1092,7 +1097,7 @@
             (let ((sel [decoded car])
                   (params [[decoded cdr] car]))
               (cons (list sel params body)
-                    (__defproto-pair-handlers rest))))))))
+                    [DefProto pairHandlers: rest])))))))
 
 ;; clause-walker. accumulates (parent, slot-names, handler-tuples)
 ;; and returns a 3-elem list at the end.
@@ -1111,7 +1116,7 @@
                                   handlers)
             (if [head-sym is 'handlers]
                 (__defproto-walk rest parent slots
-                                  [[(__defproto-pair-handlers [c cdr]) reverse]
+                                  [[[DefProto pairHandlers: [c cdr]] reverse]
                                     append: handlers])
                 ;; bare header — pair with next clause as body.
                 (let ((decoded (__decode-header c))
