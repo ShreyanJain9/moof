@@ -644,8 +644,11 @@ fn install_string_methods(w: &mut World) {
     }
     str_predicate!(w, "contains?:",    contains);
     str_predicate!(w, "startsWith?:",  starts_with);
-    // [s endsWith?: suffix] is derived in lib/bootstrap.moof from
-    // :length, :slice:length:, and :=.
+    // [s endsWith?: suffix] is in rust because `Symbol :endsWithColon?`
+    // depends on it, and `__decode-header` (which `defmethod` itself
+    // depends on) calls `:endsWithColon?`. promotion breaks an
+    // otherwise-circular bootstrap.
+    str_predicate!(w, "endsWith?:",    ends_with);
     // [s indexOf: needle] — char-index of first occurrence, or -1.
     // (the -1 sentinel is the discoverable default; phase G+ may
     // promote to a Maybe/Optional shape.)
@@ -1760,11 +1763,24 @@ fn install_bool_methods(_: &mut World) {}
 fn install_nil_methods(w: &mut World) {
     w.install_native(w.protos.nil, "cons:", make_cons_method);
     // nil-as-empty-list: `:length` returns 0, `:head`/`:tail` return
-    // nil. used by the moof compiler (compile-send: `[args length]`
-    // when args is the empty list).
+    // nil, `:empty?` returns true. used by the moof compiler
+    // (compile-send: `[args length]`) AND by `__decode-header` in
+    // bootstrap.moof (`[rest empty?]`), which `defmethod` itself
+    // depends on — so :empty? must exist before any `(defmethod …)`
+    // runs.
     w.install_native(w.protos.nil, "length", |_, _, _| Ok(Value::Int(0)));
     w.install_native(w.protos.nil, "head", |_, _, _| Ok(Value::Nil));
     w.install_native(w.protos.nil, "tail", |_, _, _| Ok(Value::Nil));
+    w.install_native(w.protos.nil, "empty?", |_, _, _| Ok(Value::Bool(true)));
+    // nil-as-empty-list: reverse of nothing is nothing.
+    w.install_native(w.protos.nil, "reverse", |_, _, _| Ok(Value::Nil));
+    // nil-as-empty-list: appending xs to nothing is xs. moof's
+    // List :reverse (defined later in bootstrap.moof) recurses
+    // and bottoms out on `[nil append: …]`, so this needs to
+    // exist before any defmethod with kw header is expanded.
+    w.install_native(w.protos.nil, "append:", |_, _, args| {
+        Ok(args[0])
+    });
 
     // nil is its own proto — singleton. there is no separate
     // `Nil-proto` namespace pollution; from moof's view, `[nil proto]`
@@ -1818,6 +1834,22 @@ fn install_list_methods(w: &mut World) {
         Ok(w.heap.get(id).slot(tail_sym))
     });
     w.install_native(w.protos.list, "null?", |_, _, _| Ok(Value::Bool(false)));
+    // [list empty?] — false (a List cell is always non-empty;
+    // emptiness is the Nil case). promoted to rust because
+    // `__decode-header` depends on `:empty?` and the bootstrap
+    // would otherwise be circular.
+    w.install_native(w.protos.list, "empty?", |_, _, _| Ok(Value::Bool(false)));
+    // [list reverse] — used by __decode-keyword (kw-shape headers
+    // are decoded by accumulating params front-to-back, then
+    // reversing). promoted to rust to break the same defmethod
+    // bootstrap circularity.
+    w.install_native(w.protos.list, "reverse", |w, self_, _| {
+        let elems = w
+            .list_to_vec(self_)
+            .map_err(|_| type_error(w, "reverse on non-List"))?;
+        let rev: Vec<Value> = elems.into_iter().rev().collect();
+        Ok(w.make_list(&rev))
+    });
     // [list length] — count cons cells. used by the moof compiler's
     // compile-send (`[args length]` for argc), so `:length` must be
     // available on List from rust *before* bootstrap.moof loads

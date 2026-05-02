@@ -209,17 +209,14 @@
               [slot-entries map:
                 (fn (e)
                   (let ((k [[e tail] head]))
-                    `(setHandler! __objLit__ ',k
-                                   (fn () (slot self ',k)))))])
+                    `(defmethod __objLit__ (,k) (slot self ',k))))])
             (slot-setters
               [slot-entries map:
                 (fn (e)
                   (let ((k [[e tail] head]))
                     (let ((setter-sel
                             (intern [[k toString] + ":"])))
-                      `(setHandler! __objLit__ ',setter-sel
-                                     (fn (__v__)
-                                       (slotSet! self ',k __v__))))))])
+                      `(defmethod __objLit__ (,setter-sel __v__) (slotSet! self ',k __v__)))))])
             (user-methods
               [method-entries map:
                 (fn (e)
@@ -585,6 +582,10 @@
 ;; returns (sel . params-list).
 ;; ─────────────────────────────────────────────────────────────────
 
+;; these two stay as `setHandler!` because they're consumed by
+;; `__decode-header`, which is consumed by the `defmethod` macro
+;; itself — defining them via defmethod would be circular. once
+;; defmethod exists (below), every other method uses it.
 (setHandler! Symbol 'endsWithColon?
   (fn () [[self toString] endsWith?: ":"]))
 
@@ -648,8 +649,7 @@
 ;; ─────────────────────────────────────────────────────────────────
 
 ;; default :initialize is a no-op. user protos override.
-(setHandler! Object 'initialize
-  (fn () self))
+(defmethod Object (initialize) self)
 
 ;; :inspect is the REPL-readable rendering. defaults to :toString
 ;; (installed in rust); String / Char / List / Method override it
@@ -666,12 +666,10 @@
 ;; carries its own `=` handler (e.g. Integer's `=` assumes
 ;; self is an Int) — sending `=` to Integer-proto-Form would land
 ;; in the wrong place. `is` lives only on Object.
-(setHandler! Object 'protos
-  (fn ()
-    (let ((p [self proto]))
+(defmethod Object (protos) (let ((p [self proto]))
       (if [p is nil]
           nil
-          (cons p [p protos])))))
+          (cons p [p protos]))))
 
 ;; [T satisfies?: v] — `#true` iff v's proto chain reaches T.
 ;; the type-membership predicate. used by pattern matcher's
@@ -680,9 +678,7 @@
 ;; walks the chain via `:is` (identity) — `:contains?:` uses `=`
 ;; which is structural and wouldn't reliably distinguish two
 ;; proto-Forms whose meta tables happened to look alike.
-(setHandler! Object 'satisfies?:
-  (fn (v)
-    (__satisfies-walk self [v protos])))
+(defmethod Object (satisfies?: v) (__satisfies-walk self [v protos]))
 
 (def __satisfies-walk
   (fn (target chain)
@@ -699,31 +695,26 @@
 ;; here.
 ;; ─────────────────────────────────────────────────────────────────
 
-(setHandler! Bool 'not
-  (fn () (if self #false #true)))
+(defmethod Bool (not) (if self #false #true))
 
-(setHandler! Bool 'toString
-  (fn () (if self "#true" "#false")))
+(defmethod Bool (toString) (if self "#true" "#false"))
 
-(setHandler! Bool 'and:
-  (fn (other) (if self other #false)))
+(defmethod Bool (and: other) (if self other #false))
 
-(setHandler! Bool 'or:
-  (fn (other) (if self #true other)))
+(defmethod Bool (or: other) (if self #true other))
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; Nil — the proto of `nil`. cons: stays rust (heap alloc).
 ;; ─────────────────────────────────────────────────────────────────
 
-(setHandler! Nil 'toString
-  (fn () "nil"))
+(defmethod Nil (toString) "nil")
 
-(setHandler! Nil 'head    (fn () nil))
-(setHandler! Nil 'tail    (fn () nil))
-(setHandler! Nil 'null?   (fn () #true))
-(setHandler! Nil 'empty?  (fn () #true))
-(setHandler! Nil 'length  (fn () 0))
-(setHandler! Nil 'nonEmpty? (fn () #false))
+(defmethod Nil (head) nil)
+(defmethod Nil (tail) nil)
+(defmethod Nil (null?) #true)
+(defmethod Nil (empty?) #true)
+(defmethod Nil (length) 0)
+(defmethod Nil (nonEmpty?) #false)
 
 ;; Nil inherits Object's identity `=`/`!=`. since
 ;; `Value::Nil == Value::Nil`, that's exactly the right semantics
@@ -733,123 +724,87 @@
 ;; List — Enumerable. primitives: head, tail, cons:, null?
 ;; ─────────────────────────────────────────────────────────────────
 
-(setHandler! List 'length
-  (fn () [1 + [.tail length]]))
+(defmethod List (length) [1 + [.tail length]])
 
-(setHandler! List 'empty?     (fn () #false))
-(setHandler! List 'nonEmpty?  (fn () #true))
+(defmethod List (empty?) #false)
+(defmethod List (nonEmpty?) #true)
 
 ;; (defn append: ys) — concatenate two lists.
-(setHandler! List 'append:
-  (fn (ys)
-    (cons .head [.tail append: ys])))
+(defmethod List (append: ys) (cons .head [.tail append: ys]))
 
 ;; (reverse) — O(n²) naive; phase C's pattern matching gives us a
 ;; cleaner accumulator-form.
-(setHandler! List 'reverse
-  (fn ()
-    [[.tail reverse] append: (cons .head nil)]))
+(defmethod List (reverse) [[.tail reverse] append: (cons .head nil)])
 
 ;; (map: f) — element-wise.
-(setHandler! List 'map:
-  (fn (f)
-    (cons (f .head) [.tail map: f])))
+(defmethod List (map: f) (cons (f .head) [.tail map: f]))
 
-(setHandler! List 'filter:
-  (fn (pred)
-    (if (pred .head)
+(defmethod List (filter: pred) (if (pred .head)
         (cons .head [.tail filter: pred])
-        [.tail filter: pred])))
+        [.tail filter: pred]))
 
-(setHandler! List 'reduce:from:
-  (fn (f init)
-    [.tail reduce: f from: (f init .head)]))
+(defmethod List (reduce: f from: init) [.tail reduce: f from: (f init .head)])
 
-(setHandler! List 'forEach:
-  (fn (blk)
-    (do
+(defmethod List (forEach: blk) (do
       (blk .head)
-      [.tail forEach: blk])))
+      [.tail forEach: blk]))
 
-(setHandler! List 'take:
-  (fn (n)
-    (if [n = 0]
+(defmethod List (take: n) (if [n = 0]
         nil
-        (cons .head [.tail take: [n - 1]]))))
+        (cons .head [.tail take: [n - 1]])))
 
-(setHandler! List 'drop:
-  (fn (n)
-    (if [n = 0]
+(defmethod List (drop: n) (if [n = 0]
         self
-        [.tail drop: [n - 1]])))
+        [.tail drop: [n - 1]]))
 
-(setHandler! List 'any?:
-  (fn (pred)
-    (if (pred .head)
+(defmethod List (any?: pred) (if (pred .head)
         #true
-        [.tail any?: pred])))
+        [.tail any?: pred]))
 
-(setHandler! List 'all?:
-  (fn (pred)
-    (if (pred .head)
+(defmethod List (all?: pred) (if (pred .head)
         [.tail all?: pred]
-        #false)))
+        #false))
 
-(setHandler! List 'contains?:
-  (fn (x)
-    [self any?: (fn (y) [x = y])]))
+(defmethod List (contains?: x) [self any?: (fn (y) [x = y])])
 
-(setHandler! List 'sum
-  (fn () [self reduce: (fn (a b) [a + b]) from: 0]))
+(defmethod List (sum) [self reduce: (fn (a b) [a + b]) from: 0])
 
-(setHandler! List 'product
-  (fn () [self reduce: (fn (a b) [a * b]) from: 1]))
+(defmethod List (product) [self reduce: (fn (a b) [a * b]) from: 1])
 
-(setHandler! List 'countWhere:
-  (fn (pred)
-    [[self filter: pred] length]))
+(defmethod List (countWhere: pred) [[self filter: pred] length])
 
-(setHandler! List 'last
-  (fn ()
-    (if [.tail empty?]
+(defmethod List (last) (if [.tail empty?]
         .head
-        [.tail last])))
+        [.tail last]))
 
 ;; [xs count] — alias for :length, per docs-driven.md's Iterable
 ;; protocol table.
-(setHandler! List 'count (fn () [self length]))
-(setHandler! Nil 'count (fn () 0))
+(defmethod List (count) [self length])
+(defmethod Nil (count) 0)
 
 ;; [xs zip: ys] — pairwise. ((a . a') (b . b') …). stops at shorter.
-(setHandler! List 'zip:
-  (fn (ys)
-    (if [ys empty?]
+(defmethod List (zip: ys) (if [ys empty?]
         nil
         (cons (cons .head (cons [ys head] nil))
-              [.tail zip: [ys tail]]))))
+              [.tail zip: [ys tail]])))
 
-(setHandler! Nil 'zip: (fn (ys) nil))
+(defmethod Nil (zip: ys) nil)
 
 ;; [xs scan: f from: init] — running fold, returning a list of all
 ;; intermediate accumulators. concepts/tables.md mentions :scan: for
 ;; Tables; same shape derives for Lists.
-(setHandler! List 'scan:from:
-  (fn (f init)
-    (let ((next (f init .head)))
-      (cons next [.tail scan: f from: next]))))
+(defmethod List (scan: f from: init) (let ((next (f init .head)))
+      (cons next [.tail scan: f from: next])))
 
-(setHandler! Nil 'scan:from: (fn (f init) nil))
+(defmethod Nil (scan: f from: init) nil)
 
 ;; [xs at: i] — O(n) indexed access. concepts/lists.md spec'd this
 ;; alongside the obvious caveat (use a Table for random access).
-(setHandler! List 'at:
-  (fn (i)
-    (if [i = 0]
+(defmethod List (at: i) (if [i = 0]
         .head
-        [.tail at: [i - 1]])))
+        [.tail at: [i - 1]]))
 
-(setHandler! Nil 'at:
-  (fn (i) nil))
+(defmethod Nil (at: i) nil)
 
 ;; [xs = ys] — structural element-wise equality. flows over the
 ;; head/tail spine, terminating either when both reach nil
@@ -858,31 +813,29 @@
 ;; List inherits Object's identity `:=` by default; this overrides
 ;; with structural so two distinct cons-cells with the same content
 ;; compare equal — matching concepts/lists.md's `Equatable` impl.
-(setHandler! List '=
-  (fn (other)
-    (if [other empty?]
+(defmethod List (= other) (if [other empty?]
         #false
         (if [.head = [other head]]
             [.tail = [other tail]]
-            #false))))
+            #false)))
 
-(setHandler! List '!= (fn (other) [[self = other] not]))
+(defmethod List (!= other) [[self = other] not])
 
-(setHandler! Nil 'append:    (fn (ys) ys))
-(setHandler! Nil 'reverse    (fn () nil))
-(setHandler! Nil 'map:       (fn (f) nil))
-(setHandler! Nil 'filter:    (fn (pred) nil))
-(setHandler! Nil 'reduce:from: (fn (f init) init))
-(setHandler! Nil 'forEach:   (fn (blk) nil))
-(setHandler! Nil 'take:      (fn (n) nil))
-(setHandler! Nil 'drop:      (fn (n) nil))
-(setHandler! Nil 'any?:      (fn (pred) #false))
-(setHandler! Nil 'all?:      (fn (pred) #true))
-(setHandler! Nil 'contains?: (fn (x) #false))
-(setHandler! Nil 'sum        (fn () 0))
-(setHandler! Nil 'product    (fn () 1))
-(setHandler! Nil 'countWhere: (fn (pred) 0))
-(setHandler! Nil 'last       (fn () nil))
+(defmethod Nil (append: ys) ys)
+(defmethod Nil (reverse) nil)
+(defmethod Nil (map: f) nil)
+(defmethod Nil (filter: pred) nil)
+(defmethod Nil (reduce: f from: init) init)
+(defmethod Nil (forEach: blk) nil)
+(defmethod Nil (take: n) nil)
+(defmethod Nil (drop: n) nil)
+(defmethod Nil (any?: pred) #false)
+(defmethod Nil (all?: pred) #true)
+(defmethod Nil (contains?: x) #false)
+(defmethod Nil (sum) 0)
+(defmethod Nil (product) 1)
+(defmethod Nil (countWhere: pred) 0)
+(defmethod Nil (last) nil)
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; Integer — derived comparisons + predicates.
@@ -890,69 +843,57 @@
 ;; everything else flows from those.
 ;; ─────────────────────────────────────────────────────────────────
 
-(setHandler! Integer '!= (fn (other) [[self = other] not]))
-(setHandler! Integer '<= (fn (other) (if [self < other] #true [self = other])))
-(setHandler! Integer '>= (fn (other) (if [self > other] #true [self = other])))
+(defmethod Integer (!= other) [[self = other] not])
+(defmethod Integer (<= other) (if [self < other] #true [self = other]))
+(defmethod Integer (>= other) (if [self > other] #true [self = other]))
 
-(setHandler! Integer 'zero?     (fn () [self = 0]))
-(setHandler! Integer 'positive? (fn () [self > 0]))
-(setHandler! Integer 'negative? (fn () [self < 0]))
+(defmethod Integer (zero?) [self = 0])
+(defmethod Integer (positive?) [self > 0])
+(defmethod Integer (negative?) [self < 0])
 
-(setHandler! Integer 'abs
-  (fn ()
-    (if [self < 0]
+(defmethod Integer (abs) (if [self < 0]
         [0 - self]
-        self)))
+        self))
 
-(setHandler! Integer 'square
-  (fn () [self * self]))
+(defmethod Integer (square) [self * self])
 
-(setHandler! Integer 'min:
-  (fn (other) (if [self < other] self other)))
+(defmethod Integer (min: other) (if [self < other] self other))
 
-(setHandler! Integer 'max:
-  (fn (other) (if [self > other] self other)))
+(defmethod Integer (max: other) (if [self > other] self other))
 
-(setHandler! Integer 'between:and:
-  (fn (lo hi)
-    (if [self < lo]
+(defmethod Integer (between: lo and: hi) (if [self < lo]
         #false
-        [self <= hi])))
+        [self <= hi]))
 
 ;; [n clamp: lo to: hi] — Comparable derived. concepts/numbers.md.
-(setHandler! Integer 'clamp:to:
-  (fn (lo hi)
-    (if [self < lo]
+(defmethod Integer (clamp: lo to: hi) (if [self < lo]
         lo
-        (if [self > hi] hi self))))
+        (if [self > hi] hi self)))
 
-(setHandler! Integer 'even? (fn () [[self - [[self / 2] * 2]] = 0]))
-(setHandler! Integer 'odd?  (fn () (if .even? #false #true)))
+(defmethod Integer (even?) [[self - [[self / 2] * 2]] = 0])
+(defmethod Integer (odd?) (if .even? #false #true))
 
 ;; concepts/numbers.md tower predicates. Integer is the leaf —
 ;; everything in the chain (Real, Rational, Number) is also true.
 ;; Float is real but neither integer nor rational.
-(setHandler! Integer 'negate    (fn () [0 - self]))
-(setHandler! Integer 'integer?  (fn () #true))
-(setHandler! Integer 'rational? (fn () #true))
-(setHandler! Integer 'real?     (fn () #true))
-(setHandler! Integer 'finite?   (fn () #true))
-(setHandler! Integer 'nan?      (fn () #false))
+(defmethod Integer (negate) [0 - self])
+(defmethod Integer (integer?) #true)
+(defmethod Integer (rational?) #true)
+(defmethod Integer (real?) #true)
+(defmethod Integer (finite?) #true)
+(defmethod Integer (nan?) #false)
 
 ;; [a mod: b] / [a quotient: b] / [a remainder: b] — integer
 ;; division ops. concepts/numbers.md.
-(setHandler! Integer 'mod:
-  (fn (other) [self - [[self / other] * other]]))
+(defmethod Integer (mod: other) [self - [[self / other] * other]])
 
-(setHandler! Integer 'quotient: (fn (other) [self / other]))
-(setHandler! Integer 'remainder: (fn (other) [self mod: other]))
+(defmethod Integer (quotient: other) [self / other])
+(defmethod Integer (remainder: other) [self mod: other])
 
 ;; (range from: lo to: hi) — exclusive upper. accumulator-style.
-(setHandler! Integer 'upto:
-  (fn (hi)
-    (if [self >= hi]
+(defmethod Integer (upto: hi) (if [self >= hi]
         nil
-        (cons self [[self + 1] upto: hi]))))
+        (cons self [[self + 1] upto: hi])))
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; Float — derived comparisons + predicates.
@@ -960,67 +901,54 @@
 ;;                     floor ceil round asInteger nan? finite?
 ;; ─────────────────────────────────────────────────────────────────
 
-(setHandler! Float '!= (fn (other) [[self = other] not]))
-(setHandler! Float '<= (fn (other) (if [self < other] #true [self = other])))
-(setHandler! Float '>= (fn (other) (if [self > other] #true [self = other])))
+(defmethod Float (!= other) [[self = other] not])
+(defmethod Float (<= other) (if [self < other] #true [self = other]))
+(defmethod Float (>= other) (if [self > other] #true [self = other]))
 
-(setHandler! Float 'zero?     (fn () [self = 0.0]))
-(setHandler! Float 'positive? (fn () [self > 0.0]))
-(setHandler! Float 'negative? (fn () [self < 0.0]))
+(defmethod Float (zero?) [self = 0.0])
+(defmethod Float (positive?) [self > 0.0])
+(defmethod Float (negative?) [self < 0.0])
 
-(setHandler! Float 'abs
-  (fn () (if [self < 0.0] [0.0 - self] self)))
+(defmethod Float (abs) (if [self < 0.0] [0.0 - self] self))
 
-(setHandler! Float 'negate    (fn () [0.0 - self]))
-(setHandler! Float 'integer?  (fn () #false))
-(setHandler! Float 'rational? (fn () #false))
-(setHandler! Float 'real?     (fn () #true))
+(defmethod Float (negate) [0.0 - self])
+(defmethod Float (integer?) #false)
+(defmethod Float (rational?) #false)
+(defmethod Float (real?) #true)
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; String — derivables. rust keeps the UTF-8/unicode primitives.
 ;; ─────────────────────────────────────────────────────────────────
 
 ;; structural inequality is just identity-of-content negated.
-(setHandler! String '!= (fn (other) [[self = other] not]))
+(defmethod String (!= other) [[self = other] not])
 
-(setHandler! String 'empty?
-  (fn () [[self byteLength] = 0]))
+(defmethod String (empty?) [[self byteLength] = 0])
 
 ;; :asList is an alias for :toList — both walk the String into a
 ;; List of Chars.
-(setHandler! String 'asList
-  (fn () [self toList]))
+(defmethod String (asList) [self toList])
 
 ;; iterate over chars by walking the Char list.
-(setHandler! String 'forEach:
-  (fn (blk) [[self toList] forEach: blk]))
+(defmethod String (forEach: blk) [[self toList] forEach: blk])
 
 ;; map: collects each block-result via `+` (which accepts Char +
 ;; String on the rhs and dispatches through :toString otherwise).
-(setHandler! String 'map:
-  (fn (f)
-    [[[self toList] map: f] reduce: (fn (acc x) [acc + x]) from: ""]))
+(defmethod String (map: f) [[[self toList] map: f] reduce: (fn (acc x) [acc + x]) from: ""])
 
-(setHandler! String 'filter:
-  (fn (pred)
-    [[[self toList] filter: pred] reduce: (fn (acc x) [acc + x]) from: ""]))
+(defmethod String (filter: pred) [[[self toList] filter: pred] reduce: (fn (acc x) [acc + x]) from: ""])
 
-(setHandler! String 'reverse
-  (fn ()
-    [[[self toList] reverse] reduce: (fn (acc x) [acc + x]) from: ""]))
+(defmethod String (reverse) [[[self toList] reverse] reduce: (fn (acc x) [acc + x]) from: ""])
 
 ;; endsWith?: derive from slice + `=`. cheap because primitives are O(n).
-(setHandler! String 'endsWith?:
-  (fn (suffix)
-    (let ((nself [self length])
+(defmethod String (endsWith?: suffix) (let ((nself [self length])
           (nsuf  [suffix length]))
       (if [nsuf > nself]
           #false
-          [[self slice: [nself - nsuf] length: nsuf] = suffix]))))
+          [[self slice: [nself - nsuf] length: nsuf] = suffix])))
 
 ;; concat is a stricter `+`: rhs must be a String.
-(setHandler! String 'concat:
-  (fn (other) [self + other]))
+(defmethod String (concat: other) [self + other])
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; Table — derivables. rust keeps positional/keyed primitives:
@@ -1028,31 +956,23 @@
 ;;   = (structural)
 ;; ─────────────────────────────────────────────────────────────────
 
-(setHandler! Table 'size
-  (fn () [[self keys] length]))
+(defmethod Table (size) [[self keys] length])
 
-(setHandler! Table 'empty?
-  (fn () [[self size] = 0]))
+(defmethod Table (empty?) [[self size] = 0])
 
-(setHandler! Table '!=
-  (fn (other) [[self = other] not]))
+(defmethod Table (!= other) [[self = other] not])
 
-(setHandler! Table 'forEach:
-  (fn (blk) [[self values] forEach: blk]))
+(defmethod Table (forEach: blk) [[self values] forEach: blk])
 
 ;; positional-only conversion — phase G+ may extend with key-paths.
-(setHandler! Table 'toList
-  (fn ()
-    [[0 upto: [self length]] map: (fn (i) [self at: i])]))
+(defmethod Table (toList) [[0 upto: [self length]] map: (fn (i) [self at: i])])
 
 ;; map: / filter: / reduce:from: preserve table shape.
 ;; positional and keyed entries both flow through; map: maps the
 ;; values, filter: keeps entries whose value passes pred. positional
 ;; keys are written via push: (preserving compaction); keyed keys
 ;; via at:put:.
-(setHandler! Table 'map:
-  (fn (f)
-    (let ((result [Table new]))
+(defmethod Table (map: f) (let ((result [Table new]))
       (do
         [[self keys] forEach:
           (fn (k)
@@ -1060,11 +980,9 @@
               (if [[k proto] is Integer]
                   [result push: v]
                   [result at: k put: v])))]
-        result))))
+        result)))
 
-(setHandler! Table 'filter:
-  (fn (pred)
-    (let ((result [Table new]))
+(defmethod Table (filter: pred) (let ((result [Table new]))
       (do
         [[self keys] forEach:
           (fn (k)
@@ -1074,27 +992,22 @@
                       [result push: v]
                       [result at: k put: v])
                   nil)))]
-        result))))
+        result)))
 
-(setHandler! Table 'reduce:from:
-  (fn (f init) [[self values] reduce: f from: init]))
+(defmethod Table (reduce: f from: init) [[self values] reduce: f from: init])
 
 ;; [t reduce: f] — fold without an explicit init. uses the first
 ;; value as init; on an empty Table, returns nil. concepts/tables.md.
-(setHandler! Table 'reduce:
-  (fn (f)
-    (let ((vs [self values]))
+(defmethod Table (reduce: f) (let ((vs [self values]))
       (if [vs empty?]
           nil
-          [[vs tail] reduce: f from: [vs head]]))))
+          [[vs tail] reduce: f from: [vs head]])))
 
 ;; [t at-or: k default: d] — keyed lookup with a fallback.
 ;; concepts/tables.md.
-(setHandler! Table 'at-or:default:
-  (fn (k d)
-    (if [self containsKey?: k]
+(defmethod Table (at-or: k default: d) (if [self containsKey?: k]
         [self at: k]
-        d)))
+        d))
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; Console — derived sugar over the rust-primitive :emit:.
@@ -1104,16 +1017,13 @@
 ;; $out and $err share the Console proto via the global Console.
 ;; the rust intrinsic only installs :emit: and :close; everything
 ;; else is moof code, user-overridable.
-(setHandler! Console 'say:
-  (fn (x)
-    (do
+(defmethod Console (say: x) (do
       [self emit: [x toString]]
-      [self emit: "\n"])))
+      [self emit: "\n"]))
 
-(setHandler! Console 'show:
-  (fn (x) [self emit: [x toString]]))
+(defmethod Console (show: x) [self emit: [x toString]])
 
-(setHandler! Console 'done? (fn () #false))
+(defmethod Console (done?) #false)
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; Method — derived reflection.
@@ -1123,22 +1033,18 @@
 ;; [m disassemble] — render the bytecode as a String, one op per
 ;; line. each Opcode-Form already carries a :toString that includes
 ;; the op name and operands; we just join them.
-(setHandler! Method 'disassemble
-  (fn ()
-    [[self bytecodes] reduce:
+(defmethod Method (disassemble) [[self bytecodes] reduce:
       (fn (acc op) [acc + [[op toString] + "\n"]])
-      from: ""]))
+      from: ""])
 
 ;; [m arity] — number of formal parameters, per laws/reflection-
 ;; contract.md R2. variadic isn't a phase-A concept yet, so this
 ;; just returns the param count.
-(setHandler! Method 'arity
-  (fn () [[self params] length]))
+(defmethod Method (arity) [[self params] length])
 
 ;; [m parameters] — alias for :params, matching the spelling in
 ;; laws/reflection-contract.md R2.
-(setHandler! Method 'parameters
-  (fn () [self params]))
+(defmethod Method (parameters) [self params])
 
 ;; [m purity], [m caps-required] — the analyzer that fills these
 ;; in arrives in phase C (laws/purity-and-effects.md). until then,
@@ -1146,8 +1052,8 @@
 ;;   :purity        → 'unknown
 ;;   :caps-required → ()
 ;; user methods can override either with their own annotation.
-(setHandler! Method 'purity        (fn () 'unknown))
-(setHandler! Method 'caps-required (fn () nil))
+(defmethod Method (purity) 'unknown)
+(defmethod Method (caps-required) nil)
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; defproto — the largest of the moved-from-rust special forms.
@@ -1220,15 +1126,13 @@
 ;; build (setHandler! Name 'slot (fn () (slot self 'slot))) — getter.
 (def __defproto-slot-getter
   (fn (proto-name slot-name)
-    `(setHandler! ,proto-name ',slot-name
-                   (fn () (slot self ',slot-name)))))
+    `(defmethod ,proto-name (,slot-name) (slot self ',slot-name))))
 
 ;; build (setHandler! Name 'slot: (fn (__v__) (slotSet! self 'slot __v__))) — setter.
 (def __defproto-slot-setter
   (fn (proto-name slot-name)
     (let ((setter-sel (intern [[slot-name toString] + ":"])))
-      `(setHandler! ,proto-name ',setter-sel
-                     (fn (__v__) (slotSet! self ',slot-name __v__))))))
+      `(defmethod ,proto-name (,setter-sel __v__) (slotSet! self ',slot-name __v__)))))
 
 ;; build (setHandler! Name 'sel (fn (params) body)) — user handler.
 (def __defproto-handler
