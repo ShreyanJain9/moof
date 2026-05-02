@@ -43,22 +43,37 @@ pub const BOOTSTRAP_SOURCE: &str = include_str!("../../../lib/bootstrap.moof");
 /// see `docs/reference/compiler-primitives.md`.
 pub const COMPILER_SOURCE: &str = include_str!("../../../lib/compiler.moof");
 
-/// build a fresh world with the phase-A intrinsics + bootstrap
-/// stdlib + moof-side compiler loaded.
+/// build a fresh world with the phase-A intrinsics, the moof-side
+/// compiler, and the bootstrap stdlib loaded — in that order.
+///
+/// the boot dance, per `docs/process/self-hosted-compiler.md`:
+///
+/// 1. rust intrinsics (heap, OS i/o, arithmetic primitives, the
+///    chunk-construction api, etc).
+/// 2. **rust compiler compiles `compiler.moof`.** the rust
+///    compiler is sized to handle exactly the special forms that
+///    file uses: `def`, `fn`, `if`, `let`, `do`, `quote`,
+///    `__send__`. nothing else.
+/// 3. flip `use_moof_compiler` — from this point, every compile
+///    routes through moof's `compile-top`.
+/// 4. **moof compiler compiles `bootstrap.moof`.** all the macros
+///    (`when`, `match`, `defn`, `defmethod`, `defproto`, …) and
+///    method installations land via the canonical compiler.
+///
+/// failures at any step are substrate bugs (both files ship with
+/// the seed), so we panic.
 pub fn new_world() -> world::World {
     let mut w = world::World::new();
     intrinsics::install(&mut w);
-    // load the moof-side bootstrap. failures here are substrate
-    // bugs, not user errors — bootstrap.moof ships with the seed.
-    if let Err(e) = eval_program(&mut w, BOOTSTRAP_SOURCE) {
-        panic!("bootstrap.moof failed to load: {}", e.message);
-    }
-    // load the moof-side compiler. same reasoning — substrate bug
-    // if this fails. the rust compiler stays as the bootstrap
-    // fallback (used to compile both bootstrap.moof and compiler.moof
-    // itself) until track 3 flips the canonical-path flag.
+    // step 2 — compile compiler.moof via the rust seed compiler.
     if let Err(e) = eval_program(&mut w, COMPILER_SOURCE) {
         panic!("compiler.moof failed to load: {}", e.message);
+    }
+    // step 3 — flip. all subsequent compiles go through moof.
+    w.use_moof_compiler = true;
+    // step 4 — compile bootstrap.moof via the moof compiler.
+    if let Err(e) = eval_program(&mut w, BOOTSTRAP_SOURCE) {
+        panic!("bootstrap.moof failed to load: {}", e.message);
     }
     w
 }

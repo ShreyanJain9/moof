@@ -148,6 +148,22 @@ pub struct World {
     /// the world's global environment Form.
     pub global_env: FormId,
 
+    /// when `true`, [`crate::compiler::compile`] delegates to the
+    /// moof-side `compile-top` (defined in `lib/compiler.moof`).
+    /// when `false`, the rust compiler runs.
+    ///
+    /// the bootstrap dance: starts `false`, rust compiler compiles
+    /// `compiler.moof` into the world, then `lib.rs` flips this to
+    /// `true`, then `bootstrap.moof` loads via the moof compiler.
+    /// **after that, every compile in this world routes through
+    /// moof.** the rust compiler is dead code post-flip.
+    ///
+    /// see `docs/process/self-hosted-compiler.md` for the full
+    /// dance. the rust compiler's residual surface is exactly
+    /// what compiler.moof itself uses (def, fn, if, let, do,
+    /// quote, __send__) — minimal seed.
+    pub use_moof_compiler: bool,
+
     /// the bytecode interpreter's per-vat state.
     pub vm: Vm,
 
@@ -210,6 +226,7 @@ impl World {
             native_fns: IndexMap::new(),
             macros_form,
             global_env,
+            use_moof_compiler: false,
             vm: Vm::default(),
             head_sym,
             tail_sym,

@@ -113,20 +113,23 @@
                 ;; macro — expand and recurse.
                 (compile-form (macroexpand form) chunk tail)))))))
 
+;; nested-if dispatch (rather than `match`) so compiler.moof has
+;; *zero* macro dependencies — and the rust shim can drop its own
+;; user-macro expansion. once the flag flips and the moof compiler
+;; takes over, `match` is back on the table for user code.
 (def compile-special-or-call
   (fn (form head rest chunk tail)
     (if (__mc-symbol? head)
-        (match head
-          'quote      (compile-quote rest chunk)
-          'set!       (compile-set rest chunk)
-          'def        (compile-def rest chunk)
-          '__send__   (compile-send rest chunk tail)
-          'if         (compile-if rest chunk tail)
-          'fn         (compile-fn rest chunk)
-          'defmacro   (compile-defmacro rest chunk)
-          'do         (compile-do rest chunk tail)
-          'let        (compile-let rest chunk tail)
-          _           (compile-call form chunk tail))
+        (if [head is 'quote]    (compile-quote rest chunk)
+        (if [head is 'set!]     (compile-set rest chunk)
+        (if [head is 'def]      (compile-def rest chunk)
+        (if [head is '__send__] (compile-send rest chunk tail)
+        (if [head is 'if]       (compile-if rest chunk tail)
+        (if [head is 'fn]       (compile-fn rest chunk)
+        (if [head is 'defmacro] (compile-defmacro rest chunk)
+        (if [head is 'do]       (compile-do rest chunk tail)
+        (if [head is 'let]      (compile-let rest chunk tail)
+        (compile-call form chunk tail))))))))))
         (compile-call form chunk tail))))
 
 ;; ─────────────────────────────────────────────────────────────────
@@ -158,22 +161,54 @@
           (raise: 'compile-error "set! first arg must be a symbol")))))
 
 ;; ─────────────────────────────────────────────────────────────────
-;; (def name expr) — eval expr, DefineGlobal name.
-;;
-;; only handles single-binding shape. multi-clause defs go through
-;; the `defn` macro at the call site (it's already in bootstrap.moof
-;; and rewrites to a single-binding (def name (fn …))).
+;; (def name expr)        — single-binding: eval expr, DefineGlobal.
+;; (def name |p| b |p| b…) — multi-clause: reroute to `defn` macro
+;;                          (which expands to a single-binding (def
+;;                          name (fn …)) with match dispatch). the
+;;                          reader's block-sugar already lowered each
+;;                          `|pats| body` to a `(fn (pats) body)`,
+;;                          so the multi-clause shape arrives here as
+;;                            (def name (fn …) (fn …) …)
+;;                          — i.e., 2+ tail elements all of which
+;;                          are `(fn …)` forms.
 ;; ─────────────────────────────────────────────────────────────────
+
+;; predicate: rest = (name clause₁ clause₂ …) where clauseᵢ is a
+;; `(fn …)` form. matches rust's `is_multi_clause_def`.
+(def __mc-multi-clause-def?
+  (fn (rest)
+    (let ((tail-after-name [rest tail]))
+      (if [tail-after-name is nil]
+          #false
+          (if [[tail-after-name tail] is nil]
+              #false
+              (__mc-all-fn-forms? tail-after-name))))))
+
+(def __mc-all-fn-forms?
+  (fn (clauses)
+    (if [clauses is nil]
+        #true
+        (let ((c [clauses head]))
+          (if (__mc-list? c)
+              (if [c is nil]
+                  #false
+                  (if [[c head] is 'fn]
+                      (__mc-all-fn-forms? [clauses tail])
+                      #false))
+              #false)))))
 
 (def compile-def
   (fn (rest chunk)
-    (let ((name [rest head])
-          (rhs [[rest tail] head]))
-      (if (__mc-symbol? name)
-          (do
-            (compile-form rhs chunk #false)
-            [chunk emit: [Opcode defineGlobal: name]])
-          (raise: 'compile-error "def first arg must be a symbol")))))
+    (if (__mc-multi-clause-def? rest)
+        ;; rewrite to (defn name fn₁ fn₂ …) and recompile.
+        (compile-form (cons 'defn rest) chunk #false)
+        (let ((name [rest head])
+              (rhs [[rest tail] head]))
+          (if (__mc-symbol? name)
+              (do
+                (compile-form rhs chunk #false)
+                [chunk emit: [Opcode defineGlobal: name]])
+              (raise: 'compile-error "def first arg must be a symbol"))))))
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; (__send__ receiver 'selector args…) — emit Send / SuperSend /
@@ -196,20 +231,23 @@
                 (compile-form receiver chunk #false))
             ;; push args.
             (compile-form-list-as-args args chunk)
-            ;; emit the right send op.
-            (let ((argc [args length]))
+            ;; emit the right send op. the ic slot is reserved
+            ;; unconditionally (matching rust's `next_ic()`-before-
+            ;; the-emit pattern), so byte-identity holds for the
+            ;; chunk_ics side table even when this site lowers to
+            ;; TailSend (which doesn't carry an ic_idx operand).
+            (let ((argc [args length])
+                  (ic [chunk addIc]))
               (if is-super
-                  (let ((ic [chunk addIc]))
-                    [chunk emit: [Opcode superSend: selector
-                                         argc: argc
-                                         ic: ic]])
+                  [chunk emit: [Opcode superSend: selector
+                                       argc: argc
+                                       ic: ic]]
                   (if tail
                       [chunk emit: [Opcode tailSend: selector
                                            argc: argc]]
-                      (let ((ic [chunk addIc]))
-                        [chunk emit: [Opcode send: selector
-                                             argc: argc
-                                             ic: ic]])))))
+                      [chunk emit: [Opcode send: selector
+                                           argc: argc
+                                           ic: ic]]))))
           (raise: 'compile-error "__send__ selector must be a symbol")))))
 
 ;; helper: walk a list of arg-forms and compile each in non-tail
@@ -313,15 +351,16 @@
           (compile-form body sub-chunk #true)
           [sub-chunk emit: [Opcode return]]
           ;; push closure, then evaluate each value, then call.
+          ;; ic reserved unconditionally — see compile-send.
           [chunk emit: [Opcode pushClosure: sub-chunk]]
           (compile-form-list-as-args values chunk)
-          (let ((argc [values length]))
+          (let ((argc [values length])
+                (ic [chunk addIc]))
             (if tail
                 [chunk emit: [Opcode tailSend: 'call argc: argc]]
-                (let ((ic [chunk addIc]))
-                  [chunk emit: [Opcode send: 'call
-                                       argc: argc
-                                       ic: ic]]))))))))
+                [chunk emit: [Opcode send: 'call
+                                     argc: argc
+                                     ic: ic]])))))))
 
 (def __mc-let-params
   (fn (bindings)
@@ -379,23 +418,32 @@
           (args [form tail]))
       (compile-form callable chunk #false)
       (compile-form-list-as-args args chunk)
-      (let ((argc [args length]))
+      ;; ic reserved unconditionally — see compile-send.
+      (let ((argc [args length])
+            (ic [chunk addIc]))
         (if tail
             [chunk emit: [Opcode tailSend: 'call argc: argc]]
-            (let ((ic [chunk addIc]))
-              [chunk emit: [Opcode send: 'call
-                                   argc: argc
-                                   ic: ic]]))))))
+            [chunk emit: [Opcode send: 'call
+                                 argc: argc
+                                 ic: ic]])))))
 
 ;; ─────────────────────────────────────────────────────────────────
-;; testing helper: compile + run a top-level form. takes the
-;; source-form (already parsed by the rust reader), produces a value.
-;; this is the moof-side analogue of `crate::eval`.
+;; (compile-top form) — the moof-side analog of the rust
+;; `crate::compiler::compile`. allocate a fresh top-level chunk,
+;; compile the form in tail position, emit Return, return the
+;; chunk-Form value. **the rust shim calls this when the
+;; `use-moof-compiler` flag is on.**
 ;; ─────────────────────────────────────────────────────────────────
 
-(def __mc-compile-and-run
+(def compile-top
   (fn (form)
     (let ((c [Chunk new: '() source: form]))
       (compile-form form c #true)
       [c emit: [Opcode return]]
-      [[c asClosure] call])))
+      c)))
+
+;; testing helper: compile a top-level form and run it. used by
+;; tests/moof_compiler.rs.
+(def __mc-compile-and-run
+  (fn (form)
+    [[(compile-top form) asClosure] call]))

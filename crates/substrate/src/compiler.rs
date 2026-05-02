@@ -1,25 +1,35 @@
-//! the bootstrap compiler — Form → Chunk.
+//! the seed compiler — compiles `lib/compiler.moof`, then steps aside.
 //!
-//! lowers parsed moof source-Forms into bytecode chunks the VM can
-//! run. handles the substrate's hardcoded special forms (`if`,
-//! `let`, `let*`, `do`, `quote`, `set!`, `fn`, `def`) plus the
-//! general fn-call shape `(callable args…)`.
+//! when `world.use_moof_compiler` is on (which `new_world()` flips
+//! immediately after this compiler runs over compiler.moof), the
+//! [`compile`] entry point delegates to the moof-side `compile-top`.
+//! the moof compiler is the canonical artifact; this file is the
+//! seed that bootstraps it.
 //!
-//! per `process/docs-driven.md`'s self-host rule, this compiler is
-//! *throwaway scaffolding* — phase A-self-host loads `compiler.moof`
-//! as the production compiler. the bootstrap compiler stays
-//! buildable for diagnosing compiler.moof itself, but is not the
-//! canonical artifact.
+//! the seed handles only the special forms compiler.moof itself
+//! uses:
 //!
-//! per `concepts/sends-and-calls.md`, a fn-call `(foo x y)` lowers
-//! to `[foo call: x y]` — i.e., load `foo`, push args, send `:call`
-//! with `argc=2`. the `Closure` proto's `:call` handler self-invokes
-//! (installed by `intrinsics`).
+//! | form                           | emits                          |
+//! |--------------------------------|--------------------------------|
+//! | `def name expr`                | rhs + `DefineGlobal`           |
+//! | `fn (params…) body…`           | sub-chunk + `PushClosure`      |
+//! | `if cond then [else]`          | `JumpIfFalse` + `Jump`         |
+//! | `let ((name val)…) body…`      | `((fn …) values…)` desugar     |
+//! | `do e1 … eN`                   | pop intermediates              |
+//! | `quote v`                      | `LoadConst`                    |
+//! | `__send__ recv 'sel args…`     | `Send` (or `SuperSend`)        |
+//! | `(callable args…)`             | `[callable call: args…]`       |
 //!
-//! per `concepts/blocks-and-patterns.md`, a `(fn (a b) body)`
-//! becomes a chunk-Form whose `:params` slot is `(a b)` and whose
-//! `:body` is the bytecode. `PushClosure` allocates a closure-Form
-//! capturing the current env.
+//! that's it. no `set!`, no `defmacro`, no multi-clause def, no
+//! user-macro lookup, no quasiquote / table / object / cascade /
+//! defproto / defmethod / defn — those are *all* moof-side concerns
+//! once compiler.moof loads. the seed has *one* responsibility:
+//! turn compiler.moof into runnable bytecode. then it's done.
+//!
+//! per `docs/process/self-hosted-compiler.md`, the rust compiler is
+//! dead code after the flag flip. it stays buildable (and unit-
+//! tested) so that diagnosing a broken compiler.moof is possible
+//! without circular dependency.
 
 use crate::form::{Form, FormId};
 use crate::opcodes::Op;
@@ -29,11 +39,42 @@ use crate::world::{ICache, RaiseError, World};
 
 /// compile a top-level expression into a chunk-Form. the chunk has
 /// no params; running it produces the expression's value.
+///
+/// when `world.use_moof_compiler` is `true`, delegates to the
+/// moof-side `compile-top` (in `lib/compiler.moof`). otherwise
+/// runs the rust seed compiler — sized to compile exactly
+/// compiler.moof. see `docs/process/self-hosted-compiler.md`.
 pub fn compile(world: &mut World, form: Value) -> Result<FormId, RaiseError> {
+    if world.use_moof_compiler {
+        return compile_via_moof(world, form);
+    }
     let mut c = Compiler::new(world, Vec::new(), form);
     c.compile_expr(form, true)?;
     c.emit(Op::Return);
     c.finalize()
+}
+
+/// route the compile through moof's `compile-top`. assumes
+/// `compiler.moof` is loaded.
+fn compile_via_moof(world: &mut World, form: Value) -> Result<FormId, RaiseError> {
+    let compile_top_sym = world.intern("compile-top");
+    let compile_top = world
+        .env_lookup(world.global_env, compile_top_sym)
+        .ok_or_else(|| {
+            RaiseError::new(
+                world.intern("bootstrap-error"),
+                "use_moof_compiler is on but `compile-top` is unbound — \
+                 compiler.moof not loaded?",
+            )
+        })?;
+    let call_sym = world.intern("call");
+    let chunk_v = world.send(compile_top, call_sym, &[form])?;
+    chunk_v.as_form_id().ok_or_else(|| {
+        RaiseError::new(
+            world.intern("bootstrap-error"),
+            "compile-top returned a non-chunk-Form",
+        )
+    })
 }
 
 /// compile a function body. `params` is the list of parameter
@@ -60,19 +101,19 @@ struct Compiler<'a> {
     /// the source-form for `:source` reflection.
     source: Value,
 
+    // cached SymIds for the seed's special forms. `set_sym`,
+    // `defmacro_sym`, `cascade_marker_sym` deliberately absent —
+    // the seed doesn't recognize them.
     if_sym: SymId,
     let_sym: SymId,
     do_sym: SymId,
     quote_sym: SymId,
-    set_sym: SymId,
     fn_sym: SymId,
     def_sym: SymId,
     call_sym: SymId,
     self_sym: SymId,
     send_sym: SymId,
     super_sym: SymId,
-    cascade_marker_sym: SymId,
-    defmacro_sym: SymId,
 }
 
 impl<'a> Compiler<'a> {
@@ -81,15 +122,12 @@ impl<'a> Compiler<'a> {
         let let_sym = world.intern("let");
         let do_sym = world.intern("do");
         let quote_sym = world.intern("quote");
-        let set_sym = world.intern("set!");
         let fn_sym = world.intern("fn");
         let def_sym = world.intern("def");
         let call_sym = world.intern("call");
         let self_sym = world.intern("self");
         let send_sym = world.intern("__send__");
         let super_sym = world.intern("super");
-        let cascade_marker_sym = world.intern("__cascade__");
-        let defmacro_sym = world.intern("defmacro");
         Compiler {
             world,
             ops: Vec::new(),
@@ -101,15 +139,12 @@ impl<'a> Compiler<'a> {
             let_sym,
             do_sym,
             quote_sym,
-            set_sym,
             fn_sym,
             def_sym,
             call_sym,
             self_sym,
             send_sym,
             super_sym,
-            cascade_marker_sym,
-            defmacro_sym,
         }
     }
 
@@ -147,8 +182,6 @@ impl<'a> Compiler<'a> {
     /// position.
     fn patch_jump_to_here(&mut self, jump_pos: usize) {
         let target = self.ops.len();
-        // off is relative to jump_pos (matches VM's `(pc-1) + off`
-        // formula since pc has already advanced past the jump op).
         let off = target as isize - jump_pos as isize;
         let off_i16 = i16::try_from(off).expect("jump offset out of i16 range");
         self.ops[jump_pos] = match self.ops[jump_pos] {
@@ -171,11 +204,9 @@ impl<'a> Compiler<'a> {
             ..
         } = self;
         let mut chunk_form = Form::with_proto(Value::Form(world.protos.chunk));
-        // :params is a moof list of symbol-Values.
         let param_values: Vec<Value> = params.iter().map(|&s| Value::Sym(s)).collect();
         let params_list = world.make_list(&param_values);
         chunk_form.slots.insert(world.params_sym, params_list);
-        // :source for reflection.
         chunk_form.meta.insert(world.source_sym, source);
         let chunk_id = world.alloc(chunk_form);
         world.chunk_ops.insert(chunk_id, ops);
@@ -188,15 +219,9 @@ impl<'a> Compiler<'a> {
 
     fn compile_expr(&mut self, form: Value, tail: bool) -> Result<(), RaiseError> {
         match form {
-            Value::Nil => {
-                self.emit(Op::PushNil);
-            }
-            Value::Bool(true) => {
-                self.emit(Op::PushTrue);
-            }
-            Value::Bool(false) => {
-                self.emit(Op::PushFalse);
-            }
+            Value::Nil => self.emit(Op::PushNil),
+            Value::Bool(true) => self.emit(Op::PushTrue),
+            Value::Bool(false) => self.emit(Op::PushFalse),
             Value::Int(_) | Value::Float(_) | Value::Char(_) | Value::Foreign(_) => {
                 let idx = self.add_const(form);
                 self.emit(Op::LoadConst(idx));
@@ -209,9 +234,7 @@ impl<'a> Compiler<'a> {
                 }
             }
             Value::Form(id) => {
-                // List Forms (proto = List) are code to compile.
-                // any other Form (String, ToolPalette, …) is a
-                // *literal* — load from the constant pool.
+                // List-Forms are code; any other Form is a literal.
                 let proto = self.world.heap.get(id).proto;
                 if proto == Value::Form(self.world.protos.list) {
                     self.compile_form(form, tail)?;
@@ -225,71 +248,27 @@ impl<'a> Compiler<'a> {
     }
 
     fn compile_form(&mut self, form: Value, tail: bool) -> Result<(), RaiseError> {
-        // form is a list — head (a sym) determines whether it's a
-        // special form or a fn-call.
         let elems = self.list_elems(form)?;
         if elems.is_empty() {
-            // empty list — `()` — evaluates to nil.
             self.emit(Op::PushNil);
             return Ok(());
         }
+        // dispatch on the head symbol for the seven special forms
+        // compiler.moof uses. NO user-macro lookup — compiler.moof
+        // uses none, and `bootstrap.moof` (which has the user
+        // macros) loads through the moof compiler post-flip.
         if let Value::Sym(s) = elems[0] {
-            // user-defined macros take precedence over built-in
-            // special forms. this honors the manifesto's "redefine
-            // a special form (the language is theirs)" promise:
-            // installing `(defmacro let …)` actually replaces the
-            // substrate's let, not just shadows it.
-            //
-            // bootstrap.moof loads top-to-bottom; built-in special
-            // forms used *before* a corresponding macro is
-            // registered fall through to the rust path below.
-            //
-            // calling convention (kernel/io tradition): macros take
-            // *one* arg — the list of source-arg-forms. so for
-            // `(when cond a b c)`, the macro receives one argument:
-            // the list `(cond a b c)`. the macro body destructures
-            // it with List ops, returning a Form to compile in the
-            // call site's place. see lib/bootstrap.moof for examples.
-            if let Some(macro_method) = self.world.macro_at(s) {
-                let mid = match macro_method.as_form_id() {
-                    Some(i) => i,
-                    None => {
-                        return Err(self.err("macro entry is not a Form"));
-                    }
-                };
-                let args_list = self.world.make_list(&elems[1..]);
-                let expanded = self
-                    .world
-                    .invoke(mid, Value::Nil, &[args_list], FormId::NONE)?;
-                return self.compile_expr(expanded, tail);
-            }
             if s == self.if_sym {
                 return self.compile_if(&elems, tail);
             }
             if s == self.let_sym {
                 return self.compile_let(&elems, tail);
             }
-            // when, unless, let*, let-rec used to live as
-            // hardcoded special forms here. they're now plain
-            // macros in lib/bootstrap.moof.
             if s == self.do_sym {
-                // bootstrap-only fallback: any `(do …)` compiled
-                // *before* the moof `do` macro is registered (i.e.
-                // top-of-bootstrap.moof forms) lands here. once
-                // the macro is registered, the macro check above
-                // intercepts and expands into nested lets — and
-                // this rust path is never taken again.
                 return self.compile_do(&elems, tail);
             }
             if s == self.quote_sym {
                 return self.compile_quote(&elems);
-            }
-            // quasiquote (`` ` ``), unquote (`,`), unquote-splicing
-            // (`,@`) used to be hardcoded here. they're now a moof
-            // macro `quasiquote` defined at the top of
-            // lib/bootstrap.moof.
-            if s == self.set_sym {
-                return self.compile_set(&elems);
             }
             if s == self.fn_sym {
                 return self.compile_fn(&elems);
@@ -300,50 +279,41 @@ impl<'a> Compiler<'a> {
             if s == self.send_sym {
                 return self.compile_send(&elems, tail);
             }
-            if s == self.defmacro_sym {
-                return self.compile_defmacro(&elems);
-            }
-            // __table__ / __obj__ / __cascade__ are moof macros
-            // in lib/bootstrap.moof — picked up by the macro check
-            // above this block.
         }
         // fn-call: `(callable arg…)`
         self.compile_call(&elems, tail)
     }
 
     /// `(__send__ receiver 'selector args…)` — emitted by the
-    /// reader for `[recv sel args…]` and `.foo` shorthand. lowers
-    /// directly to a `Send` opcode (not `:call` indirection).
-    ///
-    /// when `receiver` is the symbol `super`, we emit `SuperSend`
-    /// instead — the receiver of the dispatched method is `self`
-    /// (handled at runtime), and lookup walks the chain *above* the
-    /// current frame's defining proto.
+    /// reader for `[recv sel args…]`. lowers to a `Send` opcode
+    /// (or `SuperSend` if the receiver is the symbol `super`).
     fn compile_send(&mut self, elems: &[Value], tail: bool) -> Result<(), RaiseError> {
         if elems.len() < 3 {
             return Err(self.err("malformed __send__ form"));
         }
         let receiver = elems[1];
-        let selector = elems[2].as_sym().ok_or_else(|| {
-            self.err("__send__ selector must be a symbol")
-        })?;
+        let selector = elems[2]
+            .as_sym()
+            .ok_or_else(|| self.err("__send__ selector must be a symbol"))?;
         let args = &elems[3..];
 
         let is_super = matches!(receiver, Value::Sym(s) if s == self.super_sym);
 
         if !is_super {
-            // push receiver, then args.
             self.compile_expr(receiver, false)?;
         }
         for &a in args {
             self.compile_expr(a, false)?;
         }
-        let argc = u8::try_from(args.len()).map_err(|_| {
-            self.err("send: too many args (max 255)")
-        })?;
+        let argc = u8::try_from(args.len())
+            .map_err(|_| self.err("send: too many args (max 255)"))?;
         let ic = self.next_ic();
         self.emit(if is_super {
-            Op::SuperSend { selector, argc, ic_idx: ic }
+            Op::SuperSend {
+                selector,
+                argc,
+                ic_idx: ic,
+            }
         } else if tail {
             Op::TailSend { selector, argc }
         } else {
@@ -356,27 +326,18 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    /// expand a list-Form to a `Vec<Value>`. errors with a clear
-    /// message if not a list.
     fn list_elems(&self, form: Value) -> Result<Vec<Value>, RaiseError> {
-        self.world.list_to_vec(form).map_err(|_| {
-            RaiseError::new(
-                SymId::NONE,
-                "compiler: expected a list",
-            )
-        })
+        self.world
+            .list_to_vec(form)
+            .map_err(|_| RaiseError::new(SymId::NONE, "compiler: expected a list"))
     }
 
     fn compile_if(&mut self, elems: &[Value], tail: bool) -> Result<(), RaiseError> {
-        // `(if cond then)` and `(if cond then else)` both legal.
-        // missing else defaults to nil, so the form has a value
-        // on every path (no surprise undefined-behavior).
         let (cond, then_branch, else_branch) = match elems.len() {
             3 => (elems[1], elems[2], Value::Nil),
             4 => (elems[1], elems[2], elems[3]),
             _ => return Err(self.err("if takes 2 or 3 args: (if cond then [else])")),
         };
-
         self.compile_expr(cond, false)?;
         let jmp_to_else = self.emit_placeholder_jump(BranchKind::IfFalse);
         self.compile_expr(then_branch, tail)?;
@@ -388,9 +349,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn compile_do(&mut self, elems: &[Value], tail: bool) -> Result<(), RaiseError> {
-        // (do e1 e2 … eN)
         if elems.len() == 1 {
-            // (do) → nil
             self.emit(Op::PushNil);
             return Ok(());
         }
@@ -414,82 +373,22 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    // quasiquote / unquote / unquote-splicing used to live here as
-    // an ~120-LoC recursive expander. they're now a moof macro
-    // `quasiquote` defined at the top of lib/bootstrap.moof, with
-    // its expansion helpers (`__qq-list?`, `__qq-marker?`,
-    // `__qq-walk-elems`, `__qq-expand`) right next to it. user
-    // code can `[quasiquote source]`-inspect the macro and
-    // override its semantics by re-running `(defmacro quasiquote
-    // …)`.
-
-    fn compile_set(&mut self, elems: &[Value]) -> Result<(), RaiseError> {
-        if elems.len() != 3 {
-            return Err(self.err("set! requires 2 args: (set! name expr)"));
-        }
-        let name = elems[1].as_sym().ok_or_else(|| {
-            self.err("set!'s first arg must be a symbol")
-        })?;
-        self.compile_expr(elems[2], false)?;
-        self.emit(Op::StoreName(name));
-        Ok(())
-    }
-
     fn compile_def(&mut self, elems: &[Value]) -> Result<(), RaiseError> {
-        // single-binding shape: (def name expr).
-        if elems.len() == 3 {
-            let name = elems[1].as_sym().ok_or_else(|| {
-                self.err("def's first arg must be a symbol")
-            })?;
-            self.compile_expr(elems[2], false)?;
-            self.emit(Op::DefineGlobal(name));
-            return Ok(());
+        // single-binding: (def name expr).
+        // multi-clause defs are a moof-side concern — `defn` macro
+        // and `compile-def`'s detect-and-reroute. the seed never
+        // sees those because compiler.moof uses only single-binding.
+        if elems.len() != 3 {
+            return Err(self.err(
+                "seed compiler: def requires 2 args (multi-clause is moof-only)",
+            ));
         }
-        // multi-clause shape per docs/syntax/binding-and-defs.md:
-        //   (def name |pat₁| body₁ |pat₂| body₂ …)
-        // the `|pats| body` reader-sugar already lowered each
-        // `|pats| body` into a single `(fn (pats) body)` form, so
-        // multi-clause defs arrive here as
-        //   (def name (fn …) (fn …) (fn …))
-        // — N+1 elements for N clauses. we rewrite to
-        // `(defn name (fn …) (fn …) …)` and re-compile; `defn` is
-        // a moof macro (lib/bootstrap.moof) that emits the
-        // match-over-args expansion.
-        if elems.len() >= 4 && self.is_multi_clause_def(elems) {
-            let defn_sym = self.world.intern("defn");
-            let mut rewritten = vec![Value::Sym(defn_sym)];
-            rewritten.extend_from_slice(&elems[1..]);
-            let form = self.world.make_list(&rewritten);
-            return self.compile_expr(form, false);
-        }
-        Err(self.err(
-            "def requires 2 args: (def name expr) — or multi-clause `|pat| body …` shape",
-        ))
-    }
-
-    /// detect the `|pat| body |pat| body …` multi-clause shape:
-    /// name followed by ≥2 elements where every element is a
-    /// `(fn …)` form (each `|pats| body` becomes one fn-form).
-    fn is_multi_clause_def(&self, elems: &[Value]) -> bool {
-        let body = &elems[2..];
-        if body.len() < 2 {
-            return false;
-        }
-        for clause in body {
-            let fid = match clause.as_form_id() {
-                Some(id) => id,
-                None => return false,
-            };
-            let f = self.world.heap.get(fid);
-            if f.proto != Value::Form(self.world.protos.list) {
-                return false;
-            }
-            let head = f.slot(self.world.head_sym);
-            if !matches!(head, Value::Sym(s) if s == self.fn_sym) {
-                return false;
-            }
-        }
-        true
+        let name = elems[1]
+            .as_sym()
+            .ok_or_else(|| self.err("def's first arg must be a symbol"))?;
+        self.compile_expr(elems[2], false)?;
+        self.emit(Op::DefineGlobal(name));
+        Ok(())
     }
 
     fn compile_fn(&mut self, elems: &[Value]) -> Result<(), RaiseError> {
@@ -504,16 +403,15 @@ impl<'a> Compiler<'a> {
             .map_err(|_| self.err("fn: params must be a list"))?;
         let mut params: Vec<SymId> = Vec::with_capacity(params_vec.len());
         for p in params_vec {
-            params.push(p.as_sym().ok_or_else(|| {
-                self.err("fn: each param must be a symbol")
-            })?);
+            params.push(
+                p.as_sym()
+                    .ok_or_else(|| self.err("fn: each param must be a symbol"))?,
+            );
         }
-        // body — if multiple body forms, wrap in (do …).
         let body_value = if elems.len() == 3 {
             elems[2]
         } else {
-            // construct (do e1 e2 … eN) so multi-expression bodies
-            // sequence properly.
+            // multi-expression body → wrap in (do …).
             let mut wrapped = vec![Value::Sym(self.do_sym)];
             wrapped.extend_from_slice(&elems[2..]);
             self.world.make_list(&wrapped)
@@ -545,13 +443,12 @@ impl<'a> Compiler<'a> {
             if pair.len() != 2 {
                 return Err(self.err("let: each binding is (name value)"));
             }
-            let name = pair[0].as_sym().ok_or_else(|| {
-                self.err("let: binding name must be a symbol")
-            })?;
+            let name = pair[0]
+                .as_sym()
+                .ok_or_else(|| self.err("let: binding name must be a symbol"))?;
             params.push(name);
             value_forms.push(pair[1]);
         }
-        // body — wrap multi-expression bodies in (do …).
         let body_value = if elems.len() == 3 {
             elems[2]
         } else {
@@ -559,16 +456,13 @@ impl<'a> Compiler<'a> {
             wrapped.extend_from_slice(&elems[2..]);
             self.world.make_list(&wrapped)
         };
-        // compile the inner fn-chunk (evaluates body with params).
         let chunk_id = compile_fn_body(self.world, params, body_value)?;
-        // emit: PushClosure; eval each value; Send :call argc.
         self.emit(Op::PushClosure { chunk: chunk_id });
         for v in &value_forms {
             self.compile_expr(*v, false)?;
         }
-        let argc = u8::try_from(value_forms.len()).map_err(|_| {
-            self.err("let: too many bindings (max 255)")
-        })?;
+        let argc =
+            u8::try_from(value_forms.len()).map_err(|_| self.err("let: too many bindings"))?;
         let ic = self.next_ic();
         self.emit(if tail {
             Op::TailSend {
@@ -585,26 +479,15 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    // `let-rec`, `when`, `unless`, and `let*` were once special-
-    // forms here; they're now plain macros in lib/bootstrap.moof.
-    // see the `(defmacro …)` calls there for the canonical
-    // expansions. the compiler's job for them is "find the macro,
-    // splice in its expansion" — which is the user-defined-macro
-    // path in `compile_form`.
-
     fn compile_call(&mut self, elems: &[Value], tail: bool) -> Result<(), RaiseError> {
-        // (callable arg…) → `[callable call: arg…]` with argc = N.
         let callable = elems[0];
         let args = &elems[1..];
-        // push receiver.
         self.compile_expr(callable, false)?;
-        // push args.
         for &a in args {
             self.compile_expr(a, false)?;
         }
-        let argc = u8::try_from(args.len()).map_err(|_| {
-            self.err("call: too many args (max 255)")
-        })?;
+        let argc = u8::try_from(args.len())
+            .map_err(|_| self.err("call: too many args (max 255)"))?;
         let ic = self.next_ic();
         self.emit(if tail {
             Op::TailSend {
@@ -625,128 +508,6 @@ impl<'a> Compiler<'a> {
         let kind = self.world.intern("compile-error");
         RaiseError::new(kind, msg)
     }
-
-    /// `(__cascade__ <receiver> (<sel> <arg…>) …)` — emitted by the
-    /// reader for `[obj a; b; c: x]`. sends each segment to the
-    /// receiver in order; the cascade returns the *receiver* (per
-    /// smalltalk-80 semantics, not the last result).
-    ///
-    /// lowering: compile receiver once, push. for each segment,
-    /// `Dup` the receiver, push args, send, pop the result. when
-    /// all done the receiver is on top of the stack.
-    // `compile_cascade` was here. it's now a `(defmacro __cascade__
-    // …)` in lib/bootstrap.moof that desugars to
-    //   (let ((__r recv))
-    //     (do (__send__ __r sel1 args1…) … __r))
-
-    // `compile_obj_literal` was here (the largest source-to-source
-    // special form, ~190 LoC). it's now a `(defmacro __obj__ …)`
-    // in lib/bootstrap.moof that desugars `{Proto …}` literals to
-    // a (let ((__objLit__ [Proto new])) (do (slotSet! …) …
-    //                                       (setHandler! …) …
-    //                                       __objLit__)).
-
-    // `compile_table` was here. table literals now expand via the
-    // moof macro `(defmacro __table__ …)` in lib/bootstrap.moof.
-
-    // `defproto` was once a hardcoded special form here (~200 LoC
-    // of direct bytecode emission). it's now a `(defmacro defproto
-    // …)` in lib/bootstrap.moof — a user-modifiable macro that
-    // desugars to `(do (def Name (getOrCreateProto …))
-    //                  (setHandler! …) … Name)`.
-
-    /// `(defmethod ProtoExpr (header) body)`
-    ///
-    /// install a method on a proto without `setHandler!` boilerplate.
-    /// header shape mirrors defproto: `(name)` `(+ other)`
-    /// `(name x y)` `(at: i put: v)`.
-    /// (defmacro name (args-list) body) — install a macro that
-    /// expands at compile time.
-    ///
-    /// the macro receives *one* argument: the list of unevaluated
-    /// arg-forms from the call site. so for `(when cond a b c)`,
-    /// the macro is called with the list `(cond a b c)`. the body
-    /// destructures using List ops (`[args head]`, `[args tail]`,
-    /// pattern matching once we have it) and returns a Form, which
-    /// the compiler then compiles in place of the original call.
-    ///
-    /// the single-list calling convention (kernel/io tradition)
-    /// gives macros full variadic flexibility for free; templates
-    /// usually want quasiquote (`` `(if ,c ,t ,e) ``) anyway.
-    ///
-    /// installation happens eagerly at compile time of the
-    /// `defmacro` form itself, so subsequent forms in the same
-    /// chunk can use the macro.
-    fn compile_defmacro(&mut self, elems: &[Value]) -> Result<(), RaiseError> {
-        if elems.len() != 4 {
-            return Err(self.err(
-                "defmacro: (defmacro name (args-list-name) body)",
-            ));
-        }
-        let name = elems[1].as_sym().ok_or_else(|| {
-            self.err("defmacro: name must be a symbol")
-        })?;
-        let params_list = elems[2];
-        let body = elems[3];
-
-        // decode params: list of symbols.
-        let param_vec = self
-            .world
-            .list_to_vec(params_list)
-            .map_err(|_| self.err("defmacro: params must be a list"))?;
-        let mut params: Vec<SymId> = Vec::with_capacity(param_vec.len());
-        for p in param_vec {
-            let s = p.as_sym().ok_or_else(|| {
-                self.err("defmacro: param must be a symbol")
-            })?;
-            params.push(s);
-        }
-
-        // compile the body to a chunk.
-        let chunk_id = compile_fn_body(self.world, params.clone(), body)?;
-
-        // wrap as a method-Form: proto Method, slots
-        // {body, params, env=global, source=original}.
-        let mut method = Form::with_proto(Value::Form(self.world.protos.method));
-        method
-            .slots
-            .insert(self.world.body_sym, Value::Form(chunk_id));
-        // params list re-built (symbols may differ in order).
-        let params_v = self
-            .world
-            .make_list(&params.iter().map(|s| Value::Sym(*s)).collect::<Vec<_>>());
-        method.slots.insert(self.world.params_sym, params_v);
-        let global_env = Value::Form(self.world.global_env);
-        method.slots.insert(self.world.env_sym, global_env);
-        method
-            .meta
-            .insert(self.world.source_sym, params_list);
-        let macro_meta = self.world.intern("macro");
-        method
-            .meta
-            .insert(macro_meta, Value::Sym(name));
-        let method_id = self.world.alloc(method);
-
-        // register in the canonical Macros Form — eagerly, so
-        // subsequent forms in this chunk see it. moof code reads it
-        // via `[Macros at: name]`.
-        self.world.macro_register(name, Value::Form(method_id));
-
-        // also bind in global env for `[name source]` reflection
-        // and so the closure isn't gc'd if/when we have a gc.
-        self.world
-            .env_bind(self.world.global_env, name, Value::Form(method_id));
-
-        // the form itself evaluates to nil.
-        self.emit(Op::PushNil);
-        Ok(())
-    }
-
-    // `defmethod` was once a hardcoded special form here; it now
-    // lives as a `(defmacro defmethod …)` in lib/bootstrap.moof.
-    // its expansion is `(setHandler! ProtoExpr 'sel (fn (params)
-    // body))`, which the compiler handles via the ordinary
-    // `setHandler!` global + `fn` special form.
 }
 
 #[derive(Copy, Clone)]
@@ -755,19 +516,16 @@ enum BranchKind {
     IfFalse,
 }
 
-// `decode_paren_header` and `is_operator_only` used to live here
-// — they decoded `(name)` / `(+ other)` / `(at: i put: v)` /
-// `(name x y)` shapes into `(selector, params)`. now that
-// `defproto` and `defmethod` are macros, the moof-side
-// `__decode-header` (lib/bootstrap.moof) does the same job, with
-// `(intern …)` for joining keyword selectors.
-
 #[cfg(test)]
 mod tests {
+    //! the seed compiler's unit tests. they exercise the *bare*
+    //! compile path (`World::new()` — no bootstrap, no compiler.moof,
+    //! flag off) on the seven forms compiler.moof uses. dropped:
+    //! tests for `set!`, `defmacro`, multi-clause `def`, user-macro
+    //! lookup — those are moof-side and tested in
+    //! `tests/moof_compiler.rs` and `tests/doc_alignment.rs`.
     use super::*;
 
-    /// install a minimal :+ on Integer so call-shaped expressions
-    /// compile and run.
     fn install_arith(w: &mut World) {
         w.install_native(w.protos.integer, "+", |_, self_, args| {
             Ok(Value::Int(self_.as_int().unwrap() + args[0].as_int().unwrap()))
@@ -781,12 +539,8 @@ mod tests {
         w.install_native(w.protos.integer, "=", |_, self_, args| {
             Ok(Value::Bool(self_.as_int().unwrap() == args[0].as_int().unwrap()))
         });
-        w.install_native(w.protos.integer, "<", |_, self_, args| {
-            Ok(Value::Bool(self_.as_int().unwrap() < args[0].as_int().unwrap()))
-        });
     }
 
-    /// install :call on Closure so fn-application works.
     fn install_closure_call(w: &mut World) {
         w.install_native(w.protos.closure, "call", |world, self_, args| {
             let id = self_
@@ -811,30 +565,11 @@ mod tests {
     }
 
     #[test]
-    fn compile_arithmetic_send() {
-        let mut w = World::new();
-        install_arith(&mut w);
-        // (+ 1 2) is a fn-call to + with args [1, 2]. since `+` is
-        // not in scope as a name (we installed it as a method on
-        // Integer), this should *not* work the way you'd expect
-        // unless we use the smalltalk-style `[1 + 2]`. for now,
-        // the bootstrap stdlib will define a `+` global that
-        // forwards to the integer method. a direct `(+ 1 2)` won't
-        // compile-and-run yet — let's test the integer method
-        // call shape instead.
-        //
-        // i'll exercise this with an explicit binding once `def`
-        // works (test below).
-    }
-
-    #[test]
     fn compile_def_then_lookup() {
         let mut w = World::new();
-        // (def x 5) (then `x` evaluates to 5)
-        let _form = w.read("(def x 5)").unwrap();
-        let chunk = compile(&mut w, _form).unwrap();
+        let f = w.read("(def x 5)").unwrap();
+        let chunk = compile(&mut w, f).unwrap();
         w.run_top(chunk).unwrap();
-        // now x is in the global env.
         assert_eq!(ev(&mut w, "x").unwrap(), Value::Int(5));
     }
 
@@ -878,25 +613,10 @@ mod tests {
     }
 
     #[test]
-    fn compile_set_updates_global() {
-        let mut w = World::new();
-        let f = w.read("(def x 1)").unwrap();
-        let c = compile(&mut w, f).unwrap();
-        w.run_top(c).unwrap();
-        let f = w.read("(set! x 99)").unwrap();
-        let c = compile(&mut w, f).unwrap();
-        w.run_top(c).unwrap();
-        assert_eq!(ev(&mut w, "x").unwrap(), Value::Int(99));
-    }
-
-    #[test]
     fn compile_let_parallel_bindings() {
         let mut w = World::new();
         install_arith(&mut w);
         install_closure_call(&mut w);
-        // (let ((a 3) (b 4)) (+ a b)) — but `(+ a b)` doesn't work
-        // until we have `+` as a global. instead:
-        // (let ((a 3) (b 4)) a) — verify that bindings work.
         let r = ev(&mut w, "(let ((a 3) (b 4)) a)").unwrap();
         assert_eq!(r, Value::Int(3));
         let r = ev(&mut w, "(let ((a 3) (b 4)) b)").unwrap();
@@ -907,23 +627,10 @@ mod tests {
     fn compile_let_does_not_leak_bindings() {
         let mut w = World::new();
         install_closure_call(&mut w);
-        // bindings exit scope after body.
         let r = ev(&mut w, "(let ((a 5)) a)").unwrap();
         assert_eq!(r, Value::Int(5));
-        // `a` is now unbound at top level.
         let err = ev(&mut w, "a").unwrap_err();
         assert_eq!(w.resolve(err.kind), "unbound");
-    }
-
-    #[test]
-    fn compile_let_star_sequential_bindings() {
-        // `let*` is now a macro defined in lib/bootstrap.moof, so
-        // this test needs a world with the bootstrap loaded
-        // (`crate::new_world()`), not the bare `World::new()` the
-        // surrounding compiler-only tests use.
-        let mut w = crate::new_world();
-        let r = ev(&mut w, "(let* ((a 1) (b a)) b)").unwrap();
-        assert_eq!(r, Value::Int(1));
     }
 
     #[test]
@@ -942,15 +649,10 @@ mod tests {
         let mut w = World::new();
         install_arith(&mut w);
         install_closure_call(&mut w);
-        // `make-incr-by` returns a function closing over n.
         let src = "(def make-add (fn (n) (fn (x) (let ((y x)) y))))";
         let f = w.read(src).unwrap();
         let c = compile(&mut w, f).unwrap();
         w.run_top(c).unwrap();
-        // (make-add 5) returns a closure; calling it with 10 returns 10.
-        // (we don't test arithmetic on captured values yet — the
-        // bootstrap stdlib + def of `+` global is phase A.10. but
-        // the closure machinery is exercised here.)
         let _ = ev(&mut w, "(make-add 5)").unwrap();
         let r = ev(&mut w, "((make-add 5) 10)").unwrap();
         assert_eq!(r, Value::Int(10));
@@ -961,7 +663,6 @@ mod tests {
         let mut w = World::new();
         let f = w.read("(if #true 1 2)").unwrap();
         let c = compile(&mut w, f).unwrap();
-        // L5: source is canonical and reachable.
         let source = w.heap.get(c).meta_at(w.source_sym);
         assert_eq!(source, f);
     }
@@ -971,62 +672,7 @@ mod tests {
         let mut w = World::new();
         let f = w.read("(fn (x y) x)").unwrap();
         let c = compile(&mut w, f).unwrap();
-        // c is the *outer* chunk that pushes a closure for the fn.
-        // its params slot is empty (top-level expression has no
-        // params). but the inner chunk — the fn body — has params.
-        // we can't easily reach the inner chunk from here without
-        // disassembling. just verify outer:
         assert_eq!(w.heap.get(c).slot(w.params_sym), Value::Nil);
-    }
-
-    #[test]
-    fn compile_factorial_via_recursion_def_succeeds() {
-        // honestly: phase A doesn't yet have global bindings for `=`,
-        // `*`, `-`, `+` (those land in phase A.10's bootstrap stdlib
-        // alongside Integer's protocol-derived methods). the
-        // *compilation* of a recursive `fact` works; running it
-        // would fail with `unbound name =` until A.10. exercise
-        // what's testable now: the def succeeds and `fact` is in
-        // the global env as a Closure.
-        let mut w = World::new();
-        install_arith(&mut w);
-        install_closure_call(&mut w);
-        let src = "(def fact (fn (n)
-                    (if (= n 0)
-                        1
-                        (* n (fact (- n 1))))))";
-        let f = w.read(src).unwrap();
-        let c = compile(&mut w, f).unwrap();
-        w.run_top(c).unwrap();
-        let fact_sym = w.intern("fact");
-        let fact_value = w
-            .env_lookup(w.global_env, fact_sym)
-            .expect("fact should be in global env");
-        let id = fact_value.as_form_id().unwrap();
-        // the binding is a closure-Form.
-        assert_eq!(w.heap.get(id).proto, Value::Form(w.protos.closure));
-    }
-
-    #[test]
-    fn compile_recursion_via_self_referencing_def() {
-        // a recursive fn that uses *only* primitives we have at
-        // phase A: a counter that returns its arg or recurses.
-        // (fn (n) (if n n (recurse 0))) — but recurse is the def'd
-        // name. demonstrate that the function-name is reachable
-        // from within its own body.
-        let mut w = World::new();
-        install_closure_call(&mut w);
-        let src = "(def f (fn (n) (if n n 'done)))";
-        let f = w.read(src).unwrap();
-        let c = compile(&mut w, f).unwrap();
-        w.run_top(c).unwrap();
-        // (f 1) → 1 (Int(1) is truthy)
-        let r = ev(&mut w, "(f 1)").unwrap();
-        assert_eq!(r, Value::Int(1));
-        // (f nil) → 'done
-        let r = ev(&mut w, "(f nil)").unwrap();
-        let done = w.intern("done");
-        assert_eq!(r, Value::Sym(done));
     }
 
     #[test]
@@ -1038,12 +684,41 @@ mod tests {
     #[test]
     fn nested_if_works() {
         let mut w = World::new();
-        let r = ev(
-            &mut w,
-            "(if #true (if #false 'a 'b) 'c)",
-        )
-        .unwrap();
+        let r = ev(&mut w, "(if #true (if #false 'a 'b) 'c)").unwrap();
         let b = w.intern("b");
         assert_eq!(r, Value::Sym(b));
+    }
+
+    #[test]
+    fn compile_recursion_via_def() {
+        // recursion through a `def`-bound name. tested without
+        // arithmetic to avoid unbound `=` etc.
+        let mut w = World::new();
+        install_closure_call(&mut w);
+        let f = w.read("(def f (fn (n) (if n n 'done)))").unwrap();
+        let c = compile(&mut w, f).unwrap();
+        w.run_top(c).unwrap();
+        let r = ev(&mut w, "(f 1)").unwrap();
+        assert_eq!(r, Value::Int(1));
+        let r = ev(&mut w, "(f nil)").unwrap();
+        let done = w.intern("done");
+        assert_eq!(r, Value::Sym(done));
+    }
+
+    /// the through-line: the seed compiles compiler.moof. this
+    /// integration-flavored test doesn't construct compiler.moof
+    /// itself (that's `crate::new_world()`'s job), but verifies the
+    /// flag round-trips: with it on, `compile()` delegates to moof.
+    #[test]
+    fn flag_routes_through_moof_compiler() {
+        let mut w = crate::new_world();
+        // `new_world` flips the flag during boot.
+        assert!(w.use_moof_compiler);
+        // a compile after boot runs through the moof compiler and
+        // produces a runnable chunk.
+        let f = w.read("[1 + 2]").unwrap();
+        let c = compile(&mut w, f).unwrap();
+        let r = w.run_top(c).unwrap();
+        assert_eq!(r, Value::Int(3));
     }
 }

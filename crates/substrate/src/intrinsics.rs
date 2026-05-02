@@ -1646,6 +1646,12 @@ fn install_bool_methods(_: &mut World) {}
 /// `lib/bootstrap.moof`.
 fn install_nil_methods(w: &mut World) {
     w.install_native(w.protos.nil, "cons:", make_cons_method);
+    // nil-as-empty-list: `:length` returns 0, `:head`/`:tail` return
+    // nil. used by the moof compiler (compile-send: `[args length]`
+    // when args is the empty list).
+    w.install_native(w.protos.nil, "length", |_, _, _| Ok(Value::Int(0)));
+    w.install_native(w.protos.nil, "head", |_, _, _| Ok(Value::Nil));
+    w.install_native(w.protos.nil, "tail", |_, _, _| Ok(Value::Nil));
 }
 
 /// `(cons h tail)` — allocate a List cell. shared by Nil-proto
@@ -1681,6 +1687,16 @@ fn install_list_methods(w: &mut World) {
         Ok(w.heap.get(id).slot(tail_sym))
     });
     w.install_native(w.protos.list, "null?", |_, _, _| Ok(Value::Bool(false)));
+    // [list length] — count cons cells. used by the moof compiler's
+    // compile-send (`[args length]` for argc), so `:length` must be
+    // available on List from rust *before* bootstrap.moof loads
+    // through the moof compiler.
+    w.install_native(w.protos.list, "length", |w, self_, _| {
+        let n = w
+            .list_len(self_)
+            .map_err(|_| type_error(w, "length on non-List"))?;
+        Ok(Value::Int(n as i64))
+    });
     w.install_native(w.protos.list, "cons:", |w, self_, args| {
         let head_sym = w.head_sym;
         let tail_sym = w.tail_sym;
@@ -1855,6 +1871,14 @@ fn install_object_reflection(w: &mut World) {
     // :inspect is defined in lib/bootstrap.moof — it falls through
     // to :toString in phase A; phase C overrides it on Object to a
     // richer moof-side Inspector view.
+
+    // default `:initialize` — a no-op. lives in rust because the
+    // moof compiler's compile-defmacro calls `[Method new]` while
+    // *compiling* bootstrap.moof (which is where user-facing
+    // :initialize would otherwise be defined). bootstrap.moof
+    // installs the same handler again later for documentation/
+    // override-ability — that's idempotent.
+    w.install_native(w.protos.object, "initialize", |_, self_, _| Ok(self_));
 
     w.install_native(w.protos.object, "new", |w, self_, _args| {
         // (Proto :new) → fresh instance, then [self initialize].
@@ -2767,9 +2791,12 @@ mod tests {
         crate::new_world()
     }
 
+    #[allow(dead_code)]
     fn fresh_bare() -> World {
-        // intrinsics-only — no bootstrap.moof. for tests that
-        // verify the rust-side intrinsic wiring directly.
+        // intrinsics-only — no bootstrap.moof, no compiler.moof.
+        // currently unused (kept as a debugging convenience for any
+        // future test that needs to exercise rust intrinsics on a
+        // bare world).
         let mut w = World::new();
         install(&mut w);
         w

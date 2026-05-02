@@ -1,0 +1,17 @@
+# the moof-side compiler is recursive — every (let …) and (do …) in
+# the source it's compiling expands into a chain of nested fn-calls,
+# and each fn-call sends back through the rust VM's invoke path.
+# in debug builds, rust stack frames are >10 KB each, so a deeply
+# nested moof source can pile up MB of stack while compile-form
+# walks it.
+#
+# the plan (NEXT_SESSION.md, risk #3) flags this as acceptable
+# compile-time perf cost: "probably 100x slower than rust". the
+# substrate's tests inherit this cost. bumping the per-thread stack
+# to 32 MB keeps the tests green without changing semantics.
+#
+# release builds need much less stack (rust inlines / collapses
+# frames), so this is mostly a dev-loop concern.
+
+[env]
+RUST_MIN_STACK = "33554432"
