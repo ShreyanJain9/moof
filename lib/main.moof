@@ -1,0 +1,17 @@
+;; lib/main.moof — the only file the rust seed compiles directly.
+;;
+;; everything else flows through `$transporter`. files are transport,
+;; the image is canonical.
+;;
+;; Transitional during Phase 1: this file just chains the two existing
+;; bootstrap files. Phase 2-3 split them into compiler/, early/, and
+;; stdlib/ subtrees and grow the load list accordingly.
+
+;; phase 1: the moof compiler — compiled by the rust seed.
+[$transporter load: "compiler.moof"]
+
+;; flip — every subsequent compile routes through the Compiler singleton.
+[$compiler useMoof]
+
+;; phase 2-3: bootstrap stdlib + macros — compiled by the moof compiler.
+[$transporter load: "bootstrap.moof"]
