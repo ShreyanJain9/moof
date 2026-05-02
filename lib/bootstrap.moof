@@ -651,10 +651,11 @@
 (setHandler! Object 'initialize
   (fn () self))
 
-;; :inspect is :toString in phase A; phase C swaps in a richer
-;; moof-side Inspector view by overriding this here.
-(setHandler! Object 'inspect
-  (fn () [self toString]))
+;; :inspect is the REPL-readable rendering. defaults to :toString
+;; (installed in rust); String / Char / List / Method override it
+;; to produce re-readable output ("hello", #\a, (1 "hi" #\a), etc).
+;; phase C swaps in a richer moof-side Inspector view by overriding
+;; this here for richer output.
 
 ;; :protos — full delegation chain as a List. honors
 ;; laws/reflection-contract.md R1: `[v protos]` returns a List of

@@ -90,7 +90,12 @@ fn repl() -> ExitCode {
         match moof::eval(&mut world, trimmed) {
             Ok(value) => {
                 if !value.is_nil() {
-                    let _ = print_via_out(&mut world, value);
+                    // REPL prints via :inspect (re-readable) rather
+                    // than :toString (display-friendly). matches the
+                    // smalltalk `printNl` convention. one-shot
+                    // `moof '<expr>'` keeps :toString — there the
+                    // user is producing output, not debugging.
+                    let _ = print_via_out_inspect(&mut world, value);
                 }
             }
             Err(err) => {
@@ -98,6 +103,23 @@ fn repl() -> ExitCode {
             }
         }
     }
+}
+
+/// REPL print path: `[v inspect]` then emit + newline. distinct from
+/// `[$out say:]` (which uses :toString) so the REPL can show
+/// re-readable output: `"hello"` not `hello`, `#\a` not `a`.
+fn print_via_out_inspect(
+    world: &mut moof::world::World,
+    value: moof::value::Value,
+) -> Result<(), moof::world::RaiseError> {
+    let inspect = world.intern("inspect");
+    let str_v = world.send(value, inspect, &[])?;
+    let text = world
+        .string_text(str_v)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "<inspect: not a String>".to_string());
+    print_via_out_text(world, &text)?;
+    print_via_out_text(world, "\n")
 }
 
 fn print_banner(world: &mut moof::world::World) {

@@ -372,7 +372,11 @@ fn install_table_methods(w: &mut World) {
     // :!= is derived in lib/bootstrap.moof from :=.
 
     // [t toString] — `#[1 2 'name => "ada"]`-shaped rendering.
+    // proto-name short-circuit so `[Table toString]` → "Table".
     w.install_native(w.protos.table, "toString", |w, self_, _| {
+        if let Some(name) = proto_name_for(w, self_) {
+            return Ok(w.make_string(&name));
+        }
         render_table_to_string(w, self_).map(|s| w.make_string(&s))
     });
 
@@ -499,14 +503,17 @@ fn install_char_methods(w: &mut World) {
             )),
         }
     });
-    w.install_native(w.protos.char_, "toString", |w, self_, _| match self_ {
-        Value::Char(cp) => {
-            let text = char::from_u32(cp)
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| format!("?{:x}", cp));
-            Ok(w.make_string(&text))
-        }
-        _ => Err(RaiseError::new(w.intern("type-error"), "toString on non-Char")),
+    // :toString lives on Object; its default handles `Value::Char`
+    // (printing the single character). [Char toString] hits the
+    // Object handler with the proto-Form receiver and returns
+    // "Char" via :name.
+    // [c inspect] — REPL-readable form: `#\a`, `#\space`, `#\u{1f496}`.
+    // matches the reader's char-literal grammar so the inspect
+    // output is parseable input. for `say:` / interpolation, use
+    // :toString (which yields just the character).
+    w.install_native(w.protos.char_, "inspect", |w, self_, _| match self_ {
+        Value::Char(cp) => Ok(w.make_string(&render_char_literal(cp))),
+        _ => Err(RaiseError::new(w.intern("type-error"), "inspect on non-Char")),
     });
     // `=`, `!=` flow through Object's identity (Char(a) == Char(b)
     // iff their codepoints match).
@@ -704,7 +711,26 @@ fn install_string_methods(w: &mut World) {
     });
     // [s forEach: f] is derived in lib/bootstrap.moof — walks the
     // Char list via :toList.
-    w.install_native(w.protos.string, "toString", |_, self_, _| Ok(self_));
+    // [<some-string> toString] returns the string itself (raw bytes,
+    // no quotes). [String toString] returns "String" — handled by
+    // the proto-name short-circuit at the top.
+    w.install_native(w.protos.string, "toString", |w, self_, _| {
+        if let Some(name) = proto_name_for(w, self_) {
+            return Ok(w.make_string(&name));
+        }
+        Ok(self_)
+    });
+
+    // [s inspect] — REPL-readable: `"hello"` with escapes. used by
+    // the REPL print path (vs. `:say:` which uses :toString and
+    // emits raw bytes). proto-name short-circuit too.
+    w.install_native(w.protos.string, "inspect", |w, self_, _| {
+        if let Some(name) = proto_name_for(w, self_) {
+            return Ok(w.make_string(&name));
+        }
+        let text = str_arg(w, self_, "inspect")?;
+        Ok(w.make_string(&render_string_literal(&text)))
+    });
 
     // [s asTable] — a Table of Chars, one per Unicode scalar.
     // [s asList] is just :toList, exposed in lib/bootstrap.moof.
@@ -789,32 +815,57 @@ fn install_string_methods(w: &mut World) {
     // [[s byteLength] = 0] there.
 }
 
-/// :to-string on Method (covers Closure too). renders the source
-/// if available, else `<closure>` / `<method>`.
+/// :toString / :inspect on Method (covers Closure too).
+///
+/// `:toString` is concise — `<closure (x y)>` showing just the
+/// param list (read from the closure's `:params` slot). `:inspect`
+/// is the full source — `<closure source: (fn (x y) body)>`. native
+/// rust intrinsics carry a Symbol in `:source` meta; both
+/// selectors render those as `<method:name>`. proto-name short-
+/// circuit so `[Method toString]` → "Method".
 fn install_method_methods(w: &mut World) {
     w.install_native(w.protos.method, "toString", |w, self_, _| {
+        if let Some(name) = proto_name_for(w, self_) {
+            return Ok(w.make_string(&name));
+        }
         let id = match self_.as_form_id() {
             Some(id) => id,
-            None => {
-                return Ok(w.make_string("<method>"));
-            }
+            None => return Ok(w.make_string("<method>")),
+        };
+        // native intrinsics tag :source with a Symbol (the selector).
+        let source = w.heap.get(id).meta_at(w.source_sym);
+        if let Value::Sym(s) = source {
+            return Ok(w.make_string(&format!("<method:{}>", w.resolve(s))));
+        }
+        // closure / user method — render `<closure (params)>` from
+        // the `:params` slot directly, no source-introspection.
+        let params = w.heap.get(id).slot(w.params_sym);
+        let params_str = render_list_with(w, params, "toString")?;
+        Ok(w.make_string(&format!("<closure {}>", params_str)))
+    });
+
+    // :inspect — full source for closures, helpful for debugging.
+    w.install_native(w.protos.method, "inspect", |w, self_, _| {
+        if let Some(name) = proto_name_for(w, self_) {
+            return Ok(w.make_string(&name));
+        }
+        let id = match self_.as_form_id() {
+            Some(id) => id,
+            None => return Ok(w.make_string("<method>")),
         };
         let source = w.heap.get(id).meta_at(w.source_sym);
         if source.is_nil() {
             return Ok(w.make_string("<closure>"));
         }
-        match source {
-            Value::Sym(s) => {
-                let text = format!("<method:{}>", w.resolve(s));
-                Ok(w.make_string(&text))
-            }
+        let text = match source {
+            Value::Sym(s) => format!("<method:{}>", w.resolve(s)),
             Value::Form(_) => {
-                let inner = render_list_to_string(w, source)?;
-                let text = format!("<closure source: {}>", inner);
-                Ok(w.make_string(&text))
+                let inner = render_list_with(w, source, "inspect")?;
+                format!("<closure source: {}>", inner)
             }
-            _ => Ok(w.make_string("<closure>")),
-        }
+            _ => "<closure>".to_string(),
+        };
+        Ok(w.make_string(&text))
     });
 }
 
@@ -1331,6 +1382,58 @@ fn install_method_reflection(w: &mut World) {
     // own :toString.
 }
 
+/// if `self_` is a Form whose `:name` meta is a Symbol, return
+/// that name's text. used by instance `:toString` / `:inspect`
+/// handlers to short-circuit when the receiver is a *proto-Form*
+/// rather than an instance of the proto — since moof's flat
+/// prototype model has no separate metaclass, the proto sits on
+/// the same handler table as its instances. without this guard,
+/// `[String toString]` would dispatch to the instance handler
+/// and return the proto-Form (rather than the name "String").
+fn proto_name_for(w: &mut World, self_: Value) -> Option<String> {
+    let id = self_.as_form_id()?;
+    let name_meta = w.intern("name");
+    match w.heap.get(id).meta_at(name_meta) {
+        Value::Sym(s) => Some(w.resolve(s).to_string()),
+        _ => None,
+    }
+}
+
+/// REPL-readable form of a Char codepoint. matches the reader's
+/// `#\…` grammar (see `crates/substrate/src/reader.rs`):
+///   `#\a`, `#\space`, `#\newline`, `#\tab`, `#\return`, `#\null`,
+///   `#\u{HEX}` for non-printable / non-ASCII codepoints.
+fn render_char_literal(cp: u32) -> String {
+    match cp {
+        0x20 => "#\\space".to_string(),
+        0x0A => "#\\newline".to_string(),
+        0x09 => "#\\tab".to_string(),
+        0x0D => "#\\return".to_string(),
+        0x00 => "#\\null".to_string(),
+        _ => match char::from_u32(cp) {
+            Some(c) if !c.is_control() && cp <= 0x7E => format!("#\\{}", c),
+            _ => format!("#\\u{{{:x}}}", cp),
+        },
+    }
+}
+
+/// REPL-readable form of a String — `"…"` with escapes matching
+/// the reader's `\n \t \\ \"` grammar.
+fn render_string_literal(text: &str) -> String {
+    let mut out = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// stringify a Value briefly (used in disassembly comments). we
 /// don't recurse into nested forms — just enough for a one-liner.
 fn render_value(w: &World, v: Value) -> String {
@@ -1378,9 +1481,13 @@ fn install_proto_globals(w: &mut World) {
         ("Frame", w.protos.frame),
     ];
     let global = w.global_env;
+    let name_meta = w.intern("name");
     for (name, id) in bindings {
         let s = w.intern(name);
         w.env_bind(global, s, Value::Form(id));
+        // also stash the name in the proto's `:name` meta so
+        // `[Integer toString]` → `Integer`, not `<Form#3>`.
+        w.heap.get_mut(id).meta.insert(name_meta, Value::Sym(s));
     }
     // also expose the canonical macro registry as `Macros`. moof
     // code introspects via `[Macros slots]`, fetches via
@@ -1388,6 +1495,10 @@ fn install_proto_globals(w: &mut World) {
     let macros_id = w.macros_form;
     let macros_sym = w.intern("Macros");
     w.env_bind(global, macros_sym, Value::Form(macros_id));
+    w.heap
+        .get_mut(macros_id)
+        .meta
+        .insert(name_meta, Value::Sym(macros_sym));
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1488,10 +1599,12 @@ fn install_integer_methods(w: &mut World) {
     int_cmp!(w, "<", <);
     int_cmp!(w, ">", >);
 
-    w.install_native(w.protos.integer, "toString", |w, self_, _args| {
-        let a = int_arg(w, self_, "toString")?;
-        Ok(w.make_string(&a.to_string()))
-    });
+    // :toString lives on Object — its default already handles
+    // Int/Float/Bool/Sym/Char/Nil tagged immediates correctly,
+    // AND falls through to `:name` for proto-Form receivers. so
+    // `[42 toString]` → "42" and `[Integer toString]` → "Integer"
+    // both work without an Integer-specific :toString shadowing
+    // the proto's own self-name.
     w.install_native(w.protos.integer, "asFloat", |w, self_, _args| {
         let a = int_arg(w, self_, "asFloat")?;
         Ok(Value::float(a as f64))
@@ -1551,10 +1664,8 @@ fn install_float_methods(w: &mut World) {
     }
     float_cmp!(w, "<", <);
     float_cmp!(w, ">", >);
-    w.install_native(w.protos.float, "toString", |w, self_, _| {
-        let a = float_arg(w, self_, "toString")?;
-        Ok(w.make_string(&format_float(a)))
-    });
+    // :toString — same story as Integer; Object's default handles
+    // Float tagged immediates and routes proto-Forms to :name.
 
     // unary `f64`-method wrappers. `:method:` corresponds to
     // `f.method()`; the only outlier is `:log` → `f.ln()`, hence
@@ -1624,14 +1735,10 @@ fn format_float(f: f64) -> String {
 /// Symbol's only rust primitive is `:toString` — needs the sym
 /// table. equality flows through Object's identity (Sym(a) == Sym(b)
 /// iff their SymIds match).
-fn install_symbol_methods(w: &mut World) {
-    w.install_native(w.protos.symbol, "toString", |w, self_, _| {
-        let s = self_.as_sym().ok_or_else(|| {
-            RaiseError::new(w.intern("type-error"), "toString on non-Symbol")
-        })?;
-        let text = w.resolve(s).to_string();
-        Ok(w.make_string(&text))
-    });
+fn install_symbol_methods(_: &mut World) {
+    // :toString lives on Object; its default resolves
+    // `Value::Sym(s)` to its text. [Symbol toString] returns
+    // "Symbol" via :name (Object's same default handler).
 }
 
 /// Bool methods all flow through the conditional primitive `if`
@@ -1706,21 +1813,41 @@ fn install_list_methods(w: &mut World) {
         let id = w.alloc(cell);
         Ok(Value::Form(id))
     });
-    // List :to-string — recursive `(elem1 elem2 ...)` rendering.
+    // List :toString — recursive `(elem1 elem2 ...)` rendering.
+    // each element renders via its own :toString. proto-name
+    // short-circuit so `[List toString]` → "List" (not "()").
     w.install_native(w.protos.list, "toString", |w, self_, _| {
-        let s = render_list_to_string(w, self_)?;
+        if let Some(name) = proto_name_for(w, self_) {
+            return Ok(w.make_string(&name));
+        }
+        let s = render_list_with(w, self_, "toString")?;
+        Ok(w.make_string(&s))
+    });
+
+    // List :inspect — like :toString but each element renders via
+    // its own :inspect. so `(1 "hi" #\a)` inspects as `(1 "hi" #\a)`
+    // (re-readable) rather than `(1 hi a)`.
+    w.install_native(w.protos.list, "inspect", |w, self_, _| {
+        if let Some(name) = proto_name_for(w, self_) {
+            return Ok(w.make_string(&name));
+        }
+        let s = render_list_with(w, self_, "inspect")?;
         Ok(w.make_string(&s))
     });
 }
 
-/// recursive list-to-string. each element's :to-string is sent;
-/// the result is a String form; we read its bytes; join with
-/// spaces; wrap in parens.
-fn render_list_to_string(w: &mut World, list: Value) -> Result<String, RaiseError> {
+/// recursive list rendering with a user-chosen per-element selector.
+/// `:toString` and `:inspect` differ only in which selector each
+/// element gets sent — the parens-and-spaces shape is shared.
+fn render_list_with(
+    w: &mut World,
+    list: Value,
+    elem_sel: &str,
+) -> Result<String, RaiseError> {
     let mut out = String::from("(");
     let mut cur = list;
     let mut first = true;
-    let to_string = w.intern("toString");
+    let elem_sym = w.intern(elem_sel);
     let head_sym = w.head_sym;
     let tail_sym = w.tail_sym;
     loop {
@@ -1733,7 +1860,7 @@ fn render_list_to_string(w: &mut World, list: Value) -> Result<String, RaiseErro
                 first = false;
                 let head = w.heap.get(id).slot(head_sym);
                 let tail = w.heap.get(id).slot(tail_sym);
-                let head_str_v = w.send(head, to_string, &[])?;
+                let head_str_v = w.send(head, elem_sym, &[])?;
                 push_string_value(w, &mut out, head_str_v)?;
                 cur = tail;
             }
@@ -1744,7 +1871,7 @@ fn render_list_to_string(w: &mut World, list: Value) -> Result<String, RaiseErro
                     out.push(' ');
                 }
                 out.push_str(". ");
-                let tail_str_v = w.send(cur, to_string, &[])?;
+                let tail_str_v = w.send(cur, elem_sym, &[])?;
                 push_string_value(w, &mut out, tail_str_v)?;
                 break;
             }
@@ -1848,8 +1975,17 @@ fn install_object_reflection(w: &mut World) {
     w.install_native(w.protos.object, "toString", |w, self_, _| {
         // default rendering: `<Form#N>` for heap forms; tagged
         // immediates have their own to-string overrides.
+        // forms carrying a `:name` meta render as that name — so
+        // `[Integer toString]` → `Integer`, `[Macros toString]` →
+        // `Macros`, etc.
         let text = match self_ {
-            Value::Form(id) => format!("<Form#{}>", id.0),
+            Value::Form(id) => {
+                let name_meta = w.intern("name");
+                match w.heap.get(id).meta_at(name_meta) {
+                    Value::Sym(s) => w.resolve(s).to_string(),
+                    _ => format!("<Form#{}>", id.0),
+                }
+            }
             Value::Foreign(id) => format!("<Foreign#{}>", id.0),
             Value::Nil => "nil".to_string(),
             // defensive fallbacks (each tagged kind overrides above):
@@ -1866,6 +2002,14 @@ fn install_object_reflection(w: &mut World) {
             }
         };
         Ok(w.make_string(&text))
+    });
+
+    // Object :inspect — REPL-readable. defaults to :toString, but
+    // tagged-immediate / collection types override (Char, String,
+    // List, Method) to produce re-readable output.
+    w.install_native(w.protos.object, "inspect", |w, self_, _| {
+        let to_string = w.intern("toString");
+        w.send(self_, to_string, &[])
     });
 
     // :inspect is defined in lib/bootstrap.moof — it falls through
@@ -3075,6 +3219,79 @@ mod tests {
                 forbidden
             );
         }
+    }
+
+    // ── display / inspect — `:toString` vs `:inspect` split.
+    // toString is for `say:` / interpolation (display-friendly);
+    // inspect is for the REPL (re-readable).
+
+    #[test]
+    fn nil_to_string_is_nil() {
+        let mut w = fresh();
+        let r = ev(&mut w, "[nil toString]").unwrap();
+        assert_eq!(w.string_text(r).unwrap(), "nil");
+        let r = ev(&mut w, "[nil inspect]").unwrap();
+        assert_eq!(w.string_text(r).unwrap(), "nil");
+    }
+
+    #[test]
+    fn proto_to_string_uses_name_meta() {
+        let mut w = fresh();
+        let r = ev(&mut w, "[Integer toString]").unwrap();
+        assert_eq!(w.string_text(r).unwrap(), "Integer");
+        let r = ev(&mut w, "[Object toString]").unwrap();
+        assert_eq!(w.string_text(r).unwrap(), "Object");
+        let r = ev(&mut w, "[Macros toString]").unwrap();
+        assert_eq!(w.string_text(r).unwrap(), "Macros");
+    }
+
+    #[test]
+    fn char_inspect_is_hash_backslash() {
+        let mut w = fresh();
+        // a printable ASCII char.
+        let r = ev(&mut w, "[#\\a inspect]").unwrap();
+        assert_eq!(w.string_text(r).unwrap(), "#\\a");
+        // toString stays just the character.
+        let r = ev(&mut w, "[#\\a toString]").unwrap();
+        assert_eq!(w.string_text(r).unwrap(), "a");
+        // named whitespace.
+        let r = ev(&mut w, "[#\\space inspect]").unwrap();
+        assert_eq!(w.string_text(r).unwrap(), "#\\space");
+        let r = ev(&mut w, "[#\\newline inspect]").unwrap();
+        assert_eq!(w.string_text(r).unwrap(), "#\\newline");
+    }
+
+    #[test]
+    fn string_inspect_quotes_and_escapes() {
+        let mut w = fresh();
+        let r = ev(&mut w, "[\"hello\" inspect]").unwrap();
+        assert_eq!(w.string_text(r).unwrap(), "\"hello\"");
+        // escapes: tab, newline, quote.
+        let r = ev(&mut w, "[\"a\\tb\" inspect]").unwrap();
+        assert_eq!(w.string_text(r).unwrap(), "\"a\\tb\"");
+        let r = ev(&mut w, "[\"x\\\"y\" inspect]").unwrap();
+        assert_eq!(w.string_text(r).unwrap(), "\"x\\\"y\"");
+        // toString returns the raw text.
+        let r = ev(&mut w, "[\"hello\" toString]").unwrap();
+        assert_eq!(w.string_text(r).unwrap(), "hello");
+    }
+
+    #[test]
+    fn list_inspect_recursively_inspects() {
+        let mut w = fresh();
+        // toString — bare elements.
+        let r = ev(&mut w, "[(list 1 \"hi\" #\\a) toString]").unwrap();
+        assert_eq!(w.string_text(r).unwrap(), "(1 hi a)");
+        // inspect — elements re-readable.
+        let r = ev(&mut w, "[(list 1 \"hi\" #\\a) inspect]").unwrap();
+        assert_eq!(w.string_text(r).unwrap(), "(1 \"hi\" #\\a)");
+    }
+
+    #[test]
+    fn closure_to_string_is_concise() {
+        let mut w = fresh();
+        let r = ev(&mut w, "[(fn (x y) [x + y]) toString]").unwrap();
+        assert_eq!(w.string_text(r).unwrap(), "<closure (x y)>");
     }
 
     // ── compiler primitives — `docs/reference/compiler-primitives.md`
