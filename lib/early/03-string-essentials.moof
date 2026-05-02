@@ -1,0 +1,8 @@
+;; lib/early/03-string-essentials.moof
+;;
+;; Phase 3 placeholder. The small set of String methods that
+;; `__decode-header` transitively needs: :endsWith?:, :+, :=, :length,
+;; :contains?:, :all?:, :toString. Phase 4 ports these from
+;; intrinsics.rs into setHandler! form here.
+
+;; (intentionally empty in Phase 3.)
