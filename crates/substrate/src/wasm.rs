@@ -32,8 +32,9 @@
 //! mco's proto is "called". the moof program names it by `def`.
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use wasmtime::{Engine, Instance, Module, Store};
+use wasmtime::{Engine, Instance, Linker, Module, Store};
 
 use crate::form::Form;
 use crate::value::Value;
@@ -86,15 +87,26 @@ pub fn load_wasm_bytes(
         )
     })?;
     let mut store: Store<()> = Store::new(&engine, ());
-    // no imports in this MVP — modules must be self-contained.
-    // the full mco loader will populate imports from the substrate
-    // MoofApi vtable.
-    let instance = Instance::new(&mut store, &module, &[]).map_err(|e| {
+
+    // build the substrate-provided import surface. wasm modules
+    // import these as `extern "moof" fn name(...)` (zig syntax).
+    // grows as more substrate primitives become useful to mcos.
+    let mut linker: Linker<()> = Linker::new(&engine);
+    install_moof_imports(&mut linker).map_err(|e| {
         RaiseError::new(
-            world.intern("wasm-instantiate-error"),
-            format!("instantiating `{}` failed: {}", label, e),
+            world.intern("wasm-link-error"),
+            format!("substrate imports failed: {}", e),
         )
     })?;
+
+    let instance = linker
+        .instantiate(&mut store, &module)
+        .map_err(|e| {
+            RaiseError::new(
+                world.intern("wasm-instantiate-error"),
+                format!("instantiating `{}` failed: {}", label, e),
+            )
+        })?;
 
     // allocate a fresh proto-Form. parent = Object. no `:name` meta:
     // load-time anonymity per `docs/reference/mco-format.md`. the
@@ -167,6 +179,47 @@ pub fn load_wasm_bytes(
 pub enum ExportShape {
     /// fn() -> i64. result becomes Value::Int.
     NoArgsToI64,
+}
+
+/// install substrate-provided functions into a wasmtime Linker.
+/// every wasm mco that imports something `extern "moof" fn …`
+/// resolves through here.
+///
+/// the names + signatures form a stable abi surface the substrate
+/// commits to. additions are non-breaking; removals or signature
+/// changes need an abi-version bump.
+///
+/// minimum useful set right now:
+/// - `now_ns() -> i64` — wall-clock nanoseconds since unix epoch.
+///   *not* deterministic; mcos in replicated vats must avoid it
+///   (or accept replicas-may-disagree semantics).
+/// - `monotonic_ns() -> i64` — monotonic nanoseconds since some
+///   unspecified epoch. for measuring durations.
+///
+/// next up (when richer methods need them):
+/// - `intern(ptr, len) -> sym-handle`
+/// - `make_string(ptr, len) -> form-handle`
+/// - `slot(form-handle, sym-handle) -> value-handle`
+/// - `slot_set(form-handle, sym-handle, value-handle)`
+/// - `send(receiver, sel, args-ptr, argc) -> value-handle`
+/// - `raise(kind-sym, msg-ptr, msg-len) -> traps`
+fn install_moof_imports(linker: &mut Linker<()>) -> wasmtime::Result<()> {
+    linker.func_wrap("moof", "now_ns", || -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0)
+    })?;
+    linker.func_wrap("moof", "monotonic_ns", || -> i64 {
+        // std::time::Instant doesn't expose raw ns; use a process-
+        // relative epoch.
+        use std::sync::OnceLock;
+        use std::time::Instant;
+        static EPOCH: OnceLock<Instant> = OnceLock::new();
+        let epoch = EPOCH.get_or_init(Instant::now);
+        epoch.elapsed().as_nanos() as i64
+    })?;
+    Ok(())
 }
 
 /// the trampoline that bridges a moof method-call to a wasm
