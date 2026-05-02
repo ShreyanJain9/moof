@@ -185,9 +185,11 @@ pub struct World {
     /// moof-side `compile-top` (defined in `lib/compiler.moof`).
     /// when `false`, the rust compiler runs.
     ///
-    /// the bootstrap dance: starts `false`, rust compiler compiles
-    /// `compiler.moof` into the world, then `lib.rs` flips this to
-    /// `true`, then `bootstrap.moof` loads via the moof compiler.
+    /// the bootstrap dance: starts `false`, the rust seed compiler
+    /// compiles `compiler.moof` (loaded via `$transporter` from
+    /// `lib/main.moof`), then `lib/main.moof` sends `[$compiler useMoof]`
+    /// to flip this to `true`, then `bootstrap.moof` loads via the
+    /// moof compiler.
     /// **after that, every compile in this world routes through
     /// moof.** the rust compiler is dead code post-flip.
     ///
@@ -200,7 +202,9 @@ pub struct World {
     /// Resolved root for [$transporter load: ...] calls. Populated at
     /// `new_world()` via `transporter::resolve_lib_root`. None means
     /// the transporter cap will raise 'tx-no-root on every call —
-    /// used by `new_world_bare` for tests that don't need bootstrap.
+    /// None only when a `World` is constructed via `World::new()` directly
+    /// without going through `new_world` or `new_world_bare` — the
+    /// `tx-no-root` test path.
     pub transporter_root: Option<std::path::PathBuf>,
 
     /// the bytecode interpreter's per-vat state.

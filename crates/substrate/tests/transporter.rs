@@ -2,23 +2,15 @@
 //! error symbol (`tx-bad-arg`, `tx-bad-path`, `tx-no-root`,
 //! `tx-not-found`, `tx-unimplemented`). `tx-read-error` is reachable
 //! only via fragile filesystem permission setups and is left untested.
-//! tests assume `MOOF_LIB` is set in the test harness via env (handled
-//! by setting it in each test).
+//! `MOOF_LIB` is set workspace-wide via `.cargo/config.toml` — no
+//! per-test env mutation needed.
 
 use moof::value::Value;
-use std::path::PathBuf;
-
-fn lib_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("lib")
-}
 
 fn fresh_world() -> moof::world::World {
-    std::env::set_var("MOOF_LIB", lib_root());
+    // MOOF_LIB is set workspace-wide via .cargo/config.toml — no per-test
+    // env mutation needed. tests against an alternate root would set
+    // MOOF_LIB explicitly before calling moof::new_world().
     moof::new_world()
 }
 

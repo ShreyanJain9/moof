@@ -15,4 +15,7 @@
 
 [env]
 RUST_MIN_STACK = "33554432"
+# MOOF_LIB — points the $transporter cap at the in-tree lib/ during dev
+# and tests. resolves relative to this config file's directory (workspace
+# root), so works regardless of cwd. user-overridable at runtime.
 MOOF_LIB = { value = "lib", relative = true }
