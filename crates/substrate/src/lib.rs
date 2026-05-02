@@ -66,6 +66,7 @@ pub const COMPILER_SOURCE: &str = include_str!("../../../lib/compiler.moof");
 /// the seed), so we panic.
 pub fn new_world() -> world::World {
     let mut w = world::World::new();
+    w.transporter_root = transporter::resolve_lib_root();
     intrinsics::install(&mut w);
     // step 2 — compile compiler.moof via the rust seed compiler.
     if let Err(e) = eval_program(&mut w, COMPILER_SOURCE) {

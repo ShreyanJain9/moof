@@ -120,6 +120,7 @@ where
 /// install all phase-A intrinsics. idempotent: safe to call once
 /// at world init.
 pub fn install(w: &mut World) {
+    crate::transporter::install(w);
     install_call_on_method(w);
     install_integer_methods(w);
     install_float_methods(w);
