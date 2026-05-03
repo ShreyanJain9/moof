@@ -40,6 +40,11 @@
 ;; tail-position is threaded through. it controls Send vs TailSend;
 ;; the rest of the cases ignore it.
 
+;; Object:proto delegates to Heap. installed early (before defmethod
+;; exists) because `cons?:` below sends [v proto] during every
+;; compile of a list-form, and that has to dispatch correctly.
+(setHandler! Object 'proto (fn () [Heap protoOf: self]))
+
 (def Compiler [Object new])
 
 ;; ─────────────────────────────────────────────────────────────────

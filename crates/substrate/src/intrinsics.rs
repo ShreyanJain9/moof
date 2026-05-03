@@ -129,6 +129,7 @@ pub fn install(w: &mut World) {
     install_table_methods(w);
     install_object_reflection(w);
     install_cons_and_nil_primitives(w);
+    install_heap_singleton(w);
     install_method_reflection(w);
     install_console_proto_and_caps(w);
     install_compiler_cap(w);
@@ -1501,46 +1502,99 @@ fn install_cons_and_nil_primitives(w: &mut World) {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Object reflection — the load-bearing moldable promise (L6)
+// Heap singleton — a primordial cap exposing every primitive heap
+// operation as a method. moof code on user-type protos delegates
+// here for proto/identity/slot/handler/meta access, allocation, and
+// the few "raw list" operations the moof compiler bottoms out on.
+//
+// rust on user-type protos shrinks dramatically when these live on
+// Heap instead: Object only needs :is, :=, :toString, :new, plus
+// the dispatch fallbacks. All reflection moves to moof methods that
+// say `[Heap protoOf: self]` etc.
 // ─────────────────────────────────────────────────────────────────
 
-fn install_object_reflection(w: &mut World) {
-    // ─────────────────────────────────────────────────────────────
-    // primitive reflection — installed as native methods. each is
-    // ONE heap-level operation; algorithmic methods (Object:slots,
-    // :handlers, :meta) compose them in moof.
-    // ─────────────────────────────────────────────────────────────
+fn install_heap_singleton(w: &mut World) {
+    // allocate a Heap proto-Form inheriting from Object.
+    let proto = w.alloc(Form::with_proto(Value::Form(w.protos.object)));
 
-    // :proto — the proto-Form for any value.
-    w.install_native(w.protos.object, "proto", |w, self_, _| {
-        Ok(w.proto_of(self_))
+    // [Heap protoOf: v] — proto-Form of any Value (handles tagged
+    // immediates).
+    w.install_native(proto, "protoOf:", |w, _self, args| {
+        Ok(w.proto_of(args.first().copied().unwrap_or(Value::Nil)))
     });
 
-    // :identity — heap-id as Int, 0 for tagged immediates.
-    w.install_native(w.protos.object, "identity", |_, self_, _| match self_ {
-        Value::Form(id) => Ok(Value::Int(id.0 as i64)),
-        Value::Foreign(id) => Ok(Value::Int(id.0 as i64)),
-        _ => Ok(Value::Int(0)),
-    });
-
-    // :source — the `:source` meta-slot, or nil. specialization of
-    // :metaAt: for the most common reflection target.
-    w.install_native(w.protos.object, "source", |w, self_, _| match self_ {
-        Value::Form(id) => {
-            let source = w.source_sym;
-            Ok(w.heap.get(id).meta_at(source))
+    // [Heap heapIdOf: v] — heap-id Int for Forms / Foreigns; 0 for
+    // tagged immediates.
+    w.install_native(proto, "heapIdOf:", |_, _self, args| {
+        match args.first().copied().unwrap_or(Value::Nil) {
+            Value::Form(id) => Ok(Value::Int(id.0 as i64)),
+            Value::Foreign(id) => Ok(Value::Int(id.0 as i64)),
+            _ => Ok(Value::Int(0)),
         }
-        _ => Ok(Value::Nil),
     });
 
-    // :slotKeys / :handlerKeys / :metaKeys — Cons of the receiver's
-    // IndexMap keys (Symbols), in insertion order. nil for tagged
-    // immediates without a singleton-Form. moof code iterates these
-    // to build the user-facing :slots / :handlers / :meta Tables.
-    macro_rules! key_list {
-        ($w:expr, $sel:literal, $field:ident) => {
-            $w.install_native($w.protos.object, $sel, |w, self_, _| {
-                match w.effective_form_id(self_) {
+    // [Heap allocFormWithProto: p] — heap-alloc a fresh Form whose
+    // proto is `p` (which must be a Form).
+    w.install_native(proto, "allocFormWithProto:", |w, _self, args| {
+        let proto_v = args.first().copied().unwrap_or(Value::Nil);
+        let proto_id = match proto_v {
+            Value::Form(id) => id,
+            _ => return Err(type_error(w, "allocFormWithProto: proto must be a Form")),
+        };
+        let f = Form::with_proto(Value::Form(proto_id));
+        let id = w.alloc(f);
+        Ok(Value::Form(id))
+    });
+
+    // [Heap slotOf: v at: 'name] — single-slot read.
+    w.install_native(proto, "slotOf:at:", |w, _self, args| {
+        let v = args.first().copied().unwrap_or(Value::Nil);
+        let sym = args.get(1).copied().and_then(|x| x.as_sym()).ok_or_else(|| {
+            type_error(w, "slotOf:at: expects a Symbol key")
+        })?;
+        match w.effective_form_id(v) {
+            Some(id) => Ok(w.heap.get(id).slot(sym)),
+            None => Ok(Value::Nil),
+        }
+    });
+
+    // [Heap handlerOf: v at: 'sel] — single-handler read.
+    w.install_native(proto, "handlerOf:at:", |w, _self, args| {
+        let v = args.first().copied().unwrap_or(Value::Nil);
+        let sel = args.get(1).copied().and_then(|x| x.as_sym()).ok_or_else(|| {
+            type_error(w, "handlerOf:at: expects a Symbol key")
+        })?;
+        match w.effective_form_id(v) {
+            Some(id) => Ok(w
+                .heap
+                .get(id)
+                .handlers
+                .get(&sel)
+                .copied()
+                .unwrap_or(Value::Nil)),
+            None => Ok(Value::Nil),
+        }
+    });
+
+    // [Heap metaOf: v at: 'sym] — single-meta read.
+    w.install_native(proto, "metaOf:at:", |w, _self, args| {
+        let v = args.first().copied().unwrap_or(Value::Nil);
+        let sym = args.get(1).copied().and_then(|x| x.as_sym()).ok_or_else(|| {
+            type_error(w, "metaOf:at: expects a Symbol key")
+        })?;
+        match v {
+            Value::Form(id) => Ok(w.heap.get(id).meta_at(sym)),
+            _ => Ok(Value::Nil),
+        }
+    });
+
+    // [Heap slotKeysOf: v] — Cons of slot keys (Symbols). nil for
+    // tagged immediates without a singleton-Form.
+    macro_rules! key_list_on_heap {
+        ($w:expr, $proto:expr, $sel:literal, $field:ident) => {
+            $w.install_native($proto, $sel, |w, _self, args| {
+                let v = args.first().copied().unwrap_or(Value::Nil);
+                match w.effective_form_id(v) {
                     Some(id) => {
                         let keys: Vec<Value> = w
                             .heap
@@ -1556,41 +1610,34 @@ fn install_object_reflection(w: &mut World) {
             });
         };
     }
-    key_list!(w, "slotKeys", slots);
-    key_list!(w, "handlerKeys", handlers);
-    key_list!(w, "metaKeys", meta);
+    key_list_on_heap!(w, proto, "slotKeysOf:", slots);
+    key_list_on_heap!(w, proto, "handlerKeysOf:", handlers);
+    key_list_on_heap!(w, proto, "metaKeysOf:", meta);
 
-    // :handlerAt: / :metaAt: — single-key lookup. (the existing
-    // `slot` global covers the same for the slots IndexMap.)
-    w.install_native(w.protos.object, "handlerAt:", |w, self_, args| {
-        let sel = args
-            .first()
-            .copied()
-            .and_then(|v| v.as_sym())
-            .ok_or_else(|| type_error(w, "handlerAt: expects a Symbol"))?;
-        match w.effective_form_id(self_) {
-            Some(id) => Ok(w
-                .heap
-                .get(id)
-                .handlers
-                .get(&sel)
-                .copied()
-                .unwrap_or(Value::Nil)),
-            None => Ok(Value::Nil),
-        }
-    });
+    // bind globally as `Heap`. capitalized like Compiler / Match —
+    // module-style, not primordial cap (no `$`).
+    let global = w.global_env;
+    let name = w.intern("Heap");
+    let name_meta = w.intern("name");
+    w.heap.get_mut(proto).meta.insert(name_meta, Value::Sym(name));
+    w.env_bind(global, name, Value::Form(proto));
 
-    w.install_native(w.protos.object, "metaAt:", |w, self_, args| {
-        let sym = args
-            .first()
-            .copied()
-            .and_then(|v| v.as_sym())
-            .ok_or_else(|| type_error(w, "metaAt: expects a Symbol"))?;
-        match self_ {
-            Value::Form(id) => Ok(w.heap.get(id).meta_at(sym)),
-            _ => Ok(Value::Nil),
-        }
-    });
+    // ─────────────────────────────────────────────────────────────
+    // Object/Cons/nil method removal: the per-type wrappers that just
+    // delegated to heap ops are deleted. moof stdlib defines them as
+    // defmethods that forward to Heap.
+    // ─────────────────────────────────────────────────────────────
+}
+
+fn install_object_reflection(w: &mut World) {
+    // :proto, :identity, :source, :slotKeys, :handlerKeys, :metaKeys,
+    // :handlerAt:, :metaAt: are moof. they live as defmethods that
+    // delegate to the Heap singleton (compiler/00-helpers.moof for
+    // :proto since the compiler needs it before stdlib loads;
+    // stdlib/object.moof for the rest).
+    //
+    // Object's rust contribution shrinks to the irreducible identity-
+    // and-dispatch primitives:
 
     w.install_native(w.protos.object, "is", |_, self_, args| {
         // identity equality (same heap-id or same tagged-immediate).

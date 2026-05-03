@@ -1,10 +1,27 @@
 ;; lib/stdlib/object.moof
 ;;
 ;; Object — derived defaults that flow through every proto chain.
-;; primitives live in rust intrinsics: :proto, :identity, :source,
-;; :slotKeys, :handlerKeys, :metaKeys, :handlerAt:, :metaAt:, :is,
-;; :=, :toString, :new, :initialize, :doesNotUnderstand:with:.
-;; this file derives the rest using those primitives.
+;; reflection methods are moof, delegating to the Heap singleton
+;; (a primordial object whose handlers are the only rust-side heap
+;; operations remaining). only the irreducible identity / dispatch
+;; primitives stay rust: :is, :=, :toString, :new, :initialize,
+;; :doesNotUnderstand:with:. (:proto lives in compiler/00-helpers.moof
+;; because the compiler needs it before this file loads.)
+
+;; ─────────────────────────────────────────────────────────────────
+;; reflection — every method here is a moof one-liner forwarding to
+;; Heap. user-facing API is identical to before; the substrate just
+;; routes through a single coherent cap rather than scattered native
+;; intrinsics on Object proto.
+;; ─────────────────────────────────────────────────────────────────
+
+(defmethod Object (identity) [Heap heapIdOf: self])
+(defmethod Object (source) [Heap metaOf: self at: 'source])
+(defmethod Object (slotKeys) [Heap slotKeysOf: self])
+(defmethod Object (handlerKeys) [Heap handlerKeysOf: self])
+(defmethod Object (metaKeys) [Heap metaKeysOf: self])
+(defmethod Object (handlerAt: sel) [Heap handlerOf: self at: sel])
+(defmethod Object (metaAt: sym) [Heap metaOf: self at: sym])
 
 ;; default :!= — Bool:not over identity-equality.
 (defmethod Object (!= other) [[self = other] not])
