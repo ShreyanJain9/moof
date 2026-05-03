@@ -1,5 +1,23 @@
 # next session — polyglot maturity
 
+> **status: pre-MCO cleanup landed.** `$transporter` cap (Self-style
+> file ↔ image bridge), `$compiler useMoof` cap, `lib/main.moof` as
+> single rust entry. `bootstrap.moof` and `compiler.moof` split into
+> 27 thematic files under `lib/{compiler,early,stdlib}/`. ~100 LoC
+> out of `intrinsics.rs` (Bool/nil/Cons primitives migrated; Object
+> :inspect, :!=, :initialize-via-stdlib). REPL prints `nil`. 357
+> tests green at every commit boundary. ~40 commits.
+>
+> the deeper rust→moof shrink the spec estimated (down to ~2500 LoC)
+> turns out to be capped by genuine primitive needs — heap, byte
+> access, chunk reflection, IEEE-754 ops. landed at ~3735, which is
+> the right shape: rust hosts only what *must* live there. further
+> shrink would require slot-access primitives in moof that lose perf
+> for marginal LoC gain.
+>
+> ready for: parser-in-moof, real MCO arg marshaling, the polyglot
+> tracks below.
+
 > **mission: take wasm-mco from "proof of life" to "production-
 > shaped." richer signatures, real moof imports, signed mcos,
 > deps resolution, and the first non-zig polyglot module. by
