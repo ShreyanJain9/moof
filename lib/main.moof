@@ -31,4 +31,5 @@
 ;; phase 3: stdlib — defmethod-driven, regular moof code.
 [$transporter load: "stdlib/object.moof"]
 [$transporter load: "stdlib/bool.moof"]
+[$transporter load: "stdlib/nil.moof"]
 [$transporter load: "bootstrap.moof"]

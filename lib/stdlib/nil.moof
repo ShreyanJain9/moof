@@ -1,0 +1,49 @@
+;; lib/stdlib/nil.moof
+;;
+;; nil — the singleton empty-list and absence value. Phase 3 of the
+;; cleanup leaves both these defmethods AND the rust intrinsics as
+;; shadow installs. Phase 4 removes the rust copies; the moof
+;; defmethods become canonical.
+;;
+;; Nil inherits Object's identity `=`/`!=`. since
+;; `Value::Nil == Value::Nil`, that's exactly the right semantics
+;; without any extra handlers here.
+
+;; ─────────────────────────────────────────────────────────────────
+;; identity + iteration shape
+;; ─────────────────────────────────────────────────────────────────
+
+(defmethod nil (toString) "nil")
+
+(defmethod nil (car) nil)
+(defmethod nil (cdr) nil)
+(defmethod nil (null?) #true)
+(defmethod nil (empty?) #true)
+(defmethod nil (length) 0)
+(defmethod nil (nonEmpty?) #false)
+
+;; ─────────────────────────────────────────────────────────────────
+;; nil-as-empty-list bottom cases for the Cons stdlib. each pairs
+;; with a Cons defmethod in stdlib/cons.moof — the nil case is the
+;; recursion base.
+;; ─────────────────────────────────────────────────────────────────
+
+(defmethod nil (count) 0)
+(defmethod nil (zip: ys) nil)
+(defmethod nil (scan: f from: init) nil)
+(defmethod nil (at: i) nil)
+(defmethod nil (append: ys) ys)
+(defmethod nil (reverse) nil)
+(defmethod nil (map: f) nil)
+(defmethod nil (filter: pred) nil)
+(defmethod nil (reduce: f from: init) init)
+(defmethod nil (forEach: blk) nil)
+(defmethod nil (take: n) nil)
+(defmethod nil (drop: n) nil)
+(defmethod nil (any?: pred) #false)
+(defmethod nil (all?: pred) #true)
+(defmethod nil (contains?: x) #false)
+(defmethod nil (sum) 0)
+(defmethod nil (product) 1)
+(defmethod nil (countWhere: pred) 0)
+(defmethod nil (last) nil)
