@@ -45,6 +45,7 @@ pub struct Protos {
     pub symbol: FormId,
     pub char_: FormId,
     pub string: FormId,
+    pub bytes: FormId,
     pub cons: FormId,
     pub table: FormId,
     pub method: FormId,
@@ -75,6 +76,7 @@ impl Protos {
         let symbol = mk(heap);
         let char_ = mk(heap);
         let string = mk(heap);
+        let bytes = mk(heap);
         let cons = mk(heap);
         let table = mk(heap);
         let method = mk(heap);
@@ -94,6 +96,7 @@ impl Protos {
             symbol,
             char_,
             string,
+            bytes,
             cons,
             table,
             method,

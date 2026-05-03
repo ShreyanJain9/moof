@@ -257,3 +257,28 @@ fn handle_table_basic_alloc_and_drop() {
     assert_eq!(t.len(), 2);
     drop(t);
 }
+
+// ─────────────────────────────────────────────────────────────────
+// Bytes primitive tests
+// ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn bytes_roundtrip() {
+    let mut world = moof::world::World::new();
+    let data = vec![0x00, 0x01, 0xFF, 0x42, 0xCA, 0xFE];
+    let v = world.make_bytes(&data);
+    assert_eq!(world.bytes_data(v), Some(data.as_slice()));
+}
+
+#[test]
+fn bytes_proto_is_distinct_from_string() {
+    let mut world = moof::world::World::new();
+    let s = world.make_string("hello");
+    let b = world.make_bytes(b"hello");
+    assert_eq!(world.string_bytes(s), Some(b"hello".as_slice()));
+    assert_eq!(world.bytes_data(b), Some(b"hello".as_slice()));
+    // proto check: String and Bytes have different protos.
+    let s_proto = world.proto_of(s);
+    let b_proto = world.proto_of(b);
+    assert_ne!(s_proto, b_proto);
+}

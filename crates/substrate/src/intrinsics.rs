@@ -958,6 +958,7 @@ fn install_proto_globals(w: &mut World) {
         ("Symbol", w.protos.symbol),
         ("Char", w.protos.char_),
         ("String", w.protos.string),
+        ("Bytes", w.protos.bytes),
         ("Cons", w.protos.cons),
         ("Table", w.protos.table),
         ("Method", w.protos.method),
