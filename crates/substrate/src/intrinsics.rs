@@ -954,12 +954,9 @@ fn install_method_reflection(w: &mut World) {
 
     // [m source] — the source form stored in :source meta. nil if
     // none (e.g. a bare-rust intrinsic).
-    w.install_native(w.protos.method, "source", |w, self_, _| {
-        let id = self_.as_form_id().ok_or_else(|| {
-            RaiseError::new(w.intern("type-error"), "source: receiver not a Form")
-        })?;
-        Ok(w.heap.get(id).meta_at(w.source_sym))
-    });
+    // [m source] — handled by Object:source (native, returns nil for
+    // non-Form; same behavior as the old type-error stricter version
+    // for any actual Method-Form receiver).
 
     // [m params] — a Table of param symbols.
     w.install_native(w.protos.method, "params", |w, self_, _| {
