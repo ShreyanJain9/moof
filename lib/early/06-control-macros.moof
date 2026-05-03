@@ -1,0 +1,176 @@
+;; lib/early/06-control-macros.moof
+;;
+;; control-flow + binding sugar — each was once a hardcoded special
+;; form in the rust compiler; they live here as moof macros so the
+;; "everything is a Form" claim isn't a lie about what the user wrote.
+
+;; ─────────────────────────────────────────────────────────────────
+;; control-flow + binding sugar — defined as macros so that the
+;; "everything is a Form" claim isn't a lie about what the user
+;; wrote. each of these used to be a hardcoded special-form in the
+;; rust compiler; now they're moof code, user-overridable like
+;; everything else.
+;;
+;; the macro calling convention: a macro receives ONE arg — the
+;; Cons of unevaluated source-arg-Forms. `(when c a b)` calls the
+;; `when` macro with `(c a b)`. macros destructure with Cons ops
+;; and return a Form, which the compiler then compiles in-place.
+;;
+;; the only true compiler-level special forms remaining (after these
+;; macros load) are: `if`, `let`, `do`, `quote`, `set!`, `fn`,
+;; `def`, `defmacro`, plus the reader-emitted helper `__send__`
+;; (its operand grammar is private to the reader). each genuinely
+;; needs bytecode-level access (jumps, closure construction, name
+;; binding, compile-time evaluation order).
+;; ─────────────────────────────────────────────────────────────────
+;; reader-emitted markers — these are the head-symbols the reader
+;; uses to convey surface-syntax to the compiler:
+;;
+;;   __cascade__   for `[recv ; seg1 ; seg2]` cascade sends
+;;   __table__     for `#[a b 'k => v]` table literals
+;;   __obj__       for `{Proto slot: v [sel] body}` object literals
+;;   __entry__     marker inside __table__ for a `k => v` entry
+;;   __slot__      marker inside __obj__ for a slot init
+;;   __method__    marker inside __obj__ for a method decl
+;;
+;; the reader emits them; the user never types them. they used to
+;; be hardcoded in the compiler. now they're macros — same
+;; user-modifiable promise as the rest of the surface syntax.
+;; ─────────────────────────────────────────────────────────────────
+
+;; (__cascade__ recv (sel1 args1...) (sel2 args2...) ...) →
+;;   (let ((__r recv))
+;;     (do (__send__ __r sel1 args1...)
+;;         (__send__ __r sel2 args2...)
+;;         ...
+;;         __r))
+;;
+;; cascade returns the receiver (smalltalk semantics). each
+;; segment's value is discarded.
+(defmacro __cascade__ (args)
+  (let ((receiver [args car])
+        (segments [args cdr]))
+    (let ((sends
+            [segments map:
+              (fn (seg)
+                ;; seg = (sel arg1 arg2 ...)
+                ;; → (__send__ __r sel arg1 arg2 ...)
+                (cons '__send__ (cons '__r seg)))]))
+      `(let ((__r ,receiver))
+         (do ,@sends __r)))))
+
+;; (__table__ entry1 entry2 ...) → builds a fresh Table.
+;; each entry is either:
+;;   - a positional expression                  → `[__t push: expr]`
+;;   - `(__entry__ key-expr value-expr)`        → `[__t at: k put: v]`
+;; everything is wrapped in a (let ((__t [Table new])) (do … __t))
+;; so the table-Form is the value of the literal.
+(defmacro __table__ (args)
+  (let ((inits
+          [args map:
+            (fn (entry)
+              (if (__qq-marker? entry '__entry__)
+                  (let ((k [[entry cdr] car])
+                        (v [[[entry cdr] cdr] car]))
+                    `[__t at: ,k put: ,v])
+                  `[__t push: ,entry]))]))
+    `(let ((__t [Table new]))
+       (do ,@inits __t))))
+
+;; (__obj__ ProtoName entry1 entry2 ...) — `{Proto …}` object
+;; literal, after the reader has tagged each entry. each entry is
+;; one of:
+;;   (__slot__ key val)              — slot init
+;;   (__method__ sel params body)    — method declaration
+;;
+;; expands to:
+;;   (let ((__objLit__ [Proto new]))
+;;     (do (slotSet! __objLit__ 'k v) …          ; 1. slot inits
+;;         (setHandler! __objLit__ 'k             ; 2. auto getters
+;;            (fn () (slot self 'k))) …
+;;         (setHandler! __objLit__ 'k:            ; 3. auto setters
+;;            (fn (__v__) (slotSet! self 'k __v__))) …
+;;         (setHandler! __objLit__ 'sel           ; 4. user methods
+;;            (fn params body)) …                 ;    (after auto-
+;;         __objLit__))                           ;    accessors so
+;;                                                ;    they override)
+(defmacro __obj__ (args)
+  (let ((proto-sym [args car])
+        (entries [args cdr]))
+    (let ((slot-entries
+            [entries filter:
+              (fn (e) [[e car] is '__slot__])])
+          (method-entries
+            [entries filter:
+              (fn (e) [[e car] is '__method__])]))
+      (let ((slot-inits
+              [slot-entries map:
+                (fn (e)
+                  (let ((k [[e cdr] car])
+                        (v [[[e cdr] cdr] car]))
+                    `(slotSet! __objLit__ ',k ,v)))])
+            (slot-getters
+              [slot-entries map:
+                (fn (e)
+                  (let ((k [[e cdr] car]))
+                    `(defmethod __objLit__ (,k) (slot self ',k))))])
+            (slot-setters
+              [slot-entries map:
+                (fn (e)
+                  (let ((k [[e cdr] car]))
+                    (let ((setter-sel
+                            (intern [[k toString] + ":"])))
+                      `(defmethod __objLit__ (,setter-sel __v__) (slotSet! self ',k __v__)))))])
+            (user-methods
+              [method-entries map:
+                (fn (e)
+                  (let ((sel [[e cdr] car])
+                        (params [[[e cdr] cdr] car])
+                        (body [[[[e cdr] cdr] cdr] car]))
+                    `(setHandler! __objLit__ ',sel
+                                   (fn ,params ,body))))]))
+        `(let ((__objLit__ [,proto-sym new]))
+           (do ,@slot-inits
+               ,@slot-getters
+               ,@slot-setters
+               ,@user-methods
+               __objLit__))))))
+
+;; (when cond body...) ≡ (if cond (do body...) nil)
+(defmacro when (args)
+  (let ((cond [args car])
+        (body [args cdr]))
+    `(if ,cond (do ,@body) nil)))
+
+;; (unless cond body...) ≡ (if cond nil (do body...))
+(defmacro unless (args)
+  (let ((cond [args car])
+        (body [args cdr]))
+    `(if ,cond nil (do ,@body))))
+
+;; (let* ((a 1) (b a) ...) body...) — nested single-binding lets.
+;; expands recursively: empty bindings → wrap body in (do …);
+;; otherwise peel one binding, nest the rest.
+(defmacro let* (args)
+  (let ((bindings [args car])
+        (body [args cdr]))
+    (if [bindings empty?]
+        (cons 'do body)
+        `(let (,[bindings car])
+           (let* ,[bindings cdr] ,@body)))))
+
+;; (let-rec ((f (fn …)) (g (fn …))) body) — bindings may refer to
+;; each other (including recursively). desugars to:
+;;   (let ((f nil) (g nil)) (do (set! f …) (set! g …) body…))
+;; closures created in the bindings capture the let's env;
+;; later set!s mutate those slots; lookups inside the closures
+;; see whichever value is current at call time.
+(defmacro let-rec (args)
+  (let ((bindings [args car])
+        (body [args cdr]))
+    (let ((nil-bindings
+            [bindings map: (fn (b) (list [b car] nil))])
+          (sets
+            [bindings map:
+              (fn (b) (list 'set! [b car] [[b cdr] car]))]))
+      `(let ,nil-bindings (do ,@sets ,@body)))))
