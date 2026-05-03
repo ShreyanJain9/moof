@@ -4,5 +4,51 @@
 ;; everything else (:inspect, :digit?, :letter?, :uppercase, :lowercase)
 ;; lives here.
 
-;; (intentionally empty in Phase 3 — Phase 4 fills with the
-;; migrated :inspect plus optional helpers as they're derived.)
+;; ─────────────────────────────────────────────────────────────────
+;; hex helpers — used by :inspect's escape path. written in moof
+;; using `__char-from-codepoint` (the only primitive needed) plus
+;; arithmetic and Cons:cons:.
+;; ─────────────────────────────────────────────────────────────────
+
+;; map 0..15 → ASCII codepoint of '0'..'9' / 'a'..'f', then build
+;; a Char.
+(def __hex-digit-char
+  (fn (n)
+    (__char-from-codepoint
+      (if [n < 10]
+          [n + 48]      ;; '0' = 48
+          [n + 87]))))  ;; 'a' = 97 = 87 + 10
+
+;; produce a String of hex digits (no prefix). recursively prepends
+;; the low nibble's char to the rest.
+(def __int-to-hex-acc
+  (fn (n acc)
+    (if [n = 0]
+        acc
+        (__int-to-hex-acc
+          [n / 16]
+          [[(__hex-digit-char [n mod: 16]) toString] + acc]))))
+
+(def __int-to-hex
+  (fn (n)
+    (if [n = 0]
+        "0"
+        (__int-to-hex-acc n ""))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; :inspect — REPL-readable Char literal. dispatch via codepoint:
+;; the five named control chars (space/tab/newline/return/null) get
+;; their long names; printable ASCII gets `#\X`; everything else
+;; gets `#\u{hex}`.
+;; ─────────────────────────────────────────────────────────────────
+
+(defmethod Char (inspect)
+  (let ((cp [self codepoint]))
+    (if [cp = 32]   "#\\space"
+    (if [cp = 9]    "#\\tab"
+    (if [cp = 10]   "#\\newline"
+    (if [cp = 13]   "#\\return"
+    (if [cp = 0]    "#\\null"
+    (if (if [cp >= 32] [cp <= 126] #false)
+        ["#\\" + [self toString]]
+        [["#\\u{" + (__int-to-hex cp)] + "}"]))))))))

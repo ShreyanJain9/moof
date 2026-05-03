@@ -530,10 +530,9 @@ fn install_char_methods(w: &mut World) {
     // matches the reader's char-literal grammar so the inspect
     // output is parseable input. for `say:` / interpolation, use
     // :toString (which yields just the character).
-    w.install_native(w.protos.char_, "inspect", |w, self_, _| match self_ {
-        Value::Char(cp) => Ok(w.make_string(&render_char_literal(cp))),
-        _ => Err(RaiseError::new(w.intern("type-error"), "inspect on non-Char")),
-    });
+    // :inspect — moof, in stdlib/char.moof. backed by the existing
+    // :codepoint primitive plus `__char-from-codepoint` for the hex
+    // escape's digit construction.
     // `=`, `!=` flow through Object's identity (Char(a) == Char(b)
     // iff their codepoints match).
     w.install_native(w.protos.char_, "<", |_, self_, args| match (self_, args[0]) {
@@ -2584,6 +2583,19 @@ fn install_globals(w: &mut World) {
         match args.first().copied().unwrap_or(Value::Nil) {
             Value::Form(id) => Ok(Value::Int(id.0 as i64)),
             _ => Ok(Value::Int(0)),
+        }
+    });
+
+    // (__char-from-codepoint cp) — construct a Char-tagged-immediate
+    // from a non-negative Integer codepoint. inverse of Char:codepoint.
+    // single tagged-immediate primitive, no validation beyond bounds.
+    install_global(w, "__char-from-codepoint", |world, _self, args| {
+        match args.first().copied().unwrap_or(Value::Nil) {
+            Value::Int(n) if n >= 0 => Ok(Value::Char(n as u32)),
+            _ => Err(type_error(
+                world,
+                "__char-from-codepoint: expects non-negative Integer",
+            )),
         }
     });
 
