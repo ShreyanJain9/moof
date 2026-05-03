@@ -70,34 +70,29 @@
 ;; :toString and :inspect share the same walk.
 ;; ─────────────────────────────────────────────────────────────────
 
-;; concatenate a Cons of Strings with " " separators. empty → "".
-(def __join-with-spaces
-  (fn (parts)
-    [parts reduce:
-           (fn (acc s) (if [acc = ""] s [acc + [" " + s]]))
-           from: ""]))
-
-(def __render-table-with
-  (fn (t render)
-    (let ((n [t length]))
-      (let ((positional-strs [[0 upto: n] map: (fn (i) (render [t at: i]))])
-            (keyed-keys [[t keys] drop: n]))
-        (let ((keyed-strs [keyed-keys map:
-                            (fn (k)
-                              [[(render k) + " => "] + (render [t at: k])])]))
-          (__join-with-spaces [positional-strs append: keyed-strs]))))))
+;; [t renderEntriesWith: f] — render each positional entry as
+;; `(f val)` and each keyed entry as `(f key) " => " (f val)`,
+;; joined with spaces. positional keys are 0..length (Integer);
+;; the keyed-key tail starts at index `length` in [t keys].
+(defmethod Table (renderEntriesWith: f)
+  (let ((n [self length]))
+    (let ((positional-strs [[0 upto: n] map: (fn (i) (f [self at: i]))])
+          (keyed-strs [[[self keys] drop: n] map:
+                        (fn (k)
+                          [[(f k) + " => "] + (f [self at: k])])]))
+      [[positional-strs append: keyed-strs] joinedBy: " "])))
 
 (defmethod Table (toString)
   (let ((nm [self metaAt: 'name]))
     (if [[nm proto] is Symbol]
         [nm toString]
-        [["#[" + (__render-table-with self (fn (v) [v toString]))] + "]"])))
+        [["#[" + [self renderEntriesWith: (fn (v) [v toString])]] + "]"])))
 
 (defmethod Table (inspect)
   (let ((nm [self metaAt: 'name]))
     (if [[nm proto] is Symbol]
         [nm toString]
-        [["#[" + (__render-table-with self (fn (v) [v inspect]))] + "]"])))
+        [["#[" + [self renderEntriesWith: (fn (v) [v inspect])]] + "]"])))
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; :asString — collect positional Chars into a String. raises if any

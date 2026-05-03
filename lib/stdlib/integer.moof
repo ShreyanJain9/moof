@@ -55,3 +55,23 @@
 (defmethod Integer (upto: hi) (if [self >= hi]
         nil
         (cons self [[self + 1] upto: hi])))
+
+;; [n asHexChar] — interpret self as a hex digit (0..15) and return
+;; the corresponding ASCII Char ('0'..'9' / 'a'..'f').
+(defmethod Integer (asHexChar)
+  [(if [self < 10]
+       [self + 48]                ;; ASCII '0' = 48
+       [self + 87])               ;; ASCII 'a' = 97 = 87 + 10
+   asChar])
+
+;; [n asHexString] — render `self` in lowercase hex, no prefix.
+;; recursive: prepend the low nibble's char to the higher digits.
+(defmethod Integer (asHexString)
+  (if [self = 0]
+      "0"
+      [self __asHexAcc: ""]))
+
+(defmethod Integer (__asHexAcc: acc)
+  (if [self = 0]
+      acc
+      [[self / 16] __asHexAcc: [[[self mod: 16] asHexChar toString] + acc]]))

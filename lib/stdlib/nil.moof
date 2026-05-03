@@ -47,3 +47,6 @@
 (defmethod nil (product) 1)
 (defmethod nil (countWhere: pred) 0)
 (defmethod nil (last) nil)
+(defmethod nil (asPositionalTable) [Table new])
+(defmethod nil (joinedBy: sep) "")
+(defmethod nil (joinedBy: sep with: f) "")

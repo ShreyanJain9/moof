@@ -36,20 +36,22 @@
 ;; lookup; the algorithm is here.
 ;; ─────────────────────────────────────────────────────────────────
 
-(def __reflect-into-table
-  (fn (keys lookup)
-    (let ((tbl [Table new]))
-      [keys forEach: (fn (k) [tbl at: k put: (lookup k)])]
-      tbl)))
-
+;; build a keyed Table from the receiver's <kind>-keys list, looking
+;; up each value via the corresponding accessor.
 (defmethod Object (slots)
-  (__reflect-into-table [self slotKeys] (fn (k) (slot self k))))
+  (let ((tbl [Table new]))
+    [[self slotKeys] forEach: (fn (k) [tbl at: k put: (slot self k)])]
+    tbl))
 
 (defmethod Object (handlers)
-  (__reflect-into-table [self handlerKeys] (fn (k) [self handlerAt: k])))
+  (let ((tbl [Table new]))
+    [[self handlerKeys] forEach: (fn (k) [tbl at: k put: [self handlerAt: k]])]
+    tbl))
 
 (defmethod Object (meta)
-  (__reflect-into-table [self metaKeys] (fn (k) [self metaAt: k])))
+  (let ((tbl [Table new]))
+    [[self metaKeys] forEach: (fn (k) [tbl at: k put: [self metaAt: k]])]
+    tbl))
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; :protos / :satisfies?: — proto-chain walks. honors
@@ -61,12 +63,7 @@
           nil
           (cons p [p protos]))))
 
-(defmethod Object (satisfies?: v) (__satisfies-walk self [v protos]))
-
-(def __satisfies-walk
-  (fn (target chain)
-    (if [chain is nil]
-        #false
-        (if [[chain car] is target]
-            #true
-            (__satisfies-walk target [chain cdr])))))
+;; [T satisfies?: v] — `#true` iff v's proto chain reaches T. uses
+;; Cons:any?: with an identity predicate against T.
+(defmethod Object (satisfies?: v)
+  [[v protos] any?: (fn (p) [p is self])])
