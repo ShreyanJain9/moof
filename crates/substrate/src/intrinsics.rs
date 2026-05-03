@@ -128,7 +128,6 @@ pub fn install(w: &mut World) {
     install_string_methods(w);
     install_table_methods(w);
     install_object_reflection(w);
-    install_method_methods(w);
     install_method_reflection(w);
     install_console_proto_and_caps(w);
     install_compiler_cap(w);
@@ -822,59 +821,11 @@ fn install_string_methods(w: &mut World) {
     // [[s byteLength] = 0] there.
 }
 
-/// :toString / :inspect on Method (covers Closure too).
-///
-/// `:toString` is concise — `<closure (x y)>` showing just the
-/// param list (read from the closure's `:params` slot). `:inspect`
-/// is the full source — `<closure source: (fn (x y) body)>`. native
-/// rust intrinsics carry a Symbol in `:source` meta; both
-/// selectors render those as `<method:name>`. proto-name short-
-/// circuit so `[Method toString]` → "Method".
-fn install_method_methods(w: &mut World) {
-    w.install_native(w.protos.method, "toString", |w, self_, _| {
-        if let Some(name) = proto_name_for(w, self_) {
-            return Ok(w.make_string(&name));
-        }
-        let id = match self_.as_form_id() {
-            Some(id) => id,
-            None => return Ok(w.make_string("<method>")),
-        };
-        // native intrinsics tag :source with a Symbol (the selector).
-        let source = w.heap.get(id).meta_at(w.source_sym);
-        if let Value::Sym(s) = source {
-            return Ok(w.make_string(&format!("<method:{}>", w.resolve(s))));
-        }
-        // closure / user method — render `<closure (params)>` from
-        // the `:params` slot directly, no source-introspection.
-        let params = w.heap.get(id).slot(w.params_sym);
-        let params_str = render_list_with(w, params, "toString")?;
-        Ok(w.make_string(&format!("<closure {}>", params_str)))
-    });
-
-    // :inspect — full source for closures, helpful for debugging.
-    w.install_native(w.protos.method, "inspect", |w, self_, _| {
-        if let Some(name) = proto_name_for(w, self_) {
-            return Ok(w.make_string(&name));
-        }
-        let id = match self_.as_form_id() {
-            Some(id) => id,
-            None => return Ok(w.make_string("<method>")),
-        };
-        let source = w.heap.get(id).meta_at(w.source_sym);
-        if source.is_nil() {
-            return Ok(w.make_string("<closure>"));
-        }
-        let text = match source {
-            Value::Sym(s) => format!("<method:{}>", w.resolve(s)),
-            Value::Form(_) => {
-                let inner = render_list_with(w, source, "inspect")?;
-                format!("<closure source: {}>", inner)
-            }
-            _ => "<closure>".to_string(),
-        };
-        Ok(w.make_string(&text))
-    });
-}
+// install_method_methods is gone — Method's :toString and :inspect
+// are moof, in stdlib/method.moof. they read :source / :params /
+// :name metas via existing primitives (`slot`, `__form-meta-at`)
+// and dispatch on the source's shape (Symbol → native, Cons →
+// closure, nil → bare).
 
 // ─────────────────────────────────────────────────────────────────
 // Method / Chunk / Closure reflection — `docs/laws/reflection-contract.md`

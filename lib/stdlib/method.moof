@@ -27,3 +27,35 @@
 ;; user methods can override either with their own annotation.
 (defmethod Method (purity) 'unknown)
 (defmethod Method (caps-required) nil)
+
+;; ─────────────────────────────────────────────────────────────────
+;; :toString and :inspect — dispatch on the :source meta.
+;;   - native intrinsics carry a Symbol :source (the selector) →
+;;     `<method:foo>` for both.
+;;   - user closures carry the original (fn …) Form as :source →
+;;     `<closure (params)>` for :toString, `<closure source: (fn …)>`
+;;     for :inspect.
+;;   - proto-Forms (Method itself, etc.) short-circuit to the :name
+;;     meta the substrate stamps on every named proto.
+;; ─────────────────────────────────────────────────────────────────
+
+(defmethod Method (toString)
+  (let ((nm (__form-meta-at self 'name)))
+    (if [[nm proto] is Symbol]
+        [nm toString]
+        (let ((src (__form-meta-at self 'source)))
+          (if [[src proto] is Symbol]
+              [["<method:" + [src toString]] + ">"]
+              (let ((p (slot self 'params)))
+                [["<closure " + (if [p is nil] "()" [p toString])] + ">"]))))))
+
+(defmethod Method (inspect)
+  (let ((nm (__form-meta-at self 'name)))
+    (if [[nm proto] is Symbol]
+        [nm toString]
+        (let ((src (__form-meta-at self 'source)))
+          (if [src is nil]
+              "<closure>"
+              (if [[src proto] is Symbol]
+                  [["<method:" + [src toString]] + ">"]
+                  [["<closure source: " + [src inspect]] + ">"]))))))
