@@ -115,6 +115,38 @@ producer drives, but they wrap pull-based primitives:
 ;; internally: spawns a fiber that pulls and dispatches.
 ```
 
+## infinite sources
+
+a DataSource subclass with this contract:
+
+- `:done?` always returns `#false`
+- `:close` is a no-op
+- `:next` always succeeds (no eof)
+
+two flavors share the same conformance test except in their `:peek`
+discipline:
+
+- **polled** (Clock-like): `:next` reads environment state. `:peek`
+  is `:next` (idempotent; no internal state to manage). examples:
+  Clock, atom-watch, mouse-position.
+- **generator** (Random-like): `:next` advances internal state and
+  returns. `:peek` stashes one value to return on next `:next` (or
+  computes-one-step-ahead — implementation chooses). examples:
+  Random, id-mints, fibonacci sequences.
+
+both pass `assert-infinite-source` (in `lib/stdlib/data-source.test.moof`).
+combinators (`:take:`, `:for-each:`, `:throttle:`, `:ticks:`) work
+on either flavor uniformly:
+
+```moof
+[Random take: 10]               ; → Cons of 10 fresh values
+[Clock ticks: 1s]               ; → stream that emits clock value once per second
+```
+
+protos that conform declare `:infinite-source #true` as a meta-slot;
+moof-side default methods in `lib/stdlib/data-source.moof` provide
+`:done?` and `:peek` defaults.
+
 ## backpressure
 
 backpressure is automatic for pull-based chains (slow consumer ⇒
