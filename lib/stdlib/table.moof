@@ -98,3 +98,27 @@
     (if [[nm proto] is Symbol]
         [nm toString]
         [["#[" + (__render-table-with self (fn (v) [v inspect]))] + "]"])))
+
+;; ─────────────────────────────────────────────────────────────────
+;; :asString — collect positional Chars into a String. raises if any
+;; positional entry isn't a Char.
+;; :as: — protocol coercion to String / Cons / Table.
+;; ─────────────────────────────────────────────────────────────────
+
+(defmethod Table (asString)
+  [[self toList] reduce:
+    (fn (acc c)
+      (if [[c proto] is Char]
+          [acc + [c toString]]
+          (raise: 'type-error
+                  "asString: every positional entry must be a Char")))
+    from: ""])
+
+(defmethod Table (as: target)
+  (if [target is String]
+      [self asString]
+      (if [target is Cons]
+          [self toList]
+          (if [target is Table]
+              self
+              (raise: 'type-error "Table:as: expects String, Cons, or Table")))))

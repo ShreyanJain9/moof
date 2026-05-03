@@ -373,68 +373,10 @@ fn install_table_methods(w: &mut World) {
     // positional via [t at: i], keyed via [keys drop: length],
     // join via the closure passed in.
 
-    // [t asString] — collect positional Chars into a String. raises
-    // if any positional entry isn't a Char.
-    w.install_native(w.protos.table, "asString", |w, self_, _| {
-        let entries: Vec<Value> = match w.table_repr(self_) {
-            Some(r) => r.positional.clone(),
-            None => {
-                return Err(RaiseError::new(
-                    w.intern("type-error"),
-                    "asString on non-Table",
-                ));
-            }
-        };
-        let mut out = String::new();
-        for v in entries {
-            match v {
-                Value::Char(cp) => {
-                    if let Some(c) = char::from_u32(cp) {
-                        out.push(c);
-                    }
-                }
-                _ => {
-                    return Err(RaiseError::new(
-                        w.intern("type-error"),
-                        "asString: every positional entry must be a Char",
-                    ));
-                }
-            }
-        }
-        Ok(w.make_string(&out))
-    });
-
-    // [t as: String] — protocol-style coercion. arg is a proto-Form.
-    w.install_native(w.protos.table, "as:", |w, self_, args| {
-        let target = args.first().copied().unwrap_or(Value::Nil);
-        let table_proto = Value::Form(w.protos.table);
-        let string_proto = Value::Form(w.protos.string);
-        let list_proto = Value::Form(w.protos.cons);
-        if target == string_proto {
-            let sel = w.intern("asString");
-            return w.send(self_, sel, &[]);
-        }
-        if target == table_proto {
-            return Ok(self_);
-        }
-        if target == list_proto {
-            // a Table's positional entries as a List.
-            let entries: Vec<Value> = match w.table_repr(self_) {
-                Some(r) => r.positional.clone(),
-                None => Vec::new(),
-            };
-            return Ok(w.make_list(&entries));
-        }
-        Err(RaiseError::new(
-            w.intern("conversion"),
-            "Table can be converted as: String, List, Table",
-        ))
-    });
+    // :asString and :as: live in stdlib/table.moof — moof code uses
+    // [self toList] + Cons:reduce: + [c toString] for concatenation.
 }
 
-/// recursive table rendering with a user-chosen per-element
-/// selector. `:toString` and `:inspect` differ only in which
-/// selector each element gets sent — the `#[…]` shape is shared.
 // ─────────────────────────────────────────────────────────────────
 // Char — tagged-immediate Unicode scalar.
 // strings iterate to Chars; `[s at: i]` returns a Char.
