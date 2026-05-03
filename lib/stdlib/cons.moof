@@ -98,3 +98,41 @@
             #false)))
 
 (defmethod Cons (!= other) [[self = other] not])
+
+;; ─────────────────────────────────────────────────────────────────
+;; :toString / :inspect — render a list as `(elem elem …)`. each
+;; element renders through its own :toString or :inspect; the comma-
+;; less spacing matches Lisp tradition.
+;;
+;; proto-Form short-circuit: any Form with a `:name` meta (Cons,
+;; user subprotos, …) is the proto-Form itself, not an instance —
+;; render its name. for instances, walk the spine recursively.
+;; ─────────────────────────────────────────────────────────────────
+
+(def __cons-join-toString
+  (fn (xs)
+    (if [xs empty?]
+        ""
+        (if [[xs cdr] empty?]
+            [[xs car] toString]
+            [[[xs car] toString] + [" " + (__cons-join-toString [xs cdr])]]))))
+
+(def __cons-join-inspect
+  (fn (xs)
+    (if [xs empty?]
+        ""
+        (if [[xs cdr] empty?]
+            [[xs car] inspect]
+            [[[xs car] inspect] + [" " + (__cons-join-inspect [xs cdr])]]))))
+
+(defmethod Cons (toString)
+  (let ((nm (__form-meta-at self 'name)))
+    (if [nm is nil]
+        [["(" + (__cons-join-toString self)] + ")"]
+        [nm toString])))
+
+(defmethod Cons (inspect)
+  (let ((nm (__form-meta-at self 'name)))
+    (if [nm is nil]
+        [["(" + (__cons-join-inspect self)] + ")"]
+        [nm toString])))

@@ -128,7 +128,6 @@ pub fn install(w: &mut World) {
     install_string_methods(w);
     install_table_methods(w);
     install_object_reflection(w);
-    install_list_methods(w);
     install_method_methods(w);
     install_method_reflection(w);
     install_console_proto_and_caps(w);
@@ -1771,30 +1770,11 @@ fn make_cons_method(w: &mut World, self_: Value, args: &[Value]) -> Result<Value
 // List (cons-cell) methods
 // ─────────────────────────────────────────────────────────────────
 
-fn install_list_methods(w: &mut World) {
-    // List :toString — recursive `(elem1 elem2 ...)` rendering.
-    // each element renders via its own :toString. proto-name
-    // short-circuit so `[List toString]` → "List" (not "()").
-    // STAYS IN RUST because the recursive renderer is already
-    // tested-and-correct and the moof recursion would re-allocate
-    // a String for every cons cell. (movable later if perf doesn't
-    // matter.)
-    w.install_native(w.protos.cons, "toString", |w, self_, _| {
-        if let Some(name) = proto_name_for(w, self_) {
-            return Ok(w.make_string(&name));
-        }
-        let s = render_list_with(w, self_, "toString")?;
-        Ok(w.make_string(&s))
-    });
-
-    w.install_native(w.protos.cons, "inspect", |w, self_, _| {
-        if let Some(name) = proto_name_for(w, self_) {
-            return Ok(w.make_string(&name));
-        }
-        let s = render_list_with(w, self_, "inspect")?;
-        Ok(w.make_string(&s))
-    });
-}
+// install_list_methods is gone — every Cons method lives in moof:
+//   - early/00-cons.moof: :car, :cdr, :cons:, :empty?, :null?,
+//     :nonEmpty?, :length, :reverse (via list-primitives)
+//   - stdlib/cons.moof: the rest, including :toString / :inspect
+//     (which use moof spine recursion + Char codepoint escapes).
 
 /// recursive list rendering with a user-chosen per-element selector.
 /// `:toString` and `:inspect` differ only in which selector each
