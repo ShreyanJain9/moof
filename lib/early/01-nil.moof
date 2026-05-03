@@ -1,9 +1,17 @@
 ;; lib/early/01-nil.moof
 ;;
-;; setHandler!-driven nil primitive methods. Phase 3 placeholder;
-;; Phase 4 fills in `:length, :car, :cdr, :empty?, :reverse, :append:,
-;; :proto, :toString, :inspect, :cons:` — the canonical nil methods
-;; that supersede both the rust shadow installs in intrinsics.rs AND
-;; the bootstrap.moof defmethod shadows further down.
+;; nil primitives that must exist BEFORE defmethod runs — :empty?
+;; (used by __decode-header), :cons: (used by (cons head nil) which
+;; happens in macro expansion). everything else (length, car, cdr,
+;; reverse, append:, etc.) lives in stdlib/nil.moof.
+;;
+;; setHandler!-driven because defmethod itself is later in the boot.
 
-;; (intentionally empty in Phase 3.)
+(setHandler! nil 'empty? (fn () #true))
+(setHandler! nil 'cons:
+  (fn (x) (__alloc-cons x self)))
+
+;; nil is its own proto — singleton. without this override, Object's
+;; :proto returns the hidden nil-proto-Form (which would leak the
+;; substrate-level structure).
+(setHandler! nil 'proto (fn () nil))

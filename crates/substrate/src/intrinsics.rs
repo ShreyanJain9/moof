@@ -125,8 +125,6 @@ pub fn install(w: &mut World) {
     install_integer_methods(w);
     install_float_methods(w);
     install_symbol_methods(w);
-    install_bool_methods(w);
-    install_nil_methods(w);
     install_char_methods(w);
     install_string_methods(w);
     install_table_methods(w);
@@ -1783,57 +1781,6 @@ fn install_symbol_methods(_: &mut World) {
     // "Symbol" via :name (Object's same default handler).
 }
 
-/// Bool methods all flow through the conditional primitive `if`
-/// and live in `lib/bootstrap.moof`: `=`, `!=` (Object identity),
-/// `not`, `toString`, `and:`, `or:`. nothing in this rust module.
-fn install_bool_methods(_: &mut World) {}
-
-/// Nil-proto only carries one rust primitive: `:cons:`, which
-/// allocates a fresh List cell. everything else (`=`, `!=`,
-/// `toString`, `head`, `tail`, `null?`, `empty?`, `length`,
-/// `map:`, `filter:`, `reduce:from:`, …) lives in
-/// `lib/bootstrap.moof`.
-fn install_nil_methods(w: &mut World) {
-    w.install_native(w.protos.nil, "cons:", make_cons_method);
-    // nil-as-empty-list: `:length` returns 0, `:head`/`:tail` return
-    // nil, `:empty?` returns true. used by the moof compiler
-    // (compile-send: `[args length]`) AND by `__decode-header` in
-    // bootstrap.moof (`[rest empty?]`), which `defmethod` itself
-    // depends on — so :empty? must exist before any `(defmethod …)`
-    // runs.
-    w.install_native(w.protos.nil, "length", |_, _, _| Ok(Value::Int(0)));
-    w.install_native(w.protos.nil, "car", |_, _, _| Ok(Value::Nil));
-    w.install_native(w.protos.nil, "cdr", |_, _, _| Ok(Value::Nil));
-    w.install_native(w.protos.nil, "empty?", |_, _, _| Ok(Value::Bool(true)));
-    // nil-as-empty-list: reverse of nothing is nothing.
-    w.install_native(w.protos.nil, "reverse", |_, _, _| Ok(Value::Nil));
-    // nil-as-empty-list: appending xs to nothing is xs. moof's
-    // List :reverse (defined later in bootstrap.moof) recurses
-    // and bottoms out on `[nil append: …]`, so this needs to
-    // exist before any defmethod with kw header is expanded.
-    w.install_native(w.protos.nil, "append:", |_, _, args| {
-        Ok(args[0])
-    });
-
-    // nil is its own proto — singleton. there is no separate
-    // `Nil-proto` namespace pollution; from moof's view, `[nil proto]`
-    // returns nil itself. the substrate-level proto-Form
-    // (`world.protos.nil`) still exists internally to host nil's
-    // handlers, but it's not exposed as a global. observationally,
-    // nil is a singleton object that is its own proto.
-    w.install_native(w.protos.nil, "proto", |_, _, _| Ok(Value::Nil));
-    // toString/inspect: explicit "nil" so receiver-as-proto-Form
-    // (the rare `[[nil proto] toString]` path before the overridden
-    // :proto kicks in) still says "nil" rather than dispatching
-    // through Object's :name lookup.
-    w.install_native(w.protos.nil, "toString", |w, _, _| {
-        Ok(w.make_string("nil"))
-    });
-    w.install_native(w.protos.nil, "inspect", |w, _, _| {
-        Ok(w.make_string("nil"))
-    });
-}
-
 /// `(cons h tail)` — allocate a List cell. shared by Nil-proto
 /// and List, since the heap operation is identical: head + tail
 /// in a fresh Form whose proto is List.
@@ -2739,6 +2686,38 @@ fn install_globals(w: &mut World) {
         })?;
         let text = world.resolve(sym);
         Ok(Value::Bool(text.ends_with(':')))
+    });
+
+    // (__alloc-cons head tail) — heap-alloc a fresh Cons cell. used
+    // by moof-side `:cons:` handlers on nil and Cons (now defined in
+    // early/00-cons.moof and early/01-nil.moof).
+    install_global(w, "__alloc-cons", |world, _self, args| {
+        if args.len() != 2 {
+            return Err(raise(world, "arity", "(__alloc-cons head tail)"));
+        }
+        let mut cell = Form::with_proto(Value::Form(world.protos.cons));
+        cell.slots.insert(world.car_sym, args[0]);
+        cell.slots.insert(world.cdr_sym, args[1]);
+        Ok(Value::Form(world.alloc(cell)))
+    });
+
+    // (__form-name v) — return the proto-Form's `:name` meta as a
+    // String, or "Object" for tagged immediates / unknown values.
+    // backs Object's :toString fallback when the moof-side default
+    // is in play.
+    install_global(w, "__form-name", |world, _self, args| {
+        let v = args.first().copied().unwrap_or(Value::Nil);
+        let name_sym = world.intern("name");
+        if let Value::Form(id) = v {
+            let name_v = world.heap.get(id).meta_at(name_sym);
+            if let Some(s) = world.string_text(name_v) {
+                return Ok(world.make_string(&s.to_string()));
+            }
+            if let Value::Sym(sym) = name_v {
+                return Ok(world.make_string(&world.resolve(sym).to_string()));
+            }
+        }
+        Ok(world.make_string("Object"))
     });
 }
 

@@ -29,6 +29,12 @@
 [$transporter load: "early/09-defmethod.moof"]
 
 ;; phase 3: stdlib — defmethod-driven, regular moof code.
+;;
+;; can't cascade these via `;` syntax because __cascade__'s macro
+;; expansion calls Cons:map: which lives in stdlib/cons.moof —
+;; circular. plain sends bootstrap-cleanly. (could rewrite
+;; __cascade__ to use free-function primitives instead; future
+;; cleanup if we miss the ; sugar enough.)
 [$transporter load: "stdlib/object.moof"]
 [$transporter load: "stdlib/bool.moof"]
 [$transporter load: "stdlib/nil.moof"]

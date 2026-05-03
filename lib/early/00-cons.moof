@@ -1,15 +1,17 @@
 ;; lib/early/00-cons.moof
 ;;
-;; setHandler!-driven Cons primitive methods. Phase 3 (file split)
-;; leaves this as a placeholder; Phase 4 (rust→moof migration) fills
-;; it in with `:length`, `:reverse`, `:empty?`, `:null?`, `:toString`,
-;; `:inspect`, plus any other Cons primitives that move out of
-;; intrinsics.rs.
+;; Cons primitives that must exist BEFORE defmethod runs — :cons:
+;; (heap alloc, used by the (cons head tail) global which is hit
+;; during macro expansion via __decode-keyword), plus the trivial
+;; :empty?, :null?, :nonEmpty? predicates.
 ;;
-;; load order rationale: Cons methods are needed by `__qq-walk-elems`
-;; (uses `[forms car]` and `[forms cdr]` — free-function primitives,
-;; not method sends, so technically not blocking), and by the entire
-;; rest of bootstrap. installing them first keeps the load-order story
-;; clean for readers.
+;; setHandler!-driven because defmethod itself is later in the boot
+;; (in early/09-defmethod.moof). everything else (length, reverse,
+;; map, filter, …) lives in stdlib/cons.moof.
 
-;; (intentionally empty in Phase 3.)
+(setHandler! Cons 'cons:
+  (fn (x) (__alloc-cons x self)))
+
+(setHandler! Cons 'empty? (fn () #false))
+(setHandler! Cons 'null? (fn () #false))
+(setHandler! Cons 'nonEmpty? (fn () #true))
