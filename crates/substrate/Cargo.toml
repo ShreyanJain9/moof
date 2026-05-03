@@ -22,6 +22,11 @@ wasmtime = { version = "26", default-features = false, features = ["cranelift", 
 wasmtime-wasi = "26"
 blake3 = "1"   # temporary; superseded by lib/mcos/hash/ in Phase I
 
+[dev-dependencies]
+# WAT text-format compiler used only in tests. production code
+# works with pre-compiled .wasm binaries; tests use inline WAT.
+wat = "1"
+
 [[bin]]
 name = "moof"
 path = "src/main.rs"

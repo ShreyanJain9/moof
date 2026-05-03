@@ -31,6 +31,7 @@
 //! load-time anonymity holds: the substrate doesn't know what the
 //! mco's proto is "called". the moof program names it by `def`.
 
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
 use wasmtime::{Engine, Instance, Linker, Module, Store};
@@ -38,8 +39,54 @@ use wasmtime_wasi::preview1::WasiP1Ctx;
 use wasmtime_wasi::WasiCtxBuilder;
 
 use crate::form::Form;
+use crate::sym::SymId;
 use crate::value::Value;
 use crate::world::{RaiseError, World};
+
+thread_local! {
+    /// pinned World pointer for the duration of an mco dispatch.
+    /// SAFETY: substrate is single-threaded per vat; pin ↔ unpin
+    /// via DispatchGuard ensures the pointer is only dereferenced
+    /// while the World is alive and not otherwise borrowed.
+    static DISPATCH_WORLD: Cell<*mut World> = Cell::new(std::ptr::null_mut());
+
+    /// per-dispatch handle table. allocated on dispatch entry,
+    /// cleared on dispatch exit (including raise paths via Drop).
+    /// pub so that tests and the trampoline (C4) can inspect handles
+    /// after a wasm call returns.
+    pub static DISPATCH_HANDLE_TABLE: RefCell<HandleTable> = RefCell::new(HandleTable::new());
+}
+
+/// RAII guard for an mco dispatch's thread-local state.
+/// pin a World and clear the handle table on construction;
+/// unpin and clear on Drop (including panic-unwind / wasmtime trap).
+pub struct DispatchGuard {
+    _private: (),
+}
+
+impl DispatchGuard {
+    /// begin an mco dispatch: pin the world pointer, clear any
+    /// stale handles. returns a guard that cleans up on drop.
+    pub fn begin(world: &mut World) -> Self {
+        DISPATCH_WORLD.with(|cell| cell.set(world as *mut World));
+        DISPATCH_HANDLE_TABLE.with(|t| t.borrow_mut().clear());
+        Self { _private: () }
+    }
+}
+
+impl Drop for DispatchGuard {
+    fn drop(&mut self) {
+        DISPATCH_WORLD.with(|cell| cell.set(std::ptr::null_mut()));
+        DISPATCH_HANDLE_TABLE.with(|t| t.borrow_mut().clear());
+    }
+}
+
+/// look up the current dispatch's World. panics if called outside dispatch.
+fn current_world() -> *mut World {
+    let p = DISPATCH_WORLD.with(|cell| cell.get());
+    assert!(!p.is_null(), "moof import called outside dispatch");
+    p
+}
 
 /// Per-dispatch handle table. wasm-side u32 indexes into this Vec.
 /// Allocated at dispatch entry; dropped at dispatch exit (including
@@ -435,7 +482,7 @@ fn decode_manifest_form(
 }
 
 /// install substrate-provided functions into a wasmtime Linker.
-/// every wasm mco that imports something `extern "moof" fn …`
+/// every wasm mco that imports something in the "moof" wasm namespace
 /// resolves through here.
 ///
 /// the names + signatures form a stable abi surface the substrate
@@ -446,20 +493,194 @@ fn decode_manifest_form(
 ///
 /// the substrate doesn't fake-shim POSIX. clear separation:
 ///   "wasi" namespace  → standard system services
-///   "moof" namespace  → moof-specific (slot, send, raise, …)
+///   "moof" namespace  → moof-specific (raise, make_string, make_bytes,
+///                        string_text, bytes_data, intern)
 ///
-/// planned moof imports (coming as richer methods need them):
-/// - `intern(ptr, len) -> sym-handle`
-/// - `make_string(ptr, len) -> form-handle`
-/// - `slot(form-handle, sym-handle) -> value-handle`
-/// - `slot_set(form-handle, sym-handle, value-handle)`
-/// - `send(receiver, sel, args-ptr, argc) -> value-handle`
-/// - `raise(kind-sym, msg-ptr, msg-len) -> traps`
-///
-/// the function is currently a no-op. left as a hook so the
-/// import-pipeline plumbing is in place; the first real moof-
-/// import lands when an mco needs slot access.
-fn install_moof_imports(_linker: &mut Linker<WasiP1Ctx>) -> wasmtime::Result<()> {
+/// all closures read/write the World and HandleTable through the
+/// DISPATCH_WORLD / DISPATCH_HANDLE_TABLE thread-locals set up by
+/// DispatchGuard::begin. no WasiP1Ctx-specific state is used, so
+/// the function is generic over the store context T.
+pub fn install_moof_imports<T: 'static>(linker: &mut Linker<T>) -> wasmtime::Result<()> {
+    use wasmtime::{Caller, Extern};
+
+    // helper: read a slice from wasm linear memory.
+    fn read_linmem<T>(
+        caller: &mut Caller<'_, T>,
+        ptr: u32,
+        len: u32,
+    ) -> wasmtime::Result<Vec<u8>> {
+        let mem = caller
+            .get_export("memory")
+            .and_then(Extern::into_memory)
+            .ok_or_else(|| wasmtime::Error::msg("wasm module has no memory export"))?;
+        let data = mem.data(caller);
+        let start = ptr as usize;
+        let end = start
+            .checked_add(len as usize)
+            .ok_or_else(|| wasmtime::Error::msg("moof import: ptr+len overflow"))?;
+        if end > data.len() {
+            return Err(wasmtime::Error::msg("moof import: ptr+len out of bounds"));
+        }
+        Ok(data[start..end].to_vec())
+    }
+
+    // helper: write bytes into wasm linear memory at ptr (capped at cap).
+    // returns the total (uncapped) length so the caller can size-check.
+    fn write_linmem<T>(
+        caller: &mut Caller<'_, T>,
+        ptr: u32,
+        cap: u32,
+        bytes: &[u8],
+    ) -> wasmtime::Result<usize> {
+        let to_write = bytes.len().min(cap as usize);
+        let mem = caller
+            .get_export("memory")
+            .and_then(Extern::into_memory)
+            .ok_or_else(|| wasmtime::Error::msg("wasm module has no memory export"))?;
+        let start = ptr as usize;
+        let end = start
+            .checked_add(to_write)
+            .ok_or_else(|| wasmtime::Error::msg("moof import: write ptr+cap overflow"))?;
+        let data = mem.data_mut(caller);
+        if end > data.len() {
+            return Err(wasmtime::Error::msg(
+                "moof import: write ptr+cap out of bounds",
+            ));
+        }
+        data[start..end].copy_from_slice(&bytes[..to_write]);
+        Ok(bytes.len())
+    }
+
+    // moof_raise(kind_handle, msg_ptr, msg_len) — traps with a structured
+    // error message that the trampoline (C4) will decode into a RaiseError.
+    linker.func_wrap(
+        "moof",
+        "moof_raise",
+        |mut caller: Caller<'_, T>,
+         kind_handle: u32,
+         msg_ptr: u32,
+         msg_len: u32|
+         -> wasmtime::Result<()> {
+            let msg_bytes = read_linmem(&mut caller, msg_ptr, msg_len)?;
+            let msg = String::from_utf8_lossy(&msg_bytes).into_owned();
+            let kind_str = DISPATCH_HANDLE_TABLE
+                .with(|t| {
+                    let table = t.borrow();
+                    table.get(kind_handle).and_then(|v| {
+                        if let Value::Sym(sid) = v {
+                            let sid = *sid;
+                            // SAFETY: pointer valid within dispatch (see DispatchGuard).
+                            let world: &World = unsafe { &*current_world() };
+                            Some(world.resolve(sid).to_string())
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .unwrap_or_else(|| "moof-raise".to_string());
+            // encode kind+msg into the trap message so C4's trampoline
+            // can reconstruct the RaiseError without an extra side-channel.
+            Err(wasmtime::Error::msg(format!(
+                "__moof_raise__:{}:{}",
+                kind_str, msg
+            )))
+        },
+    )?;
+
+    // moof_make_string(ptr, len) -> handle
+    linker.func_wrap(
+        "moof",
+        "moof_make_string",
+        |mut caller: Caller<'_, T>, ptr: u32, len: u32| -> wasmtime::Result<u32> {
+            let bytes = read_linmem(&mut caller, ptr, len)?;
+            let s = String::from_utf8_lossy(&bytes).into_owned();
+            // SAFETY: pointer valid within dispatch (see DispatchGuard).
+            let world: &mut World = unsafe { &mut *current_world() };
+            let v = world.make_string(&s);
+            Ok(DISPATCH_HANDLE_TABLE.with(|t| t.borrow_mut().push(v)))
+        },
+    )?;
+
+    // moof_make_bytes(ptr, len) -> handle
+    linker.func_wrap(
+        "moof",
+        "moof_make_bytes",
+        |mut caller: Caller<'_, T>, ptr: u32, len: u32| -> wasmtime::Result<u32> {
+            let bytes = read_linmem(&mut caller, ptr, len)?;
+            // SAFETY: pointer valid within dispatch (see DispatchGuard).
+            let world: &mut World = unsafe { &mut *current_world() };
+            let v = world.make_bytes(&bytes);
+            Ok(DISPATCH_HANDLE_TABLE.with(|t| t.borrow_mut().push(v)))
+        },
+    )?;
+
+    // moof_string_text(handle, buf, cap) -> u32 (actual byte length)
+    // writes min(actual, cap) bytes into buf; returns actual length
+    // so the caller can detect truncation or pre-size a second call.
+    linker.func_wrap(
+        "moof",
+        "moof_string_text",
+        |mut caller: Caller<'_, T>,
+         handle: u32,
+         buf: u32,
+         cap: u32|
+         -> wasmtime::Result<u32> {
+            let bytes_owned = DISPATCH_HANDLE_TABLE
+                .with(|t| {
+                    let table = t.borrow();
+                    let v = table.get(handle).copied()?;
+                    // SAFETY: pointer valid within dispatch (see DispatchGuard).
+                    let world: &World = unsafe { &*current_world() };
+                    world.string_bytes(v).map(|b| b.to_vec())
+                })
+                .ok_or_else(|| {
+                    wasmtime::Error::msg("moof_string_text: handle is not a String")
+                })?;
+            let actual = write_linmem(&mut caller, buf, cap, &bytes_owned)?;
+            Ok(actual as u32)
+        },
+    )?;
+
+    // moof_bytes_data(handle, buf, cap) -> u32 (actual byte length)
+    linker.func_wrap(
+        "moof",
+        "moof_bytes_data",
+        |mut caller: Caller<'_, T>,
+         handle: u32,
+         buf: u32,
+         cap: u32|
+         -> wasmtime::Result<u32> {
+            let bytes_owned = DISPATCH_HANDLE_TABLE
+                .with(|t| {
+                    let table = t.borrow();
+                    let v = table.get(handle).copied()?;
+                    // SAFETY: pointer valid within dispatch (see DispatchGuard).
+                    let world: &World = unsafe { &*current_world() };
+                    world.bytes_data(v).map(|b| b.to_vec())
+                })
+                .ok_or_else(|| {
+                    wasmtime::Error::msg("moof_bytes_data: handle is not a Bytes value")
+                })?;
+            let actual = write_linmem(&mut caller, buf, cap, &bytes_owned)?;
+            Ok(actual as u32)
+        },
+    )?;
+
+    // moof_intern(ptr, len) -> handle (Symbol)
+    linker.func_wrap(
+        "moof",
+        "moof_intern",
+        |mut caller: Caller<'_, T>, ptr: u32, len: u32| -> wasmtime::Result<u32> {
+            let bytes = read_linmem(&mut caller, ptr, len)?;
+            let s = std::str::from_utf8(&bytes)
+                .map_err(|_| wasmtime::Error::msg("moof_intern: invalid utf-8"))?;
+            // SAFETY: pointer valid within dispatch (see DispatchGuard).
+            let world: &mut World = unsafe { &mut *current_world() };
+            let sid: SymId = world.intern(s);
+            Ok(DISPATCH_HANDLE_TABLE.with(|t| t.borrow_mut().push(Value::Sym(sid))))
+        },
+    )?;
+
     Ok(())
 }
 

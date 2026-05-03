@@ -282,3 +282,308 @@ fn bytes_proto_is_distinct_from_string() {
     let b_proto = world.proto_of(b);
     assert_ne!(s_proto, b_proto);
 }
+
+// ─────────────────────────────────────────────────────────────────
+// moof import ABI tests — each import exercised via a WAT module.
+//
+// we use a Store<()> (unit context) so these tests have zero WASI
+// setup cost. install_moof_imports is generic over T, so it accepts
+// Linker<()> directly. DispatchGuard + DISPATCH_HANDLE_TABLE are
+// set up manually around each call.call().
+// ─────────────────────────────────────────────────────────────────
+
+/// compile a WAT text string to a wasm binary, then create a Module.
+/// wasmtime is built without the `wat` feature to keep dependencies
+/// lean, so we use the standalone `wat` crate in tests.
+fn module_from_wat(engine: &wasmtime::Engine, wat_text: &str) -> wasmtime::Module {
+    let binary = wat::parse_str(wat_text).expect("WAT parse failed");
+    wasmtime::Module::from_binary(engine, &binary).expect("Module::from_binary failed")
+}
+
+/// build a wasmtime Engine + Linker<()> with the 6 moof imports
+/// registered. helper shared by all import tests below.
+fn make_moof_linker() -> (wasmtime::Engine, wasmtime::Linker<()>) {
+    let engine = wasmtime::Engine::default();
+    let mut linker: wasmtime::Linker<()> = wasmtime::Linker::new(&engine);
+    moof::wasm::install_moof_imports(&mut linker)
+        .expect("install_moof_imports should not fail");
+    (engine, linker)
+}
+
+#[test]
+fn moof_import_make_string_roundtrip() {
+    // WAT: write "hello" at offset 0, call moof_make_string(0, 5),
+    // return the handle.
+    let wat = r#"
+        (module
+          (import "moof" "moof_make_string" (func $ms (param i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "hello")
+          (func (export "go") (result i32)
+            i32.const 0
+            i32.const 5
+            call $ms))
+    "#;
+    let (engine, linker) = make_moof_linker();
+    let module = module_from_wat(&engine, wat);
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = linker.instantiate(&mut store, &module).unwrap();
+    let go = instance
+        .get_typed_func::<(), i32>(&mut store, "go")
+        .unwrap();
+
+    let mut world = moof::world::World::new();
+    let _guard = moof::wasm::DispatchGuard::begin(&mut world);
+    let handle = go.call(&mut store, ()).unwrap() as u32;
+
+    // retrieve the value from the handle table and validate.
+    let v = moof::wasm::DISPATCH_HANDLE_TABLE
+        .with(|t| t.borrow().get(handle).copied())
+        .expect("handle should exist");
+    assert_eq!(
+        world.string_bytes(v),
+        Some(b"hello".as_slice()),
+        "make_string roundtrip failed"
+    );
+}
+
+#[test]
+fn moof_import_make_bytes_roundtrip() {
+    // WAT: write bytes [0xDE, 0xAD, 0xBE, 0xEF] at offset 8,
+    // call moof_make_bytes(8, 4), return the handle.
+    let wat = r#"
+        (module
+          (import "moof" "moof_make_bytes" (func $mb (param i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 8) "\de\ad\be\ef")
+          (func (export "go") (result i32)
+            i32.const 8
+            i32.const 4
+            call $mb))
+    "#;
+    let (engine, linker) = make_moof_linker();
+    let module = module_from_wat(&engine, wat);
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = linker.instantiate(&mut store, &module).unwrap();
+    let go = instance
+        .get_typed_func::<(), i32>(&mut store, "go")
+        .unwrap();
+
+    let mut world = moof::world::World::new();
+    let _guard = moof::wasm::DispatchGuard::begin(&mut world);
+    let handle = go.call(&mut store, ()).unwrap() as u32;
+
+    let v = moof::wasm::DISPATCH_HANDLE_TABLE
+        .with(|t| t.borrow().get(handle).copied())
+        .expect("handle should exist");
+    assert_eq!(
+        world.bytes_data(v),
+        Some(&[0xDE, 0xAD, 0xBE, 0xEF][..]),
+        "make_bytes roundtrip failed"
+    );
+}
+
+#[test]
+fn moof_import_string_text_roundtrip() {
+    // WAT: moof_make_string("world"), then moof_string_text back into
+    // a different buffer, return actual length.
+    let wat = r#"
+        (module
+          (import "moof" "moof_make_string" (func $ms  (param i32 i32) (result i32)))
+          (import "moof" "moof_string_text" (func $st  (param i32 i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "world")
+          (func (export "go") (result i32)
+            ;; make string from bytes at 0, len 5 → handle in local 0
+            (local $h i32)
+            i32.const 0
+            i32.const 5
+            call $ms
+            local.set $h
+            ;; read it back into offset 64, capacity 32
+            local.get $h
+            i32.const 64
+            i32.const 32
+            call $st))
+    "#;
+    let (engine, linker) = make_moof_linker();
+    let module = module_from_wat(&engine, wat);
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = linker.instantiate(&mut store, &module).unwrap();
+    let go = instance
+        .get_typed_func::<(), i32>(&mut store, "go")
+        .unwrap();
+
+    let mut world = moof::world::World::new();
+    let _guard = moof::wasm::DispatchGuard::begin(&mut world);
+    let actual_len = go.call(&mut store, ()).unwrap() as u32;
+    assert_eq!(actual_len, 5, "moof_string_text should return actual length");
+
+    // verify the bytes were actually written into offset 64.
+    let mem = instance
+        .get_memory(&mut store, "memory")
+        .expect("memory export");
+    let buf = &mem.data(&store)[64..69];
+    assert_eq!(buf, b"world", "moof_string_text wrote wrong bytes");
+}
+
+#[test]
+fn moof_import_bytes_data_roundtrip() {
+    // WAT: moof_make_bytes([1,2,3]), then moof_bytes_data back into buffer.
+    let wat = r#"
+        (module
+          (import "moof" "moof_make_bytes"  (func $mb  (param i32 i32) (result i32)))
+          (import "moof" "moof_bytes_data"  (func $bd  (param i32 i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "\01\02\03")
+          (func (export "go") (result i32)
+            (local $h i32)
+            i32.const 0
+            i32.const 3
+            call $mb
+            local.set $h
+            local.get $h
+            i32.const 128
+            i32.const 16
+            call $bd))
+    "#;
+    let (engine, linker) = make_moof_linker();
+    let module = module_from_wat(&engine, wat);
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = linker.instantiate(&mut store, &module).unwrap();
+    let go = instance
+        .get_typed_func::<(), i32>(&mut store, "go")
+        .unwrap();
+
+    let mut world = moof::world::World::new();
+    let _guard = moof::wasm::DispatchGuard::begin(&mut world);
+    let actual_len = go.call(&mut store, ()).unwrap() as u32;
+    assert_eq!(actual_len, 3);
+
+    let mem = instance
+        .get_memory(&mut store, "memory")
+        .expect("memory export");
+    let buf = &mem.data(&store)[128..131];
+    assert_eq!(buf, &[1u8, 2, 3], "moof_bytes_data wrote wrong bytes");
+}
+
+#[test]
+fn moof_import_intern_produces_symbol() {
+    // WAT: moof_intern("ok") → handle. we verify it's a Symbol in
+    // the handle table after the call.
+    let wat = r#"
+        (module
+          (import "moof" "moof_intern" (func $intern (param i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "ok")
+          (func (export "go") (result i32)
+            i32.const 0
+            i32.const 2
+            call $intern))
+    "#;
+    let (engine, linker) = make_moof_linker();
+    let module = module_from_wat(&engine, wat);
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = linker.instantiate(&mut store, &module).unwrap();
+    let go = instance
+        .get_typed_func::<(), i32>(&mut store, "go")
+        .unwrap();
+
+    let mut world = moof::world::World::new();
+    let _guard = moof::wasm::DispatchGuard::begin(&mut world);
+    let handle = go.call(&mut store, ()).unwrap() as u32;
+
+    let v = moof::wasm::DISPATCH_HANDLE_TABLE
+        .with(|t| t.borrow().get(handle).copied())
+        .expect("handle should exist");
+    // must be a symbol whose text is "ok".
+    let sid = v.as_sym().expect("intern should produce a Sym value");
+    assert_eq!(world.resolve(sid), "ok", "interned symbol resolves to wrong text");
+}
+
+#[test]
+fn moof_import_raise_traps_with_structured_message() {
+    // WAT: intern "my-error" → kind handle, then moof_raise(kind, msg).
+    // we expect a wasmtime trap whose message contains __moof_raise__.
+    let wat = r#"
+        (module
+          (import "moof" "moof_intern"    (func $intern (param i32 i32) (result i32)))
+          (import "moof" "moof_raise"     (func $raise  (param i32 i32 i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0)  "my-error")
+          (data (i32.const 16) "something went wrong")
+          (func (export "go")
+            (local $k i32)
+            ;; intern "my-error" (len 8) → kind handle
+            i32.const 0
+            i32.const 8
+            call $intern
+            local.set $k
+            ;; raise(kind, msg_ptr=16, msg_len=20)
+            local.get $k
+            i32.const 16
+            i32.const 20
+            call $raise))
+    "#;
+    let (engine, linker) = make_moof_linker();
+    let module = module_from_wat(&engine, wat);
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = linker.instantiate(&mut store, &module).unwrap();
+    let go = instance
+        .get_typed_func::<(), ()>(&mut store, "go")
+        .unwrap();
+
+    let mut world = moof::world::World::new();
+    let _guard = moof::wasm::DispatchGuard::begin(&mut world);
+    let err = go.call(&mut store, ()).expect_err("moof_raise should trap");
+    // wasmtime wraps host errors in a wasm backtrace layer; walk the
+    // full std::error::Error source chain to find our structured message.
+    let full_chain = {
+        let mut chain = err.to_string();
+        let mut src: Option<&dyn std::error::Error> = err.source();
+        while let Some(e) = src {
+            chain.push('\n');
+            chain.push_str(&e.to_string());
+            src = e.source();
+        }
+        chain
+    };
+    assert!(
+        full_chain.contains("__moof_raise__"),
+        "error chain should contain __moof_raise__, got: {}",
+        full_chain
+    );
+    assert!(
+        full_chain.contains("my-error"),
+        "error chain should contain the kind name, got: {}",
+        full_chain
+    );
+    assert!(
+        full_chain.contains("something went wrong"),
+        "error chain should contain the error message, got: {}",
+        full_chain
+    );
+}
+
+#[test]
+fn dispatch_guard_clears_on_drop() {
+    // verify that the handle table is empty after the guard drops,
+    // even if a value was pushed during the "dispatch".
+    use moof::wasm::DISPATCH_HANDLE_TABLE;
+    let mut world = moof::world::World::new();
+    {
+        let _guard = moof::wasm::DispatchGuard::begin(&mut world);
+        DISPATCH_HANDLE_TABLE.with(|t| t.borrow_mut().push(moof::value::Value::Int(99)));
+        assert_eq!(
+            DISPATCH_HANDLE_TABLE.with(|t| t.borrow().len()),
+            1,
+            "handle should be present inside dispatch"
+        );
+    }
+    // guard dropped: table should be cleared.
+    assert_eq!(
+        DISPATCH_HANDLE_TABLE.with(|t| t.borrow().len()),
+        0,
+        "handle table should be cleared after DispatchGuard drops"
+    );
+}
