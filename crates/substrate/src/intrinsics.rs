@@ -71,18 +71,6 @@ fn str_arg<'a>(w: &'a mut World, v: Value, op: &str) -> Result<String, RaiseErro
     }
 }
 
-/// extract two Strings (`self_`, `args[0]`); for binary String ops.
-fn two_strs(
-    w: &mut World,
-    self_: Value,
-    other: Value,
-    op: &str,
-) -> Result<(String, String), RaiseError> {
-    let a = str_arg(w, self_, op)?;
-    let b = str_arg(w, other, op)?;
-    Ok((a, b))
-}
-
 /// extract a numeric argument as f64, type-errored against `op`.
 /// accepts Int (lossless promotion) and Float.
 fn num_f64(w: &mut World, v: Value, op: &str) -> Result<f64, RaiseError> {
@@ -90,32 +78,6 @@ fn num_f64(w: &mut World, v: Value, op: &str) -> Result<f64, RaiseError> {
         .ok_or_else(|| type_error(w, format!("{} expected a numeric rhs", op)))
 }
 
-/// shared `:slots` / `:handlers` / `:meta` rendering: snapshot a
-/// Form's IndexMap field as a Table, keyed by symbol → value, in
-/// insertion order.
-///
-/// per `concepts/forms.md` and `laws/reflection-contract.md` R7,
-/// these accessors return Tables (so `[v meta at: 'doc]` works the
-/// same as for any other Table). the snapshot is detached: mutating
-/// the returned Table does *not* propagate back to the source Form.
-/// phase-C live-views are a follow-up; the contract today is "you
-/// get a Table, you can iterate and at: it."
-fn form_table_to_table<F>(w: &mut World, id: FormId, table: F) -> Value
-where
-    F: Fn(&crate::form::Form) -> &indexmap::IndexMap<SymId, Value>,
-{
-    let pairs: Vec<(SymId, Value)> = table(w.heap.get(id))
-        .iter()
-        .map(|(k, v)| (*k, *v))
-        .collect();
-    let tbl = w.make_table();
-    if let Some(r) = w.table_repr_mut(tbl) {
-        for (k, v) in pairs {
-            r.keyed.insert(Value::Sym(k), v);
-        }
-    }
-    tbl
-}
 
 /// install all phase-A intrinsics. idempotent: safe to call once
 /// at world init.
@@ -130,7 +92,7 @@ pub fn install(w: &mut World) {
     install_object_reflection(w);
     install_cons_and_nil_primitives(w);
     install_heap_singleton(w);
-    install_method_reflection(w);
+    install_chunks_singleton(w);
     install_console_proto_and_caps(w);
     install_compiler_cap(w);
     install_globals(w);
@@ -930,175 +892,13 @@ fn decode_op_form(
     })
 }
 
-fn install_method_reflection(w: &mut World) {
-    // ensure the Opcode proto exists at install time, so global
-    // `Opcode` is bound from the start.
-    let _ = ensure_opcode_proto(w);
-    // [m body] — the chunk-Form (closure's `:body`, or self if a chunk).
-    w.install_native(w.protos.method, "body", |w, self_, _| {
-        let id = self_.as_form_id().ok_or_else(|| {
-            RaiseError::new(w.intern("type-error"), "body: receiver not a Form")
-        })?;
-        // Closure case: has a :body slot pointing at a chunk.
-        let body = w.heap.get(id).slot(w.body_sym);
-        if let Some(bid) = body.as_form_id() {
-            if w.chunk_ops.contains_key(&bid) {
-                return Ok(Value::Form(bid));
-            }
-        }
-        // chunk case: receiver is itself a chunk.
-        if w.chunk_ops.contains_key(&id) {
-            return Ok(Value::Form(id));
-        }
-        Ok(Value::Nil)
-    });
-
-    // [m source] — the source form stored in :source meta. nil if
-    // none (e.g. a bare-rust intrinsic).
-    // [m source] — handled by Object:source (native, returns nil for
-    // non-Form; same behavior as the old type-error stricter version
-    // for any actual Method-Form receiver).
-
-    // [m params] — a Table of param symbols.
-    w.install_native(w.protos.method, "params", |w, self_, _| {
-        let id = match self_.as_form_id() {
-            Some(i) => i,
-            None => return Ok(w.make_table()),
-        };
-        // params live on the closure or on the chunk; check both.
-        let mut params = w.heap.get(id).slot(w.params_sym);
-        if params.is_nil() {
-            if let Some(cid) = chunk_id_of(w, self_) {
-                params = w.heap.get(cid).slot(w.params_sym);
-            }
-        }
-        // walk the params List up front so we don't fight the
-        // borrow checker once we hold the table-rep mut.
-        let car_sym = w.intern("car");
-        let cdr_sym = w.intern("cdr");
-        let list_proto = Value::Form(w.protos.cons);
-        let mut items: Vec<Value> = Vec::new();
-        let mut cur = params;
-        while let Some(fid) = cur.as_form_id() {
-            let f = w.heap.get(fid);
-            if f.proto != list_proto {
-                break;
-            }
-            let head = f.slot(car_sym);
-            let tail = f.slot(cdr_sym);
-            if head.is_nil() && tail.is_nil() {
-                break;
-            }
-            items.push(head);
-            cur = tail;
-        }
-        let tbl = w.make_table();
-        if let Some(r) = w.table_repr_mut(tbl) {
-            for v in items {
-                r.positional.push(v);
-            }
-        }
-        Ok(tbl)
-    });
-
-    // [m consts] — a Table of the chunk's constants.
-    w.install_native(w.protos.method, "consts", |w, self_, _| {
-        let cid = match chunk_id_of(w, self_) {
-            Some(c) => c,
-            None => return Ok(w.make_table()),
-        };
-        let consts = w.chunk_consts.get(&cid).cloned().unwrap_or_default();
-        let tbl = w.make_table();
-        if let Some(r) = w.table_repr_mut(tbl) {
-            for v in consts {
-                r.positional.push(v);
-            }
-        }
-        Ok(tbl)
-    });
-
-    // [m bytecodes] — a Table of opcode-Forms decoded from the chunk.
-    // edit source → substrate re-derives → :bytecodes reflects it.
-    w.install_native(w.protos.method, "bytecodes", |w, self_, _| {
-        let cid = match chunk_id_of(w, self_) {
-            Some(c) => c,
-            None => return Ok(w.make_table()),
-        };
-        let ops = w.chunk_ops.get(&cid).cloned().unwrap_or_default();
-        let tbl = w.make_table();
-        for op in ops {
-            let v = opcode_form(w, op);
-            if let Some(r) = w.table_repr_mut(tbl) {
-                r.positional.push(v);
-            }
-        }
-        Ok(tbl)
-    });
-
-    // [m ics] — inline-cache snapshot. closes reflection-contract
-    // R6's promise: "an inline cache at a send-site is substrate-
-    // level state, but it's exposed as `[send-site cache-stats]`
-    // for inspection." returns a Table where each entry is a small
-    // Form (proto: Object) carrying `:cached-proto :cached-method
-    // :cached-defining :cached-generation`. unresolved sites
-    // appear as Forms whose four slots are all nil.
-    //
-    // ICs are *substrate-internal cache* (L5/R6 explicitly permit
-    // derived caches as long as the canonical source is reflected
-    // — bytecode IS derived from source, the IC is a hot-path
-    // optimization). this method makes the cache observable for
-    // tooling: a moldable inspector can show "what protos has this
-    // method's send-site #3 been resolving against?" — useful for
-    // debugging dispatch and for teaching the dispatch model.
-    w.install_native(w.protos.method, "ics", |w, self_, _| {
-        let cid = match chunk_id_of(w, self_) {
-            Some(c) => c,
-            None => return Ok(w.make_table()),
-        };
-        let ics = w.chunk_ics.get(&cid).cloned().unwrap_or_default();
-        let cached_proto_sym = w.intern("cached-proto");
-        let cached_method_sym = w.intern("cached-method");
-        let cached_defining_sym = w.intern("cached-defining");
-        let cached_generation_sym = w.intern("cached-generation");
-        let object_proto = Value::Form(w.protos.object);
-        let mut entries = Vec::with_capacity(ics.len());
-        for ic in &ics {
-            let mut form = crate::form::Form::with_proto(object_proto);
-            let proto_v = if ic.cached_proto.is_none() {
-                Value::Nil
-            } else {
-                Value::Form(ic.cached_proto)
-            };
-            let method_v = if ic.cached_method.is_none() {
-                Value::Nil
-            } else {
-                Value::Form(ic.cached_method)
-            };
-            let defining_v = if ic.cached_defining.is_none() {
-                Value::Nil
-            } else {
-                Value::Form(ic.cached_defining)
-            };
-            form.slots.insert(cached_proto_sym, proto_v);
-            form.slots.insert(cached_method_sym, method_v);
-            form.slots.insert(cached_defining_sym, defining_v);
-            form.slots
-                .insert(cached_generation_sym, Value::Int(ic.cached_generation as i64));
-            entries.push(Value::Form(w.alloc(form)));
-        }
-        let tbl = w.make_table();
-        if let Some(r) = w.table_repr_mut(tbl) {
-            for v in entries {
-                r.positional.push(v);
-            }
-        }
-        Ok(tbl)
-    });
-
-    // :disassemble is derived in lib/bootstrap.moof: one line per
-    // entry of [m bytecodes], each rendered via the Opcode-Form's
-    // own :toString.
-}
+// install_method_reflection is gone. Method reflection methods
+// (:body, :params, :consts, :bytecodes, :ics) now live in
+// stdlib/method.moof, calling into the Chunks singleton for
+// chunk-side-table access.
+//
+// the Opcode proto is initialized eagerly via ensure_opcode_proto
+// during install_chunks_singleton (whose :opsListOf: needs it).
 
 /// recover the FormId where a value's per-instance state should
 /// be **written** (lazy alloc for tagged immediates).
@@ -1622,11 +1422,140 @@ fn install_heap_singleton(w: &mut World) {
     w.heap.get_mut(proto).meta.insert(name_meta, Value::Sym(name));
     w.env_bind(global, name, Value::Form(proto));
 
-    // ─────────────────────────────────────────────────────────────
-    // Object/Cons/nil method removal: the per-type wrappers that just
-    // delegated to heap ops are deleted. moof stdlib defines them as
-    // defmethods that forward to Heap.
-    // ─────────────────────────────────────────────────────────────
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Chunks singleton — exposes chunk side-tables (chunk_ops,
+// chunk_consts, chunk_ics) to moof. Method reflection methods
+// (:body, :params, :consts, :bytecodes, :ics) live in
+// stdlib/method.moof and call into Chunks.
+// ─────────────────────────────────────────────────────────────────
+
+fn install_chunks_singleton(w: &mut World) {
+    let _ = ensure_opcode_proto(w);
+    let proto = w.alloc(Form::with_proto(Value::Form(w.protos.object)));
+
+    // [Chunks isChunk?: v] — true iff v is a Form with chunk
+    // side-tables (i.e. emitted bytecode lives at this id).
+    w.install_native(proto, "isChunk?:", |w, _self, args| {
+        let v = args.first().copied().unwrap_or(Value::Nil);
+        if let Value::Form(id) = v {
+            return Ok(Value::Bool(w.chunk_ops.contains_key(&id)));
+        }
+        Ok(Value::Bool(false))
+    });
+
+    // [Chunks paramsListOf: m] — Cons of param symbols. closures
+    // store them on :params; chunks store on the chunk's :params
+    // slot. nil for non-Form receivers.
+    w.install_native(proto, "paramsListOf:", |w, _self, args| {
+        let v = args.first().copied().unwrap_or(Value::Nil);
+        let id = match v {
+            Value::Form(id) => id,
+            _ => return Ok(Value::Nil),
+        };
+        let p = w.heap.get(id).slot(w.params_sym);
+        if !p.is_nil() {
+            return Ok(p);
+        }
+        if let Some(cid) = chunk_id_of(w, v) {
+            return Ok(w.heap.get(cid).slot(w.params_sym));
+        }
+        Ok(Value::Nil)
+    });
+
+    // [Chunks constsListOf: m] — Cons of the chunk's constants.
+    w.install_native(proto, "constsListOf:", |w, _self, args| {
+        let v = args.first().copied().unwrap_or(Value::Nil);
+        let cid = match chunk_id_of(w, v) {
+            Some(c) => c,
+            None => return Ok(Value::Nil),
+        };
+        let consts = w.chunk_consts.get(&cid).cloned().unwrap_or_default();
+        Ok(w.make_list(&consts))
+    });
+
+    // [Chunks opsListOf: m] — Cons of opcode-Forms decoded from
+    // the chunk. each Op enum variant becomes a Form via opcode_form.
+    w.install_native(proto, "opsListOf:", |w, _self, args| {
+        let v = args.first().copied().unwrap_or(Value::Nil);
+        let cid = match chunk_id_of(w, v) {
+            Some(c) => c,
+            None => return Ok(Value::Nil),
+        };
+        let ops = w.chunk_ops.get(&cid).cloned().unwrap_or_default();
+        let entries: Vec<Value> = ops.into_iter().map(|op| opcode_form(w, op)).collect();
+        Ok(w.make_list(&entries))
+    });
+
+    // [Chunks icsListOf: m] — Cons of IC snapshot Forms. each entry
+    // is a small Form with `:cached-proto, :cached-method,
+    // :cached-defining, :cached-generation` slots.
+    w.install_native(proto, "icsListOf:", |w, _self, args| {
+        let v = args.first().copied().unwrap_or(Value::Nil);
+        let cid = match chunk_id_of(w, v) {
+            Some(c) => c,
+            None => return Ok(Value::Nil),
+        };
+        let ics = w.chunk_ics.get(&cid).cloned().unwrap_or_default();
+        let cached_proto_sym = w.intern("cached-proto");
+        let cached_method_sym = w.intern("cached-method");
+        let cached_defining_sym = w.intern("cached-defining");
+        let cached_generation_sym = w.intern("cached-generation");
+        let object_proto = Value::Form(w.protos.object);
+        let mut entries = Vec::with_capacity(ics.len());
+        for ic in &ics {
+            let mut form = Form::with_proto(object_proto);
+            let proto_v = if ic.cached_proto.is_none() {
+                Value::Nil
+            } else {
+                Value::Form(ic.cached_proto)
+            };
+            let method_v = if ic.cached_method.is_none() {
+                Value::Nil
+            } else {
+                Value::Form(ic.cached_method)
+            };
+            let defining_v = if ic.cached_defining.is_none() {
+                Value::Nil
+            } else {
+                Value::Form(ic.cached_defining)
+            };
+            form.slots.insert(cached_proto_sym, proto_v);
+            form.slots.insert(cached_method_sym, method_v);
+            form.slots.insert(cached_defining_sym, defining_v);
+            form.slots
+                .insert(cached_generation_sym, Value::Int(ic.cached_generation as i64));
+            entries.push(Value::Form(w.alloc(form)));
+        }
+        Ok(w.make_list(&entries))
+    });
+
+    // [Chunks bodyOf: m] — chunk-Form for a closure (via :body slot)
+    // or self if m IS a chunk; nil otherwise.
+    w.install_native(proto, "bodyOf:", |w, _self, args| {
+        let v = args.first().copied().unwrap_or(Value::Nil);
+        let id = match v {
+            Value::Form(id) => id,
+            _ => return Ok(Value::Nil),
+        };
+        let body = w.heap.get(id).slot(w.body_sym);
+        if let Some(bid) = body.as_form_id() {
+            if w.chunk_ops.contains_key(&bid) {
+                return Ok(Value::Form(bid));
+            }
+        }
+        if w.chunk_ops.contains_key(&id) {
+            return Ok(Value::Form(id));
+        }
+        Ok(Value::Nil)
+    });
+
+    let global = w.global_env;
+    let name = w.intern("Chunks");
+    let name_meta = w.intern("name");
+    w.heap.get_mut(proto).meta.insert(name_meta, Value::Sym(name));
+    w.env_bind(global, name, Value::Form(proto));
 }
 
 fn install_object_reflection(w: &mut World) {

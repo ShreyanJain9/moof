@@ -1,7 +1,28 @@
 ;; lib/stdlib/method.moof
 ;;
-;; Method — derived reflection.
-;; primitives in rust: :body :source :params :consts :bytecodes :call.
+;; Method — reflection. the only rust primitive on Method itself is
+;; :call (VM dispatch). everything else delegates to the Chunks
+;; singleton, whose handlers expose chunk_ops / chunk_consts /
+;; chunk_ics as Cons lists. moof code wraps those into Tables.
+
+;; helper: positional Table from a Cons.
+(def __cons-as-positional-table
+  (fn (xs)
+    (let ((tbl [Table new]))
+      [xs forEach: (fn (v) [tbl push: v])]
+      tbl)))
+
+;; ─────────────────────────────────────────────────────────────────
+;; chunk-side reflection: the canonical impl is `Chunks` (a rust
+;; singleton); these are thin moof methods that wrap the cap and
+;; convert the Cons → Table where the user-facing API expects one.
+;; ─────────────────────────────────────────────────────────────────
+
+(defmethod Method (body)       [Chunks bodyOf: self])
+(defmethod Method (params)     (__cons-as-positional-table [Chunks paramsListOf: self]))
+(defmethod Method (consts)     (__cons-as-positional-table [Chunks constsListOf: self]))
+(defmethod Method (bytecodes)  (__cons-as-positional-table [Chunks opsListOf: self]))
+(defmethod Method (ics)        (__cons-as-positional-table [Chunks icsListOf: self]))
 
 ;; [m disassemble] — render the bytecode as a String, one op per
 ;; line. each Opcode-Form already carries a :toString that includes
