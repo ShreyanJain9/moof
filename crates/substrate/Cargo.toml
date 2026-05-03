@@ -20,6 +20,7 @@ wasmtime = { version = "26", default-features = false, features = ["cranelift", 
 # provides ITS OWN imports namespace (under the "moof" wasm
 # module) for moof-specific primitives only.
 wasmtime-wasi = "26"
+blake3 = "1"   # temporary; superseded by lib/mcos/hash/ in Phase I
 
 [[bin]]
 name = "moof"
