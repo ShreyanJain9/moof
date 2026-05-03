@@ -23,65 +23,6 @@
 ;; `intrinsics.rs`; if it can be derived, it lives here.
 
 ;; ─────────────────────────────────────────────────────────────────
-;; Table — derivables. rust keeps positional/keyed primitives:
-;;   length at: at:put: push: pop containsKey?: remove: keys values
-;;   = (structural)
-;; ─────────────────────────────────────────────────────────────────
-
-(defmethod Table (size) [[self keys] length])
-
-(defmethod Table (empty?) [[self size] = 0])
-
-(defmethod Table (!= other) [[self = other] not])
-
-(defmethod Table (forEach: blk) [[self values] forEach: blk])
-
-;; positional-only conversion — phase G+ may extend with key-paths.
-(defmethod Table (toList) [[0 upto: [self length]] map: (fn (i) [self at: i])])
-
-;; map: / filter: / reduce:from: preserve table shape.
-;; positional and keyed entries both flow through; map: maps the
-;; values, filter: keeps entries whose value passes pred. positional
-;; keys are written via push: (preserving compaction); keyed keys
-;; via at:put:.
-(defmethod Table (map: f) (let ((result [Table new]))
-      (do
-        [[self keys] forEach:
-          (fn (k)
-            (let ((v (f [self at: k])))
-              (if [[k proto] is Integer]
-                  [result push: v]
-                  [result at: k put: v])))]
-        result)))
-
-(defmethod Table (filter: pred) (let ((result [Table new]))
-      (do
-        [[self keys] forEach:
-          (fn (k)
-            (let ((v [self at: k]))
-              (if (pred v)
-                  (if [[k proto] is Integer]
-                      [result push: v]
-                      [result at: k put: v])
-                  nil)))]
-        result)))
-
-(defmethod Table (reduce: f from: init) [[self values] reduce: f from: init])
-
-;; [t reduce: f] — fold without an explicit init. uses the first
-;; value as init; on an empty Table, returns nil. concepts/tables.md.
-(defmethod Table (reduce: f) (let ((vs [self values]))
-      (if [vs empty?]
-          nil
-          [[vs cdr] reduce: f from: [vs car]])))
-
-;; [t at-or: k default: d] — keyed lookup with a fallback.
-;; concepts/tables.md.
-(defmethod Table (at-or: k default: d) (if [self containsKey?: k]
-        [self at: k]
-        d))
-
-;; ─────────────────────────────────────────────────────────────────
 ;; Console — derived sugar over the rust-primitive :emit:.
 ;; the only path to stdout/stderr is via $out / $err caps.
 ;; ─────────────────────────────────────────────────────────────────
