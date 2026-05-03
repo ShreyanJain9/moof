@@ -29,8 +29,10 @@ fn root_returns_a_string() {
 #[test]
 fn load_known_file_succeeds() {
     let mut w = fresh_world();
-    // bootstrap.moof exists at this point (file split happens later).
-    let v = moof::eval(&mut w, "[$transporter load: \"bootstrap.moof\"]");
+    // load a small known file from the split lib tree. bool.moof has
+    // four defmethods on Bool — pure no-op when re-loaded into a
+    // bootstrapped world (handlers just shadow themselves).
+    let v = moof::eval(&mut w, "[$transporter load: \"stdlib/bool.moof\"]");
     assert!(v.is_ok(), "load: should succeed for an existing file: {:?}", v);
 }
 

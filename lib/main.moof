@@ -41,4 +41,3 @@
 [$transporter load: "stdlib/console.moof"]
 [$transporter load: "stdlib/method.moof"]
 [$transporter load: "stdlib/control-macros.moof"]
-[$transporter load: "bootstrap.moof"]
