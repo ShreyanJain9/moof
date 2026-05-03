@@ -28,5 +28,6 @@
 [$transporter load: "early/08-match-defn-proto.moof"]
 [$transporter load: "early/09-defmethod.moof"]
 
-;; phase 3: bootstrap stdlib + macros — compiled by the moof compiler.
+;; phase 3: stdlib — defmethod-driven, regular moof code.
+[$transporter load: "stdlib/object.moof"]
 [$transporter load: "bootstrap.moof"]

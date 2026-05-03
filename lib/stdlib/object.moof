@@ -1,0 +1,46 @@
+;; lib/stdlib/object.moof
+;;
+;; Object — derived defaults that flow through every proto chain.
+;; primitives like :proto, :slots, :handlers, :meta, :identity,
+;; :source, :dnu, :new, :=, :!=, :is, :toString live in rust
+;; intrinsics; this file derives the rest.
+
+;; default :initialize is a no-op. user protos override.
+(defmethod Object (initialize) self)
+
+;; :inspect is the REPL-readable rendering. defaults to :toString
+;; (installed in rust); String / Char / Cons / Method override it
+;; to produce re-readable output ("hello", #\a, (1 "hi" #\a), etc).
+;; phase C swaps in a richer moof-side Inspector view by overriding
+;; this here for richer output.
+
+;; :protos — full delegation chain as a Cons. honors
+;; laws/reflection-contract.md R1: `[v protos]` returns a Cons of
+;; all protos walked from `self.proto` up to (but not including)
+;; nil. starts with the immediate proto; ends with Object.
+;;
+;; uses `is` (identity) rather than `=` because each proto-Form
+;; carries its own `=` handler (e.g. Integer's `=` assumes
+;; self is an Int) — sending `=` to Integer-proto-Form would land
+;; in the wrong place. `is` lives only on Object.
+(defmethod Object (protos) (let ((p [self proto]))
+      (if [p is nil]
+          nil
+          (cons p [p protos]))))
+
+;; [T satisfies?: v] — `#true` iff v's proto chain reaches T.
+;; the type-membership predicate. used by pattern matcher's
+;; typed-pattern shape `|n :: T|`. concepts/types.md.
+;;
+;; walks the chain via `:is` (identity) — `:contains?:` uses `=`
+;; which is structural and wouldn't reliably distinguish two
+;; proto-Forms whose meta tables happened to look alike.
+(defmethod Object (satisfies?: v) (__satisfies-walk self [v protos]))
+
+(def __satisfies-walk
+  (fn (target chain)
+    (if [chain is nil]
+        #false
+        (if [[chain car] is target]
+            #true
+            (__satisfies-walk target [chain cdr])))))
