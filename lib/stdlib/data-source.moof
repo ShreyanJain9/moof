@@ -20,7 +20,7 @@
         [self next]
         (if [flavor = 'generator]
             (raise: 'no-impl "generator-flavor :peek must be implemented per-mco")
-            (raise: 'no-impl "peek not implemented; not declared infinite-source")))))
+            (raise: 'no-impl "peek requires :infinite-source-flavor 'polled or 'generator (or override :peek directly)")))))
 
 ;; default :close for any infinite source — no-op.
 (defmethod Object (close)
@@ -28,11 +28,15 @@
       self
       (raise: 'no-impl "close not implemented")))
 
-;; :take: n — consume n :next values into a Cons.
-(defmethod Object (take: n)
+;; :take:into: n acc — tail-recursive helper; accumulates values in reverse order.
+(defmethod Object (take: n into: acc)
   (if [n = 0]
-      nil
-      (cons [self next] [self take: [n - 1]])))
+      [acc reverse]
+      [self take: [n - 1] into: (cons [self next] acc)]))
+
+;; :take: n — consume n :next values into a Cons (stack-safe via accumulator).
+(defmethod Object (take: n)
+  [self take: n into: nil])
 
 ;; :forEach: blk — infinite-loop on :next; consumer breaks via raise.
 (defmethod Object (forEach: blk)
