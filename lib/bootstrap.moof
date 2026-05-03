@@ -23,60 +23,6 @@
 ;; `intrinsics.rs`; if it can be derived, it lives here.
 
 ;; ─────────────────────────────────────────────────────────────────
-;; defmethod — moof-side macro that desugars to setHandler!.
-;;
-;; the header decoder mirrors the send-bracket grammar
-;; (`syntax/methods-and-handlers.md`):
-;;   (name)              → unary
-;;   (+ other)           → binary (operator-only first sym)
-;;   (name x y …)        → positional
-;;   (at: i put: v)      → keyword (selectors end in `:`,
-;;                         alternating kw + param)
-;;
-;; returns (sel . params-list).
-;; ─────────────────────────────────────────────────────────────────
-
-(def __decode-header
-  (fn (header)
-    (let ((first [header car])
-          (rest [header cdr]))
-      (if (if [rest empty?] #false [first endsWithColon?])
-          ;; keyword form. concatenate alternating kws into one
-          ;; selector text; pull params from the slots between.
-          (__decode-keyword header "" nil)
-          ;; unary, binary, or positional — selector is `first`,
-          ;; params are everything after.
-          (cons first (cons rest nil))))))
-
-(def __decode-keyword
-  (fn (remaining acc-sel acc-params)
-    (if [remaining empty?]
-        (cons (intern acc-sel) (cons [acc-params reverse] nil))
-        (let ((kw [remaining car])
-              (after-kw [remaining cdr]))
-          (if [after-kw empty?]
-              ;; keyword without a following param — error path,
-              ;; left to the resulting (fn …) compilation to catch.
-              (cons (intern acc-sel) (cons [acc-params reverse] nil))
-              (let ((param [after-kw car])
-                    (rest-elems [after-kw cdr])
-                    (next-sel [acc-sel + [kw toString]]))
-                (__decode-keyword
-                  rest-elems
-                  next-sel
-                  (cons param acc-params))))))))
-
-(defmacro defmethod (args)
-  (let ((proto-expr [args car])
-        (rest [args cdr]))
-    (let ((header [rest car])
-          (body [[rest cdr] car]))
-      (let ((decoded (__decode-header header)))
-        (let ((sel [decoded car])
-              (params [[decoded cdr] car]))
-          `(setHandler! ,proto-expr (quote ,sel) (fn ,params ,body)))))))
-
-;; ─────────────────────────────────────────────────────────────────
 ;; Object — derived defaults that flow through the proto chain
 ;;
 ;; Object's `:=`, `:!=`, `:is`, `:proto`, `:slots`, `:handlers`,
