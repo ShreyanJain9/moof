@@ -1,0 +1,8 @@
+;; lib/stdlib/char.moof
+;;
+;; Char — small helpers. :codepoint and :< stay rust primitives;
+;; everything else (:inspect, :digit?, :letter?, :uppercase, :lowercase)
+;; lives here.
+
+;; (intentionally empty in Phase 3 — Phase 4 fills with the
+;; migrated :inspect plus optional helpers as they're derived.)
