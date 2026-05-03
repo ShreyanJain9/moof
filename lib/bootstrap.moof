@@ -23,40 +23,6 @@
 ;; `intrinsics.rs`; if it can be derived, it lives here.
 
 ;; ─────────────────────────────────────────────────────────────────
-;; String — derivables. rust keeps the UTF-8/unicode primitives.
-;; ─────────────────────────────────────────────────────────────────
-
-;; structural inequality is just identity-of-content negated.
-(defmethod String (!= other) [[self = other] not])
-
-(defmethod String (empty?) [[self byteLength] = 0])
-
-;; :asList is an alias for :toList — both walk the String into a
-;; Cons of Chars.
-(defmethod String (asList) [self toList])
-
-;; iterate over chars by walking the Char list.
-(defmethod String (forEach: blk) [[self toList] forEach: blk])
-
-;; map: collects each block-result via `+` (which accepts Char +
-;; String on the rhs and dispatches through :toString otherwise).
-(defmethod String (map: f) [[[self toList] map: f] reduce: (fn (acc x) [acc + x]) from: ""])
-
-(defmethod String (filter: pred) [[[self toList] filter: pred] reduce: (fn (acc x) [acc + x]) from: ""])
-
-(defmethod String (reverse) [[[self toList] reverse] reduce: (fn (acc x) [acc + x]) from: ""])
-
-;; endsWith?: derive from slice + `=`. cheap because primitives are O(n).
-(defmethod String (endsWith?: suffix) (let ((nself [self length])
-          (nsuf  [suffix length]))
-      (if [nsuf > nself]
-          #false
-          [[self slice: [nself - nsuf] length: nsuf] = suffix])))
-
-;; concat is a stricter `+`: rhs must be a String.
-(defmethod String (concat: other) [self + other])
-
-;; ─────────────────────────────────────────────────────────────────
 ;; Table — derivables. rust keeps positional/keyed primitives:
 ;;   length at: at:put: push: pop containsKey?: remove: keys values
 ;;   = (structural)

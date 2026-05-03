@@ -1,0 +1,36 @@
+;; lib/stdlib/string.moof
+;;
+;; String — derived methods. byte-level primitives (:length,
+;; :byteLength, :byteAt:, :at:, :+, :=, :slice:length:, :as:,
+;; :toList, :contains?:, :endsWith?:) live in rust; this file derives
+;; the rest.
+
+;; structural inequality is just identity-of-content negated.
+(defmethod String (!= other) [[self = other] not])
+
+(defmethod String (empty?) [[self byteLength] = 0])
+
+;; :asList is an alias for :toList — both walk the String into a
+;; Cons of Chars.
+(defmethod String (asList) [self toList])
+
+;; iterate over chars by walking the Char list.
+(defmethod String (forEach: blk) [[self toList] forEach: blk])
+
+;; map: collects each block-result via `+` (which accepts Char +
+;; String on the rhs and dispatches through :toString otherwise).
+(defmethod String (map: f) [[[self toList] map: f] reduce: (fn (acc x) [acc + x]) from: ""])
+
+(defmethod String (filter: pred) [[[self toList] filter: pred] reduce: (fn (acc x) [acc + x]) from: ""])
+
+(defmethod String (reverse) [[[self toList] reverse] reduce: (fn (acc x) [acc + x]) from: ""])
+
+;; endsWith?: derive from slice + `=`. cheap because primitives are O(n).
+(defmethod String (endsWith?: suffix) (let ((nself [self length])
+          (nsuf  [suffix length]))
+      (if [nsuf > nself]
+          #false
+          [[self slice: [nself - nsuf] length: nsuf] = suffix])))
+
+;; concat is a stricter `+`: rhs must be a String.
+(defmethod String (concat: other) [self + other])

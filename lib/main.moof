@@ -35,4 +35,5 @@
 [$transporter load: "stdlib/cons.moof"]
 [$transporter load: "stdlib/integer.moof"]
 [$transporter load: "stdlib/float.moof"]
+[$transporter load: "stdlib/string.moof"]
 [$transporter load: "bootstrap.moof"]
