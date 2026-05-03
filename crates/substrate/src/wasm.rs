@@ -67,8 +67,18 @@ pub struct DispatchGuard {
 impl DispatchGuard {
     /// begin an mco dispatch: pin the world pointer, clear any
     /// stale handles. returns a guard that cleans up on drop.
+    ///
+    /// panics if called while another DispatchGuard is live —
+    /// nested dispatch is not supported (the raw pointer would be
+    /// silently overwritten, corrupting the outer dispatch).
     pub fn begin(world: &mut World) -> Self {
-        DISPATCH_WORLD.with(|cell| cell.set(world as *mut World));
+        DISPATCH_WORLD.with(|cell| {
+            assert!(
+                cell.get().is_null(),
+                "nested dispatch not supported — DispatchGuard::begin called while another is live"
+            );
+            cell.set(world as *mut World);
+        });
         DISPATCH_HANDLE_TABLE.with(|t| t.borrow_mut().clear());
         Self { _private: () }
     }
@@ -227,24 +237,27 @@ pub fn load_wasm_bytes(
     // back to inferring from wasm exports (the MVP behavior).
     let manifest = parse_manifest_section(world, bytes, label)?;
 
-    // discover exported functions. each function with `() -> i64`
-    // shape is eligible. the manifest (if present) cross-checks:
-    // declared methods MUST be a subset of the exports, with
-    // matching shape.
+    // discover exported functions. any function export is eligible;
+    // the trampoline introspects the signature at dispatch time.
+    // we tag `() -> i64` exports for backward-compat metadata but
+    // all shapes are accepted and installed.
     let all_exports: Vec<(String, ExportShape)> = module
         .exports()
         .filter_map(|exp| match exp.ty() {
             wasmtime::ExternType::Func(ft) => {
                 let params = ft.params().collect::<Vec<_>>();
                 let results = ft.results().collect::<Vec<_>>();
-                if params.is_empty()
+                // tag the legacy no-args-i64 shape for metadata; everything
+                // else is AnyFunc. the trampoline handles all via introspection.
+                let shape = if params.is_empty()
                     && results.len() == 1
                     && matches!(results[0], wasmtime::ValType::I64)
                 {
-                    Some((exp.name().to_string(), ExportShape::NoArgsToI64))
+                    ExportShape::NoArgsToI64
                 } else {
-                    None
-                }
+                    ExportShape::AnyFunc
+                };
+                Some((exp.name().to_string(), shape))
             }
             _ => None,
         })
@@ -374,13 +387,17 @@ fn read_uleb128(bytes: &[u8]) -> Option<(u64, usize)> {
     }
 }
 
-/// per-method shape — used by the trampoline to know how to
-/// marshal args and results. starts minimal; grows as we add
-/// signatures.
+/// per-method shape — used to tag exported functions at load time.
+/// the trampoline now introspects signatures directly at dispatch
+/// time via `func.ty()`, so this enum is kept minimal. it records
+/// the "detected at load" category but the trampoline ignores it.
 #[derive(Copy, Clone, Debug)]
 pub enum ExportShape {
-    /// fn() -> i64. result becomes Value::Int.
+    /// fn() -> i64. the original MVP-only shape; still accepted.
     NoArgsToI64,
+    /// any other function export. shape is determined at dispatch
+    /// time by introspecting `func.ty()`.
+    AnyFunc,
 }
 
 /// parsed `moof.manifest` custom-section contents. fields grow as
@@ -747,16 +764,8 @@ pub fn wasm_method_trampoline(
     // ANY method call with no args must hit one of these
     // exports. find the matching one by iterating.
 
-    if !args.is_empty() {
-        return Err(RaiseError::new(
-            world.intern("arity"),
-            "wasm method (mvp) takes no args",
-        ));
-    }
-
-    // find this proto's export map entry — but which selector?
-    // we don't have it. for the MVP, require world.vm to expose
-    // the most-recent selector (added below). fallback: error.
+    // find which selector was just dispatched. the VM stashes it in
+    // `last_send_sel` before calling the native handler.
     let sel = world.vm.last_send_sel.ok_or_else(|| {
         RaiseError::new(
             world.intern("dispatch-error"),
@@ -774,26 +783,191 @@ pub fn wasm_method_trampoline(
             )
         })?;
 
-    // pre-intern error symbols so we don't fight the borrow
-    // checker once the wasm-instance mut-borrow is live.
+    // pre-intern error symbols before any borrow-checker conflicts arise.
     let wasm_err_sym = world.intern("wasm-error");
+    let arity_sym = world.intern("arity-mismatch");
+    let type_sym = world.intern("type-mismatch");
 
-    // call the wasm function.
-    let inst = world.wasm_instances.get_mut(&proto_id).unwrap();
-    let func = inst
-        .instance
-        .get_typed_func::<(), i64>(&mut inst.store, &export_name)
-        .map_err(|e| {
-            RaiseError::new(
-                wasm_err_sym,
-                format!("export `{}` lookup failed: {}", export_name, e),
-            )
-        })?;
-    let result = func.call(&mut inst.store, ()).map_err(|e| {
-        RaiseError::new(
-            wasm_err_sym,
-            format!("wasm `{}` trapped: {}", export_name, e),
-        )
-    })?;
-    Ok(Value::Int(result))
+    // introspect the wasm function signature BEFORE pinning world.
+    // we collect param/result types as owned Vecs so we can drop
+    // the inst borrow before acquiring the DispatchGuard.
+    let (param_tys, result_tys): (Vec<wasmtime::ValType>, Vec<wasmtime::ValType>) = {
+        let inst = world.wasm_instances.get_mut(&proto_id).unwrap();
+        let func = inst
+            .instance
+            .get_func(&mut inst.store, &export_name)
+            .ok_or_else(|| {
+                RaiseError::new(
+                    wasm_err_sym,
+                    format!("export `{}` not found", export_name),
+                )
+            })?;
+        let ty = func.ty(&mut inst.store);
+        (ty.params().collect(), ty.results().collect())
+    };
+
+    if param_tys.len() != args.len() {
+        return Err(RaiseError::new(
+            arity_sym,
+            format!(
+                "wasm export `{}` expects {} args, got {}",
+                export_name,
+                param_tys.len(),
+                args.len()
+            ),
+        ));
+    }
+
+    // Pin world + clear handle table. The guard's Drop handles cleanup
+    // on all exit paths (including error returns and panics).
+    //
+    // SAFETY: `world` is mutably borrowed by us for the lifetime of
+    // this function. The guard holds a raw *mut World. The wasm
+    // imports that dereference it run synchronously inside func.call —
+    // they cannot race with our outer &mut World accesses. We must
+    // not hold a Rust &mut borrow of `world` across func.call itself
+    // (the imports need the same pointer), but since the imports only
+    // touch `make_string`, `make_bytes`, `intern`, `string_bytes`,
+    // `bytes_data`, and `resolve` — none of which touch
+    // `wasm_instances` — the aliasing is safe in practice.
+    let _guard = DispatchGuard::begin(world);
+
+    // Marshal moof args → wasm Val.
+    //
+    // ValType::I32 with a non-Int arg: push to handle table → pass
+    // as a u32 slot index cast to i32. The wasm side interprets the
+    // signed-looking bit pattern as an unsigned slot index (u32 and
+    // i32 share the same bits in wasm; the guest code casts back).
+    //
+    // ValType::I64 requires Value::Int (no implicit coercion).
+    let mut wasm_args: Vec<wasmtime::Val> = Vec::with_capacity(args.len());
+    for (ty, arg) in param_tys.iter().zip(args.iter()) {
+        let wval = match ty {
+            wasmtime::ValType::I32 => match arg {
+                Value::Int(n)
+                    if *n >= i32::MIN as i64 && *n <= i32::MAX as i64 =>
+                {
+                    wasmtime::Val::I32(*n as i32)
+                }
+                _ => {
+                    // non-Int or out-of-range: treat as a handle slot.
+                    let h = DISPATCH_HANDLE_TABLE
+                        .with(|t| t.borrow_mut().push(*arg));
+                    wasmtime::Val::I32(h as i32)
+                }
+            },
+            wasmtime::ValType::I64 => match arg {
+                Value::Int(n) => wasmtime::Val::I64(*n),
+                _ => {
+                    drop(_guard);
+                    return Err(RaiseError::new(
+                        type_sym,
+                        format!(
+                            "wasm export `{}`: i64 param requires Int, got {:?}",
+                            export_name, arg
+                        ),
+                    ));
+                }
+            },
+            _ => {
+                drop(_guard);
+                return Err(RaiseError::new(
+                    type_sym,
+                    format!(
+                        "wasm export `{}`: unsupported wasm param type {:?}",
+                        export_name, ty
+                    ),
+                ));
+            }
+        };
+        wasm_args.push(wval);
+    }
+
+    // Prepare results buffer.
+    let mut wasm_results: Vec<wasmtime::Val> =
+        vec![wasmtime::Val::I32(0); result_tys.len()];
+
+    // Call wasm. The DispatchGuard is active: the 6 moof imports can
+    // dereference DISPATCH_WORLD safely. We must NOT hold a Rust &mut
+    // reference to the top-level `world` across this call (the raw
+    // pointer alias would be observable). Instead we access world only
+    // through the inst sub-borrow, which the imports don't touch.
+    let call_result = {
+        let inst = world.wasm_instances.get_mut(&proto_id).unwrap();
+        let func = inst
+            .instance
+            .get_func(&mut inst.store, &export_name)
+            .unwrap(); // we verified this above
+        func.call(&mut inst.store, &wasm_args, &mut wasm_results)
+    };
+
+    // Marshal return value.
+    match call_result {
+        Ok(()) => {
+            let ret = if result_tys.is_empty() {
+                Value::Nil
+            } else {
+                match result_tys[0] {
+                    wasmtime::ValType::I64 => {
+                        Value::Int(wasm_results[0].i64().unwrap_or(0))
+                    }
+                    wasmtime::ValType::I32 => {
+                        // Treat as a handle slot: take the Value out of the
+                        // table before the guard drops and clears it.
+                        let h = wasm_results[0].i32().unwrap_or(0) as u32;
+                        DISPATCH_HANDLE_TABLE
+                            .with(|t| t.borrow_mut().take(h))
+                            .unwrap_or(Value::Nil)
+                    }
+                    _ => Value::Nil,
+                }
+            };
+            // Guard drops here: clears any remaining table entries and
+            // unpins world. The return value has already been extracted.
+            Ok(ret)
+        }
+        Err(trap_err) => {
+            // Try to extract a structured moof raise from anywhere in
+            // the error chain. The moof_raise import encodes errors as:
+            //   "__moof_raise__:KIND:MSG"
+            // where KIND is a Symbol name (no colons) and MSG is
+            // arbitrary text (may contain colons). After stripping the
+            // prefix, we split on ':' with splitn(2, ':') — KIND is
+            // guaranteed colon-free because it's an interned symbol name;
+            // MSG may contain colons and is taken verbatim as the tail.
+            fn extract_moof_raise(
+                err: &(dyn std::error::Error + 'static),
+            ) -> Option<(String, String)> {
+                let s = err.to_string();
+                if let Some(payload) = s.strip_prefix("__moof_raise__:") {
+                    // payload = "KIND:MSG"
+                    let parts: Vec<&str> = payload.splitn(2, ':').collect();
+                    if parts.len() == 2 {
+                        return Some((
+                            parts[0].to_string(),
+                            parts[1].to_string(),
+                        ));
+                    }
+                }
+                // walk the error source chain (wasmtime wraps host errors).
+                err.source().and_then(extract_moof_raise)
+            }
+
+            let trap_ref: &(dyn std::error::Error + 'static) =
+                trap_err.as_ref();
+            // Drop the guard BEFORE re-borrowing world for intern —
+            // the guard holds the raw pointer; we want clean Rust
+            // borrow semantics for the intern call.
+            drop(_guard);
+            if let Some((kind, msg)) = extract_moof_raise(trap_ref) {
+                let kind_sym = world.intern(&kind);
+                Err(RaiseError::new(kind_sym, msg))
+            } else {
+                Err(RaiseError::new(
+                    wasm_err_sym,
+                    format!("wasm `{}` trapped: {}", export_name, trap_err),
+                ))
+            }
+        }
+    }
 }

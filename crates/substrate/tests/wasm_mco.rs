@@ -587,3 +587,161 @@ fn dispatch_guard_clears_on_drop() {
         "handle table should be cleared after DispatchGuard drops"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────
+// C4: trampoline — sig introspection, arg/return marshaling, raise
+//
+// these tests exercise the new trampoline path using WAT modules
+// loaded directly via load_wasm_bytes (same path as production).
+// we register each WAT module as an mco and dispatch moof methods
+// through the full wasm_method_trampoline code path.
+// ─────────────────────────────────────────────────────────────────
+
+/// build a .wasm binary from WAT text and append a moof.manifest
+/// custom section declaring the given methods. returns bytes that
+/// load_wasm_bytes will accept as an mco.
+fn make_test_mco(wat_text: &str, methods: &[&str]) -> Vec<u8> {
+    let mut wasm = wat::parse_str(wat_text).expect("WAT parse failed");
+    let method_list: String = methods.join(" ");
+    let manifest_text = format!(
+        "((abi-version 1) (parent Object) (methods ({})))",
+        method_list
+    );
+    append_custom_section(&mut wasm, "moof.manifest", manifest_text.as_bytes());
+    wasm
+}
+
+#[test]
+fn trampoline_marshals_i64_args_and_returns() {
+    // wasm export: (i64) -> i64, returns the arg + 1.
+    // moof call: [Adder addOne: 10] => 11.
+    let wat = r#"
+        (module
+          (func (export "addOne:") (param i64) (result i64)
+            local.get 0
+            i64.const 1
+            i64.add))
+    "#;
+    let mco = make_test_mco(wat, &["addOne:"]);
+    let mut w = moof::new_world();
+    let proto = moof::wasm::load_wasm_bytes(&mut w, &mco, "adder.mco").expect("load");
+    let sym = w.intern("Adder");
+    w.env_bind(w.global_env, sym, proto);
+    let r = moof::eval(&mut w, "[Adder addOne: 10]").expect("dispatch");
+    assert_eq!(r, Value::Int(11));
+}
+
+#[test]
+fn trampoline_no_args_no_return_gives_nil() {
+    // wasm export: () -> () (no return value). trampoline should
+    // return Value::Nil.
+    let wat = r#"
+        (module
+          (func (export "doNothing")))
+    "#;
+    let mco = make_test_mco(wat, &["doNothing"]);
+    let mut w = moof::new_world();
+    let proto = moof::wasm::load_wasm_bytes(&mut w, &mco, "nothing.mco").expect("load");
+    let sym = w.intern("Nothing");
+    w.env_bind(w.global_env, sym, proto);
+    let r = moof::eval(&mut w, "[Nothing doNothing]").expect("dispatch");
+    assert_eq!(r, Value::Nil);
+}
+
+#[test]
+fn trampoline_arity_mismatch_raises() {
+    // wasm export `answer` takes 1 i64 arg; moof sends it as a unary
+    // (0 args). the trampoline checks param_tys.len() != args.len()
+    // and raises arity-mismatch before touching wasmtime.
+    let wat = r#"
+        (module
+          (func (export "answer") (param i64) (result i64)
+            local.get 0
+            i64.const 1
+            i64.add))
+    "#;
+    let mco = make_test_mco(wat, &["answer"]);
+    let mut w = moof::new_world();
+    let proto = moof::wasm::load_wasm_bytes(&mut w, &mco, "adder.mco").expect("load");
+    let sym = w.intern("Adder");
+    w.env_bind(w.global_env, sym, proto);
+    // unary send passes 0 args; export expects 1 → arity-mismatch.
+    let err = moof::eval(&mut w, "[Adder answer]").expect_err("should raise arity-mismatch");
+    let kind = w.resolve(err.kind);
+    assert_eq!(kind, "arity-mismatch", "expected arity-mismatch, got {}", kind);
+}
+
+#[test]
+fn trampoline_catches_moof_raise_and_converts_to_raise_error() {
+    // wasm export: imports moof_intern + moof_raise. raises
+    // 'my-error with a message. the trampoline should convert this
+    // trap into a RaiseError with kind=my-error.
+    let wat = r#"
+        (module
+          (import "moof" "moof_intern" (func $intern (param i32 i32) (result i32)))
+          (import "moof" "moof_raise"  (func $raise  (param i32 i32 i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0)  "my-error")
+          (data (i32.const 16) "something went wrong")
+          (func (export "boom")
+            (local $k i32)
+            i32.const 0
+            i32.const 8
+            call $intern
+            local.set $k
+            local.get $k
+            i32.const 16
+            i32.const 20
+            call $raise))
+    "#;
+    let mco = make_test_mco(wat, &["boom"]);
+    let mut w = moof::new_world();
+    let proto = moof::wasm::load_wasm_bytes(&mut w, &mco, "raiser.mco").expect("load");
+    let sym = w.intern("Raiser");
+    w.env_bind(w.global_env, sym, proto);
+    let err = moof::eval(&mut w, "[Raiser boom]").expect_err("should raise");
+    let kind = w.resolve(err.kind);
+    assert_eq!(
+        kind, "my-error",
+        "expected my-error from moof_raise, got {} (msg: {})",
+        kind, err.message
+    );
+    assert!(
+        err.message.contains("something went wrong"),
+        "expected message to contain 'something went wrong', got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn trampoline_dispatch_guard_active_during_wasm_call() {
+    // verify that the moof imports work during a full production
+    // dispatch (not just when called with manually-started guard).
+    // we use moof_make_string inside an export and return the handle
+    // as an i32 result; the trampoline takes it from the handle table.
+    let wat = r#"
+        (module
+          (import "moof" "moof_make_string" (func $ms (param i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "hello from wasm")
+          (func (export "greet") (result i32)
+            i32.const 0
+            i32.const 15
+            call $ms))
+    "#;
+    let mco = make_test_mco(wat, &["greet"]);
+    let mut w = moof::new_world();
+    let proto = moof::wasm::load_wasm_bytes(&mut w, &mco, "greeter.mco").expect("load");
+    let sym = w.intern("Greeter");
+    w.env_bind(w.global_env, sym, proto);
+    // dispatch returns a handle (i32) → trampoline takes it out of the
+    // handle table → returns the String value.
+    let r = moof::eval(&mut w, "[Greeter greet]").expect("dispatch");
+    // result should be a String whose text is "hello from wasm".
+    assert_eq!(
+        w.string_text(r),
+        Some("hello from wasm"),
+        "expected string 'hello from wasm', got {:?}",
+        r
+    );
+}
