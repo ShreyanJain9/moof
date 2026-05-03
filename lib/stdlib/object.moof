@@ -8,6 +8,14 @@
 ;; default :initialize is a no-op. user protos override.
 (defmethod Object (initialize) self)
 
+;; default :!= — derive from := via Bool:not.
+(defmethod Object (!= other) [[self = other] not])
+
+;; default :inspect — REPL-readable rendering. falls through to
+;; :toString (whatever proto-specific override). subclasses override
+;; for re-readable output (Char → #\X, String → "…", Cons → (…)).
+(defmethod Object (inspect) [self toString])
+
 ;; :inspect is the REPL-readable rendering. defaults to :toString
 ;; (installed in rust); String / Char / Cons / Method override it
 ;; to produce re-readable output ("hello", #\a, (1 "hi" #\a), etc).

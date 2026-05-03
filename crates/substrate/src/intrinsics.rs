@@ -124,7 +124,6 @@ pub fn install(w: &mut World) {
     install_call_on_method(w);
     install_integer_methods(w);
     install_float_methods(w);
-    install_symbol_methods(w);
     install_char_methods(w);
     install_string_methods(w);
     install_table_methods(w);
@@ -1772,15 +1771,6 @@ fn format_float(f: f64) -> String {
 // Symbol / Bool / Nil — minimum equality story
 // ─────────────────────────────────────────────────────────────────
 
-/// Symbol's only rust primitive is `:toString` — needs the sym
-/// table. equality flows through Object's identity (Sym(a) == Sym(b)
-/// iff their SymIds match).
-fn install_symbol_methods(_: &mut World) {
-    // :toString lives on Object; its default resolves
-    // `Value::Sym(s)` to its text. [Symbol toString] returns
-    // "Symbol" via :name (Object's same default handler).
-}
-
 /// `(cons h tail)` — allocate a List cell. shared by Nil-proto
 /// and List, since the heap operation is identical: head + tail
 /// in a fresh Form whose proto is List.
@@ -1964,10 +1954,6 @@ fn install_object_reflection(w: &mut World) {
         Ok(Value::Bool(self_ == args[0]))
     });
 
-    w.install_native(w.protos.object, "!=", |_, self_, args| {
-        Ok(Value::Bool(self_ != args[0]))
-    });
-
     w.install_native(w.protos.object, "toString", |w, self_, _| {
         // default rendering: `<Form#N>` for heap forms; tagged
         // immediates have their own to-string overrides.
@@ -2000,24 +1986,10 @@ fn install_object_reflection(w: &mut World) {
         Ok(w.make_string(&text))
     });
 
-    // Object :inspect — REPL-readable. defaults to :toString, but
-    // tagged-immediate / collection types override (Char, String,
-    // List, Method) to produce re-readable output.
-    w.install_native(w.protos.object, "inspect", |w, self_, _| {
-        let to_string = w.intern("toString");
-        w.send(self_, to_string, &[])
-    });
-
-    // :inspect is defined in lib/bootstrap.moof — it falls through
-    // to :toString in phase A; phase C overrides it on Object to a
-    // richer moof-side Inspector view.
-
-    // default `:initialize` — a no-op. lives in rust because the
-    // moof compiler's compile-defmacro calls `[Method new]` while
-    // *compiling* bootstrap.moof (which is where user-facing
-    // :initialize would otherwise be defined). bootstrap.moof
-    // installs the same handler again later for documentation/
-    // override-ability — that's idempotent.
+    // :inspect and :!= are defmethods in stdlib/object.moof. :initialize
+    // stays here because Object:new (above) sends :initialize to every
+    // freshly allocated Form, including [Object new] in compiler/00-
+    // helpers.moof which loads BEFORE stdlib/object.moof.
     w.install_native(w.protos.object, "initialize", |_, self_, _| Ok(self_));
 
     w.install_native(w.protos.object, "new", |w, self_, _args| {
