@@ -47,6 +47,17 @@
 
 (def Compiler [Object new])
 
+;; Compiler-internal list walking — used wherever the compiler would
+;; otherwise reach for a method on the Cons / nil protos. routing
+;; through Heap directly (via `[Heap slotOf: x at: 'car]` etc.)
+;; means the compiler never calls a moof method that's defined
+;; downstream — dispatch only ever hits rust install_natives.
+(setHandler! Compiler 'argc:
+  (fn (xs)
+    (if [xs is nil]
+        0
+        [1 + [self argc: [Heap slotOf: xs at: 'cdr]]])))
+
 ;; ─────────────────────────────────────────────────────────────────
 ;; helpers — predicates and small utilities. internal to Compiler;
 ;; the rust shim never calls these directly.
@@ -56,7 +67,7 @@
   (fn (v)
     ;; nil identity — `cons?:` is a *type predicate*; v can be any
     ;; value, and nil is a valid empty-list terminus, hence #true.
-    ;; not (__list-empty? v) because v isn't constrained to be a list.
+    ;; not [v is nil] because v isn't constrained to be a list.
     (if [v is nil]
         #true
         [[v proto] is Cons])))
@@ -79,8 +90,8 @@
 ;; nil-out empty.
 (setHandler! Compiler 'wrapBody:
   (fn (bodyForms)
-    (if (__list-empty? bodyForms)
+    (if [bodyForms is nil]
         nil
-        (if (__list-empty? (__list-cdr bodyForms))
-            (__list-car bodyForms)
+        (if [[Heap slotOf: bodyForms at: 'cdr] is nil]
+            [Heap slotOf: bodyForms at: 'car]
             (cons 'do bodyForms)))))

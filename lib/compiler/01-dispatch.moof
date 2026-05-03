@@ -55,10 +55,10 @@
 
 (setHandler! Compiler 'compileList:chunk:tail:
   (fn (form chunk tail)
-    (if (__list-empty? form)
+    (if [form is nil]
         ;; () → nil
         [chunk emit: [Opcode pushNil]]
-        (let ((head (__list-car form)))
+        (let ((head [Heap slotOf: form at: 'car]))
           ;; user-defined macros take precedence over special forms
           ;; (matching the macro-precedence-flip in commit ddd54e4).
           (let ((macroMethod (if [self symbol?: head]
@@ -78,8 +78,8 @@
 ;; compiler takes over, `match` is back on the table for user code.
 (setHandler! Compiler 'compileSpecialOrCall:chunk:tail:
   (fn (form chunk tail)
-    (let ((head (__list-car form))
-          (rest (__list-cdr form)))
+    (let ((head [Heap slotOf: form at: 'car])
+          (rest [Heap slotOf: form at: 'cdr]))
       (if [self symbol?: head]
           (if [head is 'quote]    [self compileQuote: rest chunk: chunk]
           (if [head is 'set!]     [self compileSet: rest chunk: chunk]

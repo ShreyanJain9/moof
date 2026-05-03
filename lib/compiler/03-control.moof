@@ -13,11 +13,11 @@
 
 (setHandler! Compiler 'compileIf:chunk:tail:
   (fn (rest chunk tail)
-    (let ((condForm (__list-car rest))
-          (thenForm (__list-car (__list-cdr rest)))
-          (elseForm (if (__list-empty? (__list-cdr (__list-cdr rest)))
+    (let ((condForm [Heap slotOf: rest at: 'car])
+          (thenForm [Heap slotOf: [Heap slotOf: rest at: 'cdr] at: 'car])
+          (elseForm (if [[Heap slotOf: [Heap slotOf: rest at: 'cdr] at: 'cdr] is nil]
                         nil
-                        (__list-car (__list-cdr (__list-cdr rest))))))
+                        [Heap slotOf: [Heap slotOf: [Heap slotOf: rest at: 'cdr] at: 'cdr] at: 'car])))
       ;; cond — non-tail.
       [self compileForm: condForm chunk: chunk tail: #false]
       ;; placeholder: jmp-to-else-if-false.
@@ -41,8 +41,8 @@
 
 (setHandler! Compiler 'compileFn:chunk:
   (fn (rest chunk)
-    (let ((params (__list-car rest))
-          (bodyForms (__list-cdr rest)))
+    (let ((params [Heap slotOf: rest at: 'car])
+          (bodyForms [Heap slotOf: rest at: 'cdr]))
       (let ((body [self wrapBody: bodyForms]))
         (let ((subChunk [Chunk new: params source: body]))
           [self compileForm: body chunk: subChunk tail: #true]
@@ -57,15 +57,15 @@
 
 (setHandler! Compiler 'compileDo:chunk:tail:
   (fn (rest chunk tail)
-    (if (__list-empty? rest)
+    (if [rest is nil]
         [chunk emit: [Opcode pushNil]]
         [self compileDoLoop: rest chunk: chunk tail: tail])))
 
 (setHandler! Compiler 'compileDoLoop:chunk:tail:
   (fn (forms chunk tail)
-    (let ((expr (__list-car forms))
-          (rest (__list-cdr forms)))
-      (if (__list-empty? rest)
+    (let ((expr [Heap slotOf: forms at: 'car])
+          (rest [Heap slotOf: forms at: 'cdr]))
+      (if [rest is nil]
           ;; last expression — preserve its value, tail iff outer.
           [self compileForm: expr chunk: chunk tail: tail]
           ;; not last — non-tail, then pop.
@@ -85,8 +85,8 @@
 
 (setHandler! Compiler 'compileLet:chunk:tail:
   (fn (rest chunk tail)
-    (let ((bindings (__list-car rest))
-          (bodyForms (__list-cdr rest)))
+    (let ((bindings [Heap slotOf: rest at: 'car])
+          (bodyForms [Heap slotOf: rest at: 'cdr]))
       (let ((params [self letParams: bindings])
             (values [self letValues: bindings])
             (body [self wrapBody: bodyForms]))
@@ -95,7 +95,7 @@
           [subChunk emit: [Opcode return]]
           [chunk emit: [Opcode pushClosure: subChunk]]
           [self compileArgs: values chunk: chunk]
-          (let ((argc (__list-length values))
+          (let ((argc [self argc: values])
                 (ic [chunk addIc]))
             (if tail
                 [chunk emit: [Opcode tailSend: 'call argc: argc]]
@@ -103,17 +103,17 @@
 
 (setHandler! Compiler 'letParams:
   (fn (bindings)
-    (if (__list-empty? bindings)
+    (if [bindings is nil]
         nil
-        (cons (__list-car (__list-car bindings))
-              [self letParams: (__list-cdr bindings)]))))
+        (cons [Heap slotOf: [Heap slotOf: bindings at: 'car] at: 'car]
+              [self letParams: [Heap slotOf: bindings at: 'cdr]]))))
 
 (setHandler! Compiler 'letValues:
   (fn (bindings)
-    (if (__list-empty? bindings)
+    (if [bindings is nil]
         nil
-        (cons (__list-car (__list-cdr (__list-car bindings)))
-              [self letValues: (__list-cdr bindings)]))))
+        (cons [Heap slotOf: [Heap slotOf: [Heap slotOf: bindings at: 'car] at: 'cdr] at: 'car]
+              [self letValues: [Heap slotOf: bindings at: 'cdr]]))))
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; compileDefmacro:chunk:
@@ -125,9 +125,9 @@
 
 (setHandler! Compiler 'compileDefmacro:chunk:
   (fn (rest chunk)
-    (let ((name (__list-car rest))
-          (paramsList (__list-car (__list-cdr rest)))
-          (body (__list-car (__list-cdr (__list-cdr rest)))))
+    (let ((name [Heap slotOf: rest at: 'car])
+          (paramsList [Heap slotOf: [Heap slotOf: rest at: 'cdr] at: 'car])
+          (body [Heap slotOf: [Heap slotOf: [Heap slotOf: rest at: 'cdr] at: 'cdr] at: 'car]))
       ;; sub-chunk for the body, in tail position.
       (let ((subChunk [Chunk new: paramsList source: body]))
         [self compileForm: body chunk: subChunk tail: #true]
@@ -154,11 +154,11 @@
 
 (setHandler! Compiler 'compileCall:chunk:tail:
   (fn (form chunk tail)
-    (let ((callable (__list-car form))
-          (args (__list-cdr form)))
+    (let ((callable [Heap slotOf: form at: 'car])
+          (args [Heap slotOf: form at: 'cdr]))
       [self compileForm: callable chunk: chunk tail: #false]
       [self compileArgs: args chunk: chunk]
-      (let ((argc (__list-length args))
+      (let ((argc [self argc: args])
             (ic [chunk addIc]))
         (if tail
             [chunk emit: [Opcode tailSend: 'call argc: argc]]

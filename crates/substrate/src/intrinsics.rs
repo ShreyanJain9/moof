@@ -2166,64 +2166,10 @@ fn install_globals(w: &mut World) {
         crate::wasm::load_wasm_mco(w, &path)
     });
 
-    // ─────────────────────────────────────────────────────────────
-    // moof-compiler primitives — free-function escape hatches that
-    // the moof compiler uses internally so it doesn't need
-    // `Cons:length` / `Symbol:endsWithColon?` etc. to exist as
-    // *methods* before the file that defines them can be compiled.
-    //
-    // these are NOT user-facing. they live as `__`-prefixed
-    // globals; convention is "rust-side compiler plumbing".
-    // ─────────────────────────────────────────────────────────────
-
-    install_global(w, "__list-length", |world, _self, args| {
-        if args.len() != 1 {
-            return Err(raise(world, "arity", "(__list-length list)"));
-        }
-        let n = world
-            .list_len(args[0])
-            .map_err(|_| type_error(world, "__list-length: not a list"))?;
-        Ok(Value::Int(n as i64))
-    });
-
-    install_global(w, "__list-empty?", |_world, _self, args| {
-        // empty? is true for nil only — Cons cells are never empty.
-        Ok(Value::Bool(matches!(args.first(), Some(Value::Nil))))
-    });
-
-    install_global(w, "__list-car", |world, _self, args| {
-        let v = args.first().copied().unwrap_or(Value::Nil);
-        match v {
-            Value::Nil => Ok(Value::Nil),
-            Value::Form(id) => {
-                let car_sym = world.car_sym;
-                Ok(world.heap.get(id).slot(car_sym))
-            }
-            _ => Err(type_error(world, "__list-car: not a Cons or nil")),
-        }
-    });
-
-    install_global(w, "__list-cdr", |world, _self, args| {
-        let v = args.first().copied().unwrap_or(Value::Nil);
-        match v {
-            Value::Nil => Ok(Value::Nil),
-            Value::Form(id) => {
-                let cdr_sym = world.cdr_sym;
-                Ok(world.heap.get(id).slot(cdr_sym))
-            }
-            _ => Err(type_error(world, "__list-cdr: not a Cons or nil")),
-        }
-    });
-
-    install_global(w, "__list-reverse", |world, _self, args| {
-        let v = args.first().copied().unwrap_or(Value::Nil);
-        let elems = world
-            .list_to_vec(v)
-            .map_err(|_| type_error(world, "__list-reverse: not a list"))?;
-        let rev: Vec<Value> = elems.into_iter().rev().collect();
-        Ok(world.make_list(&rev))
-    });
-
+    // every `__list-*` free fn is gone. the moof compiler walks lists
+    // via `[Heap slotOf: x at: 'cdr]` and `[v is nil]` (both rust
+    // install_natives), and uses self-recursion on Compiler for
+    // counting (see `Compiler:argc:` in compiler/00-helpers.moof).
 }
 
 // ─────────────────────────────────────────────────────────────────
