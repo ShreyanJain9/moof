@@ -1,8 +1,21 @@
 ;; lib/early/02-bool.moof
 ;;
-;; Phase 3 placeholder. Bool methods (:not, :and:, :or:, :toString)
-;; currently live as `defmethod`s in bootstrap.moof and migrate to
-;; `stdlib/bool.moof` (NOT here) — this file stays empty unless a
-;; Phase 4 dependency forces a migration to setHandler! form.
+;; Smalltalk-style conditional dispatch. `:ifTrue:ifFalse:` is
+;; installed PER-SINGLETON on `#true` and `#false` (the substrate
+;; lazy-allocates a singleton-Form for each tagged-immediate Bool
+;; per the ruby/Self model). each variant just calls the right
+;; thunk — no `if` needed in either body.
+;;
+;; with these in place, the `if` "special form" can be a regular
+;; macro (registered later in early/06-control-macros.moof) that
+;; expands `(if c t e)` to `[[c !!] ifTrue: (fn () t) ifFalse: (fn () e)]`.
 
-;; (intentionally empty.)
+(setHandler! #true  'ifTrue:ifFalse: (fn (t f) [t call]))
+(setHandler! #false 'ifTrue:ifFalse: (fn (t f) [f call]))
+
+;; [v !!] — coerce any value to a Bool. nil is falsy; everything
+;; else is truthy. Bool returns self. (`!!` mirrors C/JS truthiness
+;; idioms — `!!x` is "boolean of x".)
+(setHandler! Object '!! (fn () #true))
+(setHandler! nil    '!! (fn () #false))
+(setHandler! Bool   '!! (fn () self))

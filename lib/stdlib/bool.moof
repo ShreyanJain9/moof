@@ -1,14 +1,19 @@
 ;; lib/stdlib/bool.moof
 ;;
-;; Bool — convenience derived from the conditional primitive `if`.
+;; Bool — simple conditional methods. These do NOT short-circuit -- 
+;; short-circuiting versions will land soon. 
 ;; the rust intrinsic for Bool no longer carries `=`, `!=`, `not`,
 ;; `toString`; those flow through Object (`=`/`!=`) or are defined
 ;; here.
 
-(defmethod Bool (not) (if self #false #true))
+(defmethod #true (not) #false)
+(defmethod #false (not) #true)
 
-(defmethod Bool (toString) (if self "#true" "#false"))
+(defmethod #true (toString) "#true")
+(defmethod #false (toString) "#false")
 
-(defmethod Bool (and: other) (if self other #false))
+(defmethod #true (and: other) other)
+(defmethod #false (and: other) #false)
 
-(defmethod Bool (or: other) (if self #true other))
+(defmethod #true (or: other) #true)
+(defmethod #false (or: other) other)

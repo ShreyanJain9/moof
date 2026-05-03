@@ -174,3 +174,13 @@
             [bindings map:
               (fn (b) (list 'set! [b car] [[b cdr] car]))]))
       `(let ,nil-bindings (do ,@sets ,@body)))))
+
+;; NOTE: `(defmacro if …)` lives in lib/early/10-if-macro.moof, so
+;; that the bootstrap-stage helpers in early/09-defmethod.moof
+;; (`__decode-header`, `__decode-keyword`) compile against the
+;; rust-seed special-form `if`. registering the macro before they
+;; load tickles a moof-compiler anomaly: nested `(if …)` inside a
+;; `(let …)` body in a recursively-called function compiles in such
+;; a way that the outer arm is mis-selected at runtime, even though
+;; the same source compiled at REPL time runs fine. defer the macro
+;; until the decoders are stable.

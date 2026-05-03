@@ -1,0 +1,33 @@
+;; lib/early/10-if-macro.moof
+;;
+;; (defmacro if …) — `if` becomes a regular macro that expands into
+;; a Smalltalk-style polymorphic dispatch:
+;;
+;;   (if c t e)  →  [[c !!] ifTrue: (fn () t) ifFalse: (fn () e)]
+;;
+;; the actual conditional is per-singleton on `#true`/`#false`
+;; (early/02-bool.moof) — `:ifTrue:ifFalse:` calls the first or
+;; second thunk respectively. `:!!` (also early/02) coerces any
+;; value to a Bool: `nil` → #false, everything else → #true.
+;;
+;; this file loads AFTER early/09-defmethod.moof so the bootstrap-
+;; stage decoders (`__decode-header`, `__decode-keyword`) compile
+;; against the rust-seed `if` special form. once we drop in here,
+;; every subsequent file (every stdlib/*.moof) sees `if` as a
+;; user-overridable macro — keeping the "everything is a Form"
+;; promise about what the user wrote.
+;;
+;; the rust-seed special-form `if` is still emitted for forms that
+;; predate this file (the moof compiler itself, the early/* helpers).
+;; that's fine — those are lower-level than the user-language layer.
+;; once we have stability proofs that the compiler doesn't depend on
+;; `if`-as-special internally, we can collapse this into early/06.
+
+(defmacro if (args)
+  (let ((c [args car])
+        (t [[args cdr] car])
+        (rest [[args cdr] cdr]))
+    (let ((e [[rest is nil]
+              ifTrue:  (fn () nil)
+              ifFalse: (fn () [rest car])]))
+      `[[,c !!] ifTrue: (fn () ,t) ifFalse: (fn () ,e)])))
