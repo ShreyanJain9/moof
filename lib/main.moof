@@ -32,4 +32,5 @@
 [$transporter load: "stdlib/object.moof"]
 [$transporter load: "stdlib/bool.moof"]
 [$transporter load: "stdlib/nil.moof"]
+[$transporter load: "stdlib/cons.moof"]
 [$transporter load: "bootstrap.moof"]
