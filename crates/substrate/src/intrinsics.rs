@@ -1796,62 +1796,13 @@ fn make_cons_method(w: &mut World, self_: Value, args: &[Value]) -> Result<Value
 // ─────────────────────────────────────────────────────────────────
 
 fn install_list_methods(w: &mut World) {
-    // we read the head/tail SymIds from the world *inside* each
-    // native (they're already cached on `World`, not allocated per
-    // call). this lets the closures be `fn` pointers (no capture).
-    w.install_native(w.protos.cons, "car", |w, self_, _| {
-        let id = self_.as_form_id().ok_or_else(|| {
-            RaiseError::new(w.intern("type-error"), "car on non-Cons")
-        })?;
-        let car_sym = w.car_sym;
-        Ok(w.heap.get(id).slot(car_sym))
-    });
-    w.install_native(w.protos.cons, "cdr", |w, self_, _| {
-        let id = self_.as_form_id().ok_or_else(|| {
-            RaiseError::new(w.intern("type-error"), "cdr on non-Cons")
-        })?;
-        let cdr_sym = w.cdr_sym;
-        Ok(w.heap.get(id).slot(cdr_sym))
-    });
-    w.install_native(w.protos.cons, "null?", |_, _, _| Ok(Value::Bool(false)));
-    // [list empty?] — false (a List cell is always non-empty;
-    // emptiness is the Nil case). promoted to rust because
-    // `__decode-header` depends on `:empty?` and the bootstrap
-    // would otherwise be circular.
-    w.install_native(w.protos.cons, "empty?", |_, _, _| Ok(Value::Bool(false)));
-    // [list reverse] — used by __decode-keyword (kw-shape headers
-    // are decoded by accumulating params front-to-back, then
-    // reversing). promoted to rust to break the same defmethod
-    // bootstrap circularity.
-    w.install_native(w.protos.cons, "reverse", |w, self_, _| {
-        let elems = w
-            .list_to_vec(self_)
-            .map_err(|_| type_error(w, "reverse on non-Cons"))?;
-        let rev: Vec<Value> = elems.into_iter().rev().collect();
-        Ok(w.make_list(&rev))
-    });
-    // [list length] — count cons cells. used by the moof compiler's
-    // compile-send (`[args length]` for argc), so `:length` must be
-    // available on List from rust *before* bootstrap.moof loads
-    // through the moof compiler.
-    w.install_native(w.protos.cons, "length", |w, self_, _| {
-        let n = w
-            .list_len(self_)
-            .map_err(|_| type_error(w, "length on non-Cons"))?;
-        Ok(Value::Int(n as i64))
-    });
-    w.install_native(w.protos.cons, "cons:", |w, self_, args| {
-        let car_sym = w.car_sym;
-        let cdr_sym = w.cdr_sym;
-        let mut cell = Form::with_proto(Value::Form(w.protos.cons));
-        cell.slots.insert(car_sym, args[0]);
-        cell.slots.insert(cdr_sym, self_);
-        let id = w.alloc(cell);
-        Ok(Value::Form(id))
-    });
     // List :toString — recursive `(elem1 elem2 ...)` rendering.
     // each element renders via its own :toString. proto-name
     // short-circuit so `[List toString]` → "List" (not "()").
+    // STAYS IN RUST because the recursive renderer is already
+    // tested-and-correct and the moof recursion would re-allocate
+    // a String for every cons cell. (movable later if perf doesn't
+    // matter.)
     w.install_native(w.protos.cons, "toString", |w, self_, _| {
         if let Some(name) = proto_name_for(w, self_) {
             return Ok(w.make_string(&name));
@@ -1860,9 +1811,6 @@ fn install_list_methods(w: &mut World) {
         Ok(w.make_string(&s))
     });
 
-    // List :inspect — like :toString but each element renders via
-    // its own :inspect. so `(1 "hi" #\a)` inspects as `(1 "hi" #\a)`
-    // (re-readable) rather than `(1 hi a)`.
     w.install_native(w.protos.cons, "inspect", |w, self_, _| {
         if let Some(name) = proto_name_for(w, self_) {
             return Ok(w.make_string(&name));

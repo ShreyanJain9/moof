@@ -12,6 +12,16 @@
 (setHandler! Cons 'cons:
   (fn (x) (__alloc-cons x self)))
 
+(setHandler! Cons 'car (fn () (__list-car self)))
+(setHandler! Cons 'cdr (fn () (__list-cdr self)))
+
 (setHandler! Cons 'empty? (fn () #false))
 (setHandler! Cons 'null? (fn () #false))
 (setHandler! Cons 'nonEmpty? (fn () #true))
+
+;; :length and :reverse delegate to free-function primitives. these
+;; primitive-backed versions get shadowed by the stdlib/cons.moof
+;; defmethods (which use moof recursion) once that file loads;
+;; until then, these are what dispatch sees.
+(setHandler! Cons 'length (fn () (__list-length self)))
+(setHandler! Cons 'reverse (fn () (__list-reverse self)))
