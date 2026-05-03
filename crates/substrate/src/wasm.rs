@@ -41,6 +41,41 @@ use crate::form::Form;
 use crate::value::Value;
 use crate::world::{RaiseError, World};
 
+/// Per-dispatch handle table. wasm-side u32 indexes into this Vec.
+/// Allocated at dispatch entry; dropped at dispatch exit (including
+/// via raise/trap). NEVER cached across dispatches.
+pub struct HandleTable {
+    slots: Vec<Value>,
+}
+
+impl HandleTable {
+    pub fn new() -> Self {
+        Self { slots: Vec::new() }
+    }
+    pub fn push(&mut self, v: Value) -> u32 {
+        let idx = self.slots.len() as u32;
+        self.slots.push(v);
+        idx
+    }
+    pub fn get(&self, h: u32) -> Option<&Value> {
+        self.slots.get(h as usize)
+    }
+    pub fn take(&mut self, h: u32) -> Option<Value> {
+        // Replace with a placeholder so handle indices stay valid.
+        self.slots.get_mut(h as usize).map(|slot| std::mem::replace(slot, Value::Nil))
+    }
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+    pub fn clear(&mut self) {
+        self.slots.clear();
+    }
+}
+
+impl Default for HandleTable {
+    fn default() -> Self { Self::new() }
+}
+
 /// per-mco state: the wasmtime engine + instantiated module +
 /// store. the store carries a WasiP1Ctx so mcos compiled for
 /// `wasm32-wasi` can access standard system services (time, fs,

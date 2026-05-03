@@ -235,3 +235,22 @@ fn write_uleb128(out: &mut Vec<u8>, mut n: u64) {
         }
     }
 }
+
+// ─────────────────────────────────────────────────────────────────
+// HandleTable unit tests
+// ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn handle_table_basic_alloc_and_drop() {
+    use moof::wasm::HandleTable;
+    use moof::value::Value;
+    let mut t = HandleTable::new();
+    let h1 = t.push(Value::Int(1));
+    let h2 = t.push(Value::Int(2));
+    assert_eq!(t.get(h1), Some(&Value::Int(1)));
+    assert_eq!(t.get(h2), Some(&Value::Int(2)));
+    assert_eq!(t.len(), 2);
+    let taken = t.take(h1);
+    assert_eq!(taken, Some(Value::Int(1)));
+    drop(t);
+}
