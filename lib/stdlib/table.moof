@@ -58,3 +58,43 @@
 (defmethod Table (at-or: k default: d) (if [self containsKey?: k]
         [self at: k]
         d))
+
+;; ─────────────────────────────────────────────────────────────────
+;; :toString and :inspect — render `#[pos pos … key => val …]`.
+;;
+;; positional keys are 0..length (Integer); keyed keys come after
+;; in [self keys]. we split via [keys drop: length] for the keyed
+;; tail.
+;;
+;; the selector to apply per element is passed in via a closure so
+;; :toString and :inspect share the same walk.
+;; ─────────────────────────────────────────────────────────────────
+
+;; concatenate a Cons of Strings with " " separators. empty → "".
+(def __join-with-spaces
+  (fn (parts)
+    [parts reduce:
+           (fn (acc s) (if [acc = ""] s [acc + [" " + s]]))
+           from: ""]))
+
+(def __render-table-with
+  (fn (t render)
+    (let ((n [t length]))
+      (let ((positional-strs [[0 upto: n] map: (fn (i) (render [t at: i]))])
+            (keyed-keys [[t keys] drop: n]))
+        (let ((keyed-strs [keyed-keys map:
+                            (fn (k)
+                              [[(render k) + " => "] + (render [t at: k])])]))
+          (__join-with-spaces [positional-strs append: keyed-strs]))))))
+
+(defmethod Table (toString)
+  (let ((nm (__form-meta-at self 'name)))
+    (if [[nm proto] is Symbol]
+        [nm toString]
+        [["#[" + (__render-table-with self (fn (v) [v toString]))] + "]"])))
+
+(defmethod Table (inspect)
+  (let ((nm (__form-meta-at self 'name)))
+    (if [[nm proto] is Symbol]
+        [nm toString]
+        [["#[" + (__render-table-with self (fn (v) [v inspect]))] + "]"])))

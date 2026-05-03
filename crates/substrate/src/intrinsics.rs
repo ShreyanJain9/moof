@@ -368,27 +368,9 @@ fn install_table_methods(w: &mut World) {
 
     // :!= is derived in lib/bootstrap.moof from :=.
 
-    // [t toString] — `#[1 2 'name => "ada"]`-shaped rendering.
-    // proto-name short-circuit so `[Table toString]` → "Table".
-    // each value renders via its own :toString — strings without
-    // quotes, chars as just their character, etc.
-    w.install_native(w.protos.table, "toString", |w, self_, _| {
-        if let Some(name) = proto_name_for(w, self_) {
-            return Ok(w.make_string(&name));
-        }
-        render_table_with(w, self_, "toString").map(|s| w.make_string(&s))
-    });
-
-    // [t inspect] — like :toString but each value renders via its
-    // own :inspect. so `#[1 "hi" #\a]` inspects as `#[1 "hi" #\a]`
-    // (re-readable) rather than `#[1 hi a]` (display-friendly).
-    // proto-name short-circuit too.
-    w.install_native(w.protos.table, "inspect", |w, self_, _| {
-        if let Some(name) = proto_name_for(w, self_) {
-            return Ok(w.make_string(&name));
-        }
-        render_table_with(w, self_, "inspect").map(|s| w.make_string(&s))
-    });
+    // :toString / :inspect — moof, in stdlib/table.moof. iterate
+    // positional via [t at: i], keyed via [keys drop: length],
+    // join via the closure passed in.
 
     // [t asString] — collect positional Chars into a String. raises
     // if any positional entry isn't a Char.
@@ -452,59 +434,6 @@ fn install_table_methods(w: &mut World) {
 /// recursive table rendering with a user-chosen per-element
 /// selector. `:toString` and `:inspect` differ only in which
 /// selector each element gets sent — the `#[…]` shape is shared.
-fn render_table_with(
-    w: &mut World,
-    table: Value,
-    elem_sel: &str,
-) -> Result<String, RaiseError> {
-    let positional: Vec<Value>;
-    let keyed_keys: Vec<Value>;
-    let keyed_vals: Vec<Value>;
-    match w.table_repr(table) {
-        Some(r) => {
-            positional = r.positional.clone();
-            keyed_keys = r.keyed.keys().copied().collect();
-            keyed_vals = r.keyed.values().copied().collect();
-        }
-        None => {
-            return Err(RaiseError::new(
-                w.intern("type-error"),
-                format!("{} on non-Table", elem_sel),
-            ));
-        }
-    }
-    let mut out = String::from("#[");
-    let elem_sym = w.intern(elem_sel);
-    let mut first = true;
-    for v in positional {
-        if !first {
-            out.push(' ');
-        }
-        first = false;
-        let s = w.send(v, elem_sym, &[])?;
-        let txt = w.string_text(s).map(|t| t.to_string());
-        out.push_str(&txt.unwrap_or_else(|| "?".into()));
-    }
-    for (k, v) in keyed_keys.into_iter().zip(keyed_vals.into_iter()) {
-        if !first {
-            out.push(' ');
-        }
-        first = false;
-        let ks = w.send(k, elem_sym, &[])?;
-        let kt = w.string_text(ks).map(|t| t.to_string());
-        // symbols are rendered without the leading quote in
-        // table-render — we render them as their text. that
-        // matches how `'name => "ada"` shows up in the source.
-        out.push_str(&kt.unwrap_or_else(|| "?".into()));
-        out.push_str(" => ");
-        let vs = w.send(v, elem_sym, &[])?;
-        let vt = w.string_text(vs).map(|t| t.to_string());
-        out.push_str(&vt.unwrap_or_else(|| "?".into()));
-    }
-    out.push(']');
-    Ok(out)
-}
-
 // ─────────────────────────────────────────────────────────────────
 // Char — tagged-immediate Unicode scalar.
 // strings iterate to Chars; `[s at: i]` returns a Char.
@@ -1355,54 +1284,6 @@ fn target_form_id(w: &mut World, v: Value, _op: &str) -> FormId {
 /// that name's text. used by instance `:toString` / `:inspect`
 /// handlers to short-circuit when the receiver is a *proto-Form*
 /// rather than an instance of the proto — since moof's flat
-/// prototype model has no separate metaclass, the proto sits on
-/// the same handler table as its instances. without this guard,
-/// `[String toString]` would dispatch to the instance handler
-/// and return the proto-Form (rather than the name "String").
-fn proto_name_for(w: &mut World, self_: Value) -> Option<String> {
-    let id = self_.as_form_id()?;
-    let name_meta = w.intern("name");
-    match w.heap.get(id).meta_at(name_meta) {
-        Value::Sym(s) => Some(w.resolve(s).to_string()),
-        _ => None,
-    }
-}
-
-/// REPL-readable form of a Char codepoint. matches the reader's
-/// `#\…` grammar (see `crates/substrate/src/reader.rs`):
-///   `#\a`, `#\space`, `#\newline`, `#\tab`, `#\return`, `#\null`,
-///   `#\u{HEX}` for non-printable / non-ASCII codepoints.
-fn render_char_literal(cp: u32) -> String {
-    match cp {
-        0x20 => "#\\space".to_string(),
-        0x0A => "#\\newline".to_string(),
-        0x09 => "#\\tab".to_string(),
-        0x0D => "#\\return".to_string(),
-        0x00 => "#\\null".to_string(),
-        _ => match char::from_u32(cp) {
-            Some(c) if !c.is_control() && cp <= 0x7E => format!("#\\{}", c),
-            _ => format!("#\\u{{{:x}}}", cp),
-        },
-    }
-}
-
-/// REPL-readable form of a String — `"…"` with escapes matching
-/// the reader's `\n \t \\ \"` grammar.
-fn render_string_literal(text: &str) -> String {
-    let mut out = String::from("\"");
-    for c in text.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            _ => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
 /// stringify a Value briefly (used in disassembly comments). we
 /// don't recurse into nested forms — just enough for a one-liner.
 fn render_value(w: &World, v: Value) -> String {
@@ -1726,71 +1607,6 @@ fn make_cons_method(w: &mut World, self_: Value, args: &[Value]) -> Result<Value
 //     :nonEmpty?, :length, :reverse (via list-primitives)
 //   - stdlib/cons.moof: the rest, including :toString / :inspect
 //     (which use moof spine recursion + Char codepoint escapes).
-
-/// recursive list rendering with a user-chosen per-element selector.
-/// `:toString` and `:inspect` differ only in which selector each
-/// element gets sent — the parens-and-spaces shape is shared.
-fn render_list_with(
-    w: &mut World,
-    list: Value,
-    elem_sel: &str,
-) -> Result<String, RaiseError> {
-    let mut out = String::from("(");
-    let mut cur = list;
-    let mut first = true;
-    let elem_sym = w.intern(elem_sel);
-    let car_sym = w.car_sym;
-    let cdr_sym = w.cdr_sym;
-    loop {
-        match cur {
-            Value::Nil => break,
-            Value::Form(id) => {
-                if !first {
-                    out.push(' ');
-                }
-                first = false;
-                let head = w.heap.get(id).slot(car_sym);
-                let tail = w.heap.get(id).slot(cdr_sym);
-                let head_str_v = w.send(head, elem_sym, &[])?;
-                push_string_value(w, &mut out, head_str_v)?;
-                cur = tail;
-            }
-            _ => {
-                // improper list — should be rare in moof; show as
-                // `(... . tail)`.
-                if !first {
-                    out.push(' ');
-                }
-                out.push_str(". ");
-                let tail_str_v = w.send(cur, elem_sym, &[])?;
-                push_string_value(w, &mut out, tail_str_v)?;
-                break;
-            }
-        }
-    }
-    out.push(')');
-    Ok(out)
-}
-
-/// pull text bytes out of a String form and append to `out`.
-/// raises type-error if the value isn't a String.
-fn push_string_value(
-    w: &mut World,
-    out: &mut String,
-    value: Value,
-) -> Result<(), RaiseError> {
-    let copy = w.string_text(value).map(|t| t.to_string());
-    match copy {
-        Some(t) => {
-            out.push_str(&t);
-            Ok(())
-        }
-        None => Err(RaiseError::new(
-            w.intern("type-error"),
-            ":to-string did not return a String",
-        )),
-    }
-}
 
 // ─────────────────────────────────────────────────────────────────
 // Object reflection — the load-bearing moldable promise (L6)
