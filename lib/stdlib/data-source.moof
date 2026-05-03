@@ -1,0 +1,41 @@
+;; lib/stdlib/data-source.moof — DataSource protocol defaults.
+;;
+;; the protocol is described in docs/concepts/data-sources.md.
+;; per the infinite-source amendment, protos that declare
+;; :infinite-source #true on themselves get sensible defaults
+;; here. they may also declare :infinite-source-flavor as
+;; 'polled or 'generator for the right :peek default.
+
+;; default :done? for any infinite source.
+(defmethod Object (done?)
+  (if [self metaAt: 'infinite-source]
+      #false
+      (raise: 'no-impl "done? not implemented; not declared infinite-source")))
+
+;; default :peek for any polled-flavor infinite source.
+;; if proto declares :infinite-source-flavor 'polled, peek = next.
+(defmethod Object (peek)
+  (let ((flavor [self metaAt: 'infinite-source-flavor]))
+    (if [flavor = 'polled]
+        [self next]
+        (if [flavor = 'generator]
+            (raise: 'no-impl "generator-flavor :peek must be implemented per-mco")
+            (raise: 'no-impl "peek not implemented; not declared infinite-source")))))
+
+;; default :close for any infinite source — no-op.
+(defmethod Object (close)
+  (if [self metaAt: 'infinite-source]
+      self
+      (raise: 'no-impl "close not implemented")))
+
+;; :take: n — consume n :next values into a Cons.
+(defmethod Object (take: n)
+  (if [n = 0]
+      nil
+      (cons [self next] [self take: [n - 1]])))
+
+;; :forEach: blk — infinite-loop on :next; consumer breaks via raise.
+(defmethod Object (forEach: blk)
+  (do
+    [blk call: [self next]]
+    [self forEach: blk]))
