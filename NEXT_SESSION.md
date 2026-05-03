@@ -1,19 +1,41 @@
 # next session — polyglot maturity
 
-> **status: pre-MCO cleanup landed.** `$transporter` cap (Self-style
-> file ↔ image bridge), `$compiler useMoof` cap, `lib/main.moof` as
-> single rust entry. `bootstrap.moof` and `compiler.moof` split into
-> 27 thematic files under `lib/{compiler,early,stdlib}/`. ~100 LoC
-> out of `intrinsics.rs` (Bool/nil/Cons primitives migrated; Object
-> :inspect, :!=, :initialize-via-stdlib). REPL prints `nil`. 357
-> tests green at every commit boundary. ~40 commits.
+> **status: pre-MCO cleanup landed, including the radical second
+> wave.** `$transporter` cap (Self-style file ↔ image bridge),
+> `$compiler useMoof` cap, `lib/main.moof` as single rust entry.
+> `bootstrap.moof` and `compiler.moof` split into 27 thematic files
+> under `lib/{compiler,early,stdlib}/`. **`intrinsics.rs`: 3836 →
+> 3528 (-308 LoC).** REPL prints `nil`. 357 tests green at every
+> commit boundary. ~50 commits.
 >
-> the deeper rust→moof shrink the spec estimated (down to ~2500 LoC)
-> turns out to be capped by genuine primitive needs — heap, byte
-> access, chunk reflection, IEEE-754 ops. landed at ~3735, which is
-> the right shape: rust hosts only what *must* live there. further
-> shrink would require slot-access primitives in moof that lose perf
-> for marginal LoC gain.
+> the radical migration shape we landed on — rust exposes minimal
+> heap / byte / codepoint / chunk access; moof writes the algorithms.
+> what moved (in moof now, not rust):
+>
+> - Object reflection (`:proto, :slots, :handlers, :meta,
+>   :handlerAt:, :source, :identity, :is/=/!=/inspect, :initialize`)
+>   — `__form-{slot,handler,meta}-keys` give iteration; `slot /
+>   __form-handler-at / __form-meta-at` give lookup; moof builds
+>   Tables and walks chains.
+> - All Cons methods (length, reverse, map, filter, reduce, take,
+>   drop, =, !=, toString, inspect, etc) — `__list-{car,cdr,length,
+>   empty?,reverse}` + `__alloc-cons` are the primitives; spine
+>   recursion is moof.
+> - Char:inspect — dispatch (32→space, …) + hex conversion are moof,
+>   using `[self codepoint]` + `__char-from-codepoint` for digits.
+> - Method:toString/:inspect — read :source meta, dispatch on its
+>   shape (Symbol vs Form vs nil), render in moof.
+> - String:toString/:inspect — `[self toList]` + Cons:reduce: + per-
+>   Char escape table, all moof.
+> - Table:toString/:inspect — `[t length]` + `[t at: i]` + `[keys
+>   drop: length]`, with a closure-passed renderer.
+> - 5 dead rust helpers removed (render_table_with, render_list_with,
+>   render_string_literal, render_char_literal, proto_name_for).
+>
+> the bigger shrink the spec estimated (~2500) is reachable but
+> requires more primitive-first migrations: chunk side-tables for
+> Method reflection, byte primitives for String text manipulation.
+> deferred — diminishing returns + risk for now.
 >
 > ready for: parser-in-moof, real MCO arg marshaling, the polyglot
 > tracks below.
