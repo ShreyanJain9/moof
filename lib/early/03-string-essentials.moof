@@ -1,8 +1,17 @@
 ;; lib/early/03-string-essentials.moof
 ;;
-;; Phase 3 placeholder. The small set of String methods that
-;; `__decode-header` transitively needs: :endsWith?:, :+, :=, :length,
-;; :contains?:, :all?:, :toString. Phase 4 ports these from
-;; intrinsics.rs into setHandler! form here.
+;; String methods needed before defmethod runs. `Symbol:endsWithColon?`
+;; (early/04-symbol.moof) calls `[s endsWith?: ":"]` while expanding
+;; defmethod's keyword headers, so :endsWith?: must dispatch correctly
+;; from this point on.
+;;
+;; setHandler! shape because defmethod isn't here yet. the moof body
+;; uses byte-level rust primitives (:length, :slice:length:, :=).
 
-;; (intentionally empty in Phase 3.)
+(setHandler! String 'endsWith?:
+  (fn (suffix)
+    (let ((nself [self length])
+          (nsuf [suffix length]))
+      (if [nsuf > nself]
+          #false
+          [[self slice: [nself - nsuf] length: nsuf] = suffix]))))

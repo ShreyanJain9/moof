@@ -35,6 +35,35 @@
         (__int-to-hex-acc n ""))))
 
 ;; ─────────────────────────────────────────────────────────────────
+;; predicates — written in moof using :codepoint and Integer cmps.
+;; phase G+ swaps in proper Unicode-aware variants; for now ASCII.
+;; ─────────────────────────────────────────────────────────────────
+
+(defmethod Char (whitespace?)
+  (let ((cp [self codepoint]))
+    (if [cp = 32]  #true       ;; space
+    (if [cp = 9]   #true       ;; tab
+    (if [cp = 10]  #true       ;; newline
+    (if [cp = 13]  #true       ;; return
+        #false))))))
+
+(defmethod Char (digit?)
+  (let ((cp [self codepoint]))
+    (if [cp >= 48] [cp <= 57] #false)))   ;; '0'..'9'
+
+(defmethod Char (lowercase?)
+  (let ((cp [self codepoint]))
+    (if [cp >= 97] [cp <= 122] #false)))  ;; 'a'..'z'
+
+(defmethod Char (uppercase?)
+  (let ((cp [self codepoint]))
+    (if [cp >= 65] [cp <= 90] #false)))   ;; 'A'..'Z'
+
+(defmethod Char (letter?) (if [self lowercase?] #true [self uppercase?]))
+
+(defmethod Char (alphanumeric?) (if [self letter?] #true [self digit?]))
+
+;; ─────────────────────────────────────────────────────────────────
 ;; :inspect — REPL-readable Char literal. dispatch via codepoint:
 ;; the five named control chars (space/tab/newline/return/null) get
 ;; their long names; printable ASCII gets `#\X`; everything else

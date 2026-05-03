@@ -36,6 +36,125 @@
 (defmethod String (concat: other) [self + other])
 
 ;; ─────────────────────────────────────────────────────────────────
+;; substring search + predicates — `:indexOf:` walks char-by-char
+;; comparing slices to the needle; the others derive from it.
+;; ─────────────────────────────────────────────────────────────────
+
+(def __string-indexof-walk
+  (fn (hay needle i nh nn)
+    (if [[i + nn] > nh]
+        -1
+        (if [[hay slice: i length: nn] = needle]
+            i
+            (__string-indexof-walk hay needle [i + 1] nh nn)))))
+
+(defmethod String (indexOf: needle)
+  (__string-indexof-walk self needle 0 [self length] [needle length]))
+
+(defmethod String (contains?: needle) [[self indexOf: needle] >= 0])
+
+(defmethod String (startsWith?: prefix)
+  (let ((np [prefix length]))
+    (if [np > [self length]]
+        #false
+        [[self slice: 0 length: np] = prefix])))
+
+;; ─────────────────────────────────────────────────────────────────
+;; :trim — strip ASCII whitespace from both ends. uses Char:whitespace?
+;; (in stdlib/char.moof) plus :slice:length: + :length.
+;; ─────────────────────────────────────────────────────────────────
+
+(def __trim-leading-count
+  (fn (s i n)
+    (if [i = n]
+        n
+        (if [[s at: i] whitespace?]
+            (__trim-leading-count s [i + 1] n)
+            i))))
+
+(def __trim-trailing-count
+  (fn (s i)
+    (if [i = 0]
+        0
+        (if [[s at: [i - 1]] whitespace?]
+            (__trim-trailing-count s [i - 1])
+            i))))
+
+(defmethod String (trim)
+  (let ((n [self length]))
+    (let ((start (__trim-leading-count self 0 n))
+          (end (__trim-trailing-count self n)))
+      (if [start >= end]
+          ""
+          [self slice: start length: [end - start]]))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; :split:, :lines, :replace:with: — algorithmic, all in moof.
+;; ─────────────────────────────────────────────────────────────────
+
+(def __string-split-walk
+  (fn (s sep start n nsep)
+    (let ((rest-len [n - start]))
+      (if [rest-len < nsep]
+          (cons [s slice: start length: rest-len] nil)
+          (let ((rest [s slice: start length: rest-len]))
+            (let ((idx [rest indexOf: sep]))
+              (if [idx < 0]
+                  (cons rest nil)
+                  (let ((next-start [[start + idx] + nsep]))
+                    (cons [s slice: start length: idx]
+                          (__string-split-walk s sep next-start n nsep))))))))))
+
+(defmethod String (split: sep)
+  (let ((n [self length])
+        (nsep [sep length]))
+    (if [nsep = 0]
+        ;; empty separator → list of single-char Strings.
+        [[self toList] map: (fn (c) [c toString])]
+        (__string-split-walk self sep 0 n nsep))))
+
+(defmethod String (lines)
+  ;; like :split: "\n" but drops a trailing empty string (`"abc\n"` →
+  ;; ("abc"), not ("abc" "")). matches rust's str::lines.
+  (let ((parts [self split: "\n"]))
+    (if [parts empty?]
+        nil
+        (if [[parts last] = ""]
+            [parts take: [[parts length] - 1]]
+            parts))))
+
+(defmethod String (replace: needle with: replacement)
+  (let ((idx [self indexOf: needle]))
+    (if [idx < 0]
+        self
+        (let ((nn [needle length])
+              (n [self length]))
+          (let ((after-start [idx + nn]))
+            (let ((after-len [n - after-start]))
+              (let ((before [self slice: 0 length: idx])
+                    (after [self slice: after-start length: after-len]))
+                [[before + replacement] + [after replace: needle with: replacement]])))))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; :asTable — Cons of Chars → positional Table.
+;; :as: target — protocol-style coercion.
+;; ─────────────────────────────────────────────────────────────────
+
+(defmethod String (asTable)
+  (let ((tbl [Table new]))
+    [[self toList] forEach: (fn (c) [tbl push: c])]
+    tbl))
+
+(defmethod String (as: target)
+  (if [target is String]
+      self
+      (if [target is Cons]
+          [self toList]
+          (if [target is Table]
+              [self asTable]
+              (raise: 'type-error "String:as: expects String, Cons, or Table")))))
+
+;; ─────────────────────────────────────────────────────────────────
 ;; :toString and :inspect — moof code. :toString is identity for
 ;; instances and the proto-name for the proto-Form itself. :inspect
 ;; produces a re-readable `"…"` literal with escapes.

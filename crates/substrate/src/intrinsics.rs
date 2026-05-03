@@ -561,7 +561,8 @@ fn install_string_methods(w: &mut World) {
         Ok(w.make_list(&chars))
     });
 
-    // unicode case + trim — each is a one-liner over `str_arg`.
+    // unicode case mapping stays rust — needs Char::to_uppercase /
+    // to_lowercase tables that aren't reasonable to write in moof.
     macro_rules! str_unary_string {
         ($w:expr, $sel:literal, $method:ident) => {
             $w.install_native($w.protos.string, $sel, |w, self_, _| {
@@ -572,42 +573,11 @@ fn install_string_methods(w: &mut World) {
     }
     str_unary_string!(w, "upcase",   to_uppercase);
     str_unary_string!(w, "downcase", to_lowercase);
-    w.install_native(w.protos.string, "trim", |w, self_, _| {
-        let s = str_arg(w, self_, "trim")?.trim().to_string();
-        Ok(w.make_string(&s))
-    });
 
-    // substring predicates: `contains?:`, `startsWith?:` — both
-    // walk both args as Strings, ask the rust method, return Bool.
-    macro_rules! str_predicate {
-        ($w:expr, $sel:literal, $method:ident) => {
-            $w.install_native($w.protos.string, $sel, |w, self_, args| {
-                let other = args.first().copied().unwrap_or(Value::Nil);
-                let (hay, needle) = two_strs(w, self_, other, $sel)?;
-                Ok(Value::Bool(hay.$method(&needle)))
-            });
-        };
-    }
-    str_predicate!(w, "contains?:",    contains);
-    str_predicate!(w, "startsWith?:",  starts_with);
-    // [s endsWith?: suffix] is in rust because `Symbol :endsWithColon?`
-    // depends on it, and `__decode-header` (which `defmethod` itself
-    // depends on) calls `:endsWithColon?`. promotion breaks an
-    // otherwise-circular bootstrap.
-    str_predicate!(w, "endsWith?:",    ends_with);
-    // [s indexOf: needle] — char-index of first occurrence, or -1.
-    // (the -1 sentinel is the discoverable default; phase G+ may
-    // promote to a Maybe/Optional shape.)
-    w.install_native(w.protos.string, "indexOf:", |w, self_, args| {
-        let other = args.first().copied().unwrap_or(Value::Nil);
-        let (hay, needle) = two_strs(w, self_, other, "indexOf:")?;
-        let result = match hay.find(&needle) {
-            None => -1,
-            // byte-index → char-index: count chars before the match.
-            Some(b) => hay[..b].chars().count() as i64,
-        };
-        Ok(Value::Int(result))
-    });
+    // :trim, :indexOf:, :contains?:, :startsWith?:, :endsWith?:,
+    // :replace:with:, :split:, :lines, :asTable, :as: — moof, in
+    // stdlib/string.moof (and :endsWith?: in early/03-string-essentials.moof
+    // because Symbol:endsWithColon? needs it before defmethod runs).
     // [s slice: start length: n] — substring by char-index.
     w.install_native(w.protos.string, "slice:length:", |w, self_, args| {
         let start = args.first().copied().and_then(|v| v.as_int()).ok_or_else(
@@ -631,86 +601,6 @@ fn install_string_methods(w: &mut World) {
             .collect();
         Ok(w.make_string(&collected))
     });
-    // [s replace: needle with: replacement]
-    w.install_native(w.protos.string, "replace:with:", |w, self_, args| {
-        let other = args.first().copied().unwrap_or(Value::Nil);
-        let (s, n) = two_strs(w, self_, other, "replace:with:")?;
-        let r = str_arg(w, args.get(1).copied().unwrap_or(Value::Nil), "replace:with:")?;
-        Ok(w.make_string(&s.replace(&n, &r)))
-    });
-    // [s split: sep] — returns a List of Strings.
-    w.install_native(w.protos.string, "split:", |w, self_, args| {
-        let sep = args.first().copied().unwrap_or(Value::Nil);
-        let (s, p) = two_strs(w, self_, sep, "split:")?;
-        let parts: Vec<Value> = if p.is_empty() {
-            // empty separator — split into chars-as-strings.
-            s.chars().map(|c| w.make_string(&c.to_string())).collect()
-        } else {
-            s.split(&p).map(|piece| w.make_string(piece)).collect()
-        };
-        Ok(w.make_list(&parts))
-    });
-    // [s lines] — split on '\n' / '\r\n'; rust's `str::lines` drops
-    // the trailing empty line that `split:` would keep, hence its
-    // own primitive.
-    w.install_native(w.protos.string, "lines", |w, self_, _| {
-        let text = str_arg(w, self_, "lines")?;
-        let lines: Vec<Value> = text.lines().map(|l| w.make_string(l)).collect();
-        Ok(w.make_list(&lines))
-    });
-    // [s forEach: f] is derived in lib/bootstrap.moof — walks the
-    // Char list via :toList.
-    // [<some-string> toString] returns the string itself (raw bytes,
-    // no quotes). [String toString] returns "String" — handled by
-    // the proto-name short-circuit at the top.
-    // :toString and :inspect are moof, in stdlib/string.moof.
-    // both check [self is String] for the proto-Form short-circuit
-    // and fall through to identity / Char-walking-and-escaping for
-    // instances.
-
-    // [s asTable] — a Table of Chars, one per Unicode scalar.
-    // [s asList] is just :toList, exposed in lib/bootstrap.moof.
-    // [s as: target] dispatches by identity — see below.
-    w.install_native(w.protos.string, "asTable", |w, self_, _| {
-        let chars: Vec<Value> = str_arg(w, self_, "asTable")?
-            .chars()
-            .map(|c| Value::Char(c as u32))
-            .collect();
-        let tbl = w.make_table();
-        if let Some(r) = w.table_repr_mut(tbl) {
-            for v in chars {
-                r.positional.push(v);
-            }
-        }
-        Ok(tbl)
-    });
-    // :asList is just an alias for :toList; lives in
-    // lib/bootstrap.moof.
-    w.install_native(w.protos.string, "as:", |w, self_, args| {
-        let target = args.first().copied().unwrap_or(Value::Nil);
-        let table_proto = Value::Form(w.protos.table);
-        let list_proto = Value::Form(w.protos.cons);
-        let string_proto = Value::Form(w.protos.string);
-        if target == table_proto {
-            let sel = w.intern("asTable");
-            return w.send(self_, sel, &[]);
-        }
-        if target == list_proto {
-            let sel = w.intern("asList");
-            return w.send(self_, sel, &[]);
-        }
-        if target == string_proto {
-            return Ok(self_);
-        }
-        Err(RaiseError::new(
-            w.intern("conversion"),
-            "String can be converted as: Table, List, String",
-        ))
-    });
-
-    // [s map: f], [s filter: pred], [s reverse], [s !=] are all
-    // derived in lib/bootstrap.moof from :toList plus List ops
-    // plus :+ for char/string accumulation.
     w.install_native(w.protos.string, "=", |w, self_, args| {
         // structural equality. mismatched proto → false; never
         // raises (so `[Symbol = String]` is well-defined).
