@@ -1,0 +1,81 @@
+;; lib/early/05-quasiquote.moof
+;;
+;; quasiquote — pure source-to-source expansion. lives here (not in
+;; the rust seed compiler) so user code can read it, reason about it,
+;; and override it. defined first because every macro below uses it.
+
+;; quasiquote — pure source-to-source expansion that builds a
+;; runtime constructor for the quasiquoted form. lives here
+;; (rather than the rust compiler) so that user code can read it,
+;; reason about it, and override it. defined first because every
+;; macro below it uses quasiquote in its body.
+;;
+;; the rules (kernel/CL tradition):
+;;   - atom (sym, int, etc.)              → `(quote atom)`
+;;   - empty list                         → `(quote ())`
+;;   - (unquote x) at depth 1             → x (eval'd at runtime)
+;;   - (unquote x) at depth > 1           → `(list 'unquote (qq x [d-1]))`
+;;   - (quasiquote x) inside              → `(list 'quasiquote (qq x [d+1]))`
+;;   - (unquote-splicing y) inside list at depth 1
+;;                                        → splice into accumulator via `append`
+;;   - general list, walk right-to-left   → `(cons (qq elem) acc)`
+;;
+;; the helpers are top-level `def`s (not methods) so that the
+;; macro body — which can't itself use quasiquote, since we're
+;; defining it — stays terse with bare `cons` / `list` / `quote`.
+
+(def __qq-list?
+  (fn (v)
+    (if [v is nil]
+        #true
+        (if [[v proto] is Cons] #true #false))))
+
+;; pre-bootstrap, the only "is this an empty list?" predicate
+;; that's reachable is `[v is nil]` (Object's identity-eq to nil).
+;; `:empty?` and `:null?` only get installed further down the file,
+;; so the quasiquote helpers — which run during compilation of
+;; *later* macros in this same file — must use `is nil`.
+
+(def __qq-marker?
+  (fn (form sym)
+    (if (__qq-list? form)
+        (if [form is nil]
+            #false
+            [[form car] is sym])
+        #false)))
+
+(def __qq-walk-elems
+  (fn (elems depth)
+    (if [elems is nil]
+        (list 'quote nil)
+        (let ((elem [elems car])
+              (acc (__qq-walk-elems [elems cdr] depth)))
+          (if (if [depth = 1]
+                  (__qq-marker? elem 'unquote-splicing)
+                  #false)
+              (list 'append [[elem cdr] car] acc)
+              (list 'cons (__qq-expand elem depth) acc))))))
+
+(def __qq-expand
+  (fn (form depth)
+    (if (__qq-list? form)
+        (if [form is nil]
+            (list 'quote form)
+            (let ((first [form car]))
+              (if [first is 'unquote]
+                  (if [depth = 1]
+                      [[form cdr] car]
+                      (list 'list
+                            (list 'quote 'unquote)
+                            (__qq-expand [[form cdr] car]
+                                         [depth - 1])))
+              (if [first is 'quasiquote]
+                  (list 'list
+                        (list 'quote 'quasiquote)
+                        (__qq-expand [[form cdr] car]
+                                     [depth + 1]))
+                  (__qq-walk-elems form depth)))))
+        (list 'quote form))))
+
+(defmacro quasiquote (args)
+  (__qq-expand [args car] 1))
