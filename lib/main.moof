@@ -24,6 +24,7 @@
 [$transporter load: "early/04-symbol.moof"]
 [$transporter load: "early/05-quasiquote.moof"]
 [$transporter load: "early/06-control-macros.moof"]
+[$transporter load: "early/07-modules.moof"]
 
 ;; phase 3: bootstrap stdlib + macros — compiled by the moof compiler.
 [$transporter load: "bootstrap.moof"]
