@@ -1,27 +1,9 @@
 ;; lib/early/00-cons.moof
 ;;
-;; Cons primitives that must exist BEFORE defmethod runs — :cons:
-;; (heap alloc, used by the (cons head tail) global which is hit
-;; during macro expansion via __decode-keyword), plus the trivial
-;; :empty?, :null?, :nonEmpty? predicates.
+;; Cons primitives (:car, :cdr, :cons:, :empty?, :null?, :nonEmpty?,
+;; :reverse) are native methods installed by `intrinsics::install`.
+;; this file is intentionally empty.
 ;;
-;; setHandler!-driven because defmethod itself is later in the boot
-;; (in early/09-defmethod.moof). everything else (length, reverse,
-;; map, filter, …) lives in stdlib/cons.moof.
-
-(setHandler! Cons 'cons:
-  (fn (x) (__alloc-cons x self)))
-
-(setHandler! Cons 'car (fn () (__list-car self)))
-(setHandler! Cons 'cdr (fn () (__list-cdr self)))
-
-(setHandler! Cons 'empty? (fn () #false))
-(setHandler! Cons 'null? (fn () #false))
-(setHandler! Cons 'nonEmpty? (fn () #true))
-
-;; :length and :reverse delegate to free-function primitives. these
-;; primitive-backed versions get shadowed by the stdlib/cons.moof
-;; defmethods (which use moof recursion) once that file loads;
-;; until then, these are what dispatch sees.
-(setHandler! Cons 'length (fn () (__list-length self)))
-(setHandler! Cons 'reverse (fn () (__list-reverse self)))
+;; the algorithmic Cons methods (length, map, filter, reduce, take,
+;; drop, =, !=, toString, inspect, append:, …) live in stdlib/cons.moof
+;; and shadow the rust :reverse with moof recursion when applicable.

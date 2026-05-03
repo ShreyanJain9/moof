@@ -70,15 +70,6 @@ fn list_reverse_primitive() {
     );
 }
 
-#[test]
-fn symbol_ends_with_colon_primitive() {
-    let mut w = fresh_world();
-    assert_eq!(
-        moof::eval(&mut w, "(__symbol-ends-with-colon? 'foo:)").unwrap(),
-        Value::Bool(true)
-    );
-    assert_eq!(
-        moof::eval(&mut w, "(__symbol-ends-with-colon? 'foo)").unwrap(),
-        Value::Bool(false)
-    );
-}
+// __symbol-ends-with-colon? was removed — Symbol:endsWithColon? in
+// early/04-symbol.moof uses [[self toString] endsWith?: ":"] which
+// dispatches through methods. no compiler-internal primitive needed.

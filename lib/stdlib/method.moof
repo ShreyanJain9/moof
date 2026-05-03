@@ -40,20 +40,20 @@
 ;; ─────────────────────────────────────────────────────────────────
 
 (defmethod Method (toString)
-  (let ((nm (__form-meta-at self 'name)))
+  (let ((nm [self metaAt: 'name]))
     (if [[nm proto] is Symbol]
         [nm toString]
-        (let ((src (__form-meta-at self 'source)))
+        (let ((src [self metaAt: 'source]))
           (if [[src proto] is Symbol]
               [["<method:" + [src toString]] + ">"]
               (let ((p (slot self 'params)))
                 [["<closure " + (if [p is nil] "()" [p toString])] + ">"]))))))
 
 (defmethod Method (inspect)
-  (let ((nm (__form-meta-at self 'name)))
+  (let ((nm [self metaAt: 'name]))
     (if [[nm proto] is Symbol]
         [nm toString]
-        (let ((src (__form-meta-at self 'source)))
+        (let ((src [self metaAt: 'source]))
           (if [src is nil]
               "<closure>"
               (if [[src proto] is Symbol]

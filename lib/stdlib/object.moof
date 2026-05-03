@@ -1,38 +1,24 @@
 ;; lib/stdlib/object.moof
 ;;
 ;; Object — derived defaults that flow through every proto chain.
-;; primitives like :proto, :slots, :handlers, :meta, :identity,
-;; :source, :dnu, :new, :=, :!=, :is, :toString live in rust
-;; intrinsics; this file derives the rest.
+;; primitives live in rust intrinsics: :proto, :identity, :source,
+;; :slotKeys, :handlerKeys, :metaKeys, :handlerAt:, :metaAt:, :is,
+;; :=, :toString, :new, :initialize, :doesNotUnderstand:with:.
+;; this file derives the rest using those primitives.
 
-;; default :initialize is a no-op. user protos override.
-(defmethod Object (initialize) self)
-
-;; default :!= — derive from := via Bool:not.
+;; default :!= — Bool:not over identity-equality.
 (defmethod Object (!= other) [[self = other] not])
 
-;; default :inspect — REPL-readable rendering. falls through to
-;; :toString (whatever proto-specific override). subclasses override
-;; for re-readable output (Char → #\X, String → "…", Cons → (…)).
+;; default :inspect — REPL-readable rendering. defaults to :toString;
+;; Char / String / Cons / Method override for re-readable output.
 (defmethod Object (inspect) [self toString])
 
 ;; ─────────────────────────────────────────────────────────────────
-;; reflection — written in moof using heap-iteration primitives
-;; (`__form-slot-keys`, `__form-handler-keys`, `__form-meta-keys`,
-;; `slot`, `__form-handler-at`, `__form-meta-at`, `__heap-id`,
-;; `__proto-of`). the rust side just exposes "give me the keys" and
-;; "look up by key" — the iteration and Table-construction logic
-;; lives here.
-;;
-;; `:proto` is in compiler/00-helpers.moof (also moof, also via
-;; `__proto-of`), since the compiler's `cons?:` calls [v proto]
-;; before this file loads.
+;; :slots / :handlers / :meta — moof iteration over key list,
+;; building a Table. the rust primitives expose key lists + key
+;; lookup; the algorithm is here.
 ;; ─────────────────────────────────────────────────────────────────
 
-;; build a Table by iterating a key list and looking up each value
-;; via the supplied accessor (`slot` / `__form-handler-at` /
-;; `__form-meta-at`). pulled out as a helper because :slots,
-;; :handlers, :meta share the shape.
 (def __reflect-into-table
   (fn (keys lookup)
     (let ((tbl [Table new]))
@@ -40,51 +26,24 @@
       tbl)))
 
 (defmethod Object (slots)
-  (__reflect-into-table
-    (__form-slot-keys self)
-    (fn (k) (slot self k))))
+  (__reflect-into-table [self slotKeys] (fn (k) (slot self k))))
 
 (defmethod Object (handlers)
-  (__reflect-into-table
-    (__form-handler-keys self)
-    (fn (k) (__form-handler-at self k))))
+  (__reflect-into-table [self handlerKeys] (fn (k) [self handlerAt: k])))
 
 (defmethod Object (meta)
-  (__reflect-into-table
-    (__form-meta-keys self)
-    (fn (k) (__form-meta-at self k))))
+  (__reflect-into-table [self metaKeys] (fn (k) [self metaAt: k])))
 
-(defmethod Object (handlerAt: sel) (__form-handler-at self sel))
-(defmethod Object (source) (__form-meta-at self 'source))
-(defmethod Object (identity) (__heap-id self))
+;; ─────────────────────────────────────────────────────────────────
+;; :protos / :satisfies?: — proto-chain walks. honors
+;; laws/reflection-contract.md R1.
+;; ─────────────────────────────────────────────────────────────────
 
-;; :inspect is the REPL-readable rendering. defaults to :toString
-;; (installed in rust); String / Char / Cons / Method override it
-;; to produce re-readable output ("hello", #\a, (1 "hi" #\a), etc).
-;; phase C swaps in a richer moof-side Inspector view by overriding
-;; this here for richer output.
-
-;; :protos — full delegation chain as a Cons. honors
-;; laws/reflection-contract.md R1: `[v protos]` returns a Cons of
-;; all protos walked from `self.proto` up to (but not including)
-;; nil. starts with the immediate proto; ends with Object.
-;;
-;; uses `is` (identity) rather than `=` because each proto-Form
-;; carries its own `=` handler (e.g. Integer's `=` assumes
-;; self is an Int) — sending `=` to Integer-proto-Form would land
-;; in the wrong place. `is` lives only on Object.
 (defmethod Object (protos) (let ((p [self proto]))
       (if [p is nil]
           nil
           (cons p [p protos]))))
 
-;; [T satisfies?: v] — `#true` iff v's proto chain reaches T.
-;; the type-membership predicate. used by pattern matcher's
-;; typed-pattern shape `|n :: T|`. concepts/types.md.
-;;
-;; walks the chain via `:is` (identity) — `:contains?:` uses `=`
-;; which is structural and wouldn't reliably distinguish two
-;; proto-Forms whose meta tables happened to look alike.
 (defmethod Object (satisfies?: v) (__satisfies-walk self [v protos]))
 
 (def __satisfies-walk

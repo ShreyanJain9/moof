@@ -1,17 +1,8 @@
 ;; lib/early/01-nil.moof
 ;;
-;; nil primitives that must exist BEFORE defmethod runs — :empty?
-;; (used by __decode-header), :cons: (used by (cons head nil) which
-;; happens in macro expansion). everything else (length, car, cdr,
-;; reverse, append:, etc.) lives in stdlib/nil.moof.
+;; nil's bootstrap primitives (:cons:, :empty?, :proto) are native
+;; methods installed by `intrinsics::install`. this file is empty.
 ;;
-;; setHandler!-driven because defmethod itself is later in the boot.
-
-(setHandler! nil 'empty? (fn () #true))
-(setHandler! nil 'cons:
-  (fn (x) (__alloc-cons x self)))
-
-;; nil is its own proto — singleton. without this override, Object's
-;; :proto returns the hidden nil-proto-Form (which would leak the
-;; substrate-level structure).
-(setHandler! nil 'proto (fn () nil))
+;; nil's other methods (length, car, cdr, reverse, append:, map:,
+;; filter:, …) live in stdlib/nil.moof as defmethods that load
+;; after the macros are available.

@@ -5,19 +5,18 @@
 ;; lives here.
 
 ;; ─────────────────────────────────────────────────────────────────
-;; hex helpers — used by :inspect's escape path. written in moof
-;; using `__char-from-codepoint` (the only primitive needed) plus
-;; arithmetic and Cons:cons:.
+;; hex helpers — used by :inspect's escape path. written in moof,
+;; using Integer:asChar (the codepoint→Char inverse of :codepoint).
 ;; ─────────────────────────────────────────────────────────────────
 
 ;; map 0..15 → ASCII codepoint of '0'..'9' / 'a'..'f', then build
-;; a Char.
+;; a Char via Integer:asChar.
 (def __hex-digit-char
   (fn (n)
-    (__char-from-codepoint
-      (if [n < 10]
-          [n + 48]      ;; '0' = 48
-          [n + 87]))))  ;; 'a' = 97 = 87 + 10
+    [(if [n < 10]
+         [n + 48]      ;; '0' = 48
+         [n + 87])     ;; 'a' = 97 = 87 + 10
+     asChar]))
 
 ;; produce a String of hex digits (no prefix). recursively prepends
 ;; the low nibble's char to the rest.

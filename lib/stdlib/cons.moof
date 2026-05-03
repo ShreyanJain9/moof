@@ -126,13 +126,13 @@
             [[[xs car] inspect] + [" " + (__cons-join-inspect [xs cdr])]]))))
 
 (defmethod Cons (toString)
-  (let ((nm (__form-meta-at self 'name)))
+  (let ((nm [self metaAt: 'name]))
     (if [nm is nil]
         [["(" + (__cons-join-toString self)] + ")"]
         [nm toString])))
 
 (defmethod Cons (inspect)
-  (let ((nm (__form-meta-at self 'name)))
+  (let ((nm [self metaAt: 'name]))
     (if [nm is nil]
         [["(" + (__cons-join-inspect self)] + ")"]
         [nm toString])))

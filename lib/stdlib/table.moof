@@ -88,13 +88,13 @@
           (__join-with-spaces [positional-strs append: keyed-strs]))))))
 
 (defmethod Table (toString)
-  (let ((nm (__form-meta-at self 'name)))
+  (let ((nm [self metaAt: 'name]))
     (if [[nm proto] is Symbol]
         [nm toString]
         [["#[" + (__render-table-with self (fn (v) [v toString]))] + "]"])))
 
 (defmethod Table (inspect)
-  (let ((nm (__form-meta-at self 'name)))
+  (let ((nm [self metaAt: 'name]))
     (if [[nm proto] is Symbol]
         [nm toString]
         [["#[" + (__render-table-with self (fn (v) [v inspect]))] + "]"])))
