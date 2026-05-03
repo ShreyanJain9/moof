@@ -16,6 +16,48 @@
 ;; for re-readable output (Char → #\X, String → "…", Cons → (…)).
 (defmethod Object (inspect) [self toString])
 
+;; ─────────────────────────────────────────────────────────────────
+;; reflection — written in moof using heap-iteration primitives
+;; (`__form-slot-keys`, `__form-handler-keys`, `__form-meta-keys`,
+;; `slot`, `__form-handler-at`, `__form-meta-at`, `__heap-id`,
+;; `__proto-of`). the rust side just exposes "give me the keys" and
+;; "look up by key" — the iteration and Table-construction logic
+;; lives here.
+;;
+;; `:proto` is in compiler/00-helpers.moof (also moof, also via
+;; `__proto-of`), since the compiler's `cons?:` calls [v proto]
+;; before this file loads.
+;; ─────────────────────────────────────────────────────────────────
+
+;; build a Table by iterating a key list and looking up each value
+;; via the supplied accessor (`slot` / `__form-handler-at` /
+;; `__form-meta-at`). pulled out as a helper because :slots,
+;; :handlers, :meta share the shape.
+(def __reflect-into-table
+  (fn (keys lookup)
+    (let ((tbl [Table new]))
+      [keys forEach: (fn (k) [tbl at: k put: (lookup k)])]
+      tbl)))
+
+(defmethod Object (slots)
+  (__reflect-into-table
+    (__form-slot-keys self)
+    (fn (k) (slot self k))))
+
+(defmethod Object (handlers)
+  (__reflect-into-table
+    (__form-handler-keys self)
+    (fn (k) (__form-handler-at self k))))
+
+(defmethod Object (meta)
+  (__reflect-into-table
+    (__form-meta-keys self)
+    (fn (k) (__form-meta-at self k))))
+
+(defmethod Object (handlerAt: sel) (__form-handler-at self sel))
+(defmethod Object (source) (__form-meta-at self 'source))
+(defmethod Object (identity) (__heap-id self))
+
 ;; :inspect is the REPL-readable rendering. defaults to :toString
 ;; (installed in rust); String / Char / Cons / Method override it
 ;; to produce re-readable output ("hello", #\a, (1 "hi" #\a), etc).

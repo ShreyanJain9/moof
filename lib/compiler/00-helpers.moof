@@ -40,6 +40,11 @@
 ;; tail-position is threaded through. it controls Send vs TailSend;
 ;; the rest of the cases ignore it.
 
+;; bootstrap-stage Object methods — installed before the moof
+;; compiler's `cons?:` runs (which calls [v proto]). other Object
+;; reflection methods live in stdlib/object.moof.
+(setHandler! Object 'proto (fn () (__proto-of self)))
+
 (def Compiler [Object new])
 
 ;; ─────────────────────────────────────────────────────────────────

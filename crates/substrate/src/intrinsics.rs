@@ -1880,68 +1880,11 @@ fn push_string_value(
 // ─────────────────────────────────────────────────────────────────
 
 fn install_object_reflection(w: &mut World) {
-    w.install_native(w.protos.object, "proto", |w, self_, _| {
-        Ok(w.proto_of(self_))
-    });
-
-    // :slots, :handlers, :meta — return a Table (key → value) of
-    // the receiver's IndexMap, in insertion order. the receiver
-    // is the *singleton-Form* for tagged immediates (lazily
-    // allocated, may not exist) — NOT the class-level proto.
-    // matches Ruby: `5.instance_variables` is `[]` until you set
-    // one; `5.singleton_methods` shows only methods specifically
-    // installed on `5`, not Integer's methods.
-    //
-    // matches the contract in concepts/forms.md and
-    // laws/reflection-contract.md R7.
-    macro_rules! reflect_table {
-        ($w:expr, $sel:literal, $field:ident) => {
-            $w.install_native($w.protos.object, $sel, |w, self_, _| match w
-                .effective_form_id(self_)
-            {
-                Some(id) => Ok(form_table_to_table(w, id, |f| &f.$field)),
-                None => Ok(w.make_table()),
-            });
-        };
-    }
-    reflect_table!(w, "slots", slots);
-    reflect_table!(w, "handlers", handlers);
-    reflect_table!(w, "meta", meta);
-
-    // [proto handlerAt: 'sel] — the method-Form installed for `sel`
-    // on this proto (NOT inherited). nil if absent. lets you get
-    // a handle to any method without walking :handlers.
-    w.install_native(w.protos.object, "handlerAt:", |w, self_, args| {
-        let sel = match args[0] {
-            Value::Sym(s) => s,
-            _ => return Err(type_error(w, "handlerAt: expects a symbol")),
-        };
-        // singleton-only: this returns the receiver's own
-        // (singleton's own) handler for `sel`, NOT inherited.
-        // for tagged immediates without a singleton-Form, returns
-        // nil. matches Ruby `obj.singleton_methods.include?(:sel)`.
-        match w.effective_form_id(self_) {
-            Some(id) => Ok(w
-                .heap
-                .get(id)
-                .handlers
-                .get(&sel)
-                .copied()
-                .unwrap_or(Value::Nil)),
-            None => Ok(Value::Nil),
-        }
-    });
-
-    w.install_native(w.protos.object, "source", |w, self_, _| match self_ {
-        Value::Form(id) => Ok(w.heap.get(id).meta_at(w.source_sym)),
-        _ => Ok(Value::Nil),
-    });
-
-    w.install_native(w.protos.object, "identity", |_, self_, _| match self_ {
-        Value::Form(id) => Ok(Value::Int(id.0 as i64)),
-        // tagged-immediates report identity = 0 (no heap slot).
-        _ => Ok(Value::Int(0)),
-    });
+    // :proto, :slots, :handlers, :meta, :handlerAt:, :source,
+    // :identity — all moof. see compiler/00-helpers.moof (for
+    // :proto, which the bootstrap-stage compiler needs early) and
+    // stdlib/object.moof (the rest). backed by the heap-reflection
+    // primitives in install_globals.
 
     w.install_native(w.protos.object, "is", |_, self_, args| {
         // identity equality (same heap-id or same tagged-immediate).
@@ -2621,23 +2564,127 @@ fn install_globals(w: &mut World) {
         Ok(Value::Form(world.alloc(cell)))
     });
 
-    // (__form-name v) — return the proto-Form's `:name` meta as a
-    // String, or "Object" for tagged immediates / unknown values.
-    // backs Object's :toString fallback when the moof-side default
-    // is in play.
-    install_global(w, "__form-name", |world, _self, args| {
-        let v = args.first().copied().unwrap_or(Value::Nil);
-        let name_sym = world.intern("name");
-        if let Value::Form(id) = v {
-            let name_v = world.heap.get(id).meta_at(name_sym);
-            if let Some(s) = world.string_text(name_v) {
-                return Ok(world.make_string(&s.to_string()));
-            }
-            if let Value::Sym(sym) = name_v {
-                return Ok(world.make_string(&world.resolve(sym).to_string()));
-            }
+    // ─────────────────────────────────────────────────────────────
+    // heap-reflection primitives — single-step access to a Form's
+    // internal IndexMaps (`slots`, `handlers`, `meta`). genuine
+    // primitives, not "rust does the work" wrappers: each returns
+    // ONE thing (a key list, a single value, an identity int).
+    // moof code iterates and builds higher-level structures.
+    // ─────────────────────────────────────────────────────────────
+
+    // (__proto-of v) — the proto-Form for any value. handles tagged-
+    // immediate dispatch.
+    install_global(w, "__proto-of", |world, _self, args| {
+        Ok(world.proto_of(args.first().copied().unwrap_or(Value::Nil)))
+    });
+
+    // (__heap-id v) — Form's heap-id as an Int, 0 for tagged
+    // immediates. backs Object:identity.
+    install_global(w, "__heap-id", |_world, _self, args| {
+        match args.first().copied().unwrap_or(Value::Nil) {
+            Value::Form(id) => Ok(Value::Int(id.0 as i64)),
+            _ => Ok(Value::Int(0)),
         }
-        Ok(world.make_string("Object"))
+    });
+
+    // (__alloc-form proto) — heap-alloc a fresh Form with the given
+    // proto. used by Object:new at the moof level (which then sends
+    // :initialize itself).
+    install_global(w, "__alloc-form", |world, _self, args| {
+        let proto_v = args.first().copied().unwrap_or(Value::Nil);
+        let proto_id = match proto_v {
+            Value::Form(id) => id,
+            _ => return Err(type_error(world, "__alloc-form: proto must be a Form")),
+        };
+        let f = Form::with_proto(Value::Form(proto_id));
+        let id = world.alloc(f);
+        Ok(Value::Form(id))
+    });
+
+    // (__form-slot-keys v), (__form-handler-keys v), (__form-meta-keys v)
+    //   — return a Cons of the receiver's IndexMap keys (Symbols),
+    // in insertion order. nil for tagged immediates without a
+    // singleton-Form. moof code iterates these to build Tables /
+    // walk handlers / etc.
+    install_global(w, "__form-slot-keys", |world, _self, args| {
+        let v = args.first().copied().unwrap_or(Value::Nil);
+        match world.effective_form_id(v) {
+            Some(id) => {
+                let keys: Vec<Value> = world
+                    .heap
+                    .get(id)
+                    .slots
+                    .keys()
+                    .map(|s| Value::Sym(*s))
+                    .collect();
+                Ok(world.make_list(&keys))
+            }
+            None => Ok(Value::Nil),
+        }
+    });
+    install_global(w, "__form-handler-keys", |world, _self, args| {
+        let v = args.first().copied().unwrap_or(Value::Nil);
+        match world.effective_form_id(v) {
+            Some(id) => {
+                let keys: Vec<Value> = world
+                    .heap
+                    .get(id)
+                    .handlers
+                    .keys()
+                    .map(|s| Value::Sym(*s))
+                    .collect();
+                Ok(world.make_list(&keys))
+            }
+            None => Ok(Value::Nil),
+        }
+    });
+    install_global(w, "__form-meta-keys", |world, _self, args| {
+        let v = args.first().copied().unwrap_or(Value::Nil);
+        match world.effective_form_id(v) {
+            Some(id) => {
+                let keys: Vec<Value> = world
+                    .heap
+                    .get(id)
+                    .meta
+                    .keys()
+                    .map(|s| Value::Sym(*s))
+                    .collect();
+                Ok(world.make_list(&keys))
+            }
+            None => Ok(Value::Nil),
+        }
+    });
+
+    // (__form-handler-at v 'sel) / (__form-meta-at v 'sym) — single-
+    // value lookups in the receiver's handlers / meta IndexMap. nil
+    // if absent. analogous to the existing `slot` global which does
+    // the same for the slots IndexMap.
+    install_global(w, "__form-handler-at", |world, _self, args| {
+        let v = args.first().copied().unwrap_or(Value::Nil);
+        let sel = args.get(1).and_then(|x| x.as_sym()).ok_or_else(|| {
+            type_error(world, "__form-handler-at: expects (v 'sel)")
+        })?;
+        match world.effective_form_id(v) {
+            Some(id) => Ok(world
+                .heap
+                .get(id)
+                .handlers
+                .get(&sel)
+                .copied()
+                .unwrap_or(Value::Nil)),
+            None => Ok(Value::Nil),
+        }
+    });
+
+    install_global(w, "__form-meta-at", |world, _self, args| {
+        let v = args.first().copied().unwrap_or(Value::Nil);
+        let sym = args.get(1).and_then(|x| x.as_sym()).ok_or_else(|| {
+            type_error(world, "__form-meta-at: expects (v 'sym)")
+        })?;
+        match v {
+            Value::Form(id) => Ok(world.heap.get(id).meta_at(sym)),
+            _ => Ok(Value::Nil),
+        }
     });
 }
 
