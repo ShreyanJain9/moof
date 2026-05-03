@@ -134,18 +134,23 @@ discipline:
   computes-one-step-ahead — implementation chooses). examples:
   Random, id-mints, fibonacci sequences.
 
-both pass `assert-infinite-source` (in `lib/stdlib/data-source.test.moof`).
+both pass the conformance helpers in `lib/stdlib/data-source.test.moof` (`assert-infinite-source-polled` and `assert-infinite-source-generator`, applied to their respective flavors).
 combinators (`:take:`, `:for-each:`, `:throttle:`, `:ticks:`) work
 on either flavor uniformly:
 
 ```moof
 [Random take: 10]               ; → Cons of 10 fresh values
-[Clock ticks: 1s]               ; → stream that emits clock value once per second
+[Clock ticks: 1s]               ; → stream emitting clock value per second (impl deferred — needs $scheduler)
 ```
 
-protos that conform declare `:infinite-source #true` as a meta-slot;
+protos that conform declare two meta-slots:
+
+- `:infinite-source #true` — marks membership in the subclass
+- `:infinite-source-flavor 'polled` (or `'generator`) — selects which `:peek` default applies
+
 moof-side default methods in `lib/stdlib/data-source.moof` provide
-`:done?` and `:peek` defaults.
+`:done?` and `:peek` defaults; binding authors override `:peek`
+only if they want non-default semantics.
 
 ## backpressure
 
