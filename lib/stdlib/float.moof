@@ -1,0 +1,20 @@
+;; lib/stdlib/float.moof
+;;
+;; Float — derived methods. arithmetic primitives live in rust;
+;; this file derives :abs, :max:, :min:, :!=, :<=, :>=, :asInteger,
+;; rounding helpers.
+
+(defmethod Float (!= other) [[self = other] not])
+(defmethod Float (<= other) (if [self < other] #true [self = other]))
+(defmethod Float (>= other) (if [self > other] #true [self = other]))
+
+(defmethod Float (zero?) [self = 0.0])
+(defmethod Float (positive?) [self > 0.0])
+(defmethod Float (negative?) [self < 0.0])
+
+(defmethod Float (abs) (if [self < 0.0] [0.0 - self] self))
+
+(defmethod Float (negate) [0.0 - self])
+(defmethod Float (integer?) #false)
+(defmethod Float (rational?) #false)
+(defmethod Float (real?) #true)

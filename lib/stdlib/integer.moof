@@ -1,0 +1,57 @@
+;; lib/stdlib/integer.moof
+;;
+;; Integer — derived methods. arithmetic primitives (+ - * / = < >),
+;; :asFloat live in rust; this file derives :abs, :even?, :odd?,
+;; :between?, :max:, :min:, comparison shortcuts (!=, <=, >=), etc.
+
+(defmethod Integer (!= other) [[self = other] not])
+(defmethod Integer (<= other) (if [self < other] #true [self = other]))
+(defmethod Integer (>= other) (if [self > other] #true [self = other]))
+
+(defmethod Integer (zero?) [self = 0])
+(defmethod Integer (positive?) [self > 0])
+(defmethod Integer (negative?) [self < 0])
+
+(defmethod Integer (abs) (if [self < 0]
+        [0 - self]
+        self))
+
+(defmethod Integer (square) [self * self])
+
+(defmethod Integer (min: other) (if [self < other] self other))
+
+(defmethod Integer (max: other) (if [self > other] self other))
+
+(defmethod Integer (between: lo and: hi) (if [self < lo]
+        #false
+        [self <= hi]))
+
+;; [n clamp: lo to: hi] — Comparable derived. concepts/numbers.md.
+(defmethod Integer (clamp: lo to: hi) (if [self < lo]
+        lo
+        (if [self > hi] hi self)))
+
+(defmethod Integer (even?) [[self - [[self / 2] * 2]] = 0])
+(defmethod Integer (odd?) (if .even? #false #true))
+
+;; concepts/numbers.md tower predicates. Integer is the leaf —
+;; everything in the chain (Real, Rational, Number) is also true.
+;; Float is real but neither integer nor rational.
+(defmethod Integer (negate) [0 - self])
+(defmethod Integer (integer?) #true)
+(defmethod Integer (rational?) #true)
+(defmethod Integer (real?) #true)
+(defmethod Integer (finite?) #true)
+(defmethod Integer (nan?) #false)
+
+;; [a mod: b] / [a quotient: b] / [a remainder: b] — integer
+;; division ops. concepts/numbers.md.
+(defmethod Integer (mod: other) [self - [[self / other] * other]])
+
+(defmethod Integer (quotient: other) [self / other])
+(defmethod Integer (remainder: other) [self mod: other])
+
+;; (range from: lo to: hi) — exclusive upper. accumulator-style.
+(defmethod Integer (upto: hi) (if [self >= hi]
+        nil
+        (cons self [[self + 1] upto: hi])))
