@@ -1,0 +1,55 @@
+;; lib/stdlib/control-macros.moof
+;;
+;; let — the manifesto's "redefine a special form" claim cashed
+;; in. now lives as a moof macro, picked up by the compiler's
+;; macro-precedence path before the built-in let special-form
+;; fallback. the rust special-form remains as a safety net for
+;; any `let` compiled before this point in bootstrap.moof.
+;;
+;; desugaring:  (let ((a 1) (b 2)) body…) → ((fn (a b) body…) 1 2)
+;;
+;; `do` stays a built-in special form: `compile_fn` auto-wraps
+;; multi-form bodies in `(do …)`, and a moof `do` macro that
+;; expands to `((fn () …))` would re-trigger that wrapping and
+;; recurse. once we expose lower-level body-sequencing primitives
+;; (an internal `__do__` not subject to macro override), `do`
+;; can move too.
+;;
+;; loads in stdlib/ (after Cons is installed) because the let
+;; macro's expansion uses [bindings map: |b| ...] — needs Cons:map:.
+
+(defmacro let (args)
+  (let ((bindings [args car])
+        (body [args cdr]))
+    (let ((names [bindings map: |b| [b car]])
+          (vals  [bindings map: |b| [[b cdr] car]]))
+      (if [[body cdr] empty?]
+          ;; single-body: avoid an extra `do` wrap.
+          `((fn ,names ,[body car]) ,@vals)
+          `((fn ,names (do ,@body)) ,@vals)))))
+
+;; (do e₁ e₂ … eₙ) — sequence body forms, value of the last.
+;;
+;; the desugaring threads a chain of single-binding lets:
+;;
+;;   ()                  →  nil
+;;   (e₁)                →  e₁
+;;   (e₁ e₂)             →  (let ((__ e₁)) e₂)
+;;   (e₁ e₂ e₃)          →  (let ((__ e₁)) (do e₂ e₃))
+;;                       →  (let ((__ e₁)) (let ((__ e₂)) e₃))
+;;
+;; each `let` expands (via the moof let macro) to a *single-body*
+;; fn-call — `((fn (__) body) val)` — so compile_fn's auto-wrap-
+;; multi-form-bodies-in-(do) discipline never re-triggers `do`.
+;; that's the only reason the previous attempt needed an `__do__`
+;; rust escape hatch; this one doesn't.
+;;
+;; `__` shadows on each step; rebinding the same name across nested
+;; lets is fine because lexical scoping makes the outer one
+;; unreachable from the inner body anyway.
+(defmacro do (args)
+  (if [args empty?]
+      'nil
+      (if [[args cdr] empty?]
+          [args car]
+          `(let ((__ ,[args car])) (do ,@[args cdr])))))

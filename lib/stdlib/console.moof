@@ -1,0 +1,15 @@
+;; lib/stdlib/console.moof
+;;
+;; Console — derived sugar over the rust-primitive :emit:.
+;; the only path to stdout/stderr is via $out / $err caps.
+
+;; $out and $err share the Console proto via the global Console.
+;; the rust intrinsic only installs :emit: and :close; everything
+;; else is moof code, user-overridable.
+(defmethod Console (say: x) (do
+      [self emit: [x toString]]
+      [self emit: "\n"]))
+
+(defmethod Console (show: x) [self emit: [x toString]])
+
+(defmethod Console (done?) #false)

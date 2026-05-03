@@ -38,4 +38,7 @@
 [$transporter load: "stdlib/string.moof"]
 [$transporter load: "stdlib/char.moof"]
 [$transporter load: "stdlib/table.moof"]
+[$transporter load: "stdlib/console.moof"]
+[$transporter load: "stdlib/method.moof"]
+[$transporter load: "stdlib/control-macros.moof"]
 [$transporter load: "bootstrap.moof"]

@@ -1,0 +1,29 @@
+;; lib/stdlib/method.moof
+;;
+;; Method — derived reflection.
+;; primitives in rust: :body :source :params :consts :bytecodes :call.
+
+;; [m disassemble] — render the bytecode as a String, one op per
+;; line. each Opcode-Form already carries a :toString that includes
+;; the op name and operands; we just join them.
+(defmethod Method (disassemble) [[self bytecodes] reduce:
+      (fn (acc op) [acc + [[op toString] + "\n"]])
+      from: ""])
+
+;; [m arity] — number of formal parameters, per laws/reflection-
+;; contract.md R2. variadic isn't a phase-A concept yet, so this
+;; just returns the param count.
+(defmethod Method (arity) [[self params] length])
+
+;; [m parameters] — alias for :params, matching the spelling in
+;; laws/reflection-contract.md R2.
+(defmethod Method (parameters) [self params])
+
+;; [m purity], [m caps-required] — the analyzer that fills these
+;; in arrives in phase C (laws/purity-and-effects.md). until then,
+;; the contract is honored with placeholder values:
+;;   :purity        → 'unknown
+;;   :caps-required → ()
+;; user methods can override either with their own annotation.
+(defmethod Method (purity) 'unknown)
+(defmethod Method (caps-required) nil)
