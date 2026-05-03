@@ -69,9 +69,11 @@
 (defmethod Integer (asHexString)
   (if [self = 0]
       "0"
-      [self __asHexAcc: ""]))
+      [self asHexStringFrom: ""]))
 
-(defmethod Integer (__asHexAcc: acc)
+;; [n asHexStringFrom: acc] — appends self's hex digits to the front
+;; of acc and recurses on (self / 16) until self is 0.
+(defmethod Integer (asHexStringFrom: acc)
   (if [self = 0]
       acc
-      [[self / 16] __asHexAcc: [[[self mod: 16] asHexChar toString] + acc]]))
+      [[self / 16] asHexStringFrom: [[[self mod: 16] asHexChar toString] + acc]]))
