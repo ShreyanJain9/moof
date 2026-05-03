@@ -735,23 +735,10 @@ fn install_string_methods(w: &mut World) {
     // [<some-string> toString] returns the string itself (raw bytes,
     // no quotes). [String toString] returns "String" — handled by
     // the proto-name short-circuit at the top.
-    w.install_native(w.protos.string, "toString", |w, self_, _| {
-        if let Some(name) = proto_name_for(w, self_) {
-            return Ok(w.make_string(&name));
-        }
-        Ok(self_)
-    });
-
-    // [s inspect] — REPL-readable: `"hello"` with escapes. used by
-    // the REPL print path (vs. `:say:` which uses :toString and
-    // emits raw bytes). proto-name short-circuit too.
-    w.install_native(w.protos.string, "inspect", |w, self_, _| {
-        if let Some(name) = proto_name_for(w, self_) {
-            return Ok(w.make_string(&name));
-        }
-        let text = str_arg(w, self_, "inspect")?;
-        Ok(w.make_string(&render_string_literal(&text)))
-    });
+    // :toString and :inspect are moof, in stdlib/string.moof.
+    // both check [self is String] for the proto-Form short-circuit
+    // and fall through to identity / Char-walking-and-escaping for
+    // instances.
 
     // [s asTable] — a Table of Chars, one per Unicode scalar.
     // [s asList] is just :toList, exposed in lib/bootstrap.moof.

@@ -34,3 +34,33 @@
 
 ;; concat is a stricter `+`: rhs must be a String.
 (defmethod String (concat: other) [self + other])
+
+;; ─────────────────────────────────────────────────────────────────
+;; :toString and :inspect — moof code. :toString is identity for
+;; instances and the proto-name for the proto-Form itself. :inspect
+;; produces a re-readable `"…"` literal with escapes.
+;; ─────────────────────────────────────────────────────────────────
+
+;; per-Char escape mapping: backslash, double-quote, newline, tab
+;; get backslash escapes; everything else renders as itself.
+(def __string-escape-char
+  (fn (c)
+    (let ((cp [c codepoint]))
+      (if [cp = 92] "\\\\"   ;; '\' → "\\"
+      (if [cp = 34] "\\\""   ;; '"' → "\""
+      (if [cp = 10] "\\n"    ;; '\n' → "\n"
+      (if [cp = 9]  "\\t"    ;; '\t' → "\t"
+          [c toString])))))))
+
+(defmethod String (toString)
+  (if [self is String]
+      "String"
+      self))
+
+(defmethod String (inspect)
+  (if [self is String]
+      "String"
+      (let ((body [[self toList] reduce:
+                     (fn (acc c) [acc + (__string-escape-char c)])
+                     from: ""]))
+        [["\"" + body] + "\""])))
