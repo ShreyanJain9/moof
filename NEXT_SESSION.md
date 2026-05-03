@@ -1,12 +1,28 @@
 # next session — polyglot maturity
 
-> **status: pre-MCO cleanup landed, including the radical second
-> wave.** `$transporter` cap (Self-style file ↔ image bridge),
-> `$compiler useMoof` cap, `lib/main.moof` as single rust entry.
-> `bootstrap.moof` and `compiler.moof` split into 27 thematic files
-> under `lib/{compiler,early,stdlib}/`. **`intrinsics.rs`: 3836 →
-> 3528 (-308 LoC).** REPL prints `nil`. 357 tests green at every
-> commit boundary. ~50 commits.
+> **status: pre-MCO cleanup landed, with the radical-radical wave
+> (round 3) now in.** `$transporter` cap (Self-style file ↔ image
+> bridge), `$compiler useMoof` cap, `lib/main.moof` as single rust
+> entry. `bootstrap.moof` and `compiler.moof` split into 27 thematic
+> files under `lib/{compiler,early,stdlib}/`. **`intrinsics.rs`:
+> 3836 → 3344 (-492 LoC).** REPL prints `nil`. ~356 tests green at
+> every commit boundary. ~60 commits.
+>
+> the architectural rule we landed on after a few false starts:
+> - **rust install_native** for atomic heap / byte / codepoint
+>   operations (Object:proto, Cons:car, String:length, etc.) —
+>   irreducible primitives, dispatched as methods.
+> - **moof defmethod** for everything algorithmic (Cons:length,
+>   String:trim, Object:slots iteration, all renderers, all Char
+>   predicates, …) — real logic in moof.
+> - **free-fn primitives** ONLY for the moof compiler's circular-
+>   dep escape: `__list-length / car / cdr / empty? / reverse`.
+>   used exclusively by `lib/compiler/*.moof`. nothing else.
+>
+> the `__fn` + moof-wrapper indirection pattern that was clogging
+> early attempts is gone. anything that's "rust does the work" is
+> now an `install_native` method, full stop. anything algorithmic
+> is moof.
 >
 > the radical migration shape we landed on — rust exposes minimal
 > heap / byte / codepoint / chunk access; moof writes the algorithms.
