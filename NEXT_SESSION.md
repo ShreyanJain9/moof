@@ -1,12 +1,21 @@
 # next session — polyglot maturity
 
-> **status: pre-MCO cleanup landed, with the radical-radical-radical
-> wave (round 4) now in.** `$transporter` cap, `$compiler` cap,
-> `lib/main.moof` as single rust entry. `bootstrap.moof` and
-> `compiler.moof` split into 27 thematic files under
-> `lib/{compiler,early,stdlib}/`. **`intrinsics.rs`: 3836 → 3320
-> (-516 LoC).** REPL prints `nil`. 356 tests green at every commit
-> boundary. ~70 commits.
+> **status: pre-MCO cleanup landed, with the radical²² wave (round 5)
+> now in.** `$transporter` cap, `$compiler` cap, `lib/main.moof` as
+> single rust entry. `bootstrap.moof` and `compiler.moof` split into
+> 27 thematic files under `lib/{compiler,early,stdlib}/`.
+> **`intrinsics.rs`: 3836 → 3266 (-570 LoC).** REPL prints `nil`.
+> 351 tests green at every commit boundary. ~80 commits.
+>
+> the `__`-prefix free function primitives are GONE. the moof
+> compiler walks lists via `[Heap slotOf: x at: 'cdr]` (a method on
+> the Heap singleton) and `[v is nil]` (Object identity); for length
+> it uses `[self argc: x]` — a self-recursive Compiler method that
+> walks via Heap. zero `__`-prefix free fns in rust. eight `__`-prefix
+> toplevel defs in moof, all bootstrap fundamentals (quasiquote
+> internals + defmethod's `__decode-header` / `__decode-keyword`)
+> defined before defmethod is available — those are the only
+> remaining ones, down from ~25 mid-session.
 >
 > the architectural rule we landed on:
 >
