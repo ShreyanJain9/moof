@@ -252,5 +252,8 @@ fn handle_table_basic_alloc_and_drop() {
     assert_eq!(t.len(), 2);
     let taken = t.take(h1);
     assert_eq!(taken, Some(Value::Int(1)));
+    // tombstoning preserves index stability:
+    assert_eq!(t.get(h1), Some(&Value::Nil));
+    assert_eq!(t.len(), 2);
     drop(t);
 }

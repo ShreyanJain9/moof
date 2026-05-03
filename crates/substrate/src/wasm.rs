@@ -53,7 +53,7 @@ impl HandleTable {
         Self { slots: Vec::new() }
     }
     pub fn push(&mut self, v: Value) -> u32 {
-        let idx = self.slots.len() as u32;
+        let idx = u32::try_from(self.slots.len()).expect("HandleTable overflow");
         self.slots.push(v);
         idx
     }
@@ -66,6 +66,9 @@ impl HandleTable {
     }
     pub fn len(&self) -> usize {
         self.slots.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
     }
     pub fn clear(&mut self) {
         self.slots.clear();
