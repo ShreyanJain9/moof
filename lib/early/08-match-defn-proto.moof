@@ -1,0 +1,136 @@
+;; lib/early/08-match-defn-proto.moof
+;;
+;; the three macros that turn the Match / Defn / DefProto modules
+;; from helper data into language surfaces. each desugars to setHandler!
+;; or an ordinary def using the helpers in early/07-modules.moof.
+;;
+;; DefProto's own setHandler!s live here too, alongside the defproto
+;; macro that drives them — they're the macro's expansion-time toolkit
+;; and read more clearly bundled with their consumer.
+
+;; the macro itself.
+(defmacro match (args)
+  (let ((subj [args car])
+        (clauses [args cdr]))
+    `(let ((__match-subj__ ,subj))
+       ,[Match build: clauses subj: '__match-subj__])))
+
+(defmacro defn (args)
+  (let ((name [args car])
+        (clauses [args cdr]))
+    (if [clauses empty?]
+        (raise: 'defn-empty "defn: must have at least one clause")
+        (let ((first-clause [clauses car])
+              (first-params [[[clauses car] cdr] car]))
+          (let ((grouped-arity [[Defn groupParams: first-params] length]))
+            (let ((argnames [Defn argnames: grouped-arity i: 0])
+                  (mclauses [Defn matchClauses: clauses]))
+              `(def ,name
+                 (fn ,argnames
+                   (match (list ,@argnames) ,@mclauses)))))))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; defproto — the largest of the moved-from-rust special forms.
+;;
+;; surface (concepts/objects-and-protos.md):
+;;
+;;   (defproto Counter
+;;     (proto Object)               ; optional, default Object
+;;     (slots count step)           ; declared slots → auto-getter
+;;                                  ;   + setter installed
+;;     (handlers (incr) [self count: [.count + .step]]
+;;               (read) .count))    ; or:
+;;     (incr) [self count: [.count + .step]]
+;;     (read) .count                ; flat header/body alternation
+;;
+;; expands to a (do ...) form that:
+;;   1. binds Name = (getOrCreateProto 'Name Parent)
+;;   2. installs auto-getter / `name:`-setter for each slot
+;;   3. installs each user handler via setHandler!
+;;   4. yields the proto-Form
+;;
+;; the clause walker is recursive moof — it inspects the head
+;; symbol of each clause to decide between (proto X), (slots …),
+;; (handlers …), or a bare header followed by its body.
+;; ─────────────────────────────────────────────────────────────────
+
+;; pair up (h1) body1 (h2) body2 → ((sel1 params1 body1) (sel2 params2 body2)).
+(setHandler! DefProto 'pairHandlers:
+  (fn (pairs) (if [pairs empty?]
+        nil
+        (let ((header [pairs car])
+              (body [[pairs cdr] car])
+              (rest [[pairs cdr] cdr]))
+          (let ((decoded (__decode-header header)))
+            (let ((sel [decoded car])
+                  (params [[decoded cdr] car]))
+              (cons (list sel params body)
+                    [DefProto pairHandlers: rest])))))))
+
+;; clause-walker. accumulates (parent, slot-names, handler-tuples)
+;; and returns a 3-elem list at the end.
+(setHandler! DefProto 'walk:parent:slots:handlers:
+  (fn (clauses parent slots handlers) (if [clauses empty?]
+        (list parent [slots reverse] [handlers reverse])
+        (let ((c [clauses car])
+              (rest [clauses cdr]))
+          (let ((head-sym [c car]))
+            (if [head-sym is 'proto]
+                [DefProto walk: rest parent: [[c cdr] car] slots: slots handlers: handlers]
+            (if [head-sym is 'slots]
+                [DefProto walk: rest parent: parent slots: [[[c cdr] reverse] append: slots] handlers: handlers]
+            (if [head-sym is 'handlers]
+                [DefProto walk: rest parent: parent slots: slots handlers: [[[DefProto pairHandlers: [c cdr]] reverse]
+                                    append: handlers]]
+                ;; bare header — pair with next clause as body.
+                (let ((decoded (__decode-header c))
+                      (body [rest car])
+                      (rest2 [rest cdr]))
+                  (let ((sel [decoded car])
+                        (params [[decoded cdr] car]))
+                    [DefProto walk: rest2 parent: parent slots: slots handlers: (cons (list sel params body)
+                                            handlers)]))))))))))
+
+;; build (setHandler! Name 'slot (fn () (slot self 'slot))) — getter.
+(setHandler! DefProto 'slotGetter:k:
+  (fn (proto-name slot-name) `(defmethod ,proto-name (,slot-name) (slot self ',slot-name))))
+
+;; build (setHandler! Name 'slot: (fn (__v__) (slotSet! self 'slot __v__))) — setter.
+(setHandler! DefProto 'slotSetter:k:
+  (fn (proto-name slot-name) (let ((setter-sel (intern [[slot-name toString] + ":"])))
+      `(defmethod ,proto-name (,setter-sel __v__) (slotSet! self ',slot-name __v__)))))
+
+;; build (setHandler! Name 'sel (fn (params) body)) — user handler.
+(setHandler! DefProto 'handler:decl:
+  (fn (proto-name h) (let ((sel [h car])
+          (params [[h cdr] car])
+          (body [[[h cdr] cdr] car]))
+      `(setHandler! ,proto-name ',sel (fn ,params ,body)))))
+
+(defmacro defproto (args)
+  (let ((name [args car])
+        (clauses [args cdr]))
+    (let ((parsed [DefProto walk: clauses parent: 'Object slots: nil handlers: nil]))
+      (let ((parent [parsed car])
+            (slots [[parsed cdr] car])
+            (handlers [[[parsed cdr] cdr] car]))
+        (let ((proto-decl
+                `(def ,name (getOrCreateProto ',name ,parent)))
+              (getters
+                [slots map:
+                  (fn (s) [DefProto slotGetter: name k: s])])
+              (setters
+                [slots map:
+                  (fn (s) [DefProto slotSetter: name k: s])])
+              (handler-forms
+                [handlers map:
+                  (fn (h) [DefProto handler: name decl: h])]))
+          `(do ,proto-decl
+               ,@getters
+               ,@setters
+               ,@handler-forms
+               ,name))))))
+
+;; phase A.10's defprotocol + implement operatives will be sugar
+;; over the setHandler! calls above. the substrate-level move is
+;; already operational; the surface syntax catches up.
