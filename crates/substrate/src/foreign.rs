@@ -49,6 +49,10 @@ use std::ffi::c_void;
 /// payload: `Box<Vec<u8>>` of the utf-8 bytes.
 pub const TAG_STRING_BYTES: u32 = u32::from_be_bytes(*b"WRGU");
 
+/// the `:bytes` foreign-handle on a Bytes form.
+/// payload: `Box<Vec<u8>>` — raw byte buffer, no utf-8 invariant.
+pub const TAG_BYTES: u32 = u32::from_be_bytes(*b"BYTA");
+
 /// the `:rep` foreign-handle on a Table form.
 /// payload: `Box<TableRepr>`.
 pub const TAG_TABLE_REPR: u32 = u32::from_be_bytes(*b"TBLE");

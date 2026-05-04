@@ -1,0 +1,3 @@
+((abi-version 1)
+ (parent Object)
+ (methods (encode: decode:)))

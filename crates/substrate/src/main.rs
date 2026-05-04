@@ -32,8 +32,15 @@ fn usage() {
     eprintln!("  moof '<expr>'     # eval one expression, print result");
 }
 
+/// Load REPL ergonomics (lib/repl-init.moof) — eager-binds for Clock,
+/// Random, Base64, Utf8, Hash. Failure is non-fatal: REPL still starts.
+fn load_repl_init(world: &mut moof::world::World) {
+    let _ = moof::eval(world, r#"[$transporter load: "repl-init.moof"]"#);
+}
+
 fn eval_one_shot(source: &str) -> ExitCode {
     let mut world = moof::new_world();
+    load_repl_init(&mut world);
     match moof::eval(&mut world, source) {
         Ok(value) => {
             // print every value via :inspect — including nil.
@@ -57,6 +64,7 @@ fn eval_one_shot(source: &str) -> ExitCode {
 
 fn repl() -> ExitCode {
     let mut world = moof::new_world();
+    load_repl_init(&mut world);
     print_banner(&mut world);
     let stdin = io::stdin();
     loop {

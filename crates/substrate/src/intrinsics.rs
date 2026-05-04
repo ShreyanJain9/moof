@@ -88,6 +88,7 @@ pub fn install(w: &mut World) {
     install_float_methods(w);
     install_char_methods(w);
     install_string_methods(w);
+    install_bytes_methods(w);
     install_table_methods(w);
     install_object_reflection(w);
     install_cons_and_nil_primitives(w);
@@ -153,11 +154,34 @@ fn install_table_methods(w: &mut World) {
                 })
             }
             other => {
-                let v = w
-                    .table_repr(self_)
-                    .and_then(|r| r.keyed.get(&other).copied())
-                    .unwrap_or(Value::Nil);
-                Ok(v)
+                // fast path: exact reference equality (works for
+                // symbols, booleans, integers, nil, form-ids).
+                if let Some(v) = w.table_repr(self_).and_then(|r| r.keyed.get(&other).copied()) {
+                    return Ok(v);
+                }
+                // slow path: if the query key is a String form, do a
+                // content-based linear scan. two different String
+                // allocations with the same text are semantically
+                // equal as table keys (the fast path misses them).
+                if let Some(query_text) = w.string_text(other).map(|s| s.to_string()) {
+                    let found = w.table_repr(self_).and_then(|r| {
+                        r.keyed.iter().find_map(|(k, v)| {
+                            // string_text on w returns Option<&str> tied to
+                            // the World borrow, which conflicts with &r — so
+                            // we inline the string-bytes check here.
+                            if let Value::Form(k_id) = k {
+                                if let Some(k_text) = w.string_text(Value::Form(*k_id)) {
+                                    if k_text == query_text.as_str() {
+                                        return Some(*v);
+                                    }
+                                }
+                            }
+                            None
+                        })
+                    });
+                    return Ok(found.unwrap_or(Value::Nil));
+                }
+                Ok(Value::Nil)
             }
         }
     });
@@ -544,6 +568,16 @@ fn install_string_methods(w: &mut World) {
     });
     // [s concat: t] is :+ in lib/bootstrap.moof; [s empty?] is
     // [[s byteLength] = 0] there.
+
+    // [s asUtf8Bytes] — return the raw UTF-8 encoding of s as a Bytes value.
+    // useful for passing String data to wasm mcos that expect Bytes.
+    w.install_native(w.protos.string, "asUtf8Bytes", |w, self_, _| {
+        let raw = w
+            .string_bytes(self_)
+            .map(|b| b.to_vec())
+            .ok_or_else(|| type_error(w, "asUtf8Bytes on non-String"))?;
+        Ok(w.make_bytes(&raw))
+    });
 }
 
 // install_method_methods is gone — Method's :toString and :inspect
@@ -939,6 +973,45 @@ fn render_value(w: &World, v: Value) -> String {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────
+// Bytes primitives — :length and :at: give moof code the ability
+// to iterate raw byte sequences. used by Bytes:toHexString in
+// lib/mcos.moof and other moof-side byte-processing code.
+// ─────────────────────────────────────────────────────────────────
+
+fn install_bytes_methods(w: &mut World) {
+    // [b length] — number of bytes in the Bytes form.
+    w.install_native(w.protos.bytes, "length", |w, self_, _| {
+        let n = w
+            .bytes_data(self_)
+            .map(|b| b.len() as i64)
+            .ok_or_else(|| type_error(w, "length on non-Bytes"))?;
+        Ok(Value::Int(n))
+    });
+
+    // [b at: i] — byte at index i (0-based). returns an Integer 0..255.
+    // raises 'index-out-of-bounds for i < 0 or i >= length.
+    w.install_native(w.protos.bytes, "at:", |w, self_, args| {
+        let idx = match args.first().copied() {
+            Some(Value::Int(n)) => n,
+            _ => return Err(type_error(w, "[Bytes at: i] requires an Integer index")),
+        };
+        // clone to avoid holding the borrow across type_error / raise.
+        let data: Vec<u8> = match w.bytes_data(self_) {
+            Some(b) => b.to_vec(),
+            None => return Err(type_error(w, "at: on non-Bytes")),
+        };
+        if idx < 0 || idx as usize >= data.len() {
+            return Err(raise(
+                w,
+                "index-out-of-bounds",
+                format!("[Bytes at: {}] out of range (length {})", idx, data.len()),
+            ));
+        }
+        Ok(Value::Int(data[idx as usize] as i64))
+    });
+}
+
 /// expose the canonical protos as moof globals (`Object`, `List`,
 /// `Integer`, …). user code can refer to them by name to install
 /// handlers, allocate instances, and inspect the proto chain.
@@ -958,6 +1031,7 @@ fn install_proto_globals(w: &mut World) {
         ("Symbol", w.protos.symbol),
         ("Char", w.protos.char_),
         ("String", w.protos.string),
+        ("Bytes", w.protos.bytes),
         ("Cons", w.protos.cons),
         ("Table", w.protos.table),
         ("Method", w.protos.method),
@@ -2150,20 +2224,36 @@ fn install_globals(w: &mut World) {
         Ok(args[2])
     });
 
-    // (__loadWasmMco "path/to/file.wasm") — load a wasm-mco from
-    // disk and return the resulting proto-Form. temporary entry
-    // point (the proper `[$mco load: path]` cap lands once $mco is
-    // a primordial cap). per docs/reference/mco-format.md, loading
-    // returns a fresh proto-Form; the caller binds it.
-    install_global(w, "__loadWasmMco", |w, _, args| {
+    // (__instantiate-mco-bytes bytes) — instantiate a wasm-mco from
+    // raw Bytes value. returns a fresh proto-Form. caller ($mco cap)
+    // is responsible for fetching bytes and verifying hash.
+    install_global(w, "__instantiate-mco-bytes", |w, _, args| {
         if args.len() != 1 {
-            return Err(raise(w, "arity", "(__loadWasmMco path)"));
+            return Err(raise(w, "arity", "(__instantiate-mco-bytes bytes)"));
         }
-        let path = w
-            .string_text(args[0])
-            .map(|s| s.to_string())
-            .ok_or_else(|| type_error(w, "__loadWasmMco: path must be a String"))?;
-        crate::wasm::load_wasm_mco(w, &path)
+        let bytes: Vec<u8> = match w.bytes_data(args[0]) {
+            Some(b) => b.to_vec(),
+            None => return Err(type_error(w, "__instantiate-mco-bytes: arg must be Bytes")),
+        };
+        crate::wasm::load_wasm_bytes(w, &bytes, "embedded-mco")
+    });
+
+    // (__read-file-bytes path) → Bytes.
+    // substrate-direct fs access (not WASI-routed). privileged
+    // intrinsic used only by the $mco cap. per spec LB-3 / Q1.
+    install_global(w, "__read-file-bytes", |w, _, args| {
+        if args.len() != 1 {
+            return Err(raise(w, "arity", "(__read-file-bytes path)"));
+        }
+        // clone to string to drop the immutable borrow before further use.
+        let path: String = match w.string_text(args[0]) {
+            Some(s) => s.to_string(),
+            None => return Err(type_error(w, "__read-file-bytes: arg must be String")),
+        };
+        match std::fs::read(&path) {
+            Ok(bytes) => Ok(w.make_bytes(&bytes)),
+            Err(e) => Err(raise(w, "io-error", format!("read {}: {}", path, e))),
+        }
     });
 
     // every `__list-*` free fn is gone. the moof compiler walks lists

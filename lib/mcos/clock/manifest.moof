@@ -1,0 +1,6 @@
+((abi-version 1)
+ (parent Object)
+ (meta
+   (infinite-source #true)
+   (infinite-source-flavor 'polled))
+ (methods (now monotonic next peek)))

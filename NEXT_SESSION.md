@@ -1,5 +1,59 @@
 # next session — polyglot maturity
 
+## status: track 1 wave landed
+
+> **track-1-mcos branch merged after ~26 commits.** mcos are no
+> longer proof-of-life curiosities — they're cap-mediated, content-
+> hash-verified, polyglot artifacts baked into the std lib.
+
+**what shipped:**
+
+- mcos: Random, Clock, Base64, Utf8, Hash — 5 total
+- languages: zig (Random, Clock, Base64, Hash) + c (Utf8) — 2 total
+- substrate self-hosts blake3 via embedded Hash mco bytes;
+  rust blake3 dep removed
+- `$mco` cap with content-hash-verified loading;
+  `lib/mcos/index.moof` resolves symbolic names → hashes
+- DataSource infinite-source subclass shipped (polled + generator
+  flavors); `lib/stdlib/data-source.moof` has default methods
+- `lib/repl-init.moof` eager-binds caps for interactive sessions
+- `__loadWasmMco` fully retired
+- 368 tests passing at every commit boundary
+
+**key learnings:**
+
+- 6 substrate bugs surfaced during implementation: Table
+  string-key equality, manifest meta parsing, DataSource
+  proto-inheritance, trampoline arg marshaling, cache path
+  resolution, build.rs env var wiring — all fixed
+- critical bug caught in trampoline raise encoding: kind symbols
+  containing colons (keyword selectors like `parse-error:at:`)
+  were corrupted when passed as strings through the wasmtime trap
+  message; fixed by passing SymId as an integer wire token
+- wasm_of_ocaml uses GC-wasm (the js_of_ocaml lineage);
+  incompatible with linear-memory ABI — OCaml deferred until a
+  linear-memory target path is confirmed (wasm32-wasi with GC
+  disabled, or a GC-aware import surface)
+- Haskell similarly deferred — ghc-wasm-meta flake path needs
+  deliberate toolchain session of its own
+
+**deferred to N+2:**
+
+- manifest `tier` field reservation + loader `moof.native`
+  section rejection (format guards; harmless to skip for now)
+- OCaml mco (Url parser)
+- Haskell mco (Date)
+
+**next session candidates:**
+
+- track 2: ed25519 signing + `moof.deps` + peer-fetch
+  (`moof mco install <hash>`)
+- revisit OCaml / Haskell with the right toolchain (linear-memory
+  wasm or a GC-import surface decision)
+- parser.moof — port reader.rs to moof
+
+---
+
 > **status: pre-MCO cleanup landed, with the radical²² wave (round 5)
 > now in.** `$transporter` cap, `$compiler` cap, `lib/main.moof` as
 > single rust entry. `bootstrap.moof` and `compiler.moof` split into

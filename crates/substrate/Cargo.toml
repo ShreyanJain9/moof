@@ -21,6 +21,11 @@ wasmtime = { version = "26", default-features = false, features = ["cranelift", 
 # module) for moof-specific primitives only.
 wasmtime-wasi = "26"
 
+[dev-dependencies]
+# WAT text-format compiler used only in tests. production code
+# works with pre-compiled .wasm binaries; tests use inline WAT.
+wat = "1"
+
 [[bin]]
 name = "moof"
 path = "src/main.rs"

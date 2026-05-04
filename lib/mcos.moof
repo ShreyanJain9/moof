@@ -1,0 +1,87 @@
+;; lib/mcos.moof — $hash (embedded Hash mco) and $mco caps.
+;;
+;; $hash is bound by the substrate BEFORE this file loads —
+;; it is an instance of the embedded Hash mco (blake3 in zig,
+;; baked into the substrate binary at compile time). do not
+;; redefine it here. $mco loads mcos by symbolic name with
+;; content-hash verification via $hash.
+
+;; ---- load the name→hash index ----
+
+[$transporter load: "mcos/index.moof"]
+
+;; ---- Bytes:toHexString — convert raw bytes to lowercase hex string ----
+;;
+;; uses Bytes:at: and Bytes:length (installed by install_bytes_methods
+;; in intrinsics.rs). avoids Integer:asHexChar (which uses the `if`
+;; macro and triggers a known compiler bug when called after another
+;; `asHexChar` inside a `let` binding). instead, uses a lookup String.
+
+;; lookup table: index 0-15 → hex char.
+(def $hex-digits "0123456789abcdef")
+
+;; [nibble hexDigit] — returns the String for this nibble (0-15)
+;; via String:at: on the lookup table. no (if ...) needed.
+(defmethod Integer (hexDigit)
+  [[$hex-digits at: self] toString])
+
+;; helper: append hex encoding of byte at index i to acc, recurse.
+;; selector is toHexStringFrom:acc: — two keyword parts.
+(defmethod Bytes (toHexStringFrom: i acc: a)
+  (if [i = [self length]]
+      a
+      (let ((byte [self at: i]))
+        (let ((hi [[byte / 16] hexDigit])
+              (lo [[byte mod: 16] hexDigit]))
+          [self toHexStringFrom: [i + 1] acc: [[a + hi] + lo]]))))
+
+;; [b toHexString] — full hex encoding, lowercase, no prefix.
+(defmethod Bytes (toHexString)
+  [self toHexStringFrom: 0 acc: ""])
+
+;; ---- $hash is pre-bound by the substrate (embedded Hash mco) ----
+;; no definition here — $hash is already in the global env before
+;; this file is evaluated. [$hash of: bytes] dispatches to the
+;; blake3 zig impl baked into the substrate binary.
+
+;; ---- $mco load cache ----
+
+(def $mco-load-cache [Table new])
+
+;; ---- $mco itself ----
+
+(def $mco [Object new])
+
+;; [$mco load: name] — look up name in $mco-index, then loadByHash:.
+(setHandler! $mco 'load:
+  (fn (name)
+    (let ((hash-hex [$mco-index at: name]))
+      (if [hash-hex is nil]
+          (raise: 'unknown-mco
+                  [["unknown mco: " + name] + " (not in $mco-index)"])
+          [$mco loadByHash: hash-hex]))))
+
+;; [$mco loadByHash: hash-hex] — fetch from cache or load from disk,
+;; verify hash, cache and return proto-Form.
+(setHandler! $mco 'loadByHash:
+  (fn (hash-hex)
+    (let ((cached [$mco-load-cache at: hash-hex]))
+      (if [[cached is nil] not]
+          cached
+          (let ((path [".moof/mcos/cache/" + [hash-hex + ".mco"]]))
+            (let ((bytes (__read-file-bytes path)))
+              (let ((computed-hex [[$hash of: bytes] toHexString]))
+                (if [computed-hex = hash-hex]
+                    (let ((proto (__instantiate-mco-bytes bytes)))
+                      (do
+                        [$mco-load-cache at: hash-hex put: proto]
+                        proto))
+                    (raise: 'hash-mismatch
+                            [["hash mismatch for " + hash-hex]
+                              + [": got " + computed-hex]])))))))))
+
+;; [$mco describe: name-or-hash] — stub; real impl waits until
+;; manifest-only parsing is needed.
+(setHandler! $mco 'describe:
+  (fn (name-or-hash)
+    (raise: 'todo "$mco describe: lands when manifest-only parser is needed")))

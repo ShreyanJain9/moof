@@ -1,0 +1,56 @@
+;; lib/stdlib/data-source.moof — DataSource protocol defaults.
+;;
+;; the protocol is described in docs/concepts/data-sources.md.
+;; per the infinite-source amendment, protos that declare
+;; :infinite-source #true on themselves get sensible defaults
+;; here. they may also declare :infinite-source-flavor as
+;; 'polled or 'generator for the right :peek default.
+
+;; default :done? for any infinite source.
+;; check own meta first, then proto's meta — so that instances of a
+;; proto that declares :infinite-source also get the right default.
+(defmethod Object (done?)
+  (let ((flag (if [self metaAt: 'infinite-source]
+                  #true
+                  [[self proto] metaAt: 'infinite-source])))
+    (if flag
+        #false
+        (raise: 'no-impl "done? not implemented; not declared infinite-source"))))
+
+;; default :peek for any polled-flavor infinite source.
+;; if proto declares :infinite-source-flavor 'polled, peek = next.
+(defmethod Object (peek)
+  (let ((flavor (let ((f [self metaAt: 'infinite-source-flavor]))
+                  (if [f is nil]
+                      [[self proto] metaAt: 'infinite-source-flavor]
+                      f))))
+    (if [flavor = 'polled]
+        [self next]
+        (if [flavor = 'generator]
+            (raise: 'no-impl "generator-flavor :peek must be implemented per-mco")
+            (raise: 'no-impl "peek requires :infinite-source-flavor 'polled or 'generator (or override :peek directly)")))))
+
+;; default :close for any infinite source — no-op.
+(defmethod Object (close)
+  (let ((flag (if [self metaAt: 'infinite-source]
+                  #true
+                  [[self proto] metaAt: 'infinite-source])))
+    (if flag
+        self
+        (raise: 'no-impl "close not implemented"))))
+
+;; :take:into: n acc — tail-recursive helper; accumulates values in reverse order.
+(defmethod Object (take: n into: acc)
+  (if [n = 0]
+      [acc reverse]
+      [self take: [n - 1] into: (cons [self next] acc)]))
+
+;; :take: n — consume n :next values into a Cons (stack-safe via accumulator).
+(defmethod Object (take: n)
+  [self take: n into: nil])
+
+;; :forEach: blk — infinite-loop on :next; consumer breaks via raise.
+(defmethod Object (forEach: blk)
+  (do
+    [blk call: [self next]]
+    [self forEach: blk]))

@@ -46,6 +46,17 @@ unsafe extern "C" fn string_bytes_dtor(ptr: *mut std::ffi::c_void) {
     let _ = unsafe { Box::from_raw(ptr as *mut Vec<u8>) };
 }
 
+/// destructor for a `Box<Vec<u8>>` minted by `make_bytes`. mirrors
+/// `string_bytes_dtor` — same payload type, different tag.
+unsafe extern "C" fn bytes_dtor(ptr: *mut std::ffi::c_void) {
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: ptr was minted by `Box::into_raw(Box<Vec<u8>>)` in
+    // `World::make_bytes`. consume it back into a Box and let it drop.
+    let _ = unsafe { Box::from_raw(ptr as *mut Vec<u8>) };
+}
+
 /// the signature of a native method bound by a phase-A intrinsic
 /// or, later, by an mco.
 ///
@@ -346,6 +357,47 @@ impl World {
     /// String or if bytes aren't valid UTF-8.
     pub fn string_text(&self, value: Value) -> Option<&str> {
         std::str::from_utf8(self.string_bytes(value)?).ok()
+    }
+
+    /// allocate a Bytes form with the given raw byte buffer.
+    /// no utf-8 invariant — any byte sequence is valid. mirrors
+    /// `make_string` exactly, using `TAG_BYTES` and the Bytes proto.
+    pub fn make_bytes(&mut self, data: &[u8]) -> Value {
+        use crate::foreign::ForeignHandle;
+        let boxed: Box<Vec<u8>> = Box::new(data.to_vec());
+        let ptr = Box::into_raw(boxed) as *mut std::ffi::c_void;
+        let handle_id = self.foreign.alloc(ForeignHandle {
+            ptr,
+            destructor: Some(bytes_dtor),
+            tag: crate::foreign::TAG_BYTES,
+        });
+        let mut form = Form::with_proto(Value::Form(self.protos.bytes));
+        form.slots.insert(self.bytes_sym, Value::Foreign(handle_id));
+        Value::Form(self.alloc(form))
+    }
+
+    /// borrow a Bytes form's raw byte buffer. returns `None` if
+    /// `value` isn't a well-formed Bytes form.
+    pub fn bytes_data(&self, value: Value) -> Option<&[u8]> {
+        let id = value.as_form_id()?;
+        let f = self.heap.get(id);
+        if f.proto != Value::Form(self.protos.bytes) {
+            return None;
+        }
+        let fid = match f.slot(self.bytes_sym) {
+            Value::Foreign(fid) => fid,
+            _ => return None,
+        };
+        let handle = self.foreign.get(fid);
+        if handle.tag != crate::foreign::TAG_BYTES {
+            return None;
+        }
+        // SAFETY: tag-check confirms make_bytes minted this; cast
+        // back. the pointer outlives the holding Form (gc invariant).
+        unsafe {
+            let v: &Vec<u8> = &*(handle.ptr as *const Vec<u8>);
+            Some(v.as_slice())
+        }
     }
 
     /// allocate a fresh empty Table form. the `:rep` slot holds a
