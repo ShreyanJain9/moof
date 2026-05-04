@@ -740,26 +740,28 @@ ranked by likelihood × impact:
 
 (in roughly the order they land)
 
-- [ ] `docs/reference/native-abi.md` exists (frontloaded; iterated)
-- [ ] `docs/concepts/data-sources.md` has infinite-source amendment
-- [ ] `crates/substrate/src/wasm.rs` trampoline grows arg/return marshaling + 6 imports
-- [ ] `lib/mcos/index.moof` exists with name → hash entries (schema accommodates multi-hash-per-name for future tier-3 platform variants)
-- [ ] `lib/mcos.moof` defines `$mco` cap with `:load:`, `:loadByHash:`, `:describe:`
-- [ ] manifest schema reserves the `tier` field (accepts `'wasm` only this session) and the `methods.[].impl` field accepts `#wasm-export` and `#moof-bytecode`; tier-3 variants are reserved for future expansion
-- [ ] loader rejects `moof.native` custom section presence with `'tier-3-not-supported`
-- [ ] `crates/mco-pack` extends with `pack`, `index-update` subcommands invoked by per-mco `build.sh` scripts
-- [ ] `__loadWasmMco` retired
-- [ ] `lib/mcos/hash/{hash.zig, manifest.moof, build.sh, hash.test.moof}` ships; bytes embedded in substrate
-- [ ] `lib/mcos/random/` (zig) + DataSource test conformance
-- [ ] `lib/mcos/clock/` (zig, migrated) + DataSource test conformance
-- [ ] `lib/mcos/base64/` (zig) + raise-on-bad-input test
-- [ ] `lib/mcos/utf8/` (c) + clang→wasm32 build script
-- [ ] `lib/mcos/url/` (ocaml) — if toolchain landed
-- [ ] `lib/mcos/date/` (haskell) — if toolchain landed
-- [ ] `lib/stdlib/data-source.moof` (new) with infinite-source defaults
-- [ ] `lib/repl-init.moof` (new) eager-binds for REPL ergonomics
-- [ ] cargo test --workspace ≈ 390 tests passing
-- [ ] all changes committed in atomic commits with passing tests
+- [x] `docs/reference/native-abi.md` exists (frontloaded; iterated)
+- [x] `docs/concepts/data-sources.md` has infinite-source amendment
+- [x] `crates/substrate/src/wasm.rs` trampoline grows arg/return marshaling + 6 imports
+- [x] `lib/mcos/index.moof` exists with name → hash entries (schema accommodates multi-hash-per-name for future tier-3 platform variants)
+- [x] `lib/mcos.moof` defines `$mco` cap with `:load:`, `:loadByHash:`, `:describe:`
+- [ ] manifest schema reserves the `tier` field (accepts `'wasm` only this session) and the `methods.[].impl` field accepts `#wasm-export` and `#moof-bytecode`; tier-3 variants are reserved for future expansion — **deferred to N+2; manifests ship without explicit `tier` field (loader is wasm-only by construction)**
+- [ ] loader rejects `moof.native` custom section presence with `'tier-3-not-supported` — **deferred to N+2; loader silently ignores unknown custom sections (harmless for now; no tier-3 mcos exist)**
+- [x] `crates/mco-pack` extends with `pack`, `index-update` subcommands invoked by per-mco `build.sh` scripts
+- [x] `__loadWasmMco` retired
+- [x] `lib/mcos/hash/{hash.zig, manifest.moof, build.sh, hash.test.moof}` ships; bytes embedded in substrate via content-hash cache path (`.moof/mcos/cache/<hash>.mco`); `build.rs` guards the embed
+- [x] `lib/mcos/random/` (zig) + DataSource test conformance
+- [x] `lib/mcos/clock/` (zig, migrated) + DataSource test conformance
+- [x] `lib/mcos/base64/` (zig) + raise-on-bad-input test
+- [x] `lib/mcos/utf8/` (c) + clang→wasm32 build script
+- [ ] `lib/mcos/url/` (ocaml) — **deferred: wasm_of_ocaml uses GC-wasm (js_of_ocaml lineage); incompatible with linear-memory ABI. needs deliberate toolchain choice (wasm32-wasi target via custom GC-off build or switch to a different FFI surface)**
+- [ ] `lib/mcos/date/` (haskell) — **deferred: ghc-wasm-meta flake / tweag path required; best-effort attempt not completed in session**
+- [x] `lib/stdlib/data-source.moof` (new) with infinite-source defaults
+- [x] `lib/repl-init.moof` (new) eager-binds for REPL ergonomics
+- [ ] cargo test --workspace ≈ 390 tests passing — **actual: 368 tests passing** (target was ~390; gap is OCaml + Haskell mcos + their tests not landing)
+- [x] all changes committed in atomic commits with passing tests
+
+**summary: 15/20 delivered. 2 deferred to N+2 (tier-3 format guards); 2 language mcos deferred (OCaml, Haskell — toolchain ABI mismatch); test count 368 vs ~390 target (gap tracks missing mcos).**
 
 ---
 
