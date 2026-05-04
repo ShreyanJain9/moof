@@ -2254,21 +2254,6 @@ fn install_globals(w: &mut World) {
         crate::wasm::load_wasm_bytes(w, &bytes, "embedded-mco")
     });
 
-    // (__hash-blake3-bytes bytes) → Bytes (32-byte blake3 hash).
-    // temporary; superseded in Phase I by the loaded Hash mco.
-    install_global(w, "__hash-blake3-bytes", |w, _, args| {
-        if args.len() != 1 {
-            return Err(raise(w, "arity", "(__hash-blake3-bytes bytes)"));
-        }
-        // clone bytes to drop the immutable borrow before make_bytes.
-        let data: Vec<u8> = match w.bytes_data(args[0]) {
-            Some(b) => b.to_vec(),
-            None => return Err(type_error(w, "__hash-blake3-bytes: arg must be Bytes")),
-        };
-        let hash = blake3::hash(&data);
-        Ok(w.make_bytes(hash.as_bytes()))
-    });
-
     // (__read-file-bytes path) → Bytes.
     // substrate-direct fs access (not WASI-routed). privileged
     // intrinsic used only by the $mco cap. per spec LB-3 / Q1.

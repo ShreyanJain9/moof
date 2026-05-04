@@ -35,6 +35,10 @@ pub mod vm;
 pub mod wasm;
 pub mod world;
 
+/// the Hash mco bytes, baked in at compile time.
+/// built by `lib/mcos/hash/build.sh`; path resolved by `crates/substrate/build.rs`.
+const HASH_MCO_BYTES: &[u8] = include_bytes!(env!("MOOF_HASH_MCO_PATH"));
+
 /// build a fresh world with the phase-A intrinsics, the $transporter
 /// cap populated, and `lib/main.moof` loaded — which itself orchestrates
 /// loading the rest of the std lib.
@@ -43,9 +47,11 @@ pub mod world;
 ///
 /// 1. rust intrinsics (heap, OS i/o, arithmetic primitives, the
 ///    chunk-construction api, the `$transporter` and `$compiler` caps).
-/// 2. resolve the lib root via `transporter::resolve_lib_root` and
+/// 2. bootstrap the embedded Hash mco and bind `$hash` before any
+///    moof code runs — lib/mcos.moof's $mco cap calls `[$hash of: ...]`.
+/// 3. resolve the lib root via `transporter::resolve_lib_root` and
 ///    bind it on `World.transporter_root`.
-/// 3. read `<root>/main.moof`. main.moof drives:
+/// 4. read `<root>/main.moof`. main.moof drives:
 ///    a. `[$transporter load: "compiler.moof"]` — seed-compiled.
 ///    b. `[$compiler useMoof]` — flag flip.
 ///    c. `[$transporter load: "bootstrap.moof"]` — moof-compiled.
@@ -56,6 +62,28 @@ pub fn new_world() -> world::World {
     let mut w = world::World::new();
     w.transporter_root = transporter::resolve_lib_root();
     intrinsics::install(&mut w);
+
+    // bootstrap $hash from embedded Hash mco bytes — BEFORE lib/main.moof
+    // loads lib/mcos.moof, which calls [$hash of: bytes] for hash verification.
+    // we bind $hash as an instance (not the proto directly) so that
+    // [$hash of: bytes] dispatches without an explicit [hash-proto new].
+    {
+        let hash_proto = wasm::load_wasm_bytes(&mut w, HASH_MCO_BYTES, "embedded-hash")
+            .unwrap_or_else(|e| {
+                panic!("Hash mco bootstrap failed — substrate is broken: {}", e.message)
+            });
+        // call [hash_proto new] to get an instance: method dispatch walks
+        // hash_proto → object proto → finds "new" there.
+        let new_sel = w.intern("new");
+        let hash_instance = w
+            .send(hash_proto, new_sel, &[])
+            .unwrap_or_else(|e| {
+                panic!("Hash mco [new] failed during bootstrap: {}", e.message)
+            });
+        let dollar_hash = w.intern("$hash");
+        let global = w.global_env;
+        w.env_bind(global, dollar_hash, hash_instance);
+    }
 
     let root = w.transporter_root.clone().unwrap_or_else(|| {
         panic!(
