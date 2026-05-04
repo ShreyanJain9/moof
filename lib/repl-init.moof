@@ -1,0 +1,13 @@
+;; lib/repl-init.moof — eager-binds for interactive REPL sessions.
+;;
+;; loaded by the `moof` REPL binary (see crates/substrate/src/main.rs).
+;; in production world manifests (phase B+), users choose their own
+;; bindings and skip this. cap-discipline preserved.
+
+(def Random [$mco load: "core/random"])
+(def Clock  [$mco load: "core/clock"])
+(def Base64 [$mco load: "core/base64"])
+(def Utf8   [$mco load: "core/utf8"])
+(def Hash   [$mco load: "core/hash"])
+;; (def Url  [$mco load: "core/url"])  ;; deferred — wasm_of_ocaml/GC-wasm ABI
+;; (def Date [$mco load: "core/date"]) ;; deferred — ghcup-cross toolchain
