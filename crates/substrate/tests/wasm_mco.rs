@@ -794,3 +794,86 @@ fn trampoline_dispatch_guard_active_during_wasm_call() {
         r
     );
 }
+
+// ─────────────────────────────────────────────────────────────────
+// F6: integration runner — walks lib/mcos/*/random.test.moof
+// (and any future mco test files) and evals each via eval_program.
+// ─────────────────────────────────────────────────────────────────
+
+/// walk lib/mcos/ for per-mco test files and eval each. the test
+/// file for an mco named `foo` lives at `lib/mcos/foo/foo.test.moof`.
+///
+/// each test file is a multi-form moof program (not a single expr).
+/// it raises on failure; success = no raise.
+#[test]
+fn run_mco_test_files() {
+    // resolve lib root the same way the substrate does — via MOOF_LIB
+    // env or fallback heuristics. the .cargo/config.toml sets MOOF_LIB
+    // for the workspace, so this always resolves during `cargo test`.
+    let lib_root = moof::transporter::resolve_lib_root()
+        .expect("could not resolve moof lib root");
+
+    // the .moof/mcos/cache path used by mcos.moof is relative to cwd.
+    // change cwd to the repo root (parent of lib/) so that relative
+    // paths resolve correctly. lib_root ends with "/lib".
+    let repo_root = lib_root.parent()
+        .expect("lib_root must have a parent (repo root)");
+    std::env::set_current_dir(repo_root)
+        .expect("could not set cwd to repo root");
+
+    let mcos_dir = lib_root.join("mcos");
+
+    if !mcos_dir.exists() {
+        // no mcos dir yet — not an error; skip.
+        return;
+    }
+
+    let test_files: Vec<_> = std::fs::read_dir(&mcos_dir)
+        .expect("could not read lib/mcos")
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n != "_lib")
+                .unwrap_or(false)
+        })
+        .filter_map(|dir| {
+            let name = dir.file_name()?.to_str()?.to_string();
+            let test_path = dir.join(format!("{}.test.moof", name));
+            if test_path.exists() { Some(test_path) } else { None }
+        })
+        .collect();
+
+    assert!(
+        !test_files.is_empty(),
+        "expected at least one mco test file in {}/mcos/*/",
+        lib_root.display()
+    );
+
+    let mut failures: Vec<String> = Vec::new();
+    for test_path in &test_files {
+        let src = std::fs::read_to_string(test_path)
+            .unwrap_or_else(|e| panic!("could not read {}: {}", test_path.display(), e));
+        let mut w = moof::new_world();
+        match moof::eval_program(&mut w, &src) {
+            Ok(_) => eprintln!("  ok: {}", test_path.display()),
+            Err(e) => {
+                let kind = w.resolve(e.kind);
+                failures.push(format!(
+                    "{}: {} — {}",
+                    test_path.display(),
+                    kind,
+                    e.message
+                ));
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "mco test failures:\n{}",
+        failures.join("\n")
+    );
+}

@@ -154,11 +154,34 @@ fn install_table_methods(w: &mut World) {
                 })
             }
             other => {
-                let v = w
-                    .table_repr(self_)
-                    .and_then(|r| r.keyed.get(&other).copied())
-                    .unwrap_or(Value::Nil);
-                Ok(v)
+                // fast path: exact reference equality (works for
+                // symbols, booleans, integers, nil, form-ids).
+                if let Some(v) = w.table_repr(self_).and_then(|r| r.keyed.get(&other).copied()) {
+                    return Ok(v);
+                }
+                // slow path: if the query key is a String form, do a
+                // content-based linear scan. two different String
+                // allocations with the same text are semantically
+                // equal as table keys (the fast path misses them).
+                if let Some(query_text) = w.string_text(other).map(|s| s.to_string()) {
+                    let found = w.table_repr(self_).and_then(|r| {
+                        r.keyed.iter().find_map(|(k, v)| {
+                            // string_text on w returns Option<&str> tied to
+                            // the World borrow, which conflicts with &r — so
+                            // we inline the string-bytes check here.
+                            if let Value::Form(k_id) = k {
+                                if let Some(k_text) = w.string_text(Value::Form(*k_id)) {
+                                    if k_text == query_text.as_str() {
+                                        return Some(*v);
+                                    }
+                                }
+                            }
+                            None
+                        })
+                    });
+                    return Ok(found.unwrap_or(Value::Nil));
+                }
+                Ok(Value::Nil)
             }
         }
     });

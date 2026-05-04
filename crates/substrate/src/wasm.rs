@@ -320,6 +320,15 @@ pub fn load_wasm_bytes(
         world.install_native(proto_id, export_name, wasm_method_trampoline);
     }
 
+    // apply meta entries declared in the manifest to the proto-Form.
+    // DataSource defaults (done?, take:, forEach:) key off meta slots
+    // like :infinite-source and :infinite-source-flavor.
+    if let Some(m) = &manifest {
+        for (k, v) in &m.meta {
+            world.heap.get_mut(proto_id).meta.insert(*k, *v);
+        }
+    }
+
     Ok(Value::Form(proto_id))
 }
 
@@ -409,6 +418,10 @@ pub enum ExportShape {
 pub struct McoManifest {
     pub abi_version: i64,
     pub methods: Vec<String>,
+    /// meta entries declared in the manifest's `(meta ...)` section.
+    /// each entry is a (key, value) pair where value is a pre-parsed
+    /// moof Value. applied to the proto-Form immediately after load.
+    pub meta: Vec<(crate::sym::SymId, Value)>,
 }
 
 /// extract and parse the `moof.manifest` custom section, if any.
@@ -466,6 +479,7 @@ fn decode_manifest_form(
     let mut manifest = McoManifest::default();
     let abi_version_sym = world.intern("abi-version");
     let methods_sym = world.intern("methods");
+    let meta_sym = world.intern("meta");
     for pair_v in pairs {
         let pair = world.list_to_vec(pair_v).map_err(|_| {
             RaiseError::new(
@@ -490,6 +504,44 @@ fn decode_manifest_form(
                 if let Some(s) = m.as_sym() {
                     manifest.methods.push(world.resolve(s).to_string());
                 }
+            }
+        } else if key == meta_sym {
+            // meta section: the remaining elements of the pair list are
+            // (key value) pairs, e.g.:
+            //   (meta
+            //     (infinite-source #true)
+            //     (infinite-source-flavor 'generator))
+            // pair = [sym:meta, (infinite-source #true), (infinite-source-flavor 'generator)]
+            // so pair[1..] are the individual meta entries.
+            let quote_sym = world.intern("quote");
+            for mp_v in &pair[1..] {
+                let mp = match world.list_to_vec(*mp_v) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if mp.len() < 2 {
+                    continue;
+                }
+                let mk = match mp[0].as_sym() {
+                    Some(s) => s,
+                    None => continue,
+                };
+                // unwrap (quote sym) → sym. reader produces
+                // 'foo as a (quote foo) pair.
+                let mv = {
+                    let raw = mp[1];
+                    if let Ok(inner) = world.list_to_vec(raw) {
+                        // check if it's (quote X)
+                        if inner.len() == 2 && inner[0].as_sym() == Some(quote_sym) {
+                            inner[1]
+                        } else {
+                            raw
+                        }
+                    } else {
+                        raw
+                    }
+                };
+                manifest.meta.push((mk, mv));
             }
         }
         // parent: ignored for now — defaults to Object. proper
