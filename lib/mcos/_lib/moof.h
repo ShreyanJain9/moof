@@ -7,6 +7,16 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// the import_module/import_name/export_name attributes are wasm-
+// specific (recognized by clang built with the wasm32 target).
+// Apple's system clang doesn't have wasm32 support, so it warns
+// about them when this header is scanned by IDEs. silence the
+// noise — the real build uses brew's llvm@21 which understands
+// them, and the build.sh detects the right toolchain.
+#if defined(__clang__)
+#pragma clang diagnostic ignored "-Wunknown-attributes"
+#endif
+
 // import declarations
 __attribute__((import_module("moof"), import_name("moof_raise")))
 __attribute__((noreturn))
