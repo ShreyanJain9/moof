@@ -1,0 +1,50 @@
+;; lib/mcos/clock/clock.test.moof — tests for core/clock mco.
+;;
+;; uses raw raise: for failures — no test framework needed.
+
+(def Clock [$mco load: "core/clock"])
+(def $clock [Clock new])
+
+;; ── now returns a plausible nanosecond timestamp ──────────────────
+;; 2024-01-01T00:00:00Z in nanoseconds = 1_704_067_200_000_000_000
+;; 2100-01-01T00:00:00Z in nanoseconds = 4_102_444_800_000_000_000
+
+(let ((ts [$clock now]))
+  (if [ts > 1704067200000000000]
+      nil
+      (raise: 'test-failure "now: timestamp should be after 2024-01-01"))
+  (if [ts < 4102444800000000000]
+      nil
+      (raise: 'test-failure "now: timestamp should be before 2100-01-01")))
+
+;; ── monotonic strictly grows across two calls ─────────────────────
+
+(let ((a [$clock monotonic])
+      (b [$clock monotonic]))
+  (if [b >= a]
+      nil
+      (raise: 'test-failure "monotonic: second reading should be >= first")))
+
+;; ── infinite-source meta (polled flavor) ─────────────────────────
+
+(if [[Clock metaAt: 'infinite-source] = #true]
+    nil
+    (raise: 'test-failure "meta: Clock should declare infinite-source #true"))
+
+(if [[Clock metaAt: 'infinite-source-flavor] = 'polled]
+    nil
+    (raise: 'test-failure "meta: Clock should declare infinite-source-flavor 'polled"))
+
+;; ── peek returns a plausible timestamp (polled = same as now) ────
+
+(let ((p [$clock peek]))
+  (if [p > 1704067200000000000]
+      nil
+      (raise: 'test-failure "peek: should return a recent timestamp (> 2024-01-01)")))
+
+;; ── next returns a plausible timestamp ───────────────────────────
+
+(let ((n [$clock next]))
+  (if [n > 1704067200000000000]
+      nil
+      (raise: 'test-failure "next: should return a recent timestamp (> 2024-01-01)")))

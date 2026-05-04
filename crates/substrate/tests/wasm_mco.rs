@@ -1,12 +1,10 @@
 //! end-to-end test: load a hand-rolled wasm mco and call it from
 //! moof.
 //!
-//! see `examples/wasm-mcos/hello.zig` for the source — a tiny zig
-//! program exporting `answer() i64` returning 42. compiled to
-//! `examples/wasm-mcos/hello.wasm` via:
-//!
-//!   zig build-exe -target wasm32-freestanding -O ReleaseSmall \
-//!     -fno-entry --export=answer hello.zig
+//! see `crates/substrate/tests/fixtures/hello.zig` for the source
+//! (archived) — a tiny zig program exporting `answer() i64` returning
+//! 42. compiled to `tests/fixtures/hello.wasm` for use as a test
+//! fixture.
 //!
 //! per `docs/reference/mco-format.md`, loading returns a fresh
 //! proto-Form. moof code names it (load-time anonymity); methods
@@ -14,17 +12,61 @@
 
 use moof::value::Value;
 
-/// embed the .mco bytes at test-build time. .mco = wasm + the
-/// `moof.manifest` custom section appended by mco-pack. the
-/// substrate's loader parses the manifest and cross-validates
-/// exports.
+/// embed hello.* at test-build time from the committed fixtures dir.
+/// .mco = wasm + `moof.manifest` custom section appended by mco-pack.
 ///
 /// raw `.wasm` files (no manifest) also load — the loader falls
 /// back to inferring methods from the wasm exports. covered by
 /// `loads_raw_wasm_without_manifest`.
-const HELLO_MCO: &[u8] = include_bytes!("../../../examples/wasm-mcos/hello.mco");
-const CLOCK_MCO: &[u8] = include_bytes!("../../../examples/wasm-mcos/clock.mco");
-const HELLO_RAW_WASM: &[u8] = include_bytes!("../../../examples/wasm-mcos/hello.wasm");
+const HELLO_MCO: &[u8] = include_bytes!("fixtures/hello.mco");
+const HELLO_RAW_WASM: &[u8] = include_bytes!("fixtures/hello.wasm");
+
+/// load clock.mco from the mco cache at runtime. clock is a production
+/// mco (lib/mcos/clock/) whose hash-addressed .mco lives in
+/// .moof/mcos/cache/. the index at lib/mcos/index.moof maps the name
+/// "core/clock" to its hash; we parse that mapping here so tests
+/// work even when the clock is rebuilt and the hash changes.
+///
+/// returns the mco bytes. panics if the index or cache file cannot
+/// be read (clock must have been built with `lib/mcos/clock/build.sh`
+/// before running cargo test).
+fn load_clock_mco() -> Vec<u8> {
+    // locate repo root via MOOF_LIB (set in .cargo/config.toml).
+    let lib_root = std::env::var("MOOF_LIB")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("lib"));
+    let repo_root = if lib_root.is_absolute() {
+        lib_root.parent().unwrap().to_path_buf()
+    } else {
+        std::env::current_dir().unwrap().join(&lib_root).parent().unwrap().to_path_buf()
+    };
+
+    // parse lib/mcos/index.moof for "core/clock" → hash.
+    let index_path = repo_root.join("lib/mcos/index.moof");
+    let index_src = std::fs::read_to_string(&index_path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {}", index_path.display(), e));
+    let hash = parse_mco_index_hash(&index_src, "core/clock")
+        .unwrap_or_else(|| panic!("core/clock not found in lib/mcos/index.moof"));
+
+    let cache_path = repo_root.join(format!(".moof/mcos/cache/{}.mco", hash));
+    std::fs::read(&cache_path)
+        .unwrap_or_else(|e| panic!("cannot read clock.mco at {}: {}", cache_path.display(), e))
+}
+
+/// minimal parser: find `[$mco-index at: "name" put: "hash"]` in index source.
+fn parse_mco_index_hash(src: &str, name: &str) -> Option<String> {
+    // look for the pattern: at: "core/clock" put: "HASH"
+    let needle = format!("\"{}\"", name);
+    let pos = src.find(&needle)?;
+    let after = &src[pos + needle.len()..];
+    // skip whitespace + `put:` + whitespace + `"`
+    let put_pos = after.find("put:")?;
+    let after_put = &after[put_pos + 4..];
+    let quote_pos = after_put.find('"')?;
+    let after_quote = &after_put[quote_pos + 1..];
+    let end_pos = after_quote.find('"')?;
+    Some(after_quote[..end_pos].to_string())
+}
 
 #[test]
 fn load_hello_wasm_and_call_answer() {
@@ -72,10 +114,10 @@ fn loaded_proto_can_be_instantiated_and_called() {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// core/clock — the first wasm mco that uses substrate imports.
+// core/clock — wasm mco that uses WASI clock_time_get.
 // proves the moof→wasm bridge works in BOTH directions: substrate
-// → wasm (calling the export) and wasm → substrate (the export
-// calling moof_now_ns to read system time).
+// → wasm (calling the export) and wasm → substrate (WASI host
+// resolves clock_time_get). clock lives at lib/mcos/clock/.
 // ─────────────────────────────────────────────────────────────────
 
 #[test]
@@ -85,8 +127,9 @@ fn clock_now_returns_a_real_moment() {
     // we do assert it's plausibly recent — i.e., it's after a
     // hardcoded "before the test was written" instant and before a
     // far-future bound.
+    let clock_mco = load_clock_mco();
     let mut w = moof::new_world();
-    let proto = moof::wasm::load_wasm_bytes(&mut w, CLOCK_MCO, "clock.mco").unwrap();
+    let proto = moof::wasm::load_wasm_bytes(&mut w, &clock_mco, "clock.mco").unwrap();
     let clock_sym = w.intern("Clock");
     w.env_bind(w.global_env, clock_sym, proto);
     let r = moof::eval(&mut w, "[Clock now]").unwrap();
@@ -108,8 +151,9 @@ fn clock_now_returns_a_real_moment() {
 fn clock_monotonic_is_monotonic() {
     // [Clock monotonic] should never go backwards. take two
     // samples and assert order.
+    let clock_mco = load_clock_mco();
     let mut w = moof::new_world();
-    let proto = moof::wasm::load_wasm_bytes(&mut w, CLOCK_MCO, "clock.mco").unwrap();
+    let proto = moof::wasm::load_wasm_bytes(&mut w, &clock_mco, "clock.mco").unwrap();
     let clock_sym = w.intern("Clock");
     w.env_bind(w.global_env, clock_sym, proto);
     let a = moof::eval(&mut w, "[Clock monotonic]").unwrap();
@@ -169,6 +213,7 @@ fn manifest_method_subset_only_installs_declared() {
     // we use clock.mco which exports both `now` and `monotonic`,
     // but craft a manifest that declares only `now`. then verify
     // [Clock monotonic] fails (no handler) but [Clock now] works.
+    let clock_mco = load_clock_mco();
     let mut w = moof::new_world();
     // strip manifest by using a fresh wasm-only base (re-pack with
     // a different manifest).
@@ -177,13 +222,13 @@ fn manifest_method_subset_only_installs_declared() {
         // read clock.wasm (no manifest) directly — we can't rely
         // on it being on disk relative to the test cwd, so instead
         // use clock.mco bytes and find the wasm portion. simpler:
-        // copy CLOCK_MCO and append a SECOND manifest-claim that
+        // copy clock_mco and append a SECOND manifest-claim that
         // says only `now`. wasm allows duplicate custom sections;
         // our walker returns the first one matching by name.
-        bytes.extend_from_slice(CLOCK_MCO);
+        bytes.extend_from_slice(&clock_mco);
     }
     // BUT the loader returns the first matching custom section.
-    // CLOCK_MCO already has `(methods (monotonic now))`. we need
+    // clock already has `(methods (now monotonic next peek))`. we need
     // to PREPEND a different manifest. shortcut: just use clock's
     // manifest as-is and check both methods work; this test
     // becomes more meaningful once the substrate exposes
