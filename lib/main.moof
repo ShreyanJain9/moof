@@ -40,13 +40,14 @@
 [$transporter load: "stdlib/bool.moof"]
 [$transporter load: "stdlib/nil.moof"]
 [$transporter load: "stdlib/cons.moof"]
-[$transporter load: "stdlib/integer.moof"]
-[$transporter load: "stdlib/float.moof"]
-[$transporter load: "stdlib/string.moof"]
-[$transporter load: "stdlib/char.moof"]
-[$transporter load: "stdlib/table.moof"]
-[$transporter load: "stdlib/console.moof"]
-[$transporter load: "stdlib/method.moof"]
-[$transporter load: "stdlib/control-macros.moof"]
-[$transporter load: "stdlib/data-source.moof"]
-[$transporter load: "mcos.moof"]
+;; can cascade here though!! 
+[$transporter load: "stdlib/integer.moof" ;
+              load: "stdlib/float.moof" ;
+              load: "stdlib/string.moof" ;
+              load: "stdlib/char.moof" ;
+              load: "stdlib/table.moof" ;
+              load: "stdlib/console.moof" ;
+              load: "stdlib/method.moof" ;
+              load: "stdlib/control-macros.moof" ;
+              load: "stdlib/data-source.moof" ;
+              load: "mcos.moof"]
