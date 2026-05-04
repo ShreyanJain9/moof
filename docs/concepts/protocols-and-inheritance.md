@@ -1,68 +1,92 @@
-# Protocols, Traits, and the Inheritance Tree
+# Protocols, Traits, and the Inheritance Tree: Implementation Plan
 
 > **Moving from scattered methods to a coherent, mathematically sound inheritance model.**
 
-Historically, the Moof standard library (`lib/stdlib/`) grew organically. This resulted in duplicated logic across core types (e.g., `map:`, `filter:`, `reduce:` being re-implemented for `Cons`, `String`, and `Table`). To achieve maximum elegance, we must formalize the inheritance tree using **Protocols**.
+This document details the exact syntactic macros and compiler logic needed to implement Protocols (Traits/Mixins) and deduplicate the Moof standard library.
 
-## The Underspecced Tree
+## 1. Defining Protocols
 
-Currently, delegation is simple prototype inheritance (`proto` field). However, true moldability requires understanding *interfaces* (what a Form promises to do) independently of its concrete structure.
+A Protocol is a Form that declares required primitives and derived methods.
 
-The current tree looks like a flat list inheriting from `Object`:
-`Object` ← `Cons`, `Object` ← `String`, `Object` ← `Integer`.
+### Phase 1.A: The `defprotocol` Macro
+We will add `defprotocol` to `lib/early/06-control-macros.moof`.
 
-## Introducing Protocols (Traits)
-
-A Protocol in Moof is a Form that defines a set of required primitive methods and provides a set of derived methods. It acts as a Mixin or Trait.
-
-### Example: The Iterable Protocol
-
-Instead of writing `map:` three times, we define `Iterable`:
-
+**Syntax:**
 ```moof
 (defprotocol Iterable
-  ;; Primitives that the concrete type MUST provide
   (requires [iterator] [next: iter] [done?: iter])
-
-  ;; Methods that are automatically mixed in
   (derives
-    [map: f]
-      [self reduce: '() with: |acc x| [acc cons: (f x)] reverse]
-
-    [filter: pred]
-      [self reduce: '() with: |acc x| (if (pred x) [acc cons: x] acc) reverse]
-
-    [reduce: init with: f]
-      (let loop ((iter [self iterator]) (acc init))
-        (if [self done?: iter]
-            acc
-            (loop [self next: iter] (f acc [iter value]))))))
+    [map: f] ( ... implementation ... )
+    [filter: pred] ( ... implementation ... )))
 ```
 
-### Mixin Application
+**Macro Expansion:**
+The Moof compiler expands `defprotocol` into a `Protocol` proto instantiation:
+```moof
+(def Iterable
+  [Protocol newWithRequires: '(:iterator :next: :done?:)
+                    derives: {
+                      :map: (fn (f) ...)
+                      :filter: (fn (pred) ...)
+                    }])
+```
 
-When defining a concrete type, you declare its protocols. The Moof compiler will verify that the required primitives are implemented and will automatically inject the derived methods into the prototype's `handlers` table.
+## 2. Applying Protocols (Mixins)
 
+Concrete types explicitly opt-in to protocols.
+
+### Phase 2.A: Modifying `defproto`
+We will update the `defproto` macro (in `lib/early/08-match-defn-proto.moof`) to accept a `mixins` clause.
+
+**Syntax:**
 ```moof
 (defproto Cons
-  (mixins Iterable Equatable Sized)
+  (mixins Iterable Sized)
+  (slots head tail)
   (handlers
-    ;; Only needs to implement the irreducible primitives
     [iterator] self
-    [next: iter] [iter cdr]
-    [done?: iter] [iter empty?]
-    ;; map:, filter:, etc., come for free from Iterable
-  ))
+    [next: iter] [iter tail]
+    [done?: iter] [iter is nil]))
 ```
 
-## Mathematical Protocols
+**Macro Expansion & Compiler Injection:**
+During macro expansion of `defproto`, the compiler executes the following logic:
+1. **Validation:** For each protocol in `mixins`, iterate over `[protocol requires]`. Check if the `handlers` dictionary (or the `proto` parent chain) provides those selectors. If missing, raise a `CompileError`.
+2. **Injection:** For each protocol in `mixins`, iterate over `[protocol derives]`. For every derived method, inject it into the `handlers` dictionary of the newly created Proto, *unless* the proto explicitly overrides it.
 
-This approach shines for numerical and logical operations.
+## 3. Deduplicating the Standard Library
 
-- **Equatable:** Requires `[=]`. Derives `[!=]`.
-- **Comparable:** Requires `[<]`. Derives `[>]`, `[<=]`, `[>=]`, `[between:and:]`.
-- **Arithmetic:** Requires `[+]`, `[-]`, `[*]`, `[/]`. Derives `[abs]`, `[sign]`, `[squared]`.
+Once the macro is in place, we execute a sweeping refactor of `lib/stdlib/`.
 
-## Agent-Assisted Refactoring
+### Phase 3.A: Numerical Protocols
+Create `lib/stdlib/protocols-math.moof`:
+```moof
+(defprotocol Equatable
+  (requires [=])
+  (derives [!=] (not [self = other])))
 
-By defining the world strictly through Protocols, the system becomes far more amenable to automated reasoning. An agent can read the `requires` metadata of a Protocol Form and automatically generate stub methods, or analyze a Form to see if it implicitly fulfills a Protocol it hasn't officially declared.
+(defprotocol Comparable
+  (requires [<] [=])
+  (derives
+    [>] (and (not [self = other]) (not [self < other]))
+    [<=] (or [self < other] [self = other])
+    [>=] (or [self > other] [self = other])
+    [between: a and: b] (and [self >= a] [self <= b])))
+```
+Refactor `Integer`, `Float`, and `Char` to `(mixins Equatable Comparable)`.
+
+### Phase 3.B: Collection Protocols
+Create `lib/stdlib/protocols-collections.moof`:
+```moof
+(defprotocol Sized
+  (requires [length])
+  (derives [empty?] ([self length] = 0)))
+
+;; Iterable as defined above
+```
+Refactor `Cons`, `String`, and `Table` to `(mixins Iterable Sized)`. Remove the manual implementations of `map:`, `filter:`, `reduce:`, and `empty?` from their respective files, instantly deleting hundreds of lines of duplicated code.
+
+## 4. Agent-Assisted Trait Inference
+
+Because Protocols are first-class Forms, an agent can introspect the system.
+If `UserDefinedList` has `handlers` for `:iterator`, `:next:`, and `:done?:`, but lacks the `(mixins Iterable)` declaration, an agent can proactively invoke `[UserDefinedList injectProtocol: Iterable]`, automatically enriching the user's data structure with `map:` and `filter:` at runtime.

@@ -1,38 +1,82 @@
-# VM Evolution, Elegance, and Hot-Swapping
+# VM Evolution, Elegance, and Hot-Swapping: Implementation Plan
 
 > **Building the greatest VM ever: Decoupled, Meta-Circular, and Swappable.**
 
-The Moof substrate currently utilizes a bytecode interpreter written in Rust (`src/vm.rs`) with inline caching and a minimal opcode set. To achieve the goals of extreme elegance, speed, and hot-swappability, we must transition to a fully decoupled, self-reflective VM architecture.
+This document outlines the architectural transition from the current hardcoded Rust bytecode interpreter (`src/vm.rs`) to a decoupled, polyglot, hot-swappable MCO engine with a highly reduced opcode set.
 
-## The Meta-Circular Ideal
+## 1. The Decoupled VM MCO ABI
 
-The ultimate goal for Moof is that the system understands and can rewrite its own execution engine.
+The VM must no longer be statically compiled into the `moof` binary. The substrate seed merely provides memory management and capability routing.
 
-- **VM as a Form:** The interpreter state itself (the stack, instruction pointer, frame pointers) should be represented as Forms.
-- **The Decoupled Engine:** The current `src/vm.rs` loop should be treated not as the immutable core, but as the *bootstrap* engine.
+### Phase 1.A: The `moof-engine` ABI
+Define a strict C ABI for VM MCOs.
+```rust
+// in crates/abi/src/engine.rs
+#[repr(C)]
+pub struct VmState {
+    pub instruction_pointer: usize,
+    pub frame_pointer: FormId, // Pointer to the current CallFrame Form
+    pub stack_pointer: usize,
+    pub status: VmStatus,
+}
 
-## Hot-Swapping the Execution Engine
+extern "C" {
+    // The core entrypoint the substrate calls to advance execution
+    fn moof_engine_step(state: *mut VmState, max_steps: u64) -> VmStatus;
+}
+```
 
-Hot-swapping individual methods or protos is already a core capability. Hot-swapping the *entire VM* requires a checkpoint-and-resume protocol.
+### Phase 1.B: The `$engine` Capability
+The supervisor loads the VM from an MCO:
+`(def Engine [$mco load: "core/vm-v1.mco"])`
+The substrate simply loops `moof_engine_step` until it yields or completes.
 
-1. **State Serialization (The Checkpoint):** Because all VM state (call frames, scopes) will be modeled as Forms, the current execution state can be deterministically paused and serialized at the end of a message turn.
-2. **The Swap:** A new VM implementation — compiled as an MCO (Compiled Object) from Zig, Rust, or even Moof bytecode — is loaded via the `$mco` capability.
-3. **The Resume:** The new VM engine is handed the paused state and resumes execution at the next instruction.
+## 2. Meta-Circular State Serialization (Forms all the way down)
 
-This enables radical experimentation: a user could swap a debug-heavy, tracing interpreter for a highly optimized JIT-compiling engine at runtime without dropping a single active network connection or losing UI state.
+To achieve hot-swapping, the VM cannot hold opaque native state (like Rust `Vec` stacks). All execution state must be Forms.
 
-## Shrinking the Opcode Set
+### Phase 2.A: The CallFrame Proto
+```moof
+(defproto CallFrame
+  (slots
+    method      ;; Method Form being executed
+    receiver    ;; Self
+    args        ;; List Form of arguments
+    locals      ;; Table Form of local variables
+    caller      ;; Previous CallFrame Form
+    ip          ;; Integer: current instruction index
+    stack))     ;; List Form: operand stack
+```
 
-Elegance demands minimalism. The goal is the smallest orthogonal set of operations that can express the semantics of message sending and environment manipulation.
+When the VM traps, or yields at a message turn boundary, the `frame_pointer` in the ABI points directly to a valid, garbage-collected `CallFrame` Form in the heap.
 
-- **Unifying Eval and Send:** Since `eval` and `send` are conceptually the same primitive (message dispatch to a proto), the opcode set should reflect this. We can eliminate specialized opcodes for `CALL`, `SEND`, and `TAIL_CALL` into a unified `DISPATCH` opcode parameterized by arity and continuation type.
-- **Pushing Complexity to the Compiler:** The Moof-side compiler (`compiler.moof`) should do the heavy lifting of macro expansion, desugaring, and lexical scope resolution, emitting simple, uniform bytecodes.
-- **Inline Caching as Forms:** Inline caches (ICs) are currently side-tables. By modeling IC entries as small, fast Forms, the VM can introspect and clear its own caches predictably during proto-mutations, keeping the native code tiny.
+## 3. Hot-Swapping the Execution Engine
 
-## The Polyglot VM MCO
+Because state is entirely represented as Forms, upgrading the VM is trivial and safe.
 
-By moving the VM out of the hardcoded Rust seed and into the MCO pipeline, we open the door to polyglot engines.
+### Phase 3.A: The Checkpoint-and-Resume Swap
+1. **Pause:** At a turn boundary, the current engine returns `VmStatus::Yielded`.
+2. **State Capture:** The substrate holds the root `CallFrame` Form.
+3. **Load New Engine:** The system evaluates `(def NewEngine [$mco load: "core/vm-v2-jit.mco"])`.
+4. **Resume:** The substrate calls `moof_engine_step` on the *new* engine, passing it the *existing* `CallFrame` Form pointer. The new engine reads the Form, understands the `ip` and `stack`, and resumes execution flawlessly.
 
-- The substrate seed merely provides the `libloading` bootstrap to load `engine.mco`.
-- We can maintain a formal specification of the Moof bytecode format and memory layout.
-- Anyone can author a faster, better Moof VM in any language (WebAssembly, native Rust, C) and swap it in dynamically.
+## 4. Shrinking the Opcode Set
+
+The current opcode set is large. We will shrink it to a minimalist set, pushing complexity to the Moof compiler.
+
+### Phase 4.A: The Reduced Instruction Set
+The MCO engine only needs to understand these core primitives:
+1. `LDC <const_idx>`: Load constant onto stack.
+2. `LDV <local_idx>`: Load local variable onto stack.
+3. `STV <local_idx>`: Store top of stack to local variable.
+4. `DISPATCH <selector_idx> <arity>`: The universal call mechanism. Pops `arity` args and a receiver. Looks up `selector` in receiver's `proto` chain. Pushes new CallFrame.
+5. `RET`: Pop current frame, return top of stack to caller.
+6. `JMP / JMPF <offset>`: Control flow.
+
+### Phase 4.B: Inline Caching as Forms
+The `DISPATCH` opcode is slow if it traverses the proto chain every time.
+1. The Moof compiler attaches an `IC` (Inline Cache) Table Form to every `DISPATCH` call site.
+2. The VM MCO checks the `IC` Table: `(receiver_proto_id -> method_form)`.
+3. If hit, it jumps directly to `method_form`.
+4. If miss, it walks the chain, updates the `IC` Table Form, and proceeds.
+Because the IC is a Form, `[proto setHandler:...]` can easily traverse and clear relevant ICs without needing native Rust VM hooks.

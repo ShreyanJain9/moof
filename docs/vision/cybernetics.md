@@ -1,33 +1,70 @@
-# Cybernetics and Living Systems in Moof
+# Cybernetics and Living Systems in Moof: Implementation Plan
 
 > "A system is alive if it can regenerate its own components and maintain its boundaries against perturbations." — Francisco Varela, on Autopoiesis.
 
-Moof is not merely a programming language or an operating system; it is designed to be a living, autopoietic (self-creating and self-maintaining) system. By drawing heavily on computational theory and cybernetics, we aim to build a substrate that goes beyond traditional computing models.
+This document outlines the concrete implementation steps required to embed autopoiesis, actor-model liveness, and CRDT-based morphogenesis into the Moof substrate.
 
-## Autopoiesis and the Form Substrate
+## 1. Autopoiesis: Self-Hosting and Live Recompilation
 
-At the core of Moof is the **Form** — the universal heap primitive. In a living system, the components produce the very network that produced them. In Moof, Forms are evaluated to produce new Forms, mutate the network of relations (slots and handlers), and redefine their own behaviors (protos and methods).
+To be autopoietic, the system must be able to modify its own parsing and compilation machinery at runtime without restarting.
 
-- **Self-Hosting as a Biological Imperative:** Just as a cell contains its own blueprint (DNA) and the machinery to read it, Moof self-hosts its parser and compiler as soon as possible. The system can introspect and recompile its own interpreter logic, effectively allowing it to evolve at runtime without needing external life-support (a static host OS or fixed external tools).
-- **Homeostasis via Replication:** Through the croquet-style replicated vats, Moof achieves homeostasis. Perturbations (network partitions, hardware failures) are corrected by the consensus algorithm, ensuring the deterministic state of the world persists and heals.
+### Phase 1.A: The `compiler.moof` Hot-Swap Protocol
+Currently, the compiler is a Moof module. We need a secure protocol to replace it.
 
-## The Actor Model and Liveness
+1. **The `$compiler` Cap:** The supervisor holds the `$compiler` capability.
+2. **Atomic Swap:** Introduce `[$compiler upgradeWith: newCompilerChunk]`. This method:
+   - Evaluates the new chunk in a fresh sandbox environment.
+   - Verifies the new compiler fulfills the `Compiler` protocol (responds to `:compileTop:`, `:compileForm:`, etc.).
+   - Uses `[become:]` (identity indirection) to atomically swap the old `$compiler` instance with the new one. All subsequent `eval` calls route to the new compiler.
 
-Moof's liveness is guaranteed by the Actor model acting as a cellular boundary:
+### Phase 1.B: The Agent Optimization Loop
+We will introduce a background `OptimizerVat`.
+- It periodically reads `[v meta 'ic-misses]` from heavily used methods.
+- If it detects a pattern (e.g., a polymorphic call site that should be monomorphic), it retrieves the method source via `[v source]`.
+- It rewrites the AST, calls `[$compiler compileForm: newAst]`, and uses `[v setHandler: newMethod for: selector]` to patch the live system.
 
-- **Vats as Cells:** A Vat in Moof acts like a biological cell. It contains its own internal state (Forms) and communicates with other cells strictly through message passing (Effect Intents and Receipts).
-- **Asynchronous Autonomy:** No cell can forcibly mutate the internal state of another. This enforces boundaries, preventing cascading failures and allowing independent subsystems to fail, restart, and reintegrate organically.
+## 2. Actor Boundaries and Liveness
 
-## CRDTs and Morphogenesis
+Vats act as cellular boundaries. We must enforce strict asynchronous message passing to ensure one vat cannot crash another.
 
-To support a massively distributed, multi-user environment (like Moofpaint), the system must handle concurrent, decentralized changes.
+### Phase 2.A: Strict Intent/Receipt Routing
+Currently, cross-vat calls might leak synchronous references.
+1. **The `FarRef` Proto:** Define a `FarRef` in Moof: `(defproto FarRef (slots targetVatId localId))`.
+2. **Intent Envelope:** When `[farRef msg: arg]` is invoked, it does *not* execute. Instead, it produces an `EffectIntent` Form:
+   `{Intent to: targetVatId target: localId msg: 'msg args: (arg)}`
+3. **The Reflector:** The Rust substrate (`src/reflector.rs`) sweeps the outbox at the end of the turn, serializes the Intent into Canonical Bytes, and routes it to the target Vat's inbox.
+4. **The Promise Pipeline:** `[farRef msg: arg]` immediately returns a `Promise`. The target vat processes the intent and emits a `Receipt` intent back, which resolves the promise.
 
-- **Conflict-Free Replicated Data Types (CRDTs):** We utilize CRDT-like patterns within the replicated input logs. Instead of relying on a centralized locking mechanism, changes to Forms in a shared space merge deterministically.
-- **Morphogenesis:** This allows the shape of the world to grow organically from the input of many actors, forming a coherent structure without top-down control.
+## 3. CRDTs and Morphogenesis
 
-## Agent-Driven Evolution
+For Moofpaint to work across replicated vats concurrently, we need Conflict-Free Replicated Data Types natively supported in the Form heap.
 
-A true cybernetic system has feedback loops that observe its state and adapt its behavior.
+### Phase 3.A: The LWW-Map (Last-Write-Wins) Protocol
+Instead of generic Tables for shared state, we implement CRDT Tables in Moof.
 
-- **Deep Introspection:** Moof exposes its entire state through the Reflection Contract. An agent (whether a human user or an AI) can observe the system, detect inefficiencies (e.g., heavily trafficked inline caches, duplicated method structures), and proactively rewrite the code to optimize or evolve the system.
-- **Symbiosis:** This creates a symbiotic relationship between the substrate and the agents inhabiting it, where the environment shapes the agents, and the agents mold the environment.
+```moof
+(defprotocol LWWMap
+  (requires [at:] [put:withTime:] [merge:])
+  (derives
+    [put: key value: val]
+      ;; Automatically uses the turn's logical clock
+      [self put: key withTime: [turn logicalNow] value: val]))
+
+(defproto CRDTTable
+  (mixins LWWMap)
+  (slots state) ;; A table of key -> {value, timestamp}
+  (handlers
+    [put: k withTime: t value: v]
+      (let existing [self at: k])
+      (if (or [existing is nil] (> t [existing time]))
+          [self.state at: k put: {value: v time: t}])
+    [merge: otherTable]
+      ;; Iterate and take highest timestamp for each key
+      ...))
+```
+
+### Phase 3.B: Morphogenesis via the Input Log
+When Alice and Bob edit the same Pixmap:
+1. Alice's stroke is an intent `[crdtPixmap paintAt: {x y} color: 'red time: t1]`.
+2. Bob's stroke is `[crdtPixmap paintAt: {x y} color: 'blue time: t2]`.
+3. The Croquet-style Reflector orders these globally. Even if Bob's client processes Alice's stroke late, the CRDT `merge:` protocol guarantees both clients converge on the same pixel color based on the logical timestamps injected by the Reflector.
