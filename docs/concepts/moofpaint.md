@@ -1,87 +1,96 @@
-# Moofpaint and the Spatial Interface: Implementation Plan
+# Moofpaint and the Spatial Interface: Deep Implementation Plan
 
-> **A 3D, zoomable, collaborative Morphic environment.**
+> **Goal: A 60Hz 3D ZUI with tangible Morphic components and fast native pixmaps.**
 
-This document outlines the concrete steps to implement Moofpaint, the continuous 3D Zoomable User Interface (ZUI), and the Morphic capabilities that act as the primary interface for Moof.
+This document outlines the strict technical phases for rendering, spatial management, and Morphic interactions.
 
-## 1. The Spatial Primitive: Poses and Frames
+## 1. The Spatial Primitive: Poses and Matrices
 
-Every inhabitant in the world requires a spatial representation. We introduce `Pose` and `Placement` as core Moof protocols, backed by a fast math MCO.
+All spatial coordinates are offloaded to an MCO to avoid Rust substrate bloat.
 
-### Phase 1.A: The `math3d.mco` and Spatial Protos
-1. **MCO:** Create `core/math3d.mco` (Rust/Wasm) exporting fast matrix/quaternion operations.
-2. **Moof Protos:**
-   ```moof
-   (defproto Pose
-     (slots position rotation scale) ;; Vec3, Quaternion, Vec3 handles from MCO
-     (handlers
-       [translateBy: vec] ...
-       [rotateBy: quat] ...
-       [matrix] [$math3d toMatrix: self.position rot: self.rotation scale: self.scale]))
-   ```
+### Phase 1.A: `math3d.mco` ABI
+**Files:** `crates/mco-math3d/src/lib.rs`, `examples/wasm-mcos/lib/moof.zig`
+**The ABI:** The MCO exposes matrix multiplication and quaternion math.
+```rust
+#[no_mangle]
+pub extern "C" fn math3d_matrix_mul(a_handle: u32, b_handle: u32) -> u32 {
+    // 1. Read 16 f32s from A and B Forms
+    // 2. Multiply
+    // 3. Allocate new Form containing 16 f32s, return handle
+}
+```
 
-### Phase 1.B: The World Graph
-The World is a hierarchical graph of Placements.
+### Phase 1.B: The `Placement` Graph
+**Files:** `lib/world/placement.moof`
 ```moof
 (defproto Placement
-  (slots form pose children)
+  (slots form pose children parent cachedMatrix dirty)
   (handlers
-    [addChild: placement] ...
-    [worldMatrix] [[self parent] worldMatrix] * [self.pose matrix]))
+    [markDirty]
+      (set! self.dirty #true)
+      [self.children forEach: |c| [c markDirty]]
+    [worldMatrix]
+      (if self.dirty
+          (do
+            (let local [$math3d poseToMatrix: self.pose])
+            (set! self.cachedMatrix (if [self.parent is nil] local [$math3d matrixMul: [self.parent worldMatrix] local]))
+            (set! self.dirty #false)))
+      self.cachedMatrix))
 ```
+**Tests:** `test_placement_matrix_caching`, `test_placement_dirty_propagation`.
 
-## 2. Rendering Protocol
+## 2. Rendering Protocol (`:render-with:`)
 
-Rendering is not hardcoded; it is a message sent down the spatial graph.
+We must support both terminal (braille) and GPU (wgpu) rendering cleanly.
 
-### Phase 2.A: The `:render-with:` Protocol
-Every visible Form must implement the `Renderable` protocol.
+### Phase 2.A: The RenderContext MCOs
+**Files:** `crates/mco-render-wgpu/`, `crates/mco-render-term/`
+Both MCOs must expose the exact same Moof-side capability API.
 ```moof
-(defprotocol Renderable
-  (requires [renderWith: ctx]))
-
-(defproto Cube
-  (mixins Renderable)
-  (handlers
-    [renderWith: ctx]
-      [ctx drawMesh: $defaultCubeMesh color: 'gray]))
+(defprotocol RenderContext
+  (requires [drawMesh:color:] [drawTexture:] [pushTransform:] [popTransform]))
+```
+The Wrapper Vat initializes the specific MCO and passes it down the tree:
+```moof
+[rootPlacement renderWith: $wgpuContext]
 ```
 
-### Phase 2.B: The Wrapper Vat and Render Loop
-A local, single-user "Wrapper Vat" manages the connection to the user's hardware.
-1. It holds the `$canvas` (wgpu or terminal MCO) and `$pointer` capabilities.
-2. Every 16ms (60Hz), it traverses the `Placement` graph and calls `[form renderWith: ctx]`.
+## 3. Moofpaint: Pixmaps and Pixel Buffers
 
-## 3. Moofpaint: Pixmaps and Tools
+The `Pixmap` inhabitant must be fast enough for 60Hz drawing.
 
-Moofpaint requires fast pixel manipulation and tangible tools.
+### Phase 3.A: Memory Layout of Pixel Buffers
+**Files:** `crates/mco-pixel-bits/src/lib.rs`
+The pixel buffer is a flat `Vec<u8>` in the MCO's memory (Wasm linear memory or native heap). It is *not* represented as a Moof `Table` or `List` (too slow).
+1. **Handle Allocation:** `[$pixelBits allocWidth: 1024 height: 1024]` returns an opaque `Form` containing the pointer/index to the buffer.
+2. **Fast Write:** `[$pixelBits set: handle x: 10 y: 20 r: 255 g: 0 b: 0 a: 255]` directly mutates the byte array.
 
-### Phase 3.A: The `Pixmap` Inhabitant
-1. **MCO:** Create `core/pixel-bits.mco` for rapid bit-blitting and texture updates.
-2. **Moof Proto:**
+### Phase 3.B: GPU Texture Sync
+When `[ctx drawTexture: handle]` is called on the `$wgpuContext`:
+1. The `wgpu` MCO reads the `Vec<u8>` from the `pixel-bits` MCO memory space.
+2. It uploads it to the GPU via `queue.write_texture()`.
+
+## 4. Morphic Halos (Live AST Injection)
+
+The core moldability feature: inspecting and rewriting a Form visually in 3D.
+
+### Phase 4.A: Raycasting and DNU Interception
+1. The Wrapper Vat receives a Right-Click. It calls `[$math3d raycast: ray against: rootPlacement]`.
+2. It hits `FormA`.
+3. The Wrapper Vat sends `[FormA spawnHalo]`. If `FormA` doesn't implement it, it falls through to `Object:spawnHalo`.
+
+### Phase 4.B: The Halo UI and AST Replacement
+**Files:** `lib/morphic/halo.moof`, `lib/morphic/text-editor.moof`
+1. **Spawn:** `Object:spawnHalo` creates a Ring menu `Placement` around the Form's pose.
+2. **Inspect:** Clicking the "Code" handle spawns a `TextEditor` Inhabitant, passing `[[self proto] source]` to it.
+3. **Save (The Injection):**
    ```moof
-   (defproto Pixmap
-     (mixins Renderable)
-     (slots textureHandle width height)
-     (handlers
-       [renderWith: ctx]
-         [ctx drawTexture: self.textureHandle]
-       [setPixelAt: pos color: c]
-         [$pixelBits set: self.textureHandle x: pos.x y: pos.y color: c]))
+   ;; Inside TextEditor
+   [onSave: newSourceText]
+     (let newAst [$compiler parse: newSourceText])
+     ;; The injection: compile and hot-swap the proto's method dictionary
+     (let newMethods [$compiler evaluateProtoBody: newAst])
+     [targetProto setHandlers: newMethods]
+     ;; Instantly, all 3D objects using this proto exhibit the new behavior.
    ```
-
-### Phase 3.B: Spatial Input and Raycasting
-The Wrapper Vat captures a mouse click and converts it to a 3D ray.
-1. `[$math3d raycast: ray against: rootPlacement] -> HitRecord`
-2. If the hit is a `Pixmap`, the Wrapper Vat dispatches an Input Envelope to the Replicated World Vat:
-   `{Input event: 'pointerDown target: pixmapFormId localUv: {u v}}`
-3. The Pixmap receives the event and interacts with the currently held Tool Form.
-
-## 4. Morphic Halos (Live Editing)
-
-To make the environment moldable, we implement Morphic Halos.
-
-1. **The Halo Invocation:** Right-clicking any Form raycasts to the Form and sends `[form spawnHalo]`.
-2. **The Halo Form:** The `spawnHalo` default implementation (on `Object`) creates a circular UI `Placement` surrounding the Form's pose.
-3. **Inspect Handle:** Clicking the "Inspect" button on the Halo opens a Text Editor Form in the 3D space, populated with `[[form proto] source]`.
-4. **Live Update:** When the user hits save on the Text Editor, it sends `[$compiler compileForm: newAst]` and updates the proto's handler, immediately altering the behavior of the Form in 3D space.
+**Tests:** `test_raycast_hits_closest_placement`, `test_halo_spawns_at_target_pose`, `test_text_editor_save_updates_proto_handlers`.

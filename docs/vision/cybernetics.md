@@ -1,70 +1,104 @@
-# Cybernetics and Living Systems in Moof: Implementation Plan
+# Cybernetics and Living Systems in Moof: Deep Implementation Plan
 
-> "A system is alive if it can regenerate its own components and maintain its boundaries against perturbations." — Francisco Varela, on Autopoiesis.
+> **Goal: Embed autopoiesis, actor-model liveness, and CRDT morphogenesis into the substrate via precise, testable phases.**
 
-This document outlines the concrete implementation steps required to embed autopoiesis, actor-model liveness, and CRDT-based morphogenesis into the Moof substrate.
+This document provides the day-by-day technical specification for evolving Moof into a living, distributed system.
 
 ## 1. Autopoiesis: Self-Hosting and Live Recompilation
 
-To be autopoietic, the system must be able to modify its own parsing and compilation machinery at runtime without restarting.
+A cybernetic system must be able to rewrite its own rules without restarting. We will implement hot-swappable compiler architecture.
 
-### Phase 1.A: The `compiler.moof` Hot-Swap Protocol
-Currently, the compiler is a Moof module. We need a secure protocol to replace it.
+### Phase 1.A: The `$compiler` Capability and `[become:]`
+**Files:** `src/intrinsics.rs`, `lib/early/compiler-hot-swap.moof`
+**The Protocol:** The compiler is no longer a static module; it is a live Form governed by the `$compiler` cap.
+1. **Atomic Swap Logic:** We implement `[become:]` in `src/vm.rs`. `[formA become: formB]` updates the vat's internal indirection table such that `FormId(A)` now points to the memory of `FormId(B)`.
+2. **The Moof Swap API:**
+   ```moof
+   (defproto CompilerUpdater
+     (handlers
+       [upgradeWith: sourceText]
+         ;; 1. Parse and compile the new source in isolation
+         (let newAst [$compiler parse: sourceText])
+         (let newChunk [$compiler compileForm: newAst])
+         (let newCompilerForm [$compiler execute: newChunk])
+         ;; 2. Verify it fulfills the protocol
+         (if (not [newCompilerForm respondsTo: :compileForm:])
+             (raise 'invalid-compiler))
+         ;; 3. Atomic swap
+         [$compiler become: newCompilerForm]))
+   ```
+**Tests:** `test_compiler_upgrade_retains_identity`, `test_invalid_compiler_upgrade_fails_gracefully`.
 
-1. **The `$compiler` Cap:** The supervisor holds the `$compiler` capability.
-2. **Atomic Swap:** Introduce `[$compiler upgradeWith: newCompilerChunk]`. This method:
-   - Evaluates the new chunk in a fresh sandbox environment.
-   - Verifies the new compiler fulfills the `Compiler` protocol (responds to `:compileTop:`, `:compileForm:`, etc.).
-   - Uses `[become:]` (identity indirection) to atomically swap the old `$compiler` instance with the new one. All subsequent `eval` calls route to the new compiler.
-
-### Phase 1.B: The Agent Optimization Loop
-We will introduce a background `OptimizerVat`.
-- It periodically reads `[v meta 'ic-misses]` from heavily used methods.
-- If it detects a pattern (e.g., a polymorphic call site that should be monomorphic), it retrieves the method source via `[v source]`.
-- It rewrites the AST, calls `[$compiler compileForm: newAst]`, and uses `[v setHandler: newMethod for: selector]` to patch the live system.
+### Phase 1.B: The Agent Optimization Loop (Vat)
+**Files:** `lib/stdlib/optimizer-agent.moof`
+A supervisor-level actor that runs on an interval.
+1. **Introspection Query:** `(let hotMethods [$heap queryMeta: 'ic-misses > 1000])`
+2. **Rewrite Logic:**
+   ```moof
+   (let ast [hotMethod source])
+   ;; ... Agent analysis logic (e.g. inline a polymorphic call) ...
+   (let newChunk [$compiler compileForm: optimizedAst])
+   [hotMethod become: [$compiler execute: newChunk]]
+   ```
 
 ## 2. Actor Boundaries and Liveness
 
-Vats act as cellular boundaries. We must enforce strict asynchronous message passing to ensure one vat cannot crash another.
+Vats must be strictly isolated. Cross-vat calls must be fully asynchronous.
 
-### Phase 2.A: Strict Intent/Receipt Routing
-Currently, cross-vat calls might leak synchronous references.
-1. **The `FarRef` Proto:** Define a `FarRef` in Moof: `(defproto FarRef (slots targetVatId localId))`.
-2. **Intent Envelope:** When `[farRef msg: arg]` is invoked, it does *not* execute. Instead, it produces an `EffectIntent` Form:
-   `{Intent to: targetVatId target: localId msg: 'msg args: (arg)}`
-3. **The Reflector:** The Rust substrate (`src/reflector.rs`) sweeps the outbox at the end of the turn, serializes the Intent into Canonical Bytes, and routes it to the target Vat's inbox.
-4. **The Promise Pipeline:** `[farRef msg: arg]` immediately returns a `Promise`. The target vat processes the intent and emits a `Receipt` intent back, which resolves the promise.
+### Phase 2.A: The `FarRef` Pipeline and Promises
+**Files:** `lib/stdlib/far-ref.moof`, `lib/stdlib/promise.moof`
+1. **The FarRef Form:**
+   ```moof
+   (defproto FarRef
+     (slots targetVatId localId)
+     (handlers
+       [doesNotUnderstand: selector with: args]
+         ;; Intercept all sends and construct an Intent
+         (let promise [Promise new])
+         (let intent {Intent to: self.targetVatId target: self.localId msg: selector args: args replyTo: promise})
+         [$transporter enqueue: intent]
+         promise))
+   ```
+2. **The Reflector (`src/reflector.rs`):**
+   At the end of the message turn, the Reflector iterates the Vat's outbox.
+   ```rust
+   for intent in vat.outbox.drain(..) {
+       let canonical_bytes = canonical_encode(intent)?;
+       // Network boundary
+       transport_mco.send(intent.to, canonical_bytes);
+   }
+   ```
+**Tests:** `test_far_ref_dnu_produces_intent`, `test_promise_resolves_on_receipt`.
 
 ## 3. CRDTs and Morphogenesis
 
-For Moofpaint to work across replicated vats concurrently, we need Conflict-Free Replicated Data Types natively supported in the Form heap.
+Shared state across replicated vats must converge deterministically without locks.
 
-### Phase 3.A: The LWW-Map (Last-Write-Wins) Protocol
-Instead of generic Tables for shared state, we implement CRDT Tables in Moof.
+### Phase 3.A: `CRDTTable` and the `LWWMap` Protocol
+**Files:** `lib/stdlib/crdt.moof`, `lib/protocols/crdt-protocols.moof`
+1. **The Protocol:**
+   ```moof
+   (defprotocol LWWMap
+     (requires [at:] [put:withTime:] [merge:])
+     (derives
+       [put: key value: val]
+         [self put: key withTime: [$clock logicalNow] value: val]))
+   ```
+2. **The CRDTTable Implementation:**
+   ```moof
+   (defproto CRDTTable
+     (mixins LWWMap)
+     (slots state) ;; {key -> {value, time}}
+     (handlers
+       [initialize] (set! self.state {})
+       [put: k withTime: t value: v]
+         (let existing [self.state at: k])
+         (if (or [existing is nil] (> t [existing time]))
+             [self.state put: k value: {value: v time: t}])
+       [merge: otherTable]
+         [otherTable forEach: |k vRecord|
+           [self put: k withTime: [vRecord time] value: [vRecord value]]]))
+   ```
+3. **Integration with Repliaction:** When a VAT receives a state snapshot from another peer, it does not overwrite its `CRDTTable`; it sends `[localTable merge: remoteTable]`.
 
-```moof
-(defprotocol LWWMap
-  (requires [at:] [put:withTime:] [merge:])
-  (derives
-    [put: key value: val]
-      ;; Automatically uses the turn's logical clock
-      [self put: key withTime: [turn logicalNow] value: val]))
-
-(defproto CRDTTable
-  (mixins LWWMap)
-  (slots state) ;; A table of key -> {value, timestamp}
-  (handlers
-    [put: k withTime: t value: v]
-      (let existing [self at: k])
-      (if (or [existing is nil] (> t [existing time]))
-          [self.state at: k put: {value: v time: t}])
-    [merge: otherTable]
-      ;; Iterate and take highest timestamp for each key
-      ...))
-```
-
-### Phase 3.B: Morphogenesis via the Input Log
-When Alice and Bob edit the same Pixmap:
-1. Alice's stroke is an intent `[crdtPixmap paintAt: {x y} color: 'red time: t1]`.
-2. Bob's stroke is `[crdtPixmap paintAt: {x y} color: 'blue time: t2]`.
-3. The Croquet-style Reflector orders these globally. Even if Bob's client processes Alice's stroke late, the CRDT `merge:` protocol guarantees both clients converge on the same pixel color based on the logical timestamps injected by the Reflector.
+**Tests:** `test_crdt_table_lww_semantics`, `test_crdt_merge_is_commutative`.
