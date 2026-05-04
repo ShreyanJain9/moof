@@ -9,5 +9,5 @@
 
 (def $mco-index [Table new])
 
-;; entries land here as mcos are packed, e.g.:
-;;   [$mco-index at: "core/random" put: "abcdef0123456789..."]
+;; entries land here as mcos are packed by each mco's build.sh.
+[$mco-index at: "core/random" put: "66f3a193fb28b66a0e4255b806aa40bde6288929c7656b7ebe77a8753697d685"]
