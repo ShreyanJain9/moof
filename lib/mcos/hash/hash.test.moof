@@ -1,0 +1,37 @@
+;; lib/mcos/hash/hash.test.moof — tests for core/hash mco (blake3).
+;;
+;; uses the same pattern as base64.test.moof: raise: on failure.
+;; known-good vectors verified with b3sum (homebrew).
+
+(def Hash [$mco load: "core/hash"])
+
+;; ── blake3("") ────────────────────────────────────────────────────
+;; b3sum of empty input:
+;;   af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262
+
+(let ((result [Hash of: ["" asUtf8Bytes]]))
+  (let ((hex [result toHexString]))
+    (if [hex = "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"]
+        nil
+        (raise: 'test-failure
+                [["blake3(\"\") wrong: got " + hex]
+                  + " expected af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"]))))
+
+;; ── blake3("hello") ───────────────────────────────────────────────
+;; echo -n "hello" | b3sum -
+;;   ea8f163db38682925e4491c5e58d4bb3506ef8c14eb78a86e908c5624a67200f
+
+(let ((result [Hash of: ["hello" asUtf8Bytes]]))
+  (let ((hex [result toHexString]))
+    (if [hex = "ea8f163db38682925e4491c5e58d4bb3506ef8c14eb78a86e908c5624a67200f"]
+        nil
+        (raise: 'test-failure
+                [["blake3(\"hello\") wrong: got " + hex]
+                  + " expected ea8f163db38682925e4491c5e58d4bb3506ef8c14eb78a86e908c5624a67200f"]))))
+
+;; ── output is always 32 bytes ─────────────────────────────────────
+
+(let ((result [Hash of: ["hello" asUtf8Bytes]]))
+  (if [[result length] = 32]
+      nil
+      (raise: 'test-failure "blake3 output should be 32 bytes")))
