@@ -2569,19 +2569,8 @@ mod tests {
     fn fresh() -> World {
         // for tests that exercise stdlib methods (like :empty? on
         // List), we need the full new_world() with bootstrap.moof
-        // loaded. tests of *intrinsics-only* behavior call new_bare().
+        // loaded. tests of *intrinsics-only* behavior call new_world_bare().
         crate::new_world()
-    }
-
-    #[allow(dead_code)]
-    fn fresh_bare() -> World {
-        // intrinsics-only — no bootstrap.moof, no compiler.moof.
-        // currently unused (kept as a debugging convenience for any
-        // future test that needs to exercise rust intrinsics on a
-        // bare world).
-        let mut w = World::new();
-        install(&mut w);
-        w
     }
 
     #[test]
