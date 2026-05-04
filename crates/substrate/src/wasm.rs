@@ -153,23 +153,7 @@ pub struct WasmInstance {
     pub store: Store<WasiP1Ctx>,
 }
 
-/// load a `.wasm` file from disk, instantiate it, return a fresh
-/// proto-Form whose handlers wrap the wasm exports.
-///
-/// this is the substrate-internal entry. moof code reaches it via
-/// the `[$mco load: path]` cap (see intrinsics.rs).
-pub fn load_wasm_mco(world: &mut World, path: &str) -> Result<Value, RaiseError> {
-    let bytes = std::fs::read(path).map_err(|e| {
-        RaiseError::new(
-            world.intern("io-error"),
-            format!("could not read mco at `{}`: {}", path, e),
-        )
-    })?;
-    load_wasm_bytes(world, &bytes, path)
-}
-
 /// load wasm bytes (already in memory) and instantiate. used by
-/// `load_wasm_mco` and tests that embed wasm via `include_bytes!`.
 pub fn load_wasm_bytes(
     world: &mut World,
     bytes: &[u8],

@@ -2224,22 +2224,6 @@ fn install_globals(w: &mut World) {
         Ok(args[2])
     });
 
-    // (__loadWasmMco "path/to/file.wasm") — load a wasm-mco from
-    // disk and return the resulting proto-Form. temporary entry
-    // point (the proper `[$mco load: path]` cap lands once $mco is
-    // a primordial cap). per docs/reference/mco-format.md, loading
-    // returns a fresh proto-Form; the caller binds it.
-    install_global(w, "__loadWasmMco", |w, _, args| {
-        if args.len() != 1 {
-            return Err(raise(w, "arity", "(__loadWasmMco path)"));
-        }
-        let path = w
-            .string_text(args[0])
-            .map(|s| s.to_string())
-            .ok_or_else(|| type_error(w, "__loadWasmMco: path must be a String"))?;
-        crate::wasm::load_wasm_mco(w, &path)
-    });
-
     // (__instantiate-mco-bytes bytes) — instantiate a wasm-mco from
     // raw Bytes value. returns a fresh proto-Form. caller ($mco cap)
     // is responsible for fetching bytes and verifying hash.
