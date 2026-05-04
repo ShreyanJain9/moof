@@ -1,26 +1,15 @@
-//! mco-pack — append a moof manifest custom section to a wasm
-//! file, producing a .mco.
+//! mco-pack — multi-purpose mco tooling.
 //!
-//! per `docs/reference/mco-format.md`, an `.mco` is a `.wasm` file
-//! plus moof-specific custom sections. this tool appends the
-//! `moof.manifest` section, which holds the manifest as moof
-//! source-text (parseable by the substrate's reader, no new
-//! format).
+//! subcommands:
+//!   mco-pack pack <input.wasm> <output.mco> <manifest-path>
+//!   mco-pack index-update <name> <hash>
 //!
-//! usage:
+//! pack: reads the manifest from a file path (not a literal string),
+//! appends it as a `moof.manifest` custom wasm section, writes the
+//! resulting .mco.
 //!
-//!   mco-pack <input.wasm> <output.mco> <manifest-source>
-//!
-//! the manifest source is the literal moof source-text:
-//!
-//!   ((abi-version 1)
-//!    (parent Object)
-//!    (methods (now monotonic)))
-//!
-//! that gets embedded into the wasm file as a custom section
-//! named "moof.manifest". the substrate's wasm loader parses
-//! it back via the same reader that parses every other moof
-//! source. zero new format, zero new parser.
+//! index-update: appends (or no-ops if already present) an entry to
+//! lib/mcos/index.moof: [$mco-index at: NAME put: HASH]
 
 use std::env;
 use std::fs;
@@ -28,13 +17,29 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
-    if args.len() != 4 {
-        eprintln!("usage: {} <input.wasm> <output.mco> <manifest-source>", args[0]);
+    if args.len() < 2 {
+        eprintln!("usage: {} <subcommand> [args...]", args[0]);
+        eprintln!("subcommands: pack, index-update");
         return ExitCode::from(2);
     }
-    let in_path = &args[1];
-    let out_path = &args[2];
-    let manifest_src = &args[3];
+    match args[1].as_str() {
+        "pack" => cmd_pack(&args[2..]),
+        "index-update" => cmd_index_update(&args[2..]),
+        sub => {
+            eprintln!("unknown subcommand: {}", sub);
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn cmd_pack(args: &[String]) -> ExitCode {
+    if args.len() != 3 {
+        eprintln!("usage: pack <input.wasm> <output.mco> <manifest-path>");
+        return ExitCode::from(2);
+    }
+    let in_path = &args[0];
+    let out_path = &args[1];
+    let manifest_path = &args[2];
 
     let mut wasm = match fs::read(in_path) {
         Ok(b) => b,
@@ -50,13 +55,60 @@ fn main() -> ExitCode {
         return ExitCode::from(65);
     }
 
-    append_custom_section(&mut wasm, "moof.manifest", manifest_src.as_bytes());
+    let manifest_src = match fs::read(manifest_path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("read manifest {}: {}", manifest_path, e);
+            return ExitCode::from(74);
+        }
+    };
+
+    append_custom_section(&mut wasm, "moof.manifest", &manifest_src);
 
     if let Err(e) = fs::write(out_path, &wasm) {
         eprintln!("write {}: {}", out_path, e);
         return ExitCode::from(74);
     }
     println!("packed {} → {} ({} bytes)", in_path, out_path, wasm.len());
+    ExitCode::SUCCESS
+}
+
+fn cmd_index_update(args: &[String]) -> ExitCode {
+    if args.len() != 2 {
+        eprintln!("usage: index-update <name> <hash>");
+        return ExitCode::from(2);
+    }
+    let name = &args[0];
+    let hash = &args[1];
+
+    // locate index.moof relative to cwd — the convention is that
+    // build scripts run from the repo root.
+    let index_path = "lib/mcos/index.moof";
+
+    let content = match fs::read_to_string(index_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("read {}: {}", index_path, e);
+            return ExitCode::from(74);
+        }
+    };
+
+    // idempotency: if the exact name is already present, skip.
+    let entry_marker = format!("\"{}\"", name);
+    if content.contains(&entry_marker) {
+        println!("index-update: {} already present, skipping", name);
+        return ExitCode::SUCCESS;
+    }
+
+    // append a new entry line at the end of the file.
+    let entry = format!("[$mco-index at: \"{}\" put: \"{}\"]\n", name, hash);
+    let new_content = format!("{}{}", content, entry);
+
+    if let Err(e) = fs::write(index_path, &new_content) {
+        eprintln!("write {}: {}", index_path, e);
+        return ExitCode::from(74);
+    }
+    println!("index-update: added {} → {}", name, hash);
     ExitCode::SUCCESS
 }
 
