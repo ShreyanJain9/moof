@@ -549,13 +549,15 @@ fn moof_import_raise_traps_with_structured_message() {
         chain
     };
     assert!(
-        full_chain.contains("__moof_raise__"),
-        "error chain should contain __moof_raise__, got: {}",
+        full_chain.contains("__moof_raise_id__"),
+        "error chain should contain __moof_raise_id__, got: {}",
         full_chain
     );
+    // kind is now encoded as a SymId u32, not a symbol name string.
+    // verify the numeric id field is present (a colon-delimited decimal).
     assert!(
-        full_chain.contains("my-error"),
-        "error chain should contain the kind name, got: {}",
+        full_chain.contains("__moof_raise_id__:"),
+        "error chain should contain the id-prefixed encoding, got: {}",
         full_chain
     );
     assert!(
@@ -709,6 +711,53 @@ fn trampoline_catches_moof_raise_and_converts_to_raise_error() {
     assert!(
         err.message.contains("something went wrong"),
         "expected message to contain 'something went wrong', got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn trampoline_handles_keyword_selector_as_raise_kind() {
+    // regression test: moof_raise with a colon-bearing kind symbol
+    // (e.g. `not-found:`) previously corrupted the kind/msg split
+    // because the old `__moof_raise__:KIND:MSG` wire format confused
+    // a colon inside KIND as the kind/msg separator.
+    //
+    // the fixed encoding is `__moof_raise_id__:U32:MSG` where U32 is
+    // the SymId integer — colon-free by construction.
+    let wat = r#"
+        (module
+          (import "moof" "moof_intern" (func $intern (param i32 i32) (result i32)))
+          (import "moof" "moof_raise"  (func $raise  (param i32 i32 i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0)  "not-found:")
+          (data (i32.const 16) "key was missing")
+          (func (export "boom")
+            (local $k i32)
+            i32.const 0
+            i32.const 10
+            call $intern
+            local.set $k
+            local.get $k
+            i32.const 16
+            i32.const 15
+            call $raise))
+    "#;
+    let mco = make_test_mco(wat, &["boom"]);
+    let mut w = moof::new_world();
+    let proto = moof::wasm::load_wasm_bytes(&mut w, &mco, "kw-raiser.mco").expect("load");
+    let sym = w.intern("KwRaiser");
+    w.env_bind(w.global_env, sym, proto);
+    let err = moof::eval(&mut w, "[KwRaiser boom]").expect_err("should raise");
+    let kind = w.resolve(err.kind);
+    // kind must round-trip exactly — colons preserved, not truncated.
+    assert_eq!(
+        kind, "not-found:",
+        "keyword kind should round-trip intact, got '{}' (msg: {})",
+        kind, err.message
+    );
+    assert_eq!(
+        err.message, "key was missing",
+        "message should be intact, got '{}'",
         err.message
     );
 }

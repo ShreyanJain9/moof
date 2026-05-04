@@ -580,26 +580,28 @@ pub fn install_moof_imports<T: 'static>(linker: &mut Linker<T>) -> wasmtime::Res
          -> wasmtime::Result<()> {
             let msg_bytes = read_linmem(&mut caller, msg_ptr, msg_len)?;
             let msg = String::from_utf8_lossy(&msg_bytes).into_owned();
-            let kind_str = DISPATCH_HANDLE_TABLE
+            // encode kind as the raw SymId u32 — colon-free by construction,
+            // so colon-bearing symbol names like `at:put:` survive intact.
+            // 0 is the SymId::NONE sentinel; the trampoline maps it to
+            // the generic 'wasm-error' fallback.
+            let kind_id: u32 = DISPATCH_HANDLE_TABLE
                 .with(|t| {
                     let table = t.borrow();
                     table.get(kind_handle).and_then(|v| {
                         if let Value::Sym(sid) = v {
-                            let sid = *sid;
-                            // SAFETY: pointer valid within dispatch (see DispatchGuard).
-                            let world: &World = unsafe { &*current_world() };
-                            Some(world.resolve(sid).to_string())
+                            Some(sid.0)
                         } else {
                             None
                         }
                     })
                 })
-                .unwrap_or_else(|| "moof-raise".to_string());
+                .unwrap_or(0);
             // encode kind+msg into the trap message so C4's trampoline
             // can reconstruct the RaiseError without an extra side-channel.
+            // format: __moof_raise_id__:U32:MSG  (U32 has no colons)
             Err(wasmtime::Error::msg(format!(
-                "__moof_raise__:{}:{}",
-                kind_str, msg
+                "__moof_raise_id__:{}:{}",
+                kind_id, msg
             )))
         },
     )?;
@@ -929,24 +931,22 @@ pub fn wasm_method_trampoline(
         Err(trap_err) => {
             // Try to extract a structured moof raise from anywhere in
             // the error chain. The moof_raise import encodes errors as:
-            //   "__moof_raise__:KIND:MSG"
-            // where KIND is a Symbol name (no colons) and MSG is
-            // arbitrary text (may contain colons). After stripping the
-            // prefix, we split on ':' with splitn(2, ':') — KIND is
-            // guaranteed colon-free because it's an interned symbol name;
-            // MSG may contain colons and is taken verbatim as the tail.
+            //   "__moof_raise_id__:KIND_ID:MSG"
+            // where KIND_ID is the SymId as a u32 decimal (colon-free by
+            // construction, so keyword selectors like `at:put:` are safe).
+            // MSG is arbitrary text (may contain colons); splitn(2) takes
+            // it verbatim as the tail.
             fn extract_moof_raise(
                 err: &(dyn std::error::Error + 'static),
-            ) -> Option<(String, String)> {
+            ) -> Option<(u32, String)> {
                 let s = err.to_string();
-                if let Some(payload) = s.strip_prefix("__moof_raise__:") {
-                    // payload = "KIND:MSG"
+                if let Some(payload) = s.strip_prefix("__moof_raise_id__:") {
+                    // payload = "KIND_ID:MSG"
                     let parts: Vec<&str> = payload.splitn(2, ':').collect();
                     if parts.len() == 2 {
-                        return Some((
-                            parts[0].to_string(),
-                            parts[1].to_string(),
-                        ));
+                        if let Ok(kind_id) = parts[0].parse::<u32>() {
+                            return Some((kind_id, parts[1].to_string()));
+                        }
                     }
                 }
                 // walk the error source chain (wasmtime wraps host errors).
@@ -959,8 +959,15 @@ pub fn wasm_method_trampoline(
             // the guard holds the raw pointer; we want clean Rust
             // borrow semantics for the intern call.
             drop(_guard);
-            if let Some((kind, msg)) = extract_moof_raise(trap_ref) {
-                let kind_sym = world.intern(&kind);
+            if let Some((kind_id, msg)) = extract_moof_raise(trap_ref) {
+                // Convert kind_id back to SymId. 0 is the NONE sentinel
+                // (means kind wasn't found in handle table); fall back to
+                // the pre-interned wasm_err_sym in that case.
+                let kind_sym = if kind_id == 0 {
+                    wasm_err_sym
+                } else {
+                    SymId(kind_id)
+                };
                 Err(RaiseError::new(kind_sym, msg))
             } else {
                 Err(RaiseError::new(
