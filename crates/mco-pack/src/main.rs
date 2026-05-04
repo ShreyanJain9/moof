@@ -93,22 +93,47 @@ fn cmd_index_update(args: &[String]) -> ExitCode {
         }
     };
 
-    // idempotency: if the exact name is already present, skip.
-    let entry_marker = format!("\"{}\"", name);
-    if content.contains(&entry_marker) {
-        println!("index-update: {} already present, skipping", name);
+    // check if the name is already present.
+    let exact_entry = format!("[$mco-index at: \"{}\" put: \"{}\"]", name, hash);
+    if content.contains(&exact_entry) {
+        // exact match (same hash) — already up to date.
+        println!("index-update: {} unchanged ({})", name, hash);
         return ExitCode::SUCCESS;
     }
 
-    // append a new entry line at the end of the file.
-    let entry = format!("[$mco-index at: \"{}\" put: \"{}\"]\n", name, hash);
-    let new_content = format!("{}{}", content, entry);
+    let name_marker = format!("at: \"{}\" put:", name);
+    let new_content = if content.contains(&name_marker) {
+        // entry exists with a different hash — replace it in-place.
+        let mut out = String::with_capacity(content.len());
+        for line in content.lines() {
+            if line.contains(&name_marker) {
+                out.push_str(&format!(
+                    "[$mco-index at: \"{}\" put: \"{}\"]",
+                    name, hash
+                ));
+            } else {
+                out.push_str(line);
+            }
+            out.push('\n');
+        }
+        // preserve trailing newline only if original had one.
+        if !content.ends_with('\n') {
+            out.pop();
+        }
+        out
+    } else {
+        // new entry — append.
+        format!(
+            "{}[$mco-index at: \"{}\" put: \"{}\"]\n",
+            content, name, hash
+        )
+    };
 
     if let Err(e) = fs::write(index_path, &new_content) {
         eprintln!("write {}: {}", index_path, e);
         return ExitCode::from(74);
     }
-    println!("index-update: added {} → {}", name, hash);
+    println!("index-update: added core/{} → {}", name, hash);
     ExitCode::SUCCESS
 }
 

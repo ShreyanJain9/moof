@@ -13,3 +13,4 @@
 [$mco-index at: "core/random" put: "66f3a193fb28b66a0e4255b806aa40bde6288929c7656b7ebe77a8753697d685"]
 [$mco-index at: "core/clock" put: "c934e636dded002760e82d84f8952b8cb94d80d22e0da127761f681bace892aa"]
 [$mco-index at: "core/base64" put: "70a589a71514550f7a4dc070042704b8b3f99d8d0cc3b5d1503815bfba457032"]
+[$mco-index at: "core/utf8" put: "f6b8ac38d0fd6383d2a6ab568aefc3de1deb9bc8b22e149e094b53934e3631d4"]

@@ -568,6 +568,16 @@ fn install_string_methods(w: &mut World) {
     });
     // [s concat: t] is :+ in lib/bootstrap.moof; [s empty?] is
     // [[s byteLength] = 0] there.
+
+    // [s asUtf8Bytes] — return the raw UTF-8 encoding of s as a Bytes value.
+    // useful for passing String data to wasm mcos that expect Bytes.
+    w.install_native(w.protos.string, "asUtf8Bytes", |w, self_, _| {
+        let raw = w
+            .string_bytes(self_)
+            .map(|b| b.to_vec())
+            .ok_or_else(|| type_error(w, "asUtf8Bytes on non-String"))?;
+        Ok(w.make_bytes(&raw))
+    });
 }
 
 // install_method_methods is gone — Method's :toString and :inspect
