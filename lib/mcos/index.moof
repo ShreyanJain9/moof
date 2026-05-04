@@ -1,0 +1,13 @@
+;; lib/mcos/index.moof — symbolic name → content-hash table.
+;;
+;; updated by `mco-pack index-update <name> <hash>` from each mco's
+;; build.sh. consumed by [$mco load: <name>] which looks up <name>,
+;; then reads .moof/mcos/cache/<hash>.mco from disk.
+;;
+;; this file defines $mco-index as a global Table so that load:
+;; can find it by name after the file executes.
+
+(def $mco-index [Table new])
+
+;; entries land here as mcos are packed, e.g.:
+;;   [$mco-index at: "core/random" put: "abcdef0123456789..."]

@@ -88,6 +88,7 @@ pub fn install(w: &mut World) {
     install_float_methods(w);
     install_char_methods(w);
     install_string_methods(w);
+    install_bytes_methods(w);
     install_table_methods(w);
     install_object_reflection(w);
     install_cons_and_nil_primitives(w);
@@ -937,6 +938,45 @@ fn render_value(w: &World, v: Value) -> String {
         }
         Value::Foreign(_) => "<foreign>".to_string(),
     }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Bytes primitives — :length and :at: give moof code the ability
+// to iterate raw byte sequences. used by Bytes:toHexString in
+// lib/mcos.moof and other moof-side byte-processing code.
+// ─────────────────────────────────────────────────────────────────
+
+fn install_bytes_methods(w: &mut World) {
+    // [b length] — number of bytes in the Bytes form.
+    w.install_native(w.protos.bytes, "length", |w, self_, _| {
+        let n = w
+            .bytes_data(self_)
+            .map(|b| b.len() as i64)
+            .ok_or_else(|| type_error(w, "length on non-Bytes"))?;
+        Ok(Value::Int(n))
+    });
+
+    // [b at: i] — byte at index i (0-based). returns an Integer 0..255.
+    // raises 'index-out-of-bounds for i < 0 or i >= length.
+    w.install_native(w.protos.bytes, "at:", |w, self_, args| {
+        let idx = match args.first().copied() {
+            Some(Value::Int(n)) => n,
+            _ => return Err(type_error(w, "[Bytes at: i] requires an Integer index")),
+        };
+        // clone to avoid holding the borrow across type_error / raise.
+        let data: Vec<u8> = match w.bytes_data(self_) {
+            Some(b) => b.to_vec(),
+            None => return Err(type_error(w, "at: on non-Bytes")),
+        };
+        if idx < 0 || idx as usize >= data.len() {
+            return Err(raise(
+                w,
+                "index-out-of-bounds",
+                format!("[Bytes at: {}] out of range (length {})", idx, data.len()),
+            ));
+        }
+        Ok(Value::Int(data[idx as usize] as i64))
+    });
 }
 
 /// expose the canonical protos as moof globals (`Object`, `List`,
@@ -2165,6 +2205,53 @@ fn install_globals(w: &mut World) {
             .map(|s| s.to_string())
             .ok_or_else(|| type_error(w, "__loadWasmMco: path must be a String"))?;
         crate::wasm::load_wasm_mco(w, &path)
+    });
+
+    // (__instantiate-mco-bytes bytes) — instantiate a wasm-mco from
+    // raw Bytes value. returns a fresh proto-Form. caller ($mco cap)
+    // is responsible for fetching bytes and verifying hash.
+    install_global(w, "__instantiate-mco-bytes", |w, _, args| {
+        if args.len() != 1 {
+            return Err(raise(w, "arity", "(__instantiate-mco-bytes bytes)"));
+        }
+        let bytes: Vec<u8> = match w.bytes_data(args[0]) {
+            Some(b) => b.to_vec(),
+            None => return Err(type_error(w, "__instantiate-mco-bytes: arg must be Bytes")),
+        };
+        crate::wasm::load_wasm_bytes(w, &bytes, "embedded-mco")
+    });
+
+    // (__hash-blake3-bytes bytes) → Bytes (32-byte blake3 hash).
+    // temporary; superseded in Phase I by the loaded Hash mco.
+    install_global(w, "__hash-blake3-bytes", |w, _, args| {
+        if args.len() != 1 {
+            return Err(raise(w, "arity", "(__hash-blake3-bytes bytes)"));
+        }
+        // clone bytes to drop the immutable borrow before make_bytes.
+        let data: Vec<u8> = match w.bytes_data(args[0]) {
+            Some(b) => b.to_vec(),
+            None => return Err(type_error(w, "__hash-blake3-bytes: arg must be Bytes")),
+        };
+        let hash = blake3::hash(&data);
+        Ok(w.make_bytes(hash.as_bytes()))
+    });
+
+    // (__read-file-bytes path) → Bytes.
+    // substrate-direct fs access (not WASI-routed). privileged
+    // intrinsic used only by the $mco cap. per spec LB-3 / Q1.
+    install_global(w, "__read-file-bytes", |w, _, args| {
+        if args.len() != 1 {
+            return Err(raise(w, "arity", "(__read-file-bytes path)"));
+        }
+        // clone to string to drop the immutable borrow before further use.
+        let path: String = match w.string_text(args[0]) {
+            Some(s) => s.to_string(),
+            None => return Err(type_error(w, "__read-file-bytes: arg must be String")),
+        };
+        match std::fs::read(&path) {
+            Ok(bytes) => Ok(w.make_bytes(&bytes)),
+            Err(e) => Err(raise(w, "io-error", format!("read {}: {}", path, e))),
+        }
     });
 
     // every `__list-*` free fn is gone. the moof compiler walks lists
