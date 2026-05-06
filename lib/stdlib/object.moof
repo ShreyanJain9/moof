@@ -59,7 +59,7 @@
 ;; Symbol — tagged immediate, literal syntax is `'name`. there's no
 ;; symbol.moof so we live here. mirrors the literal: `['foo inspect]`
 ;; → "'foo".
-(defmethod Symbol (inspect) ["'" + [self toString]])
+(defmethod Symbol (inspect) [self toString])
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; :slots / :handlers / :meta — moof iteration over key list,
