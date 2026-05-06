@@ -37,12 +37,16 @@ impl Heap {
     /// (`laws/substrate-laws.md` L11).
     pub fn alloc(&mut self, form: Form) -> FormId {
         let id = self.forms.len();
-        // `usize` could in principle exceed `u32`. on 64-bit, this
-        // is a 4-billion-form ceiling — way more than any real moof
-        // workload should reach. enforce it explicitly.
-        assert!(id < u32::MAX as usize, "heap exhausted: 4G forms allocated");
+        // post-V0 the vat-local payload is 30 bits, so the per-vat
+        // ceiling is ~1B forms (vs 4B before). still vastly more
+        // than any real moof workload.
+        assert!(
+            (id as u32) < crate::form::MAX_PAYLOAD,
+            "vat heap exhausted: {} forms allocated (limit {})",
+            id, crate::form::MAX_PAYLOAD
+        );
         self.forms.push(form);
-        FormId(id as u32)
+        FormId::vat_local(id as u32)
     }
 
     /// borrow a Form by id.
@@ -145,5 +149,30 @@ mod tests {
     fn get_on_none_panics_in_debug() {
         let h = Heap::new();
         let _ = h.get(FormId::NONE);
+    }
+
+    #[test]
+    fn alloc_returns_vat_local_tagged_ids() {
+        use crate::form::Scope;
+        let mut h = Heap::new();
+        let id = h.alloc(Form::default());
+        assert_eq!(id.scope(), Scope::VatLocal);
+        // payload starts at 1 (index 0 is the sentinel placeholder)
+        assert_eq!(id.payload(), 1);
+    }
+
+    #[test]
+    fn alloc_payload_increments_with_each_call() {
+        use crate::form::Scope;
+        let mut h = Heap::new();
+        let a = h.alloc(Form::default());
+        let b = h.alloc(Form::default());
+        let c = h.alloc(Form::default());
+        assert_eq!(a.scope(), Scope::VatLocal);
+        assert_eq!(b.scope(), Scope::VatLocal);
+        assert_eq!(c.scope(), Scope::VatLocal);
+        assert_eq!(a.payload(), 1);
+        assert_eq!(b.payload(), 2);
+        assert_eq!(c.payload(), 3);
     }
 }
