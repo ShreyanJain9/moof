@@ -1,6 +1,7 @@
 target/
 .moof/
 .letta/
+.worktrees/
 examples/*/target/
 examples/*/Cargo.lock
 *.swp
