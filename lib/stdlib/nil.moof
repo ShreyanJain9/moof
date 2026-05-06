@@ -14,6 +14,11 @@
 ;; ─────────────────────────────────────────────────────────────────
 
 (defmethod nil (toString) "nil")
+;; nil has no :name meta and `[nil proto] = nil` (singleton, no
+;; parent), so the default Object:inspect would infinite-recurse.
+;; short-circuit here. (the rewiring of nil-as-Object will let this
+;; fall back to Object:inspect later.)
+(defmethod nil (inspect) "nil")
 
 (defmethod nil (car) nil)
 (defmethod nil (cdr) nil)

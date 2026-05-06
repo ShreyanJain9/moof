@@ -4,6 +4,10 @@
 ;; this file derives :abs, :max:, :min:, :!=, :<=, :>=, :asInteger,
 ;; rounding helpers.
 
+;; tagged immediates have literal syntax — :inspect mirrors :toString
+;; rather than going through Object:inspect's curly form.
+(defmethod Float (inspect) [self toString])
+
 (defmethod Float (!= other) [[self = other] not])
 (defmethod Float (<= other) (if [self < other] #true [self = other]))
 (defmethod Float (>= other) (if [self > other] #true [self = other]))

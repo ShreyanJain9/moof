@@ -37,24 +37,58 @@ impl Heap {
     /// (`laws/substrate-laws.md` L11).
     pub fn alloc(&mut self, form: Form) -> FormId {
         let id = self.forms.len();
-        // `usize` could in principle exceed `u32`. on 64-bit, this
-        // is a 4-billion-form ceiling — way more than any real moof
-        // workload should reach. enforce it explicitly.
-        assert!(id < u32::MAX as usize, "heap exhausted: 4G forms allocated");
+        // post-V0 the vat-local payload is 30 bits, so the per-vat
+        // ceiling is ~1B forms (vs 4B before). still vastly more
+        // than any real moof workload.
+        assert!(
+            (id as u32) < crate::form::MAX_PAYLOAD,
+            "vat heap exhausted: {} forms allocated (limit {})",
+            id, crate::form::MAX_PAYLOAD
+        );
         self.forms.push(form);
-        FormId(id as u32)
+        FormId::vat_local(id as u32)
     }
 
     /// borrow a Form by id.
     pub fn get(&self, id: FormId) -> &Form {
+        use crate::form::Scope;
         debug_assert!(!id.is_none(), "Heap::get on FormId::NONE");
-        &self.forms[id.0 as usize]
+        match id.scope() {
+            Scope::VatLocal => &self.forms[id.payload() as usize],
+            Scope::Shared => panic!(
+                "shared segment not yet supported (V6); got id payload {}",
+                id.payload()
+            ),
+            Scope::FarRef => panic!(
+                "far-ref table not yet supported (V5); got id payload {}",
+                id.payload()
+            ),
+            Scope::Reserved => panic!(
+                "reserved scope: id payload {}",
+                id.payload()
+            ),
+        }
     }
 
     /// mutably borrow a Form by id.
     pub fn get_mut(&mut self, id: FormId) -> &mut Form {
+        use crate::form::Scope;
         debug_assert!(!id.is_none(), "Heap::get_mut on FormId::NONE");
-        &mut self.forms[id.0 as usize]
+        match id.scope() {
+            Scope::VatLocal => &mut self.forms[id.payload() as usize],
+            Scope::Shared => panic!(
+                "shared segment not yet supported (V6); got id payload {}",
+                id.payload()
+            ),
+            Scope::FarRef => panic!(
+                "far-ref table not yet supported (V5); got id payload {}",
+                id.payload()
+            ),
+            Scope::Reserved => panic!(
+                "reserved scope: id payload {}",
+                id.payload()
+            ),
+        }
     }
 
     /// total Forms allocated (including the placeholder at index 0).
@@ -145,5 +179,67 @@ mod tests {
     fn get_on_none_panics_in_debug() {
         let h = Heap::new();
         let _ = h.get(FormId::NONE);
+    }
+
+    #[test]
+    fn alloc_returns_vat_local_tagged_ids() {
+        use crate::form::Scope;
+        let mut h = Heap::new();
+        let id = h.alloc(Form::default());
+        assert_eq!(id.scope(), Scope::VatLocal);
+        // payload starts at 1 (index 0 is the sentinel placeholder)
+        assert_eq!(id.payload(), 1);
+    }
+
+    #[test]
+    fn alloc_payload_increments_with_each_call() {
+        use crate::form::Scope;
+        let mut h = Heap::new();
+        let a = h.alloc(Form::default());
+        let b = h.alloc(Form::default());
+        let c = h.alloc(Form::default());
+        assert_eq!(a.scope(), Scope::VatLocal);
+        assert_eq!(b.scope(), Scope::VatLocal);
+        assert_eq!(c.scope(), Scope::VatLocal);
+        assert_eq!(a.payload(), 1);
+        assert_eq!(b.payload(), 2);
+        assert_eq!(c.payload(), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "shared segment not yet supported")]
+    fn get_on_shared_id_panics_in_v0() {
+        let h = Heap::new();
+        let _ = h.get(FormId::shared(1));
+    }
+
+    #[test]
+    #[should_panic(expected = "far-ref table not yet supported")]
+    fn get_on_far_ref_id_panics_in_v0() {
+        let h = Heap::new();
+        let _ = h.get(FormId::far_ref(1));
+    }
+
+    #[test]
+    #[should_panic(expected = "shared segment not yet supported")]
+    fn get_mut_on_shared_id_panics_in_v0() {
+        let mut h = Heap::new();
+        let _ = h.get_mut(FormId::shared(1));
+    }
+
+    #[test]
+    #[should_panic(expected = "far-ref table not yet supported")]
+    fn get_mut_on_far_ref_id_panics_in_v0() {
+        let mut h = Heap::new();
+        let _ = h.get_mut(FormId::far_ref(1));
+    }
+
+    #[test]
+    fn get_on_vat_local_still_works() {
+        let mut h = Heap::new();
+        let mut f = Form::default();
+        f.slots.insert(SymId(7), Value::Int(42));
+        let id = h.alloc(f);
+        assert_eq!(h.get(id).slot(SymId(7)), Value::Int(42));
     }
 }

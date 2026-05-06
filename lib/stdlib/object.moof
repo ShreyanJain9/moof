@@ -26,9 +26,40 @@
 ;; default :!= — Bool:not over identity-equality.
 (defmethod Object (!= other) [[self = other] not])
 
-;; default :inspect — REPL-readable rendering. defaults to :toString;
-;; Char / String / Cons / Method override for re-readable output.
-(defmethod Object (inspect) [self toString])
+;; default :inspect — REPL-readable rendering that mirrors object-
+;; literal syntax. instances render as `{ ProtoName slot: val ... }`;
+;; proto-Forms (those with a `:name` meta) short-circuit to their
+;; name. matches the pattern in Cons:inspect / Table:inspect, so a
+;; user typing the rendering back into the REPL would re-construct
+;; an isomorphic value.
+;;
+;; slot values render via their own :inspect (so strings get quoted,
+;; lists get parens, etc). slots in insertion order. handlers and
+;; meta are not rendered — they're introspection territory, not
+;; structural identity.
+;;
+;; cycle detection is deferred: a slot pointing back to self will
+;; stack-overflow. acceptable known limitation; users can override
+;; :inspect on protos that need cycle-safe rendering.
+(defmethod Object (inspect)
+  (let ((nm [self metaAt: 'name]))
+    (if [nm is nil]
+        ;; instance: render { ProtoName k: v k: v ... }
+        (let ((proto-rendered [[self proto] inspect])
+              (slot-keys [self slotKeys]))
+          (if [slot-keys is nil]
+              [["{ " + proto-rendered] + " }"]
+              [[[["{ " + proto-rendered] + " "]
+                + [slot-keys joinedBy: " " with:
+                    (fn (k) [[[k toString] + ": "] + [(slot self k) inspect]])]]
+               + " }"]))
+        ;; proto-Form: short-circuit to the name
+        [nm toString])))
+
+;; Symbol — tagged immediate, literal syntax is `'name`. there's no
+;; symbol.moof so we live here. mirrors the literal: `['foo inspect]`
+;; → "'foo".
+(defmethod Symbol (inspect) ["'" + [self toString]])
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; :slots / :handlers / :meta — moof iteration over key list,
