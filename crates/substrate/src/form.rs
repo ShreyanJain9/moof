@@ -52,9 +52,13 @@ pub const PAYLOAD_MASK: u32 = !SCOPE_MASK;
 /// per scope — vastly more than any reasonable vat needs.
 pub const MAX_PAYLOAD: u32 = 1 << 30;
 
+#[allow(dead_code)]
 const TAG_VAT_LOCAL: u32 = 0b00 << 30;
+#[allow(dead_code)]
 const TAG_SHARED: u32 = 0b01 << 30;
+#[allow(dead_code)]
 const TAG_FAR_REF: u32 = 0b10 << 30;
+#[allow(dead_code)]
 const TAG_RESERVED: u32 = 0b11 << 30;
 
 /// the heap-id of a Form. vat-local. stable within a vat
