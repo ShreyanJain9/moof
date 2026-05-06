@@ -4,6 +4,11 @@
 ;; :asFloat live in rust; this file derives :abs, :even?, :odd?,
 ;; :between?, :max:, :min:, comparison shortcuts (!=, <=, >=), etc.
 
+;; tagged immediates have literal syntax — :inspect mirrors :toString
+;; so (e.g.) `[42 inspect]` returns "42", not the curly form Object:inspect
+;; renders for heap forms.
+(defmethod Integer (inspect) [self toString])
+
 (defmethod Integer (!= other) [[self = other] not])
 (defmethod Integer (<= other) (if [self < other] #true [self = other]))
 (defmethod Integer (>= other) (if [self > other] #true [self = other]))

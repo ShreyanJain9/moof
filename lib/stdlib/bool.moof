@@ -12,6 +12,11 @@
 (defmethod #true (toString) "#true")
 (defmethod #false (toString) "#false")
 
+;; tagged immediates have literal syntax — :inspect mirrors :toString
+;; rather than going through Object:inspect's curly form.
+(defmethod #true (inspect) "#true")
+(defmethod #false (inspect) "#false")
+
 (defmethod #true (and: other) other)
 (defmethod #false (and: other) #false)
 

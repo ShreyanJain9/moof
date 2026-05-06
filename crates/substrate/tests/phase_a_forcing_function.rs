@@ -54,6 +54,43 @@ fn forcing_function_source_reflection() {
 }
 
 #[test]
+fn object_inspect_renders_curly_form_mirroring_literal_syntax() {
+    // default Object:inspect renders heap-form instances as
+    // `{ ProtoName slot: val ... }`, mirroring the object-literal
+    // syntax. proto-Forms (named via :name meta) short-circuit to
+    // their name; tagged immediates have their own :inspect that
+    // delegates to :toString (literal-syntax-equivalent).
+    let mut w = moof::new_world();
+    moof::eval(&mut w, "(defproto Counter (slots count step))").unwrap();
+
+    // proto-Form short-circuit: Counter has :name → returns the name.
+    let r = moof::eval(&mut w, "[Counter inspect]").unwrap();
+    assert_eq!(w.string_text(r).unwrap(), "Counter");
+
+    // empty instance: { Counter } — slots map is empty until setters fire.
+    moof::eval(&mut w, "(def c [Counter new])").unwrap();
+    let r = moof::eval(&mut w, "[c inspect]").unwrap();
+    assert_eq!(w.string_text(r).unwrap(), "{ Counter }");
+
+    // populated instance: slots in insertion order; values via their
+    // own :inspect (so Integer renders "3", not "{ Integer }").
+    moof::eval(&mut w, "[c count: 3]").unwrap();
+    moof::eval(&mut w, "[c step: 1]").unwrap();
+    let r = moof::eval(&mut w, "[c inspect]").unwrap();
+    assert_eq!(w.string_text(r).unwrap(), "{ Counter count: 3 step: 1 }");
+
+    // tagged immediates keep literal-syntax inspect (no curly form).
+    let r = moof::eval(&mut w, "[42 inspect]").unwrap();
+    assert_eq!(w.string_text(r).unwrap(), "42");
+    let r = moof::eval(&mut w, "[#true inspect]").unwrap();
+    assert_eq!(w.string_text(r).unwrap(), "#true");
+    let r = moof::eval(&mut w, "['foo inspect]").unwrap();
+    assert_eq!(w.string_text(r).unwrap(), "'foo");
+    let r = moof::eval(&mut w, "[nil inspect]").unwrap();
+    assert_eq!(w.string_text(r).unwrap(), "nil");
+}
+
+#[test]
 fn forcing_function_recursion() {
     // closures + recursion + arithmetic all on substrate-laws path.
     let mut w = moof::new_world();
