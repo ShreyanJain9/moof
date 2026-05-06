@@ -52,13 +52,9 @@ pub const PAYLOAD_MASK: u32 = !SCOPE_MASK;
 /// per scope — vastly more than any reasonable vat needs.
 pub const MAX_PAYLOAD: u32 = 1 << 30;
 
-#[allow(dead_code)]
 const TAG_VAT_LOCAL: u32 = 0b00 << 30;
-#[allow(dead_code)]
 const TAG_SHARED: u32 = 0b01 << 30;
-#[allow(dead_code)]
 const TAG_FAR_REF: u32 = 0b10 << 30;
-#[allow(dead_code)]
 const TAG_RESERVED: u32 = 0b11 << 30;
 
 /// the heap-id of a Form. vat-local. stable within a vat
@@ -74,6 +70,22 @@ impl FormId {
 
     pub fn is_none(self) -> bool {
         self == Self::NONE
+    }
+
+    /// the scope tag — which of the four spaces this id addresses.
+    pub fn scope(self) -> Scope {
+        match self.0 & SCOPE_MASK {
+            TAG_VAT_LOCAL => Scope::VatLocal,
+            TAG_SHARED => Scope::Shared,
+            TAG_FAR_REF => Scope::FarRef,
+            TAG_RESERVED => Scope::Reserved,
+            _ => unreachable!("SCOPE_MASK selects exactly 2 bits"),
+        }
+    }
+
+    /// the payload (per-scope index). bottom 30 bits.
+    pub fn payload(self) -> u32 {
+        self.0 & PAYLOAD_MASK
     }
 }
 
@@ -214,5 +226,43 @@ mod tests {
         f.meta.insert(SymId(1), Value::Int(7));
         assert_eq!(f.meta_at(SymId(1)), Value::Int(7));
         assert_eq!(f.meta_at(SymId(2)), Value::Nil);
+    }
+
+    #[test]
+    fn vat_local_scope_extracted_from_zero_top_bits() {
+        // FormId(7) has top bits 00 → vat-local payload 7.
+        let id = FormId(7);
+        assert_eq!(id.scope(), Scope::VatLocal);
+        assert_eq!(id.payload(), 7);
+    }
+
+    #[test]
+    fn shared_scope_extracted_from_01_top_bits() {
+        let id = FormId(0b01 << 30 | 42);
+        assert_eq!(id.scope(), Scope::Shared);
+        assert_eq!(id.payload(), 42);
+    }
+
+    #[test]
+    fn far_ref_scope_extracted_from_10_top_bits() {
+        let id = FormId(0b10 << 30 | 100);
+        assert_eq!(id.scope(), Scope::FarRef);
+        assert_eq!(id.payload(), 100);
+    }
+
+    #[test]
+    fn reserved_scope_extracted_from_11_top_bits() {
+        let id = FormId(0b11 << 30 | 1);
+        assert_eq!(id.scope(), Scope::Reserved);
+        assert_eq!(id.payload(), 1);
+    }
+
+    #[test]
+    fn formid_none_remains_vat_local_zero() {
+        // The sentinel must remain vat-local payload 0 so existing
+        // Heap placeholder semantics work unchanged.
+        assert_eq!(FormId::NONE.scope(), Scope::VatLocal);
+        assert_eq!(FormId::NONE.payload(), 0);
+        assert!(FormId::NONE.is_none());
     }
 }
