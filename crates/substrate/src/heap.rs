@@ -51,14 +51,44 @@ impl Heap {
 
     /// borrow a Form by id.
     pub fn get(&self, id: FormId) -> &Form {
+        use crate::form::Scope;
         debug_assert!(!id.is_none(), "Heap::get on FormId::NONE");
-        &self.forms[id.0 as usize]
+        match id.scope() {
+            Scope::VatLocal => &self.forms[id.payload() as usize],
+            Scope::Shared => panic!(
+                "shared segment not yet supported (V6); got id payload {}",
+                id.payload()
+            ),
+            Scope::FarRef => panic!(
+                "far-ref table not yet supported (V5); got id payload {}",
+                id.payload()
+            ),
+            Scope::Reserved => panic!(
+                "reserved scope: id payload {}",
+                id.payload()
+            ),
+        }
     }
 
     /// mutably borrow a Form by id.
     pub fn get_mut(&mut self, id: FormId) -> &mut Form {
+        use crate::form::Scope;
         debug_assert!(!id.is_none(), "Heap::get_mut on FormId::NONE");
-        &mut self.forms[id.0 as usize]
+        match id.scope() {
+            Scope::VatLocal => &mut self.forms[id.payload() as usize],
+            Scope::Shared => panic!(
+                "shared segment not yet supported (V6); got id payload {}",
+                id.payload()
+            ),
+            Scope::FarRef => panic!(
+                "far-ref table not yet supported (V5); got id payload {}",
+                id.payload()
+            ),
+            Scope::Reserved => panic!(
+                "reserved scope: id payload {}",
+                id.payload()
+            ),
+        }
     }
 
     /// total Forms allocated (including the placeholder at index 0).
@@ -174,5 +204,42 @@ mod tests {
         assert_eq!(a.payload(), 1);
         assert_eq!(b.payload(), 2);
         assert_eq!(c.payload(), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "shared segment not yet supported")]
+    fn get_on_shared_id_panics_in_v0() {
+        let h = Heap::new();
+        let _ = h.get(FormId::shared(1));
+    }
+
+    #[test]
+    #[should_panic(expected = "far-ref table not yet supported")]
+    fn get_on_far_ref_id_panics_in_v0() {
+        let h = Heap::new();
+        let _ = h.get(FormId::far_ref(1));
+    }
+
+    #[test]
+    #[should_panic(expected = "shared segment not yet supported")]
+    fn get_mut_on_shared_id_panics_in_v0() {
+        let mut h = Heap::new();
+        let _ = h.get_mut(FormId::shared(1));
+    }
+
+    #[test]
+    #[should_panic(expected = "far-ref table not yet supported")]
+    fn get_mut_on_far_ref_id_panics_in_v0() {
+        let mut h = Heap::new();
+        let _ = h.get_mut(FormId::far_ref(1));
+    }
+
+    #[test]
+    fn get_on_vat_local_still_works() {
+        let mut h = Heap::new();
+        let mut f = Form::default();
+        f.slots.insert(SymId(7), Value::Int(42));
+        let id = h.alloc(f);
+        assert_eq!(h.get(id).slot(SymId(7)), Value::Int(42));
     }
 }
