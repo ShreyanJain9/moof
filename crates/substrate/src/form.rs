@@ -25,6 +25,38 @@ use indexmap::IndexMap;
 use crate::sym::SymId;
 use crate::value::Value;
 
+/// the four scopes a `FormId` can address. spec §5.
+///
+/// the top 2 bits of a 32-bit FormId encode the scope; the bottom 30
+/// bits are the per-scope payload. vat-local is the only one with
+/// real implementation in V0 — shared and far-ref panic until later
+/// phases fill them in (V6 / V5 respectively).
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+pub enum Scope {
+    /// `00…` — index into this vat's `Vec<Form>`.
+    VatLocal,
+    /// `01…` — index into the process-wide shared segment (V6).
+    Shared,
+    /// `10…` — index into this vat's far-ref table (V5).
+    FarRef,
+    /// `11…` — reserved for future use (NaN-boxed immediates,
+    /// bigint pool, segmented heaps).
+    Reserved,
+}
+
+/// the bit mask that selects the scope tag in a `FormId`'s u32.
+pub const SCOPE_MASK: u32 = 0b11 << 30;
+/// the bit mask that selects the payload in a `FormId`'s u32.
+pub const PAYLOAD_MASK: u32 = !SCOPE_MASK;
+/// the maximum payload value (exclusive). 2^30 ≈ 1.07 billion forms
+/// per scope — vastly more than any reasonable vat needs.
+pub const MAX_PAYLOAD: u32 = 1 << 30;
+
+const TAG_VAT_LOCAL: u32 = 0b00 << 30;
+const TAG_SHARED: u32 = 0b01 << 30;
+const TAG_FAR_REF: u32 = 0b10 << 30;
+const TAG_RESERVED: u32 = 0b11 << 30;
+
 /// the heap-id of a Form. vat-local. stable within a vat
 /// (`laws/substrate-laws.md` L11).
 ///
@@ -105,6 +137,18 @@ impl Form {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scope_enum_has_four_variants() {
+        // The four scopes documented in the spec §5.
+        let _vat = Scope::VatLocal;
+        let _shared = Scope::Shared;
+        let _far = Scope::FarRef;
+        let _reserved = Scope::Reserved;
+        assert_ne!(Scope::VatLocal, Scope::Shared);
+        assert_ne!(Scope::Shared, Scope::FarRef);
+        assert_ne!(Scope::FarRef, Scope::Reserved);
+    }
 
     #[test]
     fn default_form_has_no_proto_no_slots() {
