@@ -87,6 +87,24 @@ impl FormId {
     pub fn payload(self) -> u32 {
         self.0 & PAYLOAD_MASK
     }
+
+    /// construct a vat-local FormId. payload must fit in 30 bits.
+    pub fn vat_local(payload: u32) -> Self {
+        assert!(payload < MAX_PAYLOAD, "payload exceeds 30-bit limit: {}", payload);
+        FormId(TAG_VAT_LOCAL | payload)
+    }
+
+    /// construct a shared-segment FormId. payload must fit in 30 bits.
+    pub fn shared(payload: u32) -> Self {
+        assert!(payload < MAX_PAYLOAD, "payload exceeds 30-bit limit: {}", payload);
+        FormId(TAG_SHARED | payload)
+    }
+
+    /// construct a far-ref FormId. payload must fit in 30 bits.
+    pub fn far_ref(payload: u32) -> Self {
+        assert!(payload < MAX_PAYLOAD, "payload exceeds 30-bit limit: {}", payload);
+        FormId(TAG_FAR_REF | payload)
+    }
 }
 
 /// the universal heap kind.
@@ -264,5 +282,48 @@ mod tests {
         assert_eq!(FormId::NONE.scope(), Scope::VatLocal);
         assert_eq!(FormId::NONE.payload(), 0);
         assert!(FormId::NONE.is_none());
+    }
+
+    #[test]
+    fn vat_local_constructor_zero_top_bits() {
+        let id = FormId::vat_local(42);
+        assert_eq!(id.scope(), Scope::VatLocal);
+        assert_eq!(id.payload(), 42);
+        // raw bits: top 2 are 00, bottom 30 are 42
+        assert_eq!(id.0, 42);
+    }
+
+    #[test]
+    fn shared_constructor_sets_01_top_bits() {
+        let id = FormId::shared(42);
+        assert_eq!(id.scope(), Scope::Shared);
+        assert_eq!(id.payload(), 42);
+        assert_eq!(id.0, (0b01 << 30) | 42);
+    }
+
+    #[test]
+    fn far_ref_constructor_sets_10_top_bits() {
+        let id = FormId::far_ref(100);
+        assert_eq!(id.scope(), Scope::FarRef);
+        assert_eq!(id.payload(), 100);
+        assert_eq!(id.0, (0b10 << 30) | 100);
+    }
+
+    #[test]
+    #[should_panic(expected = "payload exceeds 30-bit limit")]
+    fn vat_local_constructor_panics_on_overflow() {
+        let _ = FormId::vat_local(MAX_PAYLOAD);
+    }
+
+    #[test]
+    #[should_panic(expected = "payload exceeds 30-bit limit")]
+    fn shared_constructor_panics_on_overflow() {
+        let _ = FormId::shared(MAX_PAYLOAD);
+    }
+
+    #[test]
+    #[should_panic(expected = "payload exceeds 30-bit limit")]
+    fn far_ref_constructor_panics_on_overflow() {
+        let _ = FormId::far_ref(MAX_PAYLOAD);
     }
 }
