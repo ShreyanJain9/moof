@@ -90,19 +90,19 @@ impl FormId {
 
     /// construct a vat-local FormId. payload must fit in 30 bits.
     pub fn vat_local(payload: u32) -> Self {
-        assert!(payload < MAX_PAYLOAD, "payload exceeds 30-bit limit: {}", payload);
+        assert!(payload < MAX_PAYLOAD, "vat-local payload exceeds 30-bit limit: {}", payload);
         FormId(TAG_VAT_LOCAL | payload)
     }
 
     /// construct a shared-segment FormId. payload must fit in 30 bits.
     pub fn shared(payload: u32) -> Self {
-        assert!(payload < MAX_PAYLOAD, "payload exceeds 30-bit limit: {}", payload);
+        assert!(payload < MAX_PAYLOAD, "shared-segment payload exceeds 30-bit limit: {}", payload);
         FormId(TAG_SHARED | payload)
     }
 
     /// construct a far-ref FormId. payload must fit in 30 bits.
     pub fn far_ref(payload: u32) -> Self {
-        assert!(payload < MAX_PAYLOAD, "payload exceeds 30-bit limit: {}", payload);
+        assert!(payload < MAX_PAYLOAD, "far-ref payload exceeds 30-bit limit: {}", payload);
         FormId(TAG_FAR_REF | payload)
     }
 }
