@@ -998,6 +998,67 @@ impl World {
         self.heap.get(id).meta_at(key)
     }
 
+    /// set a slot value on a form, nursery-aware. for
+    /// pre-existing forms (payload < turn_watermark) during an
+    /// active turn, writes to the nursery delta. for new-alloc
+    /// forms (payload >= turn_watermark), writes directly to
+    /// canonical heap (they're already nursery-semantic).
+    /// panics if `!in_turn` — substrate disallows mutation
+    /// outside a turn (V1 invariant: turn = unit of atomicity).
+    pub fn form_slot_set(&mut self, id: FormId, key: SymId, value: Value) {
+        assert!(
+            self.in_turn,
+            "form_slot_set called outside a turn"
+        );
+        if id.payload() >= self.turn_watermark {
+            // new alloc — write directly to canonical.
+            self.heap.get_mut(id).slots.insert(key, value);
+        } else {
+            // pre-existing — buffer in nursery delta.
+            self.nursery_deltas
+                .entry(id)
+                .or_default()
+                .slots
+                .insert(key, value);
+        }
+    }
+
+    /// set a handler entry on a form, nursery-aware. semantics
+    /// mirror `form_slot_set`.
+    pub fn form_handler_set(&mut self, id: FormId, key: SymId, value: Value) {
+        assert!(
+            self.in_turn,
+            "form_handler_set called outside a turn"
+        );
+        if id.payload() >= self.turn_watermark {
+            self.heap.get_mut(id).handlers.insert(key, value);
+        } else {
+            self.nursery_deltas
+                .entry(id)
+                .or_default()
+                .handlers
+                .insert(key, value);
+        }
+    }
+
+    /// set a meta entry on a form, nursery-aware. semantics
+    /// mirror `form_slot_set`.
+    pub fn form_meta_set(&mut self, id: FormId, key: SymId, value: Value) {
+        assert!(
+            self.in_turn,
+            "form_meta_set called outside a turn"
+        );
+        if id.payload() >= self.turn_watermark {
+            self.heap.get_mut(id).meta.insert(key, value);
+        } else {
+            self.nursery_deltas
+                .entry(id)
+                .or_default()
+                .meta
+                .insert(key, value);
+        }
+    }
+
     /// look up a handler by walking the proto chain. returns the
     /// (method-Form, defining-proto-FormId) pair, or `None` if no
     /// handler is found before the chain bottoms out.
@@ -1425,5 +1486,132 @@ mod tests {
         w.nursery_deltas.insert(id, d);
         assert_eq!(w.form_meta(id, SymId(7)), Value::Int(77));
         w.abort_turn();
+    }
+
+    #[test]
+    #[should_panic(expected = "form_slot_set called outside a turn")]
+    fn form_slot_set_outside_turn_panics() {
+        let mut w = World::new();
+        let id = w.heap.alloc(Form::default());
+        w.form_slot_set(id, SymId(1), Value::Int(42));
+    }
+
+    #[test]
+    #[should_panic(expected = "form_handler_set called outside a turn")]
+    fn form_handler_set_outside_turn_panics() {
+        let mut w = World::new();
+        let id = w.heap.alloc(Form::default());
+        w.form_handler_set(id, SymId(1), Value::Int(42));
+    }
+
+    #[test]
+    #[should_panic(expected = "form_meta_set called outside a turn")]
+    fn form_meta_set_outside_turn_panics() {
+        let mut w = World::new();
+        let id = w.heap.alloc(Form::default());
+        w.form_meta_set(id, SymId(1), Value::Int(42));
+    }
+
+    #[test]
+    fn form_slot_set_buffers_in_delta_for_pre_existing_form() {
+        let mut w = World::new();
+        let id = w.heap.alloc(Form::default());
+        // mark id as pre-existing.
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        w.form_slot_set(id, SymId(1), Value::Int(42));
+        // canonical heap still has empty slots for this form.
+        assert!(w.heap.get(id).slots.is_empty());
+        // delta should have the entry.
+        let delta = w.nursery_deltas.get(&id).unwrap();
+        assert_eq!(delta.slots.get(&SymId(1)).copied(), Some(Value::Int(42)));
+        // read-your-writes via form_slot.
+        assert_eq!(w.form_slot(id, SymId(1)), Value::Int(42));
+        w.abort_turn();
+    }
+
+    #[test]
+    fn form_slot_set_writes_canonical_directly_for_new_alloc() {
+        let mut w = World::new();
+        // set a watermark; alloc above it.
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        let id = w.heap.alloc(Form::default());
+        // id.payload() >= turn_watermark, so the form is new-alloc.
+        w.form_slot_set(id, SymId(1), Value::Int(42));
+        // canonical heap has the value directly (no delta needed).
+        assert_eq!(w.heap.get(id).slot(SymId(1)), Value::Int(42));
+        // delta is empty (new-alloc forms don't use the delta map).
+        assert!(w.nursery_deltas.get(&id).is_none() || w.nursery_deltas.get(&id).unwrap().is_empty());
+        w.commit_turn();
+    }
+
+    #[test]
+    fn commit_applies_delta_and_emits_diff() {
+        let mut w = World::new();
+        let mut f = Form::default();
+        f.slots.insert(SymId(1), Value::Int(10));
+        let id = w.heap.alloc(f);
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        w.form_slot_set(id, SymId(1), Value::Int(20));
+        w.form_slot_set(id, SymId(2), Value::Int(30));
+        let diff = w.commit_turn();
+        // canonical now has updated values.
+        assert_eq!(w.heap.get(id).slot(SymId(1)), Value::Int(20));
+        assert_eq!(w.heap.get(id).slot(SymId(2)), Value::Int(30));
+        // diff has both entries with correct prior/new.
+        let e1 = diff.mutations.get(&(id, FaceKind::Slots, SymId(1))).copied();
+        assert_eq!(e1, Some((Value::Int(10), Value::Int(20))));
+        let e2 = diff.mutations.get(&(id, FaceKind::Slots, SymId(2))).copied();
+        // SymId(2) was absent before — prior is Nil.
+        assert_eq!(e2, Some((Value::Nil, Value::Int(30))));
+    }
+
+    #[test]
+    fn last_write_wins_within_a_turn() {
+        let mut w = World::new();
+        let id = w.heap.alloc(Form::default());
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        w.form_slot_set(id, SymId(1), Value::Int(1));
+        w.form_slot_set(id, SymId(1), Value::Int(2));
+        w.form_slot_set(id, SymId(1), Value::Int(3));
+        let diff = w.commit_turn();
+        // diff has the final value 3, with prior nil (key was absent).
+        let e = diff.mutations.get(&(id, FaceKind::Slots, SymId(1))).copied();
+        assert_eq!(e, Some((Value::Nil, Value::Int(3))));
+    }
+
+    #[test]
+    fn abort_drops_delta_no_canonical_change() {
+        let mut w = World::new();
+        let mut f = Form::default();
+        f.slots.insert(SymId(1), Value::Int(10));
+        let id = w.heap.alloc(f);
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        w.form_slot_set(id, SymId(1), Value::Int(99));
+        // mid-turn: read sees new value via delta.
+        assert_eq!(w.form_slot(id, SymId(1)), Value::Int(99));
+        w.abort_turn();
+        // post-abort: canonical untouched.
+        assert_eq!(w.heap.get(id).slot(SymId(1)), Value::Int(10));
+    }
+
+    #[test]
+    fn diff_handles_all_three_faces() {
+        let mut w = World::new();
+        let id = w.heap.alloc(Form::default());
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        w.form_slot_set(id, SymId(1), Value::Int(11));
+        w.form_handler_set(id, SymId(2), Value::Int(22));
+        w.form_meta_set(id, SymId(3), Value::Int(33));
+        let diff = w.commit_turn();
+        assert_eq!(diff.mutations.len(), 3);
+        assert!(diff.mutations.contains_key(&(id, FaceKind::Slots, SymId(1))));
+        assert!(diff.mutations.contains_key(&(id, FaceKind::Handlers, SymId(2))));
+        assert!(diff.mutations.contains_key(&(id, FaceKind::Meta, SymId(3))));
     }
 }
