@@ -24,6 +24,7 @@ pub mod foreign;
 pub mod form;
 pub mod heap;
 pub mod intrinsics;
+pub mod nursery;
 pub mod opcodes;
 pub mod protos;
 pub mod reader;
