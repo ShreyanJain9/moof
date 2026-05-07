@@ -19,7 +19,7 @@ use crate::form::{Form, FormId};
 
 /// a contiguous, single-vat heap of Forms.
 pub struct Heap {
-    forms: Vec<Form>,
+    pub(crate) forms: Vec<Form>,
 }
 
 impl Heap {
