@@ -27,6 +27,7 @@ use indexmap::IndexMap;
 use crate::foreign::ForeignTable;
 use crate::form::{Form, FormId};
 use crate::heap::Heap;
+use crate::nursery::{Delta, FaceKind, TurnDiff};
 use crate::opcodes::Op;
 use crate::protos::Protos;
 use crate::reader::{self, ReadCtx, ReadError};
@@ -221,6 +222,26 @@ pub struct World {
     /// the bytecode interpreter's per-vat state.
     pub vm: Vm,
 
+    /// the current turn's mutation deltas, keyed by FormId of
+    /// pre-existing forms (payload < `turn_watermark`). forms
+    /// allocated this turn are NOT in this map — they're at
+    /// `heap.forms[i]` for `i >= turn_watermark`. cleared on
+    /// commit and abort.
+    pub nursery_deltas: IndexMap<FormId, Delta>,
+
+    /// the FormId payload below which forms are canonical
+    /// (committed in a prior turn or at boot). forms with
+    /// payload `>= turn_watermark` are this-turn allocations
+    /// during an active turn. advanced on commit; unchanged on
+    /// abort.
+    pub turn_watermark: u32,
+
+    /// `true` iff a turn is currently active. `start_turn`
+    /// flips on; `commit_turn` and `abort_turn` flip off.
+    /// nested `start_turn` calls panic — V1 supports exactly
+    /// one active turn at a time.
+    pub in_turn: bool,
+
     // cached SymIds for hot paths.
     pub car_sym: SymId,
     pub cdr_sym: SymId,
@@ -269,7 +290,7 @@ impl World {
         let rep_sym = syms.intern("rep");
         let generation_sym = syms.intern("generation");
 
-        World {
+        let mut world = World {
             heap,
             syms,
             foreign,
@@ -286,6 +307,9 @@ impl World {
             transporter_root: None,
             use_moof_compiler: false,
             vm: Vm::default(),
+            nursery_deltas: IndexMap::new(),
+            turn_watermark: 0,
+            in_turn: false,
             car_sym,
             cdr_sym,
             body_sym,
@@ -299,7 +323,15 @@ impl World {
             bytes_sym,
             rep_sym,
             generation_sym,
-        }
+        };
+
+        // boot turn auto-commit: all allocations during World::new
+        // are treated as committed canonical state. turn_watermark
+        // reflects this. (the equivalent of "start_turn → bootstrap
+        // → commit_turn" with the diff discarded.)
+        world.turn_watermark = world.heap.len() as u32;
+
+        world
     }
 
     /// intern a symbol.
@@ -810,6 +842,223 @@ impl World {
         id
     }
 
+    /// `true` iff a turn is currently active.
+    pub fn in_turn(&self) -> bool {
+        self.in_turn
+    }
+
+    /// begin a turn. panics if a turn is already active —
+    /// V1 supports exactly one active turn at a time.
+    pub fn start_turn(&mut self) {
+        assert!(
+            !self.in_turn,
+            "start_turn called while a turn is already active"
+        );
+        self.in_turn = true;
+        // nursery_deltas should already be empty (clear on commit/abort);
+        // assert defensively.
+        debug_assert!(self.nursery_deltas.is_empty());
+    }
+
+    /// commit the active turn. computes and returns the
+    /// `TurnDiff`. applies nursery deltas to canonical heap.
+    /// advances `turn_watermark` to current heap length.
+    /// clears `nursery_deltas`. flips `in_turn` off.
+    /// panics if no turn is active.
+    pub fn commit_turn(&mut self) -> TurnDiff {
+        assert!(
+            self.in_turn,
+            "commit_turn called outside a turn"
+        );
+
+        let mut diff = TurnDiff::default();
+
+        // process deltas: read canonical prior, emit diff entry,
+        // apply mutation. order is `IndexMap` insertion order,
+        // which is deterministic per `laws/determinism-laws.md` D5.
+        for (form_id, delta) in std::mem::take(&mut self.nursery_deltas) {
+            let canonical = self.heap.get_mut(form_id);
+
+            for (key, new_value) in delta.slots {
+                let prior = canonical
+                    .slots
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(Value::Nil);
+                diff.mutations.insert(
+                    (form_id, FaceKind::Slots, key),
+                    (prior, new_value),
+                );
+                canonical.slots.insert(key, new_value);
+            }
+            for (key, new_value) in delta.handlers {
+                let prior = canonical
+                    .handlers
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(Value::Nil);
+                diff.mutations.insert(
+                    (form_id, FaceKind::Handlers, key),
+                    (prior, new_value),
+                );
+                canonical.handlers.insert(key, new_value);
+            }
+            for (key, new_value) in delta.meta {
+                let prior = canonical
+                    .meta
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(Value::Nil);
+                diff.mutations.insert(
+                    (form_id, FaceKind::Meta, key),
+                    (prior, new_value),
+                );
+                canonical.meta.insert(key, new_value);
+            }
+        }
+
+        // collect new-alloc FormIds (allocations during this turn
+        // sit at `heap.forms[turn_watermark..]`).
+        let new_high = self.heap.len() as u32;
+        diff.new_allocs = (self.turn_watermark..new_high)
+            .map(FormId::vat_local)
+            .collect();
+
+        // advance watermark to include this turn's allocs.
+        self.turn_watermark = new_high;
+        self.in_turn = false;
+
+        diff
+    }
+
+    /// abort the active turn. truncates `heap.forms` to
+    /// `turn_watermark` (drops this-turn allocations). clears
+    /// `nursery_deltas` (drops buffered mutations). flips
+    /// `in_turn` off. watermark unchanged. panics if no turn
+    /// is active.
+    pub fn abort_turn(&mut self) {
+        assert!(
+            self.in_turn,
+            "abort_turn called outside a turn"
+        );
+
+        // drop new-alloc forms by truncating Vec to watermark.
+        // this is the rollback for allocations.
+        self.heap.forms.truncate(self.turn_watermark as usize);
+
+        // drop buffered mutations (no canonical writes occurred).
+        self.nursery_deltas.clear();
+
+        self.in_turn = false;
+    }
+
+    /// read a form's slot value, nursery-aware. checks nursery
+    /// delta first when the form is pre-existing and a turn is
+    /// active; falls through to canonical heap otherwise.
+    /// returns `Value::Nil` if the slot is absent in both
+    /// nursery delta (if any) and canonical (matching `Form::slot`'s
+    /// behavior).
+    pub fn form_slot(&self, id: FormId, key: SymId) -> Value {
+        if self.in_turn && id.payload() < self.turn_watermark {
+            if let Some(delta) = self.nursery_deltas.get(&id) {
+                if let Some(v) = delta.slots.get(&key).copied() {
+                    return v;
+                }
+            }
+        }
+        self.heap.get(id).slot(key)
+    }
+
+    /// read a form's handler entry, nursery-aware. returns
+    /// `None` if absent in both nursery delta and canonical
+    /// (matching `Form::handler`'s behavior — callers walking
+    /// the proto chain rely on `None` to keep walking).
+    pub fn form_handler(&self, id: FormId, key: SymId) -> Option<Value> {
+        if self.in_turn && id.payload() < self.turn_watermark {
+            if let Some(delta) = self.nursery_deltas.get(&id) {
+                if let Some(v) = delta.handlers.get(&key).copied() {
+                    return Some(v);
+                }
+            }
+        }
+        self.heap.get(id).handler(key)
+    }
+
+    /// read a form's meta entry, nursery-aware. returns
+    /// `Value::Nil` if absent in both nursery delta and
+    /// canonical (matching `Form::meta_at`'s behavior).
+    pub fn form_meta(&self, id: FormId, key: SymId) -> Value {
+        if self.in_turn && id.payload() < self.turn_watermark {
+            if let Some(delta) = self.nursery_deltas.get(&id) {
+                if let Some(v) = delta.meta.get(&key).copied() {
+                    return v;
+                }
+            }
+        }
+        self.heap.get(id).meta_at(key)
+    }
+
+    /// set a slot value on a form, nursery-aware. for
+    /// pre-existing forms (payload < turn_watermark) during an
+    /// active turn, writes to the nursery delta. for new-alloc
+    /// forms (payload >= turn_watermark), writes directly to
+    /// canonical heap (they're already nursery-semantic).
+    /// panics if `!in_turn` — substrate disallows mutation
+    /// outside a turn (V1 invariant: turn = unit of atomicity).
+    pub fn form_slot_set(&mut self, id: FormId, key: SymId, value: Value) {
+        assert!(
+            self.in_turn,
+            "form_slot_set called outside a turn"
+        );
+        if id.payload() >= self.turn_watermark {
+            // new alloc — write directly to canonical.
+            self.heap.get_mut(id).slots.insert(key, value);
+        } else {
+            // pre-existing — buffer in nursery delta.
+            self.nursery_deltas
+                .entry(id)
+                .or_default()
+                .slots
+                .insert(key, value);
+        }
+    }
+
+    /// set a handler entry on a form, nursery-aware. semantics
+    /// mirror `form_slot_set`.
+    pub fn form_handler_set(&mut self, id: FormId, key: SymId, value: Value) {
+        assert!(
+            self.in_turn,
+            "form_handler_set called outside a turn"
+        );
+        if id.payload() >= self.turn_watermark {
+            self.heap.get_mut(id).handlers.insert(key, value);
+        } else {
+            self.nursery_deltas
+                .entry(id)
+                .or_default()
+                .handlers
+                .insert(key, value);
+        }
+    }
+
+    /// set a meta entry on a form, nursery-aware. semantics
+    /// mirror `form_slot_set`.
+    pub fn form_meta_set(&mut self, id: FormId, key: SymId, value: Value) {
+        assert!(
+            self.in_turn,
+            "form_meta_set called outside a turn"
+        );
+        if id.payload() >= self.turn_watermark {
+            self.heap.get_mut(id).meta.insert(key, value);
+        } else {
+            self.nursery_deltas
+                .entry(id)
+                .or_default()
+                .meta
+                .insert(key, value);
+        }
+    }
+
     /// look up a handler by walking the proto chain. returns the
     /// (method-Form, defining-proto-FormId) pair, or `None` if no
     /// handler is found before the chain bottoms out.
@@ -1038,5 +1287,387 @@ mod tests {
         let v = w.read("(1 2 3)").unwrap();
         let id = v.as_form_id().unwrap();
         assert_eq!(w.heap.get(id).proto, Value::Form(w.protos.cons));
+    }
+
+    #[test]
+    fn boot_turn_commits_cleanly() {
+        let w = World::new();
+        // not in a turn (boot turn committed).
+        assert!(!w.in_turn());
+        // watermark advanced past all bootstrap allocations.
+        assert!(
+            w.turn_watermark > 1,
+            "watermark must include at least the bootstrap forms (got {})",
+            w.turn_watermark
+        );
+        // nursery is empty (boot turn drained on commit).
+        assert!(w.nursery_deltas.is_empty());
+    }
+
+    #[test]
+    fn start_turn_flips_in_turn_on_and_commit_flips_off() {
+        let mut w = World::new();
+        assert!(!w.in_turn());
+        w.start_turn();
+        assert!(w.in_turn());
+        let _diff = w.commit_turn();
+        assert!(!w.in_turn());
+    }
+
+    #[test]
+    fn start_turn_then_abort_flips_in_turn_off() {
+        let mut w = World::new();
+        w.start_turn();
+        assert!(w.in_turn());
+        w.abort_turn();
+        assert!(!w.in_turn());
+    }
+
+    #[test]
+    #[should_panic(expected = "start_turn called while a turn is already active")]
+    fn nested_start_turn_panics() {
+        let mut w = World::new();
+        w.start_turn();
+        w.start_turn();
+    }
+
+    #[test]
+    #[should_panic(expected = "commit_turn called outside a turn")]
+    fn commit_turn_outside_a_turn_panics() {
+        let mut w = World::new();
+        w.commit_turn();
+    }
+
+    #[test]
+    #[should_panic(expected = "abort_turn called outside a turn")]
+    fn abort_turn_outside_a_turn_panics() {
+        let mut w = World::new();
+        w.abort_turn();
+    }
+
+    #[test]
+    fn empty_turn_commit_returns_empty_diff() {
+        let mut w = World::new();
+        w.start_turn();
+        let diff = w.commit_turn();
+        assert!(diff.mutations.is_empty());
+        assert!(diff.new_allocs.is_empty());
+    }
+
+    #[test]
+    fn turn_watermark_advances_on_commit_for_new_allocs() {
+        use crate::form::Form;
+        let mut w = World::new();
+        let mark_before = w.turn_watermark;
+        w.start_turn();
+        w.heap.alloc(Form::default());
+        let diff = w.commit_turn();
+        assert_eq!(diff.new_allocs.len(), 1);
+        // watermark moved up by 1 to include the new alloc.
+        assert_eq!(w.turn_watermark, mark_before + 1);
+    }
+
+    #[test]
+    fn turn_abort_truncates_new_allocs() {
+        use crate::form::Form;
+        let mut w = World::new();
+        let mark_before = w.turn_watermark;
+        let len_before = w.heap.len();
+        w.start_turn();
+        let _ = w.heap.alloc(Form::default());
+        let _ = w.heap.alloc(Form::default());
+        assert_eq!(w.heap.len(), len_before + 2);
+        w.abort_turn();
+        // after abort, heap is back to pre-turn state.
+        assert_eq!(w.heap.len(), len_before);
+        // watermark unchanged.
+        assert_eq!(w.turn_watermark, mark_before);
+    }
+
+    #[test]
+    fn form_slot_reads_canonical_when_not_in_turn() {
+        let mut w = World::new();
+        let mut f = Form::default();
+        f.slots.insert(SymId(7), Value::Int(99));
+        let id = w.heap.alloc(f);
+        // not in a turn: form_slot reads canonical directly.
+        assert_eq!(w.form_slot(id, SymId(7)), Value::Int(99));
+    }
+
+    #[test]
+    fn form_slot_falls_through_to_canonical_when_no_delta() {
+        let mut w = World::new();
+        let mut f = Form::default();
+        f.slots.insert(SymId(7), Value::Int(99));
+        let id = w.heap.alloc(f);
+        // advance watermark so id is "pre-existing" relative to the next turn.
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        // no delta; falls through to canonical.
+        assert_eq!(w.form_slot(id, SymId(7)), Value::Int(99));
+        w.commit_turn();
+    }
+
+    #[test]
+    fn form_slot_reads_delta_when_seeded() {
+        let mut w = World::new();
+        let mut f = Form::default();
+        f.slots.insert(SymId(7), Value::Int(99));
+        let id = w.heap.alloc(f);
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        // seed nursery_deltas manually for the test.
+        let mut d = Delta::default();
+        d.slots.insert(SymId(7), Value::Int(77));
+        w.nursery_deltas.insert(id, d);
+        // form_slot should see the delta value, not canonical's 99.
+        assert_eq!(w.form_slot(id, SymId(7)), Value::Int(77));
+        w.abort_turn();
+    }
+
+    #[test]
+    fn form_slot_falls_through_when_key_not_in_delta() {
+        let mut w = World::new();
+        let mut f = Form::default();
+        f.slots.insert(SymId(7), Value::Int(99));
+        f.slots.insert(SymId(8), Value::Int(88));
+        let id = w.heap.alloc(f);
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        // delta touches slot 7 but not 8.
+        let mut d = Delta::default();
+        d.slots.insert(SymId(7), Value::Int(77));
+        w.nursery_deltas.insert(id, d);
+        assert_eq!(w.form_slot(id, SymId(7)), Value::Int(77));
+        // slot 8 falls through to canonical.
+        assert_eq!(w.form_slot(id, SymId(8)), Value::Int(88));
+        w.abort_turn();
+    }
+
+    #[test]
+    fn form_handler_reads_canonical_when_not_in_turn() {
+        let mut w = World::new();
+        let mut f = Form::default();
+        f.handlers.insert(SymId(7), Value::Int(99));
+        let id = w.heap.alloc(f);
+        assert_eq!(w.form_handler(id, SymId(7)), Some(Value::Int(99)));
+        assert_eq!(w.form_handler(id, SymId(99)), None);
+    }
+
+    #[test]
+    fn form_handler_reads_delta_when_seeded() {
+        let mut w = World::new();
+        let mut f = Form::default();
+        f.handlers.insert(SymId(7), Value::Int(99));
+        let id = w.heap.alloc(f);
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        let mut d = Delta::default();
+        d.handlers.insert(SymId(7), Value::Int(77));
+        w.nursery_deltas.insert(id, d);
+        assert_eq!(w.form_handler(id, SymId(7)), Some(Value::Int(77)));
+        w.abort_turn();
+    }
+
+    #[test]
+    fn form_meta_reads_canonical_when_not_in_turn() {
+        let mut w = World::new();
+        let mut f = Form::default();
+        f.meta.insert(SymId(7), Value::Int(99));
+        let id = w.heap.alloc(f);
+        assert_eq!(w.form_meta(id, SymId(7)), Value::Int(99));
+        // missing key returns nil (matches Form::meta_at behavior).
+        assert_eq!(w.form_meta(id, SymId(99)), Value::Nil);
+    }
+
+    #[test]
+    fn form_meta_reads_delta_when_seeded() {
+        let mut w = World::new();
+        let mut f = Form::default();
+        f.meta.insert(SymId(7), Value::Int(99));
+        let id = w.heap.alloc(f);
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        let mut d = Delta::default();
+        d.meta.insert(SymId(7), Value::Int(77));
+        w.nursery_deltas.insert(id, d);
+        assert_eq!(w.form_meta(id, SymId(7)), Value::Int(77));
+        w.abort_turn();
+    }
+
+    #[test]
+    #[should_panic(expected = "form_slot_set called outside a turn")]
+    fn form_slot_set_outside_turn_panics() {
+        let mut w = World::new();
+        let id = w.heap.alloc(Form::default());
+        w.form_slot_set(id, SymId(1), Value::Int(42));
+    }
+
+    #[test]
+    #[should_panic(expected = "form_handler_set called outside a turn")]
+    fn form_handler_set_outside_turn_panics() {
+        let mut w = World::new();
+        let id = w.heap.alloc(Form::default());
+        w.form_handler_set(id, SymId(1), Value::Int(42));
+    }
+
+    #[test]
+    #[should_panic(expected = "form_meta_set called outside a turn")]
+    fn form_meta_set_outside_turn_panics() {
+        let mut w = World::new();
+        let id = w.heap.alloc(Form::default());
+        w.form_meta_set(id, SymId(1), Value::Int(42));
+    }
+
+    #[test]
+    fn form_slot_set_buffers_in_delta_for_pre_existing_form() {
+        let mut w = World::new();
+        let id = w.heap.alloc(Form::default());
+        // mark id as pre-existing.
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        w.form_slot_set(id, SymId(1), Value::Int(42));
+        // canonical heap still has empty slots for this form.
+        assert!(w.heap.get(id).slots.is_empty());
+        // delta should have the entry.
+        let delta = w.nursery_deltas.get(&id).unwrap();
+        assert_eq!(delta.slots.get(&SymId(1)).copied(), Some(Value::Int(42)));
+        // read-your-writes via form_slot.
+        assert_eq!(w.form_slot(id, SymId(1)), Value::Int(42));
+        w.abort_turn();
+    }
+
+    #[test]
+    fn form_slot_set_writes_canonical_directly_for_new_alloc() {
+        let mut w = World::new();
+        // set a watermark; alloc above it.
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        let id = w.heap.alloc(Form::default());
+        // id.payload() >= turn_watermark, so the form is new-alloc.
+        w.form_slot_set(id, SymId(1), Value::Int(42));
+        // canonical heap has the value directly (no delta needed).
+        assert_eq!(w.heap.get(id).slot(SymId(1)), Value::Int(42));
+        // delta is empty (new-alloc forms don't use the delta map).
+        assert!(w.nursery_deltas.get(&id).is_none() || w.nursery_deltas.get(&id).unwrap().is_empty());
+        w.commit_turn();
+    }
+
+    #[test]
+    fn commit_applies_delta_and_emits_diff() {
+        let mut w = World::new();
+        let mut f = Form::default();
+        f.slots.insert(SymId(1), Value::Int(10));
+        let id = w.heap.alloc(f);
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        w.form_slot_set(id, SymId(1), Value::Int(20));
+        w.form_slot_set(id, SymId(2), Value::Int(30));
+        let diff = w.commit_turn();
+        // canonical now has updated values.
+        assert_eq!(w.heap.get(id).slot(SymId(1)), Value::Int(20));
+        assert_eq!(w.heap.get(id).slot(SymId(2)), Value::Int(30));
+        // diff has both entries with correct prior/new.
+        let e1 = diff.mutations.get(&(id, FaceKind::Slots, SymId(1))).copied();
+        assert_eq!(e1, Some((Value::Int(10), Value::Int(20))));
+        let e2 = diff.mutations.get(&(id, FaceKind::Slots, SymId(2))).copied();
+        // SymId(2) was absent before — prior is Nil.
+        assert_eq!(e2, Some((Value::Nil, Value::Int(30))));
+    }
+
+    #[test]
+    fn last_write_wins_within_a_turn() {
+        let mut w = World::new();
+        let id = w.heap.alloc(Form::default());
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        w.form_slot_set(id, SymId(1), Value::Int(1));
+        w.form_slot_set(id, SymId(1), Value::Int(2));
+        w.form_slot_set(id, SymId(1), Value::Int(3));
+        let diff = w.commit_turn();
+        // diff has the final value 3, with prior nil (key was absent).
+        let e = diff.mutations.get(&(id, FaceKind::Slots, SymId(1))).copied();
+        assert_eq!(e, Some((Value::Nil, Value::Int(3))));
+    }
+
+    #[test]
+    fn abort_drops_delta_no_canonical_change() {
+        let mut w = World::new();
+        let mut f = Form::default();
+        f.slots.insert(SymId(1), Value::Int(10));
+        let id = w.heap.alloc(f);
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        w.form_slot_set(id, SymId(1), Value::Int(99));
+        // mid-turn: read sees new value via delta.
+        assert_eq!(w.form_slot(id, SymId(1)), Value::Int(99));
+        w.abort_turn();
+        // post-abort: canonical untouched.
+        assert_eq!(w.heap.get(id).slot(SymId(1)), Value::Int(10));
+    }
+
+    #[test]
+    fn diff_handles_all_three_faces() {
+        let mut w = World::new();
+        let id = w.heap.alloc(Form::default());
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        w.form_slot_set(id, SymId(1), Value::Int(11));
+        w.form_handler_set(id, SymId(2), Value::Int(22));
+        w.form_meta_set(id, SymId(3), Value::Int(33));
+        let diff = w.commit_turn();
+        assert_eq!(diff.mutations.len(), 3);
+        assert!(diff.mutations.contains_key(&(id, FaceKind::Slots, SymId(1))));
+        assert!(diff.mutations.contains_key(&(id, FaceKind::Handlers, SymId(2))));
+        assert!(diff.mutations.contains_key(&(id, FaceKind::Meta, SymId(3))));
+    }
+
+    #[test]
+    #[ignore = "passes after Task 7 migrates env_bind to form_slot_set"]
+    fn raise_in_eval_program_aborts_implicit_turn_no_state_leak() {
+        let mut w = crate::new_world_bare();
+        let env_id = w.global_env;
+        let foo_sym = w.intern("foo");
+        let snapshot_before = w.heap.get(env_id).slot(foo_sym);
+        assert_eq!(snapshot_before, Value::Nil);
+
+        let result = crate::eval_program(
+            &mut w,
+            "(def foo 5) (raise: 'boom \"oh no\")",
+        );
+        assert!(result.is_err());
+        // env state preserved post-abort.
+        assert_eq!(w.heap.get(env_id).slot(foo_sym), Value::Nil);
+    }
+
+    #[test]
+    fn eval_program_in_turn_state_post_eval_is_not_in_turn() {
+        let mut w = crate::new_world_bare();
+        // implicit turn wraps the body; on completion, in_turn is false.
+        let result = crate::eval_program(&mut w, "(def x 42) x");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Int(42));
+        assert!(!w.in_turn());
+    }
+
+    #[test]
+    fn eval_program_returning_error_leaves_in_turn_false() {
+        let mut w = crate::new_world_bare();
+        let result = crate::eval_program(&mut w, "(raise: 'boom \"x\")");
+        assert!(result.is_err());
+        assert!(!w.in_turn());
+    }
+
+    #[test]
+    fn nested_eval_program_calls_use_outer_turn_idempotently() {
+        let mut w = crate::new_world_bare();
+        w.start_turn();
+        // outer caller already in a turn; eval_program should NOT
+        // open a nested turn (idempotent via was_in_turn).
+        let _ = crate::eval_program(&mut w, "(def x 1)");
+        // still in the outer turn — eval_program didn't commit.
+        assert!(w.in_turn());
+        w.commit_turn();
+        assert!(!w.in_turn());
     }
 }
