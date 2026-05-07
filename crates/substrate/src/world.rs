@@ -952,6 +952,52 @@ impl World {
         self.in_turn = false;
     }
 
+    /// read a form's slot value, nursery-aware. checks nursery
+    /// delta first when the form is pre-existing and a turn is
+    /// active; falls through to canonical heap otherwise.
+    /// returns `Value::Nil` if the slot is absent in both
+    /// nursery delta (if any) and canonical (matching `Form::slot`'s
+    /// behavior).
+    pub fn form_slot(&self, id: FormId, key: SymId) -> Value {
+        if self.in_turn && id.payload() < self.turn_watermark {
+            if let Some(delta) = self.nursery_deltas.get(&id) {
+                if let Some(v) = delta.slots.get(&key).copied() {
+                    return v;
+                }
+            }
+        }
+        self.heap.get(id).slot(key)
+    }
+
+    /// read a form's handler entry, nursery-aware. returns
+    /// `None` if absent in both nursery delta and canonical
+    /// (matching `Form::handler`'s behavior — callers walking
+    /// the proto chain rely on `None` to keep walking).
+    pub fn form_handler(&self, id: FormId, key: SymId) -> Option<Value> {
+        if self.in_turn && id.payload() < self.turn_watermark {
+            if let Some(delta) = self.nursery_deltas.get(&id) {
+                if let Some(v) = delta.handlers.get(&key).copied() {
+                    return Some(v);
+                }
+            }
+        }
+        self.heap.get(id).handler(key)
+    }
+
+    /// read a form's meta entry, nursery-aware. returns
+    /// `Value::Nil` if absent in both nursery delta and
+    /// canonical (matching `Form::meta_at`'s behavior).
+    pub fn form_meta(&self, id: FormId, key: SymId) -> Value {
+        if self.in_turn && id.payload() < self.turn_watermark {
+            if let Some(delta) = self.nursery_deltas.get(&id) {
+                if let Some(v) = delta.meta.get(&key).copied() {
+                    return v;
+                }
+            }
+        }
+        self.heap.get(id).meta_at(key)
+    }
+
     /// look up a handler by walking the proto chain. returns the
     /// (method-Form, defining-proto-FormId) pair, or `None` if no
     /// handler is found before the chain bottoms out.
@@ -1268,5 +1314,116 @@ mod tests {
         assert_eq!(w.heap.len(), len_before);
         // watermark unchanged.
         assert_eq!(w.turn_watermark, mark_before);
+    }
+
+    #[test]
+    fn form_slot_reads_canonical_when_not_in_turn() {
+        let mut w = World::new();
+        let mut f = Form::default();
+        f.slots.insert(SymId(7), Value::Int(99));
+        let id = w.heap.alloc(f);
+        // not in a turn: form_slot reads canonical directly.
+        assert_eq!(w.form_slot(id, SymId(7)), Value::Int(99));
+    }
+
+    #[test]
+    fn form_slot_falls_through_to_canonical_when_no_delta() {
+        let mut w = World::new();
+        let mut f = Form::default();
+        f.slots.insert(SymId(7), Value::Int(99));
+        let id = w.heap.alloc(f);
+        // advance watermark so id is "pre-existing" relative to the next turn.
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        // no delta; falls through to canonical.
+        assert_eq!(w.form_slot(id, SymId(7)), Value::Int(99));
+        w.commit_turn();
+    }
+
+    #[test]
+    fn form_slot_reads_delta_when_seeded() {
+        let mut w = World::new();
+        let mut f = Form::default();
+        f.slots.insert(SymId(7), Value::Int(99));
+        let id = w.heap.alloc(f);
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        // seed nursery_deltas manually for the test.
+        let mut d = Delta::default();
+        d.slots.insert(SymId(7), Value::Int(77));
+        w.nursery_deltas.insert(id, d);
+        // form_slot should see the delta value, not canonical's 99.
+        assert_eq!(w.form_slot(id, SymId(7)), Value::Int(77));
+        w.abort_turn();
+    }
+
+    #[test]
+    fn form_slot_falls_through_when_key_not_in_delta() {
+        let mut w = World::new();
+        let mut f = Form::default();
+        f.slots.insert(SymId(7), Value::Int(99));
+        f.slots.insert(SymId(8), Value::Int(88));
+        let id = w.heap.alloc(f);
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        // delta touches slot 7 but not 8.
+        let mut d = Delta::default();
+        d.slots.insert(SymId(7), Value::Int(77));
+        w.nursery_deltas.insert(id, d);
+        assert_eq!(w.form_slot(id, SymId(7)), Value::Int(77));
+        // slot 8 falls through to canonical.
+        assert_eq!(w.form_slot(id, SymId(8)), Value::Int(88));
+        w.abort_turn();
+    }
+
+    #[test]
+    fn form_handler_reads_canonical_when_not_in_turn() {
+        let mut w = World::new();
+        let mut f = Form::default();
+        f.handlers.insert(SymId(7), Value::Int(99));
+        let id = w.heap.alloc(f);
+        assert_eq!(w.form_handler(id, SymId(7)), Some(Value::Int(99)));
+        assert_eq!(w.form_handler(id, SymId(99)), None);
+    }
+
+    #[test]
+    fn form_handler_reads_delta_when_seeded() {
+        let mut w = World::new();
+        let mut f = Form::default();
+        f.handlers.insert(SymId(7), Value::Int(99));
+        let id = w.heap.alloc(f);
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        let mut d = Delta::default();
+        d.handlers.insert(SymId(7), Value::Int(77));
+        w.nursery_deltas.insert(id, d);
+        assert_eq!(w.form_handler(id, SymId(7)), Some(Value::Int(77)));
+        w.abort_turn();
+    }
+
+    #[test]
+    fn form_meta_reads_canonical_when_not_in_turn() {
+        let mut w = World::new();
+        let mut f = Form::default();
+        f.meta.insert(SymId(7), Value::Int(99));
+        let id = w.heap.alloc(f);
+        assert_eq!(w.form_meta(id, SymId(7)), Value::Int(99));
+        // missing key returns nil (matches Form::meta_at behavior).
+        assert_eq!(w.form_meta(id, SymId(99)), Value::Nil);
+    }
+
+    #[test]
+    fn form_meta_reads_delta_when_seeded() {
+        let mut w = World::new();
+        let mut f = Form::default();
+        f.meta.insert(SymId(7), Value::Int(99));
+        let id = w.heap.alloc(f);
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        let mut d = Delta::default();
+        d.meta.insert(SymId(7), Value::Int(77));
+        w.nursery_deltas.insert(id, d);
+        assert_eq!(w.form_meta(id, SymId(7)), Value::Int(77));
+        w.abort_turn();
     }
 }
