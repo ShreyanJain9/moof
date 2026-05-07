@@ -325,10 +325,10 @@ impl World {
             generation_sym,
         };
 
-        // set watermark to current heap length to mark end of bootstrap.
-        // task 5 will wrap this in a turn; for now, watermark is set
-        // post-construction so the boot allocations (protos, global_env,
-        // macros_form, etc.) are treated as pre-existing canonical forms.
+        // boot turn auto-commit: all allocations during World::new
+        // are treated as committed canonical state. turn_watermark
+        // reflects this. (the equivalent of "start_turn → bootstrap
+        // → commit_turn" with the diff discarded.)
         world.turn_watermark = world.heap.len() as u32;
 
         world
@@ -1290,11 +1290,18 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "passes after Task 5 wraps World::new in a boot turn"]
-    fn fresh_world_is_not_in_turn_after_construction() {
+    fn boot_turn_commits_cleanly() {
         let w = World::new();
-        // post-boot, the boot turn has committed; we're outside a turn.
+        // not in a turn (boot turn committed).
         assert!(!w.in_turn());
+        // watermark advanced past all bootstrap allocations.
+        assert!(
+            w.turn_watermark > 1,
+            "watermark must include at least the bootstrap forms (got {})",
+            w.turn_watermark
+        );
+        // nursery is empty (boot turn drained on commit).
+        assert!(w.nursery_deltas.is_empty());
     }
 
     #[test]
