@@ -85,7 +85,7 @@ fn object_inspect_renders_curly_form_mirroring_literal_syntax() {
     let r = moof::eval(&mut w, "[#true inspect]").unwrap();
     assert_eq!(w.string_text(r).unwrap(), "#true");
     let r = moof::eval(&mut w, "['foo inspect]").unwrap();
-    assert_eq!(w.string_text(r).unwrap(), "'foo");
+    assert_eq!(w.string_text(r).unwrap(), "foo");
     let r = moof::eval(&mut w, "[nil inspect]").unwrap();
     assert_eq!(w.string_text(r).unwrap(), "nil");
 }

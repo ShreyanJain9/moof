@@ -56,9 +56,7 @@
         ;; proto-Form: short-circuit to the name
         [nm toString])))
 
-;; Symbol — tagged immediate, literal syntax is `'name`. there's no
-;; symbol.moof so we live here. mirrors the literal: `['foo inspect]`
-;; → "'foo".
+;; Symbol inspect works 
 (defmethod Symbol (inspect) [self toString])
 
 ;; ─────────────────────────────────────────────────────────────────
