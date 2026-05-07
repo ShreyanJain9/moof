@@ -115,6 +115,24 @@ pub fn new_world_bare() -> world::World {
 
 /// evaluate a single expression in the world's global env.
 pub fn eval(w: &mut world::World, source: &str) -> Result<value::Value, world::RaiseError> {
+    let was_in_turn = w.in_turn();
+    if !was_in_turn {
+        w.start_turn();
+    }
+    let result = eval_inner(w, source);
+    if !was_in_turn {
+        match &result {
+            Ok(_) => { let _ = w.commit_turn(); }
+            Err(_) => { w.abort_turn(); }
+        }
+    }
+    result
+}
+
+fn eval_inner(
+    w: &mut world::World,
+    source: &str,
+) -> Result<value::Value, world::RaiseError> {
     let form = w
         .read(source)
         .map_err(|e| world::RaiseError::from_reader(&mut w.syms, e))?;
@@ -126,6 +144,24 @@ pub fn eval(w: &mut world::World, source: &str) -> Result<value::Value, world::R
 /// of the last. used to load multi-form scripts (incl. lib/main.moof
 /// and the files it transitively loads).
 pub fn eval_program(
+    w: &mut world::World,
+    source: &str,
+) -> Result<value::Value, world::RaiseError> {
+    let was_in_turn = w.in_turn();
+    if !was_in_turn {
+        w.start_turn();
+    }
+    let result = eval_program_inner(w, source);
+    if !was_in_turn {
+        match &result {
+            Ok(_) => { let _ = w.commit_turn(); }
+            Err(_) => { w.abort_turn(); }
+        }
+    }
+    result
+}
+
+fn eval_program_inner(
     w: &mut world::World,
     source: &str,
 ) -> Result<value::Value, world::RaiseError> {

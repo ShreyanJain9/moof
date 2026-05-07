@@ -1621,4 +1621,53 @@ mod tests {
         assert!(diff.mutations.contains_key(&(id, FaceKind::Handlers, SymId(2))));
         assert!(diff.mutations.contains_key(&(id, FaceKind::Meta, SymId(3))));
     }
+
+    #[test]
+    #[ignore = "passes after Task 7 migrates env_bind to form_slot_set"]
+    fn raise_in_eval_program_aborts_implicit_turn_no_state_leak() {
+        let mut w = crate::new_world_bare();
+        let env_id = w.global_env;
+        let foo_sym = w.intern("foo");
+        let snapshot_before = w.heap.get(env_id).slot(foo_sym);
+        assert_eq!(snapshot_before, Value::Nil);
+
+        let result = crate::eval_program(
+            &mut w,
+            "(def foo 5) (raise: 'boom \"oh no\")",
+        );
+        assert!(result.is_err());
+        // env state preserved post-abort.
+        assert_eq!(w.heap.get(env_id).slot(foo_sym), Value::Nil);
+    }
+
+    #[test]
+    fn eval_program_in_turn_state_post_eval_is_not_in_turn() {
+        let mut w = crate::new_world_bare();
+        // implicit turn wraps the body; on completion, in_turn is false.
+        let result = crate::eval_program(&mut w, "(def x 42) x");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Value::Int(42));
+        assert!(!w.in_turn());
+    }
+
+    #[test]
+    fn eval_program_returning_error_leaves_in_turn_false() {
+        let mut w = crate::new_world_bare();
+        let result = crate::eval_program(&mut w, "(raise: 'boom \"x\")");
+        assert!(result.is_err());
+        assert!(!w.in_turn());
+    }
+
+    #[test]
+    fn nested_eval_program_calls_use_outer_turn_idempotently() {
+        let mut w = crate::new_world_bare();
+        w.start_turn();
+        // outer caller already in a turn; eval_program should NOT
+        // open a nested turn (idempotent via was_in_turn).
+        let _ = crate::eval_program(&mut w, "(def x 1)");
+        // still in the outer turn — eval_program didn't commit.
+        assert!(w.in_turn());
+        w.commit_turn();
+        assert!(!w.in_turn());
+    }
 }
