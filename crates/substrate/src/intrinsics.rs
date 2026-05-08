@@ -2638,9 +2638,11 @@ mod tests {
     use super::*;
 
     fn ev(w: &mut World, src: &str) -> Result<Value, RaiseError> {
-        let form = w.read(src).map_err(|e| RaiseError::from_reader(&mut w.syms, e))?;
-        let chunk = crate::compiler::compile(w, form)?;
-        w.run_top(chunk)
+        // route through crate::eval so the read+compile+run_top
+        // sequence runs inside an implicit turn — the moof-side
+        // compiler dispatches sends that mutate via env_bind, which
+        // requires `in_turn`.
+        crate::eval(w, src)
     }
 
     fn fresh() -> World {
@@ -2813,10 +2815,14 @@ mod tests {
     fn reflection_source_returns_source_for_chunks() {
         // a chunk's :source meta carries the original Form.
         let mut w = fresh();
+        // wrap a turn around manual compile + send (both can mutate
+        // through nursery-aware setters).
+        w.start_turn();
         let f = w.read("(+ 1 2)").unwrap();
         let chunk = crate::compiler::compile(&mut w, f).unwrap();
         let source_sel = w.intern("source");
         let r = w.send(Value::Form(chunk), source_sel, &[]).unwrap();
+        let _ = w.commit_turn();
         // r should be the original parsed form (a list).
         assert_eq!(r, f);
     }
@@ -2826,6 +2832,8 @@ mod tests {
         // [v slots] returns a Table keyed by slot-name → value
         // (concepts/forms.md, laws/reflection-contract.md R7).
         let mut w = fresh();
+        // wrap a turn — `send` may mutate via dispatch-side writes.
+        w.start_turn();
         let mut f = Form::with_proto(Value::Form(w.protos.object));
         let a = w.intern("a");
         let b = w.intern("b");
@@ -2834,6 +2842,7 @@ mod tests {
         let id = w.alloc(f);
         let slots_sel = w.intern("slots");
         let r = w.send(Value::Form(id), slots_sel, &[]).unwrap();
+        let _ = w.commit_turn();
         // the returned Table has both slot names as keys.
         let r_repr = w.table_repr(r).unwrap();
         assert_eq!(r_repr.size(), 2);
@@ -2888,16 +2897,23 @@ mod tests {
         // :say: 42 → emit "42"; emit "\n". exercises the dispatch
         // chain without actually writing.
         let mut w = fresh();
+        // wrap a turn — `send` may mutate via dispatch-side writes.
+        w.start_turn();
         // route to stderr so test runner stays happy.
         let dollar_out = w.intern("$out");
         let out = w.env_lookup(w.global_env, dollar_out).unwrap();
         let label_sym = w.intern("label");
         let stderr_sym = w.intern("stderr");
         let id = out.as_form_id().unwrap();
+        // direct canonical write — this $out form was allocated
+        // pre-turn, so it's below the watermark; but raw heap.get_mut
+        // bypasses nursery semantics by design (this is test-only
+        // scaffolding to flip `label` before the send).
         w.heap.get_mut(id).slots.insert(label_sym, Value::Sym(stderr_sym));
         // the actual call:
         let say = w.intern("say:");
         let r = w.send(out, say, &[Value::Int(42)]).unwrap();
+        let _ = w.commit_turn();
         assert_eq!(r, Value::Nil);
     }
 

@@ -526,7 +526,12 @@ mod tests {
     //! `tests/moof_compiler.rs` and `tests/doc_alignment.rs`.
     use super::*;
 
+    /// install_native mutates handler/meta tables — these helpers
+    /// defensively wrap a turn so callers can use them on a
+    /// just-constructed `World::new()` without explicit turn mgmt.
     fn install_arith(w: &mut World) {
+        let was_in_turn = w.in_turn();
+        if !was_in_turn { w.start_turn(); }
         w.install_native(w.protos.integer, "+", |_, self_, args| {
             Ok(Value::Int(self_.as_int().unwrap() + args[0].as_int().unwrap()))
         });
@@ -539,23 +544,26 @@ mod tests {
         w.install_native(w.protos.integer, "=", |_, self_, args| {
             Ok(Value::Bool(self_.as_int().unwrap() == args[0].as_int().unwrap()))
         });
+        if !was_in_turn { let _ = w.commit_turn(); }
     }
 
     fn install_closure_call(w: &mut World) {
+        let was_in_turn = w.in_turn();
+        if !was_in_turn { w.start_turn(); }
         w.install_native(w.protos.closure, "call", |world, self_, args| {
             let id = self_
                 .as_form_id()
                 .ok_or_else(|| RaiseError::new(world.intern("dispatch"), "not a closure"))?;
             world.invoke(id, Value::Nil, args, crate::form::FormId::NONE)
         });
+        if !was_in_turn { let _ = w.commit_turn(); }
     }
 
     fn ev(w: &mut World, src: &str) -> Result<Value, RaiseError> {
-        let form = w
-            .read(src)
-            .map_err(|e| RaiseError::from_reader(&mut w.syms, e))?;
-        let chunk = compile(w, form)?;
-        w.run_top(chunk)
+        // route through crate::eval so read+compile+run_top all run
+        // inside an implicit turn (the moof-side compiler dispatches
+        // sends that mutate via env_bind, which requires `in_turn`).
+        crate::eval(w, src)
     }
 
     #[test]
@@ -567,9 +575,15 @@ mod tests {
     #[test]
     fn compile_def_then_lookup() {
         let mut w = World::new();
+        // (def x 5) goes through the seed compiler — and at the
+        // moof-compiler flag-on path, `compile` itself dispatches
+        // sends that mutate. wrap a turn around the manual
+        // compile + run_top, then ev (which manages its own).
+        w.start_turn();
         let f = w.read("(def x 5)").unwrap();
         let chunk = compile(&mut w, f).unwrap();
         w.run_top(chunk).unwrap();
+        let _ = w.commit_turn();
         assert_eq!(ev(&mut w, "x").unwrap(), Value::Int(5));
     }
 
@@ -637,9 +651,13 @@ mod tests {
     fn compile_fn_and_call() {
         let mut w = World::new();
         install_closure_call(&mut w);
+        // wrap manual compile + run_top in a turn (compile may send-
+        // dispatch via the moof-compiler path, which mutates).
+        w.start_turn();
         let f = w.read("(def square (fn (x) x))").unwrap();
         let c = compile(&mut w, f).unwrap();
         w.run_top(c).unwrap();
+        let _ = w.commit_turn();
         let r = ev(&mut w, "(square 7)").unwrap();
         assert_eq!(r, Value::Int(7));
     }
@@ -650,9 +668,12 @@ mod tests {
         install_arith(&mut w);
         install_closure_call(&mut w);
         let src = "(def make-add (fn (n) (fn (x) (let ((y x)) y))))";
+        // wrap manual compile + run_top in a turn.
+        w.start_turn();
         let f = w.read(src).unwrap();
         let c = compile(&mut w, f).unwrap();
         w.run_top(c).unwrap();
+        let _ = w.commit_turn();
         let _ = ev(&mut w, "(make-add 5)").unwrap();
         let r = ev(&mut w, "((make-add 5) 10)").unwrap();
         assert_eq!(r, Value::Int(10));
@@ -695,9 +716,12 @@ mod tests {
         // arithmetic to avoid unbound `=` etc.
         let mut w = World::new();
         install_closure_call(&mut w);
+        // wrap manual compile + run_top in a turn.
+        w.start_turn();
         let f = w.read("(def f (fn (n) (if n n 'done)))").unwrap();
         let c = compile(&mut w, f).unwrap();
         w.run_top(c).unwrap();
+        let _ = w.commit_turn();
         let r = ev(&mut w, "(f 1)").unwrap();
         assert_eq!(r, Value::Int(1));
         let r = ev(&mut w, "(f nil)").unwrap();
@@ -715,10 +739,13 @@ mod tests {
         // `new_world` flips the flag during boot.
         assert!(w.use_moof_compiler);
         // a compile after boot runs through the moof compiler and
-        // produces a runnable chunk.
+        // produces a runnable chunk. wrap a turn around the manual
+        // compile + run_top — the moof compiler send-dispatches mutate.
+        w.start_turn();
         let f = w.read("[1 + 2]").unwrap();
         let c = compile(&mut w, f).unwrap();
         let r = w.run_top(c).unwrap();
+        let _ = w.commit_turn();
         assert_eq!(r, Value::Int(3));
     }
 }
