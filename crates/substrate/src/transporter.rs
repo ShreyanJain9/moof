@@ -129,13 +129,14 @@ fn load_relative(w: &mut World, rel: &str) -> Result<Value, RaiseError> {
             ),
         ));
     }
-    let root = w.transporter_root.clone().ok_or_else(|| {
-        RaiseError::new(
+    let abs = if let Some(root) = &w.transporter_root {
+        root.join(rel)
+    } else {
+        return Err(RaiseError::new(
             w.intern("tx-no-root"),
             "transporter has no root configured",
-        )
-    })?;
-    let abs = root.join(rel);
+        ));
+    };
     if !abs.is_file() {
         return Err(RaiseError::new(
             w.intern("tx-not-found"),
