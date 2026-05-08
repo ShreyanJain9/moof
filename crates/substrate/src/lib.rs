@@ -62,6 +62,14 @@ const HASH_MCO_BYTES: &[u8] = include_bytes!(env!("MOOF_HASH_MCO_PATH"));
 pub fn new_world() -> world::World {
     let mut w = world::World::new();
     w.transporter_root = transporter::resolve_lib_root();
+
+    // wrap intrinsics::install + the $hash bootstrap in an explicit
+    // turn so the nursery-aware mutation paths (form_slot_set,
+    // form_handler_set, form_meta_set) satisfy their in_turn
+    // invariant. these run between World::new (which auto-commits
+    // its own boot turn) and the first eval_program (which opens
+    // its own implicit turn).
+    w.start_turn();
     intrinsics::install(&mut w);
 
     // bootstrap $hash from embedded Hash mco bytes — BEFORE lib/main.moof
@@ -86,6 +94,8 @@ pub fn new_world() -> world::World {
         w.env_bind(global, dollar_hash, hash_instance);
     }
 
+    let _ = w.commit_turn();
+
     let root = w.transporter_root.clone().unwrap_or_else(|| {
         panic!(
             "could not resolve moof lib root. tried MOOF_LIB env, \
@@ -109,7 +119,10 @@ pub fn new_world() -> world::World {
 pub fn new_world_bare() -> world::World {
     let mut w = world::World::new();
     w.transporter_root = transporter::resolve_lib_root();
+    // same turn-wrap as new_world — intrinsics::install needs in_turn.
+    w.start_turn();
     intrinsics::install(&mut w);
+    let _ = w.commit_turn();
     w
 }
 
