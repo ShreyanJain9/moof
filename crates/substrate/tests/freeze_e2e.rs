@@ -181,6 +181,66 @@ fn freeze_recursive_sealed_walks_handlers() {
     assert_eq!(method_frozen, Value::Bool(true));
 }
 
+// V2 task-12 — final integration coverage.
+
+#[test]
+fn raise_in_eval_program_rolls_back_freeze() {
+    // a freeze that happens inside an eval_program turn that then
+    // aborts via raise must roll back, just like any other journaled
+    // mutation. the canonical x must remain mutable.
+    let mut w = moof::new_world();
+    let src = r#"
+        (def x [Object new])
+        (slotSet! x 'k 1)
+    "#;
+    moof::eval_program(&mut w, src).unwrap();
+    // grab the canonical FormId for x.
+    let x_id = moof::eval_program(&mut w, "x")
+        .unwrap()
+        .as_form_id()
+        .unwrap();
+    assert!(!w.heap.get(x_id).frozen);
+
+    // freeze x and then raise — same eval_program turn.
+    let raise_src = r#"
+        [x freeze]
+        (raise: 'boom "rolling back the freeze")
+    "#;
+    let r = moof::eval_program(&mut w, raise_src);
+    assert!(r.is_err());
+    // canonical x should NOT be frozen — turn aborted, freeze rolled back.
+    assert!(!w.heap.get(x_id).frozen);
+}
+
+#[test]
+#[ignore = "FromBoot + FrozenByDefault may not be lib-compatible in V2 — see spec §11"]
+fn from_boot_frozen_by_default_smoke() {
+    // attempt to construct a fully-frozen-from-boot world. may panic
+    // if standard lib mutates a form post-:initialize during bootstrap.
+    // this test is ignored by default; manually run it to track lib's
+    // FromBoot-readiness over time.
+    let _ = moof::new_world_with_mode_scoped(
+        VatMode::FrozenByDefault,
+        ModeScope::FromBoot,
+    );
+}
+
+#[test]
+fn commit_emits_freezings_for_pre_existing_form() {
+    // construct a form, commit, then freeze in a fresh turn —
+    // commit_turn's TurnDiff.freezings should list the FormId.
+    let mut w = moof::new_world_bare();
+    w.start_turn();
+    let id = w.heap.alloc(moof::form::Form::default());
+    let _ = w.commit_turn();    // form is now canonical, watermark advanced
+
+    w.start_turn();
+    w.freeze(id).unwrap();
+    let diff = w.commit_turn();
+    assert!(diff.freezings.contains(&id));
+    assert!(w.heap.get(id).frozen);
+}
+
 #[test]
 fn ic_dispatches_distinct_handlers_on_singleton_pair() {
     // regression: Bool(true) and Bool(false) share proto `Bool`,
