@@ -309,7 +309,7 @@ pub fn load_wasm_bytes(
     // like :infinite-source and :infinite-source-flavor.
     if let Some(m) = &manifest {
         for (k, v) in &m.meta {
-            world.heap.get_mut(proto_id).meta.insert(*k, *v);
+            world.form_meta_set(proto_id, *k, *v);
         }
     }
 
