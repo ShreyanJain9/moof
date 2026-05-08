@@ -938,6 +938,21 @@ impl World {
                 );
                 canonical.meta.insert(key, new_value);
             }
+
+            // V2 — frozen-bit transition. only emit a freezings entry
+            // for pre-existing forms (below the *previous* watermark);
+            // forms allocated AND frozen in the same turn are already
+            // captured by new_allocs. note: the watermark advance
+            // happens after this loop, so `self.turn_watermark` here
+            // still reads the pre-turn value.
+            if delta.frozen {
+                if !canonical.frozen {
+                    canonical.frozen = true;
+                }
+                if form_id.payload() < self.turn_watermark {
+                    diff.freezings.push(form_id);
+                }
+            }
         }
 
         // collect new-alloc FormIds (allocations during this turn
@@ -1039,6 +1054,32 @@ impl World {
             }
         }
         false
+    }
+
+    /// freeze a form — set its `frozen` bit, journaling through
+    /// the nursery as a turn-mutation. one-way; there is no thaw.
+    /// V2 task-4 lands the bit-setting and journal handling;
+    /// V2 task-5 adds the live-proto refusal that raises
+    /// `'cannot-freeze-live` when the form's proto chain crosses
+    /// `World.live_protos`. for now, this method always succeeds.
+    pub fn freeze(&mut self, id: FormId) -> Result<(), RaiseError> {
+        assert!(self.in_turn, "freeze called outside a turn");
+        // already frozen — idempotent no-op.
+        if self.is_frozen(id) {
+            return Ok(());
+        }
+        if id.payload() >= self.turn_watermark {
+            // new alloc — write directly to canonical (analogous to
+            // form_*_set's fast path for above-watermark forms).
+            self.heap.get_mut(id).frozen = true;
+        } else {
+            // pre-existing — buffer in the nursery delta.
+            self.nursery_deltas
+                .entry(id)
+                .or_default()
+                .frozen = true;
+        }
+        Ok(())
     }
 
     /// set a slot value on a form, nursery-aware. for
@@ -1876,5 +1917,77 @@ mod tests {
         assert!(w.in_turn());
         w.commit_turn();
         assert!(!w.in_turn());
+    }
+
+    #[test]
+    fn freeze_new_alloc_writes_canonical_directly() {
+        let mut w = World::new();
+        w.start_turn();
+        let id = w.heap.alloc(Form::default());
+        // new alloc — above watermark — freeze writes to canonical.
+        let r = w.freeze(id);
+        assert!(r.is_ok());
+        assert!(w.heap.get(id).frozen);
+        // delta should be empty (no entry for this id).
+        assert!(!w.nursery_deltas.contains_key(&id));
+        let _ = w.commit_turn();
+    }
+
+    #[test]
+    fn freeze_pre_existing_in_turn_writes_delta() {
+        let mut w = World::new();
+        let id = w.heap.alloc(Form::default());
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        let r = w.freeze(id);
+        assert!(r.is_ok());
+        // canonical untouched until commit.
+        assert!(!w.heap.get(id).frozen);
+        // delta records the freeze.
+        assert!(w.nursery_deltas.get(&id).map(|d| d.frozen).unwrap_or(false));
+        let _ = w.commit_turn();
+    }
+
+    #[test]
+    fn freeze_then_commit_lands_in_canonical_and_freezings() {
+        let mut w = World::new();
+        let id = w.heap.alloc(Form::default());
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        let _ = w.freeze(id).unwrap();
+        let diff = w.commit_turn();
+        // canonical now frozen.
+        assert!(w.heap.get(id).frozen);
+        // diff records the transition.
+        assert!(diff.freezings.contains(&id));
+    }
+
+    #[test]
+    fn freeze_then_abort_unfreezes() {
+        let mut w = World::new();
+        let id = w.heap.alloc(Form::default());
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        let _ = w.freeze(id).unwrap();
+        // mid-turn, is_frozen sees true via delta.
+        assert!(w.is_frozen(id));
+        w.abort_turn();
+        // post-abort, canonical was never touched and delta is gone.
+        assert!(!w.heap.get(id).frozen);
+        assert!(!w.is_frozen(id));
+    }
+
+    #[test]
+    fn freeze_new_alloc_then_commit_no_freezings_entry() {
+        // forms allocated AND frozen in the same turn appear in
+        // new_allocs but NOT freezings (the new-alloc list already
+        // implies their final state).
+        let mut w = World::new();
+        w.start_turn();
+        let id = w.heap.alloc(Form::default());
+        let _ = w.freeze(id).unwrap();
+        let diff = w.commit_turn();
+        assert!(diff.new_allocs.contains(&id));
+        assert!(!diff.freezings.contains(&id));
     }
 }
