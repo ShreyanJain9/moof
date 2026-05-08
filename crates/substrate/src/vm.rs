@@ -62,7 +62,40 @@ impl World {
     /// public dispatch entry point. walks the proto chain and
     /// invokes the matching method, falling through to
     /// `:does-not-understand:with:` when no handler is found.
+    ///
+    /// defensively wraps a turn if none is active — keeps the
+    /// `mutation requires an active turn` invariant satisfied for
+    /// callers (cli, repl, embedders) that don't manage turns
+    /// themselves. mirrors the `was_in_turn` pattern in `run_top`
+    /// and `lib::eval`. dispatched method bodies routinely call
+    /// `env_bind` (any moof-defined method with params or
+    /// let-bindings) — without this wrap, those callers would
+    /// panic at `form_slot_set`'s `in_turn` assert.
     pub fn send(
+        &mut self,
+        receiver: Value,
+        selector: SymId,
+        args: &[Value],
+    ) -> Result<Value, RaiseError> {
+        let was_in_turn = self.in_turn();
+        if !was_in_turn {
+            self.start_turn();
+        }
+        let result = self.send_inner(receiver, selector, args);
+        if !was_in_turn {
+            match &result {
+                Ok(_) => {
+                    let _ = self.commit_turn();
+                }
+                Err(_) => {
+                    self.abort_turn();
+                }
+            }
+        }
+        result
+    }
+
+    fn send_inner(
         &mut self,
         receiver: Value,
         selector: SymId,
