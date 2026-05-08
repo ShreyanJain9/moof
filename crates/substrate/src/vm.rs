@@ -242,9 +242,29 @@ impl World {
     /// global env. equivalent to invoking a zero-arg method whose
     /// body is `chunk`. `defining_proto` is `NONE` because no
     /// method dispatch led here.
+    ///
+    /// defensively wraps a turn if none is active — keeps the
+    /// `mutation requires an active turn` invariant satisfied for
+    /// callers (tests, repl) that don't manage turns themselves.
+    /// mirrors the `was_in_turn` pattern in `lib::eval`.
     pub fn run_top(&mut self, chunk: FormId) -> Result<Value, RaiseError> {
+        let was_in_turn = self.in_turn();
+        if !was_in_turn {
+            self.start_turn();
+        }
         let env = self.global_env;
-        run_method(self, chunk, env, Value::Nil, FormId::NONE)
+        let result = run_method(self, chunk, env, Value::Nil, FormId::NONE);
+        if !was_in_turn {
+            match &result {
+                Ok(_) => {
+                    let _ = self.commit_turn();
+                }
+                Err(_) => {
+                    self.abort_turn();
+                }
+            }
+        }
+        result
     }
 }
 
@@ -629,7 +649,10 @@ mod tests {
     #[test]
     fn send_dispatches_native() {
         let mut w = World::new();
+        // install_native mutates handler/meta tables — wrap a turn.
+        w.start_turn();
         install_int_plus(&mut w);
+        let _ = w.commit_turn();
         let plus = w.intern("+");
         let r = w.send(Value::Int(3), plus, &[Value::Int(4)]).unwrap();
         assert_eq!(r, Value::Int(7));
@@ -638,8 +661,11 @@ mod tests {
     #[test]
     fn send_walks_proto_chain() {
         let mut w = World::new();
+        // install_native mutates handler/meta tables — wrap a turn.
+        w.start_turn();
         // install a method on Object that integers should still hit.
         w.install_native(w.protos.object, "echo", |_, self_, _| Ok(self_));
+        let _ = w.commit_turn();
         let echo = w.intern("echo");
         assert_eq!(w.send(Value::Int(42), echo, &[]).unwrap(), Value::Int(42));
         assert_eq!(w.send(Value::Bool(true), echo, &[]).unwrap(), Value::Bool(true));
@@ -661,12 +687,15 @@ mod tests {
     #[test]
     fn send_dnu_user_override_intercepts() {
         let mut w = World::new();
+        // install_native mutates handler/meta tables — wrap a turn.
+        w.start_turn();
         // install dnu on Object that returns the selector as its result.
         w.install_native(
             w.protos.object,
             "doesNotUnderstand:with:",
             |_, _self_, args| Ok(args[0]),
         );
+        let _ = w.commit_turn();
         let mystery = w.intern("mystery-selector");
         let r = w.send(Value::Int(5), mystery, &[Value::Int(99)]).unwrap();
         // dnu received (selector args-list); we return selector.
@@ -726,7 +755,10 @@ mod tests {
     fn vm_send_op_dispatches_through_send() {
         // a chunk that pushes 3, pushes 4, sends `:+` with arity 1.
         let mut w = World::new();
+        // install_native mutates handler/meta tables — wrap a turn.
+        w.start_turn();
         install_int_plus(&mut w);
+        let _ = w.commit_turn();
         let plus = w.intern("+");
         let mut chunk_form = Form::with_proto(Value::Form(w.protos.chunk));
         chunk_form.slots.insert(w.params_sym, Value::Nil);

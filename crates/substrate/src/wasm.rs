@@ -154,7 +154,36 @@ pub struct WasmInstance {
 }
 
 /// load wasm bytes (already in memory) and instantiate. used by
+///
+/// defensively wraps a turn if none is active — installs handlers
+/// + meta on the loaded proto via nursery-aware setters which
+/// require `in_turn`. mirrors the `was_in_turn` pattern in
+/// `lib::eval` and `vm::run_top`, so callers that already manage
+/// turns (like `new_world`'s bootstrap) are unaffected.
 pub fn load_wasm_bytes(
+    world: &mut World,
+    bytes: &[u8],
+    label: &str,
+) -> Result<Value, RaiseError> {
+    let was_in_turn = world.in_turn();
+    if !was_in_turn {
+        world.start_turn();
+    }
+    let result = load_wasm_bytes_inner(world, bytes, label);
+    if !was_in_turn {
+        match &result {
+            Ok(_) => {
+                let _ = world.commit_turn();
+            }
+            Err(_) => {
+                world.abort_turn();
+            }
+        }
+    }
+    result
+}
+
+fn load_wasm_bytes_inner(
     world: &mut World,
     bytes: &[u8],
     label: &str,
