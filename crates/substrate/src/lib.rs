@@ -40,6 +40,26 @@ pub mod world;
 /// built by `lib/mcos/hash/build.sh`; path resolved by `crates/substrate/build.rs`.
 const HASH_MCO_BYTES: &[u8] = include_bytes!(env!("MOOF_HASH_MCO_PATH"));
 
+/// V2 — vat mode. controls whether `:new` (Object, Table) returns
+/// born-mutable or born-frozen instances. lives on `World` for V2;
+/// will move to per-`Vat` in V4.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum VatMode {
+    MutableByDefault,
+    FrozenByDefault,
+}
+
+/// V2 — when does `vat_mode` take effect? `PostBootstrap` (default)
+/// runs lib bootstrap in mutable regardless, then flips to `mode`
+/// for user code. `FromBoot` applies `mode` from the very first
+/// allocation — opt-in expert path; standard lib may not load
+/// cleanly under `FromBoot + FrozenByDefault`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ModeScope {
+    PostBootstrap,
+    FromBoot,
+}
+
 /// build a fresh world with the phase-A intrinsics, the $transporter
 /// cap populated, and `lib/main.moof` loaded — which itself orchestrates
 /// loading the rest of the std lib.
@@ -59,8 +79,9 @@ const HASH_MCO_BYTES: &[u8] = include_bytes!(env!("MOOF_HASH_MCO_PATH"));
 ///
 /// failures at any step are substrate bugs (lib/ ships with the
 /// substrate), so we panic.
-pub fn new_world() -> world::World {
+fn build_world_with_initial_mode(initial_mode: VatMode) -> world::World {
     let mut w = world::World::new();
+    w.vat_mode = initial_mode;
     w.transporter_root = transporter::resolve_lib_root();
 
     // wrap intrinsics::install + the $hash bootstrap in an explicit
@@ -114,17 +135,69 @@ pub fn new_world() -> world::World {
     w
 }
 
-/// build a fresh world *without* loading any moof code. used by
-/// tests that exercise raw substrate behavior without the moof-side
-/// stdlib.
-pub fn new_world_bare() -> world::World {
+pub fn new_world() -> world::World {
+    build_world_with_initial_mode(VatMode::MutableByDefault)
+}
+
+/// V2 — build a world with an explicit `VatMode` and `ModeScope`.
+/// `PostBootstrap` runs lib bootstrap in mutable regardless of `mode`,
+/// then flips to `mode` for user code. `FromBoot` applies `mode` from
+/// the first allocation — opt-in expert path.
+pub fn new_world_with_mode_scoped(
+    mode: VatMode,
+    scope: ModeScope,
+) -> world::World {
+    let initial = match scope {
+        ModeScope::PostBootstrap => VatMode::MutableByDefault,
+        ModeScope::FromBoot => mode,
+    };
+    let mut w = build_world_with_initial_mode(initial);
+    w.vat_mode = mode; // either no-op (FromBoot) or post-flip (PostBootstrap)
+    w
+}
+
+/// V2 — shorthand for `new_world_with_mode_scoped(mode, ModeScope::PostBootstrap)`.
+/// the safe default — lib bootstrap runs in mutable regardless of mode;
+/// mode applies to user code that runs after `new_world_with_mode` returns.
+pub fn new_world_with_mode(mode: VatMode) -> world::World {
+    new_world_with_mode_scoped(mode, ModeScope::PostBootstrap)
+}
+
+fn build_world_bare_with_initial_mode(initial_mode: VatMode) -> world::World {
     let mut w = world::World::new();
+    w.vat_mode = initial_mode;
     w.transporter_root = transporter::resolve_lib_root();
     // same turn-wrap as new_world — intrinsics::install needs in_turn.
     w.start_turn();
     intrinsics::install(&mut w);
     let _ = w.commit_turn();
     w
+}
+
+/// build a fresh world *without* loading any moof code. used by
+/// tests that exercise raw substrate behavior without the moof-side
+/// stdlib.
+pub fn new_world_bare() -> world::World {
+    build_world_bare_with_initial_mode(VatMode::MutableByDefault)
+}
+
+/// V2 — bare-world variant of `new_world_with_mode_scoped`.
+pub fn new_world_bare_with_mode_scoped(
+    mode: VatMode,
+    scope: ModeScope,
+) -> world::World {
+    let initial = match scope {
+        ModeScope::PostBootstrap => VatMode::MutableByDefault,
+        ModeScope::FromBoot => mode,
+    };
+    let mut w = build_world_bare_with_initial_mode(initial);
+    w.vat_mode = mode;
+    w
+}
+
+/// V2 — bare-world variant of `new_world_with_mode`.
+pub fn new_world_bare_with_mode(mode: VatMode) -> world::World {
+    new_world_bare_with_mode_scoped(mode, ModeScope::PostBootstrap)
 }
 
 /// evaluate a single expression in the world's global env.

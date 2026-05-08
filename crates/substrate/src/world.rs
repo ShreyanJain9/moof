@@ -253,6 +253,11 @@ pub struct World {
     /// add Vat / Mailbox / DataSource protos.
     pub live_protos: HashSet<FormId>,
 
+    /// V2 — current vat mode. `:new` consults this in
+    /// `intrinsics.rs::install` to decide whether to seal-after-
+    /// initialize. defaults to `MutableByDefault`.
+    pub vat_mode: crate::VatMode,
+
     // cached SymIds for hot paths.
     pub car_sym: SymId,
     pub cdr_sym: SymId,
@@ -322,6 +327,7 @@ impl World {
             turn_watermark: 0,
             in_turn: false,
             live_protos: HashSet::new(),
+            vat_mode: crate::VatMode::MutableByDefault,
             car_sym,
             cdr_sym,
             body_sym,
