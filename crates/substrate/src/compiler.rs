@@ -663,7 +663,7 @@ mod tests {
         let mut w = World::new();
         let f = w.read("(if #true 1 2)").unwrap();
         let c = compile(&mut w, f).unwrap();
-        let source = w.heap.get(c).meta_at(w.source_sym);
+        let source = w.form_meta(c, w.source_sym);
         assert_eq!(source, f);
     }
 
@@ -672,7 +672,7 @@ mod tests {
         let mut w = World::new();
         let f = w.read("(fn (x y) x)").unwrap();
         let c = compile(&mut w, f).unwrap();
-        assert_eq!(w.heap.get(c).slot(w.params_sym), Value::Nil);
+        assert_eq!(w.form_slot(c, w.params_sym), Value::Nil);
     }
 
     #[test]

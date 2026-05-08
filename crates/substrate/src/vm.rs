@@ -202,7 +202,7 @@ impl World {
             return native_fn(self, self_v, args);
         }
         // bytecode method.
-        let body = self.heap.get(method).slot(self.body_sym);
+        let body = self.form_slot(method, self.body_sym);
         let chunk_id = body.as_form_id().ok_or_else(|| {
             RaiseError::new(
                 self.intern("dispatch-error"),
@@ -210,12 +210,10 @@ impl World {
             )
         })?;
         let captured_env = self
-            .heap
-            .get(method)
-            .slot(self.env_sym)
+            .form_slot(method, self.env_sym)
             .as_form_id()
             .unwrap_or(self.global_env);
-        let params_v = self.heap.get(method).slot(self.params_sym);
+        let params_v = self.form_slot(method, self.params_sym);
         let params = self
             .list_to_vec(params_v)
             .map_err(|e| RaiseError::new(self.intern("arity"), e))?;
@@ -419,7 +417,7 @@ fn step(world: &mut World) -> Result<(), RaiseError> {
                 return Ok(());
             }
             // bytecode: replace the current frame.
-            let body = world.heap.get(resolved).slot(world.body_sym);
+            let body = world.form_slot(resolved, world.body_sym);
             let chunk_id = body.as_form_id().ok_or_else(|| {
                 RaiseError::new(
                     world.intern("dispatch-error"),
@@ -427,12 +425,10 @@ fn step(world: &mut World) -> Result<(), RaiseError> {
                 )
             })?;
             let captured_env = world
-                .heap
-                .get(resolved)
-                .slot(world.env_sym)
+                .form_slot(resolved, world.env_sym)
                 .as_form_id()
                 .unwrap_or(world.global_env);
-            let params_v = world.heap.get(resolved).slot(world.params_sym);
+            let params_v = world.form_slot(resolved, world.params_sym);
             let params = world
                 .list_to_vec(params_v)
                 .map_err(|e| RaiseError::new(world.intern("arity"), e))?;
@@ -535,9 +531,9 @@ fn step(world: &mut World) -> Result<(), RaiseError> {
             let captured_self_sym = world.intern("captured-self");
             f.slots.insert(captured_self_sym, captured_self);
             // the closure inherits the chunk's `:params` and `:source`.
-            let params = world.heap.get(closure_chunk).slot(world.params_sym);
+            let params = world.form_slot(closure_chunk, world.params_sym);
             f.slots.insert(world.params_sym, params);
-            let source = world.heap.get(closure_chunk).meta_at(world.source_sym);
+            let source = world.form_meta(closure_chunk, world.source_sym);
             if !source.is_nil() {
                 f.meta.insert(world.source_sym, source);
             }
