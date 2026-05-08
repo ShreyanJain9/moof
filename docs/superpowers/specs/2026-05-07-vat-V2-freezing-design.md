@@ -159,11 +159,30 @@ pub struct World {
 new constructors at the crate root:
 
 ```rust
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ModeScope {
+    /// mode applies to user code only; bootstrap (intrinsics::install +
+    /// lib/main.moof load) runs in MutableByDefault regardless of `mode`.
+    /// safe default — lib code may mutate post-:initialize and would
+    /// break under FrozenByDefault during bootstrap.
+    PostBootstrap,
+    /// mode applies from boot; lib bootstrap itself runs in `mode`.
+    /// only safe for fully pure-ML-y worlds where lib has been audited
+    /// or written for it. may break standard lib in V2; intended for
+    /// future use cases (post-V4 spawn'd parser-vats / compiler-vats
+    /// that boot a slimmer lib).
+    FromBoot,
+}
+
 pub fn new_world_with_mode(mode: VatMode) -> World;
+//   ↑ shortcut for new_world_with_mode_scoped(mode, ModeScope::PostBootstrap)
+pub fn new_world_with_mode_scoped(mode: VatMode, scope: ModeScope) -> World;
+
 pub fn new_world_bare_with_mode(mode: VatMode) -> World;
+pub fn new_world_bare_with_mode_scoped(mode: VatMode, scope: ModeScope) -> World;
 ```
 
-the existing `new_world()` and `new_world_bare()` default to `MutableByDefault`. backwards compatible — every existing test, intrinsic, and lib-load runs in mutable mode unchanged.
+the existing `new_world()` and `new_world_bare()` default to `MutableByDefault` + `PostBootstrap`. backwards compatible — every existing test, intrinsic, and lib-load runs in mutable mode unchanged.
 
 ### 6.2. seal-after-initialize for `:new`
 
@@ -196,24 +215,36 @@ if `:new` becomes the universal allocator for moof code (post-parser-port), more
 
 substrate-internal boot (`intrinsics::install`, `$hash` mco install, the V1 boot turn) is mode-exempt — those allocations go through `world.alloc()` / `install_native()`, never through user-facing `:new`. so boot itself runs identically in either mode.
 
-**but** the lib bootstrap that follows (`lib/main.moof` and the early modules it loads) does call user-facing `:new` and `:initialize` extensively while building up Compiler / Match / Defn / DefProto / etc. some of those instances may need to mutate after construction (e.g. macros that lazily populate a slot table). running that under `FrozenByDefault` would seal lib forms before lib code finishes its own setup, and break things in non-obvious ways.
+**but** the lib bootstrap that follows (`lib/main.moof` and the early modules it loads) calls user-facing `:new` and `:initialize` extensively while building up Compiler / Match / Defn / DefProto / etc. some of those instances may need to mutate after construction (e.g. macros that lazily populate a slot table). running that under `FrozenByDefault` would seal lib forms before lib code finishes setup, and break things in non-obvious ways. **but** users wanting a fully pure-ML-y world legitimately want the mode to apply all the way down, including to lib.
 
-V2 sidesteps the hazard by **deferring the mode flip until after lib bootstrap completes**:
+V2 exposes this as a knob (the `ModeScope` enum from §6.1) with a sensible default:
+
+| scope | behavior | when to pick |
+|---|---|---|
+| `PostBootstrap` (default) | bootstrap loads in `MutableByDefault`; mode flips to `mode` immediately after `lib/main.moof` finishes | safe ergonomic default. existing lib code Just Works. user code sees the requested mode from its first instruction. |
+| `FromBoot` | mode is `mode` from the very first allocation | only safe with audited / re-authored lib that doesn't post-`:initialize`-mutate. intended for future minimal-lib parser-vats / compiler-vats spawned via V8. **may break standard lib in V2** — opt-in expert path. |
+
+implementation:
 
 ```rust
-pub fn new_world_with_mode(mode: VatMode) -> World {
-    // 1. construct + run intrinsics::install + load lib in MUTABLE mode
-    //    regardless of `mode`. lib bootstrap is allowed to mutate.
-    let mut w = new_world();           // existing path; vat_mode = MutableByDefault
-    // 2. flip the mode for user code that runs *after* this returns.
-    w.vat_mode = mode;
+pub fn new_world_with_mode_scoped(mode: VatMode, scope: ModeScope) -> World {
+    let initial_mode = match scope {
+        ModeScope::PostBootstrap => VatMode::MutableByDefault,
+        ModeScope::FromBoot => mode,
+    };
+    let mut w = build_world_with_initial_mode(initial_mode);  // intrinsics::install + lib load
+    w.vat_mode = mode;  // either no-op (FromBoot) or post-bootstrap flip (PostBootstrap)
     w
+}
+
+pub fn new_world_with_mode(mode: VatMode) -> World {
+    new_world_with_mode_scoped(mode, ModeScope::PostBootstrap)
 }
 ```
 
-semantically: `vat_mode` describes the mode for *user code that the embedder runs against this world*. lib is part of the world's substrate, not user code. this matches spec §4's intent (parsers / compilers / kernels are the use case) — those run on top of bootstrapped lib, not as part of bootstrap.
+semantically: in the default scope, `vat_mode` describes the mode for *user code that the embedder runs against this world*; lib is part of the world's substrate, not user code. in `FromBoot` scope, the user is asserting they have a lib (or no lib — `*_bare_*` variants) that's compatible with running under `mode`.
 
-once V4 introduces multi-vat with spawn-time mode parameters per `Vat`, child vats will inherit / override mode at spawn; lib will already be loaded at the substrate level so the bootstrap concern doesn't recur.
+once V4 introduces multi-vat with spawn-time mode parameters per `Vat`, child vats will inherit / override mode at spawn; lib will already be loaded at the substrate level so the bootstrap concern doesn't recur. `ModeScope` becomes V2-only scaffolding that quietly retires.
 
 ## 7. moof-side `freezeRecursive`
 
@@ -304,7 +335,7 @@ V2 lands when:
 3. `Delta.frozen: bool` and `TurnDiff.freezings: Vec<FormId>` exist; commit copies delta-frozen into canonical and into `freezings`; abort drops the delta (and hence the freeze).
 4. `World::is_frozen(id)` and `World::freeze(id) -> Result<(), RaiseError>` are public. `world.freeze` walks the proto chain and raises `'cannot-freeze-live` against `World.live_protos`.
 5. `World.live_protos: HashSet<FormId>` exists, populated at boot with the cap-bearing proto(s).
-6. `World.vat_mode: VatMode` field; `new_world_with_mode` / `new_world_bare_with_mode` constructors; `:new` (Object, Table) seals-after-initialize when mode is `FrozenByDefault`.
+6. `World.vat_mode: VatMode` field + `ModeScope` enum; `new_world_with_mode` / `new_world_with_mode_scoped` (and `_bare_` variants) constructors with `PostBootstrap` as the default scope; `:new` (Object, Table) seals-after-initialize when mode is `FrozenByDefault`.
 7. `:freeze`, `:frozen?`, `:freezable?` methods bound on Object.
 8. `lib/stdlib/object.moof` (or `freezing.moof`) exposes `freezeRecursiveWalking:`, `freezeRecursive`, `freezeRecursiveSealed`.
 9. all 436 pre-V2 tests still pass; new tests cover: freeze-then-mutate raises; freeze-on-live raises; freeze-then-abort unfreezes; mode-toggle changes `:new` born-state; same-turn freeze blocks subsequent mutation; `freezeRecursive` walks slots only; `freezeRecursiveSealed` walks slots+handlers; cycles (back-edges hitting frozen ancestor) terminate; live boundary stops recursion.
@@ -342,6 +373,7 @@ integration tests in `crates/substrate/tests/freeze_e2e.rs`:
 - **CRDT-style per-slot merge hooks** (V11): `TurnDiff.freezings` is a list a future replicator can apply, but V2 doesn't replicate.
 - **persistence of the frozen bit / freezings log** (V9): V2 keeps everything in memory.
 - **explicit `freezeRecursiveExhaustive`** (slots + handlers + meta): V2 stdlib provides only `freezeRecursive` (slots) and `freezeRecursiveSealed` (slots + handlers). users wanting all-three call `freezeRecursiveWalking: '(slots handlers meta)` explicitly.
+- **auditing standard lib for `ModeScope::FromBoot` compatibility**: V2 ships `FromBoot` as an opt-in expert constructor whose contract is "your lib must be compatible with `mode` from the very first allocation." V2 does **not** guarantee that the existing standard lib (`lib/main.moof` and friends) loads cleanly under `FromBoot` + `FrozenByDefault`. tests under that scope are best-effort. a future session would either rewrite lib to be `FromBoot`-clean, or maintain a slimmer "pure-ML-y baseline lib" alongside.
 
 ## see also
 
