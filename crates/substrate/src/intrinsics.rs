@@ -1717,6 +1717,39 @@ fn install_object_reflection(w: &mut World) {
         Ok(instance)
     }).expect("install_native at boot — substrate bug");
 
+    // V2 task-10 — freeze primitives, reachable from moof.
+    //   :freeze      — seal self; raises 'cannot-freeze-live for
+    //                  forms whose proto chain hits live_protos.
+    //   :frozen?     — Bool, nursery-aware (sees in-turn freezes).
+    //   :freezable?  — Bool, !is_frozen and !is_live.
+    // tagged immediates (Int, Bool, Sym, Char, Float, Nil) are
+    // inherently immutable: :frozen? answers true, :freezable?
+    // answers false (no mutable state to seal).
+    w.install_native(w.protos.object, "freeze", |w, self_, _args| {
+        let id = self_.as_form_id().ok_or_else(|| {
+            RaiseError::new(w.intern("type-error"), ":freeze on non-Form value")
+        })?;
+        w.freeze(id)?;
+        Ok(self_)
+    })
+    .expect("install_native :freeze at boot — substrate bug");
+
+    w.install_native(w.protos.object, "frozen?", |w, self_, _args| {
+        match self_.as_form_id() {
+            Some(id) => Ok(Value::Bool(w.is_frozen(id))),
+            None => Ok(Value::Bool(true)),
+        }
+    })
+    .expect("install_native :frozen? at boot — substrate bug");
+
+    w.install_native(w.protos.object, "freezable?", |w, self_, _args| {
+        match self_.as_form_id() {
+            Some(id) => Ok(Value::Bool(w.freezable(id))),
+            None => Ok(Value::Bool(false)),
+        }
+    })
+    .expect("install_native :freezable? at boot — substrate bug");
+
     // default :initialize is a no-op. user protos override.
     // :initialize is defined in lib/bootstrap.moof as an identity
     // no-op; user protos override it to construct.
@@ -1831,6 +1864,13 @@ fn make_primordial_console(w: &mut World, console_proto: FormId, target: Console
 fn install_console_proto_and_caps(w: &mut World) {
     // allocate a Console proto inheriting from Object.
     let console_proto = w.alloc(Form::with_proto(Value::Form(w.protos.object)));
+
+    // V2 task-10: cap-bearing protos are live by spec §4 — any form
+    // whose proto chain hits this one (the primordial $out / $err and
+    // user-allocated Console subclasses) refuses :freeze with
+    // 'cannot-freeze-live. without this insert, [$out freeze] would
+    // silently seal a cap.
+    w.live_protos.insert(console_proto);
 
     // primitive methods (rust):
     //   :emit:  — write bytes to the fd held in self's :fd slot.
