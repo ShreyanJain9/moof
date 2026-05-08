@@ -167,6 +167,46 @@ fn freeze_recursive_sealed_walks_handlers() {
     "#;
     let r = moof::eval_program(&mut w, src);
     assert!(r.is_ok());
+    // verify proto itself is frozen.
     let proto_frozen = moof::eval_program(&mut w, "[proto frozen?]").unwrap();
     assert_eq!(proto_frozen, Value::Bool(true));
+    // and the method-Form on the handler table is also frozen — that's
+    // the sealed-vs-default distinction: plain freezeRecursive walks
+    // slots only, freezeRecursiveSealed also walks handlers.
+    let method_frozen = moof::eval_program(
+        &mut w,
+        "[[Heap handlerOf: proto at: 'm] frozen?]",
+    )
+    .unwrap();
+    assert_eq!(method_frozen, Value::Bool(true));
+}
+
+#[test]
+fn ic_dispatches_distinct_handlers_on_singleton_pair() {
+    // regression: Bool(true) and Bool(false) share proto `Bool`,
+    // so the IC must distinguish them by `cached_singleton`. before
+    // the V2-task-11 fix, populating the cache via Bool(true) would
+    // serve Bool(false) the wrong handler.
+    let mut w = moof::new_world();
+    // install a singleton handler on each of #true and #false that
+    // returns a distinguishable Symbol.
+    let src = r#"
+        (defmethod #true (mark) 'true-mark)
+        (defmethod #false (mark) 'false-mark)
+        ;; force IC populate on #true, then dispatch on #false.
+        ;; both invocations share the same call site if expressed
+        ;; via the same chunk — eval_program runs each top-level
+        ;; expression as a fresh chunk, so we wrap in a do-form.
+        (do
+          [#true mark]
+          [#false mark])
+    "#;
+    let r = moof::eval_program(&mut w, src).unwrap();
+    // the do-form returns the LAST expression — which is [#false mark].
+    let false_mark_sym = w.intern("false-mark");
+    assert_eq!(r, Value::Sym(false_mark_sym));
+    // and confirm separately:
+    let r_true = moof::eval_program(&mut w, "[#true mark]").unwrap();
+    let true_mark_sym = w.intern("true-mark");
+    assert_eq!(r_true, Value::Sym(true_mark_sym));
 }
