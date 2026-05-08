@@ -107,7 +107,10 @@ fn root_raises_no_root_when_no_root_configured() {
     // (so it resolves MOOF_LIB / exe/../lib / ./lib the same way new_world
     // does). we need a world with no root at all to hit tx-no-root.
     let mut w = moof::world::World::new();
+    // intrinsics::install mutates handler/meta tables — wrap a turn.
+    w.start_turn();
     moof::intrinsics::install(&mut w);
+    let _ = w.commit_turn();
     let err = moof::eval(&mut w, "[$transporter root]")
         .expect_err(":root should raise tx-no-root when no root configured");
     let kind_str = w.resolve(err.kind).to_string();

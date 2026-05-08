@@ -12,6 +12,19 @@
 
 use moof::value::Value;
 
+/// bind `name → value` in `w.global_env`, transparently wrapping a
+/// turn so the underlying nursery-aware `form_slot_set` invariant
+/// holds. used by tests that load a wasm proto and want to make it
+/// reachable from moof source via a global name.
+fn bind_global(w: &mut moof::world::World, name: &str, value: Value) {
+    let was_in_turn = w.in_turn();
+    if !was_in_turn { w.start_turn(); }
+    let sym = w.intern(name);
+    let global = w.global_env;
+    w.env_bind(global, sym, value);
+    if !was_in_turn { let _ = w.commit_turn(); }
+}
+
 /// embed hello.* at test-build time from the committed fixtures dir.
 /// .mco = wasm + `moof.manifest` custom section appended by mco-pack.
 ///
@@ -77,8 +90,7 @@ fn load_hello_wasm_and_call_answer() {
     let proto = moof::wasm::load_wasm_bytes(&mut w, HELLO_MCO, "hello.mco")
         .expect("load");
     // bind it manually under a name moof code can see.
-    let hello_sym = w.intern("Hello");
-    w.env_bind(w.global_env, hello_sym, proto);
+    bind_global(&mut w, "Hello", proto);
     // [Hello answer] sends `:answer` to the proto. dispatches to
     // the wasm trampoline, which calls the wasm `answer` export.
     let r = moof::eval(&mut w, "[Hello answer]").expect("call");
@@ -107,8 +119,7 @@ fn loaded_proto_can_be_instantiated_and_called() {
     // `:answer` dispatches up the proto chain to the wasm method.
     let mut w = moof::new_world();
     let proto = moof::wasm::load_wasm_bytes(&mut w, HELLO_MCO, "hello.mco").unwrap();
-    let hello_sym = w.intern("Hello");
-    w.env_bind(w.global_env, hello_sym, proto);
+    bind_global(&mut w, "Hello", proto);
     let r = moof::eval(&mut w, "(do (def h [Hello new]) [h answer])").unwrap();
     assert_eq!(r, Value::Int(42));
 }
@@ -130,8 +141,7 @@ fn clock_now_returns_a_real_moment() {
     let clock_mco = load_clock_mco();
     let mut w = moof::new_world();
     let proto = moof::wasm::load_wasm_bytes(&mut w, &clock_mco, "clock.mco").unwrap();
-    let clock_sym = w.intern("Clock");
-    w.env_bind(w.global_env, clock_sym, proto);
+    bind_global(&mut w, "Clock", proto);
     let r = moof::eval(&mut w, "[Clock now]").unwrap();
     let ns = match r {
         Value::Int(n) => n,
@@ -154,8 +164,7 @@ fn clock_monotonic_is_monotonic() {
     let clock_mco = load_clock_mco();
     let mut w = moof::new_world();
     let proto = moof::wasm::load_wasm_bytes(&mut w, &clock_mco, "clock.mco").unwrap();
-    let clock_sym = w.intern("Clock");
-    w.env_bind(w.global_env, clock_sym, proto);
+    bind_global(&mut w, "Clock", proto);
     let a = moof::eval(&mut w, "[Clock monotonic]").unwrap();
     let b = moof::eval(&mut w, "[Clock monotonic]").unwrap();
     let (a_ns, b_ns) = match (a, b) {
@@ -178,8 +187,7 @@ fn loads_raw_wasm_without_manifest() {
     let mut w = moof::new_world();
     let proto = moof::wasm::load_wasm_bytes(&mut w, HELLO_RAW_WASM, "hello.wasm")
         .expect("raw wasm should load too");
-    let hello_sym = w.intern("Hello");
-    w.env_bind(w.global_env, hello_sym, proto);
+    bind_global(&mut w, "Hello", proto);
     let r = moof::eval(&mut w, "[Hello answer]").unwrap();
     assert_eq!(r, Value::Int(42));
 }
@@ -672,8 +680,7 @@ fn trampoline_marshals_i64_args_and_returns() {
     let mco = make_test_mco(wat, &["addOne:"]);
     let mut w = moof::new_world();
     let proto = moof::wasm::load_wasm_bytes(&mut w, &mco, "adder.mco").expect("load");
-    let sym = w.intern("Adder");
-    w.env_bind(w.global_env, sym, proto);
+    bind_global(&mut w, "Adder", proto);
     let r = moof::eval(&mut w, "[Adder addOne: 10]").expect("dispatch");
     assert_eq!(r, Value::Int(11));
 }
@@ -689,8 +696,7 @@ fn trampoline_no_args_no_return_gives_nil() {
     let mco = make_test_mco(wat, &["doNothing"]);
     let mut w = moof::new_world();
     let proto = moof::wasm::load_wasm_bytes(&mut w, &mco, "nothing.mco").expect("load");
-    let sym = w.intern("Nothing");
-    w.env_bind(w.global_env, sym, proto);
+    bind_global(&mut w, "Nothing", proto);
     let r = moof::eval(&mut w, "[Nothing doNothing]").expect("dispatch");
     assert_eq!(r, Value::Nil);
 }
@@ -710,8 +716,7 @@ fn trampoline_arity_mismatch_raises() {
     let mco = make_test_mco(wat, &["answer"]);
     let mut w = moof::new_world();
     let proto = moof::wasm::load_wasm_bytes(&mut w, &mco, "adder.mco").expect("load");
-    let sym = w.intern("Adder");
-    w.env_bind(w.global_env, sym, proto);
+    bind_global(&mut w, "Adder", proto);
     // unary send passes 0 args; export expects 1 → arity-mismatch.
     let err = moof::eval(&mut w, "[Adder answer]").expect_err("should raise arity-mismatch");
     let kind = w.resolve(err.kind);
@@ -744,8 +749,7 @@ fn trampoline_catches_moof_raise_and_converts_to_raise_error() {
     let mco = make_test_mco(wat, &["boom"]);
     let mut w = moof::new_world();
     let proto = moof::wasm::load_wasm_bytes(&mut w, &mco, "raiser.mco").expect("load");
-    let sym = w.intern("Raiser");
-    w.env_bind(w.global_env, sym, proto);
+    bind_global(&mut w, "Raiser", proto);
     let err = moof::eval(&mut w, "[Raiser boom]").expect_err("should raise");
     let kind = w.resolve(err.kind);
     assert_eq!(
@@ -790,8 +794,7 @@ fn trampoline_handles_keyword_selector_as_raise_kind() {
     let mco = make_test_mco(wat, &["boom"]);
     let mut w = moof::new_world();
     let proto = moof::wasm::load_wasm_bytes(&mut w, &mco, "kw-raiser.mco").expect("load");
-    let sym = w.intern("KwRaiser");
-    w.env_bind(w.global_env, sym, proto);
+    bind_global(&mut w, "KwRaiser", proto);
     let err = moof::eval(&mut w, "[KwRaiser boom]").expect_err("should raise");
     let kind = w.resolve(err.kind);
     // kind must round-trip exactly — colons preserved, not truncated.
@@ -826,8 +829,7 @@ fn trampoline_dispatch_guard_active_during_wasm_call() {
     let mco = make_test_mco(wat, &["greet"]);
     let mut w = moof::new_world();
     let proto = moof::wasm::load_wasm_bytes(&mut w, &mco, "greeter.mco").expect("load");
-    let sym = w.intern("Greeter");
-    w.env_bind(w.global_env, sym, proto);
+    bind_global(&mut w, "Greeter", proto);
     // dispatch returns a handle (i32) → trampoline takes it out of the
     // handle table → returns the String value.
     let r = moof::eval(&mut w, "[Greeter greet]").expect("dispatch");

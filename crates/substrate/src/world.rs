@@ -1228,6 +1228,8 @@ mod tests {
     #[test]
     fn env_lookup_walks_parents() {
         let mut w = World::new();
+        // env_bind goes through form_slot_set which requires in_turn.
+        w.start_turn();
         let outer = w.alloc_env(None);
         let inner = w.alloc_env(Some(outer));
         let foo = w.intern("foo");
@@ -1243,11 +1245,14 @@ mod tests {
         // unbound name is None.
         let baz = w.intern("baz");
         assert_eq!(w.env_lookup(inner, baz), None);
+        let _ = w.commit_turn();
     }
 
     #[test]
     fn env_inner_shadows_outer() {
         let mut w = World::new();
+        // env_bind goes through form_slot_set which requires in_turn.
+        w.start_turn();
         let outer = w.alloc_env(None);
         let inner = w.alloc_env(Some(outer));
         let x = w.intern("x");
@@ -1255,6 +1260,7 @@ mod tests {
         w.env_bind(inner, x, Value::Int(20));
         assert_eq!(w.env_lookup(inner, x), Some(Value::Int(20)));
         assert_eq!(w.env_lookup(outer, x), Some(Value::Int(10)));
+        let _ = w.commit_turn();
     }
 
     #[test]
@@ -1290,7 +1296,11 @@ mod tests {
             // returns its first arg or self if no args.
             Ok(args.first().copied().unwrap_or(self_))
         }
+        // install_native writes :source meta and a handler entry —
+        // both go through nursery-aware setters that require in_turn.
+        w.start_turn();
         let method_id = w.install_native(w.protos.integer, "test-echo", echo);
+        let _ = w.commit_turn();
         // method-Form is a Method.
         assert_eq!(
             w.heap.get(method_id).proto,

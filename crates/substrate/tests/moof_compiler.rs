@@ -34,6 +34,13 @@ use moof::world::World;
 /// structurally (deep) so freshly-allocated forms (Strings, Lists
 /// built at runtime) match by content rather than heap-id.
 fn assert_compilers_agree(w: &mut World, src: &str) {
+    // wrap a turn around the whole compile-and-run pipeline —
+    // both rust and moof compilers can mutate via send-dispatch,
+    // and the test harness drives them outside the implicit turn
+    // that crate::eval would normally provide.
+    let was_in_turn = w.in_turn();
+    if !was_in_turn { w.start_turn(); }
+
     let form = w
         .read(src)
         .unwrap_or_else(|e| panic!("read failed on `{}`: {}", src, e.message));
@@ -54,6 +61,8 @@ fn assert_compilers_agree(w: &mut World, src: &str) {
     let moof_result = w
         .send(helper, call_sym, &[form])
         .unwrap_or_else(|e| panic!("moof compile/run failed on `{}`: {}", src, e.message));
+
+    if !was_in_turn { let _ = w.commit_turn(); }
 
     assert!(
         values_equal_deep(w, rust_result, moof_result),
