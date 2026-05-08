@@ -60,25 +60,8 @@ pub enum ModeScope {
     FromBoot,
 }
 
-/// build a fresh world with the phase-A intrinsics, the $transporter
-/// cap populated, and `lib/main.moof` loaded — which itself orchestrates
-/// loading the rest of the std lib.
-///
-/// the boot dance, per `docs/process/self-hosted-compiler.md`:
-///
-/// 1. rust intrinsics (heap, OS i/o, arithmetic primitives, the
-///    chunk-construction api, the `$transporter` and `$compiler` caps).
-/// 2. bootstrap the embedded Hash mco and bind `$hash` before any
-///    moof code runs — lib/mcos.moof's $mco cap calls `[$hash of: ...]`.
-/// 3. resolve the lib root via `transporter::resolve_lib_root` and
-///    bind it on `World.transporter_root`.
-/// 4. read `<root>/main.moof`. main.moof drives:
-///    a. `[$transporter load: "compiler.moof"]` — seed-compiled.
-///    b. `[$compiler useMoof]` — flag flip.
-///    c. `[$transporter load: "bootstrap.moof"]` — moof-compiled.
-///
-/// failures at any step are substrate bugs (lib/ ships with the
-/// substrate), so we panic.
+/// shared body for [`new_world`] / [`new_world_with_mode_scoped`] —
+/// see [`new_world`] for the full boot sequence.
 fn build_world_with_initial_mode(initial_mode: VatMode) -> world::World {
     let mut w = world::World::new();
     w.vat_mode = initial_mode;
@@ -135,14 +118,33 @@ fn build_world_with_initial_mode(initial_mode: VatMode) -> world::World {
     w
 }
 
+/// build a fresh world with the phase-A intrinsics, the $transporter
+/// cap populated, and `lib/main.moof` loaded — which itself orchestrates
+/// loading the rest of the std lib.
+///
+/// the boot dance, per `docs/process/self-hosted-compiler.md`:
+///
+/// 1. rust intrinsics (heap, OS i/o, arithmetic primitives, the
+///    chunk-construction api, the `$transporter` and `$compiler` caps).
+/// 2. bootstrap the embedded Hash mco and bind `$hash` before any
+///    moof code runs — lib/mcos.moof's $mco cap calls `[$hash of: ...]`.
+/// 3. resolve the lib root via `transporter::resolve_lib_root` and
+///    bind it on `World.transporter_root`.
+/// 4. read `<root>/main.moof`. main.moof drives:
+///    a. `[$transporter load: "compiler.moof"]` — seed-compiled.
+///    b. `[$compiler useMoof]` — flag flip.
+///    c. `[$transporter load: "bootstrap.moof"]` — moof-compiled.
+///
+/// failures at any step are substrate bugs (lib/ ships with the
+/// substrate), so we panic.
 pub fn new_world() -> world::World {
     build_world_with_initial_mode(VatMode::MutableByDefault)
 }
 
-/// V2 — build a world with an explicit `VatMode` and `ModeScope`.
-/// `PostBootstrap` runs lib bootstrap in mutable regardless of `mode`,
-/// then flips to `mode` for user code. `FromBoot` applies `mode` from
-/// the first allocation — opt-in expert path.
+/// build a world with a specified [`VatMode`] and [`ModeScope`].
+/// see [`ModeScope`] for the difference between `PostBootstrap`
+/// (default; safe with standard lib) and `FromBoot` (mode applies
+/// from the very first allocation; opt-in expert path).
 pub fn new_world_with_mode_scoped(
     mode: VatMode,
     scope: ModeScope,
@@ -156,13 +158,16 @@ pub fn new_world_with_mode_scoped(
     w
 }
 
-/// V2 — shorthand for `new_world_with_mode_scoped(mode, ModeScope::PostBootstrap)`.
-/// the safe default — lib bootstrap runs in mutable regardless of mode;
-/// mode applies to user code that runs after `new_world_with_mode` returns.
+/// shorthand for [`new_world_with_mode_scoped`] with
+/// [`ModeScope::PostBootstrap`] — the safe default. lib bootstrap
+/// runs in mutable regardless of `mode`; the requested mode applies
+/// to user code that runs after this returns.
 pub fn new_world_with_mode(mode: VatMode) -> world::World {
     new_world_with_mode_scoped(mode, ModeScope::PostBootstrap)
 }
 
+/// shared body for [`new_world_bare`] / [`new_world_bare_with_mode_scoped`] —
+/// see [`new_world_bare`] for what "bare" means.
 fn build_world_bare_with_initial_mode(initial_mode: VatMode) -> world::World {
     let mut w = world::World::new();
     w.vat_mode = initial_mode;
@@ -181,7 +186,10 @@ pub fn new_world_bare() -> world::World {
     build_world_bare_with_initial_mode(VatMode::MutableByDefault)
 }
 
-/// V2 — bare-world variant of `new_world_with_mode_scoped`.
+/// bare-world variant of [`new_world_with_mode_scoped`] — same
+/// [`VatMode`] / [`ModeScope`] semantics, but skips loading
+/// `lib/main.moof` (no stdlib). see [`new_world_bare`] for the
+/// no-mode-args version.
 pub fn new_world_bare_with_mode_scoped(
     mode: VatMode,
     scope: ModeScope,
@@ -195,7 +203,9 @@ pub fn new_world_bare_with_mode_scoped(
     w
 }
 
-/// V2 — bare-world variant of `new_world_with_mode`.
+/// bare-world shorthand for [`new_world_bare_with_mode_scoped`]
+/// with [`ModeScope::PostBootstrap`] — the safe default for tests
+/// that want a specific [`VatMode`] without loading the stdlib.
 pub fn new_world_bare_with_mode(mode: VatMode) -> world::World {
     new_world_bare_with_mode_scoped(mode, ModeScope::PostBootstrap)
 }
