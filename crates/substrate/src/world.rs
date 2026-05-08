@@ -566,15 +566,30 @@ impl World {
     }
 
     /// look up a name in an env chain.
+    ///
+    /// nursery-aware: when in a turn, checks the per-form delta
+    /// before canonical, since `env_set` / `env_bind` write to the
+    /// delta. note we can't just use `form_slot` here — `env_lookup`
+    /// must distinguish `Some(Value::Nil)` (bound to nil) from
+    /// `None` (unbound), and `form_slot` collapses both to
+    /// `Value::Nil`. so we do the dual check explicitly.
     pub fn env_lookup(&self, env: FormId, name: SymId) -> Option<Value> {
         let mut cur = env;
         loop {
+            // delta first (only meaningful for pre-existing forms in a turn).
+            if self.in_turn && cur.payload() < self.turn_watermark {
+                if let Some(delta) = self.nursery_deltas.get(&cur) {
+                    if let Some(v) = delta.slots.get(&name).copied() {
+                        return Some(v);
+                    }
+                }
+            }
             let f = self.heap.get(cur);
             if let Some(v) = f.slots.get(&name).copied() {
                 return Some(v);
             }
-            // walk parent
-            let parent = f.meta.get(&self.parent_sym).copied().unwrap_or(Value::Nil);
+            // walk parent — nursery-aware via form_meta.
+            let parent = self.form_meta(cur, self.parent_sym);
             match parent {
                 Value::Nil => return None,
                 Value::Form(id) => cur = id,
@@ -585,7 +600,7 @@ impl World {
 
     /// bind a name in an env's local scope (does not walk parents).
     pub fn env_bind(&mut self, env: FormId, name: SymId, value: Value) {
-        self.heap.get_mut(env).slots.insert(name, value);
+        self.form_slot_set(env, name, value);
     }
 
     /// `set!` semantics: walk the parent chain looking for an
@@ -602,17 +617,22 @@ impl World {
     pub fn env_set(&mut self, env: FormId, name: SymId, value: Value) -> bool {
         let mut cur = env;
         loop {
-            if self.heap.get(cur).slots.contains_key(&name) {
-                self.heap.get_mut(cur).slots.insert(name, value);
+            // contains_key semantics: present in delta OR canonical.
+            // form_slot collapses absent and bound-to-nil; we need
+            // explicit dual-check here so set! on a nil-bound name
+            // hits, but set! on an unbound name walks parent.
+            let bound_in_delta = self
+                .nursery_deltas
+                .get(&cur)
+                .map(|d| d.slots.contains_key(&name))
+                .unwrap_or(false);
+            let bound_in_canonical = self.heap.get(cur).slots.contains_key(&name);
+            if bound_in_delta || bound_in_canonical {
+                self.form_slot_set(cur, name, value);
                 return true;
             }
-            let parent = self
-                .heap
-                .get(cur)
-                .meta
-                .get(&self.parent_sym)
-                .copied()
-                .unwrap_or(Value::Nil);
+            // walk parent — nursery-aware.
+            let parent = self.form_meta(cur, self.parent_sym);
             match parent {
                 Value::Form(id) => cur = id,
                 _ => return false,
@@ -647,15 +667,13 @@ impl World {
         // form; the bare-rust intrinsics installed at boot use the
         // selector symbol as a placeholder.
         let sym_v = Value::Sym(sel_id);
-        self.heap
-            .get_mut(method_id)
-            .meta
-            .insert(self.source_sym, sym_v);
+        // method_id is freshly allocated this turn (above the
+        // watermark) — form_meta_set writes directly to canonical.
+        self.form_meta_set(method_id, self.source_sym, sym_v);
         self.native_fns.insert(method_id, native_fn);
-        self.heap
-            .get_mut(proto)
-            .handlers
-            .insert(sel_id, Value::Form(method_id));
+        // proto may be pre-existing — form_handler_set buffers in
+        // the delta when so, writes directly when above watermark.
+        self.form_handler_set(proto, sel_id, Value::Form(method_id));
         method_id
     }
 
@@ -745,7 +763,18 @@ impl World {
     /// reads from the canonical `Macros` Form's slots — the same
     /// table moof code reads via `[Macros at: name]`.
     pub fn macro_at(&self, name: SymId) -> Option<Value> {
-        let f = self.heap.get(self.macros_form);
+        // dual-check like env_lookup: must distinguish absent from
+        // bound-to-nil (slot_present semantics), so we check the
+        // delta's contains_key first, then canonical's slot_present.
+        let id = self.macros_form;
+        if self.in_turn && id.payload() < self.turn_watermark {
+            if let Some(delta) = self.nursery_deltas.get(&id) {
+                if let Some(v) = delta.slots.get(&name).copied() {
+                    return Some(v);
+                }
+            }
+        }
+        let f = self.heap.get(id);
         if f.slot_present(name) {
             Some(f.slot(name))
         } else {
@@ -756,10 +785,7 @@ impl World {
     /// register a macro: install `method` under `name` in the
     /// canonical `Macros` Form.
     pub fn macro_register(&mut self, name: SymId, method: Value) {
-        self.heap
-            .get_mut(self.macros_form)
-            .slots
-            .insert(name, method);
+        self.form_slot_set(self.macros_form, name, method);
     }
 
     /// the current generation for `proto_id`. zero is the default
@@ -770,7 +796,7 @@ impl World {
     /// state-about-a-Form, exposed via the reflection protocol —
     /// `[proto meta at: 'generation]` works from inside moof).
     pub fn proto_generation(&self, proto_id: FormId) -> u32 {
-        match self.heap.get(proto_id).meta_at(self.generation_sym) {
+        match self.form_meta(proto_id, self.generation_sym) {
             Value::Int(n) => n as u32,
             _ => 0,
         }
@@ -783,10 +809,7 @@ impl World {
     pub fn bump_proto_generation(&mut self, proto_id: FormId) {
         let cur = self.proto_generation(proto_id);
         let next = cur.wrapping_add(1);
-        self.heap
-            .get_mut(proto_id)
-            .meta
-            .insert(self.generation_sym, Value::Int(next as i64));
+        self.form_meta_set(proto_id, self.generation_sym, Value::Int(next as i64));
     }
 
     /// the FormId where this value's per-instance state lives, if
@@ -1086,16 +1109,19 @@ impl World {
         selector: SymId,
     ) -> Option<(Value, FormId)> {
         // 1. receiver's own (or singleton's own) handler table.
+        //    nursery-aware via form_handler.
         let own_id = self.effective_form_id(receiver);
         if let Some(id) = own_id {
-            if let Some(handler) = self.heap.get(id).handler(selector) {
+            if let Some(handler) = self.form_handler(id, selector) {
                 return Some((handler, id));
             }
         }
         // 2. walk the proto chain. starts from `own_id`'s proto
         //    when it exists (so the singleton's class chain is
         //    respected), else from `proto_of(receiver)` (the
-        //    classic tagged-immediate case).
+        //    classic tagged-immediate case). proto is a struct
+        //    field on Form, not a slot — never buffered through
+        //    the nursery, so direct heap reads are correct.
         let mut proto = match own_id {
             Some(id) => self.heap.get(id).proto,
             None => self.proto_of(receiver),
@@ -1104,11 +1130,10 @@ impl World {
         for _ in 0..MAX_PROTO_DEPTH {
             match proto {
                 Value::Form(proto_id) => {
-                    let f = self.heap.get(proto_id);
-                    if let Some(handler) = f.handler(selector) {
+                    if let Some(handler) = self.form_handler(proto_id, selector) {
                         return Some((handler, proto_id));
                     }
-                    proto = f.proto;
+                    proto = self.heap.get(proto_id).proto;
                 }
                 _ => return None,
             }
@@ -1124,16 +1149,16 @@ impl World {
         defining_proto: FormId,
         selector: SymId,
     ) -> Option<(Value, FormId)> {
+        // proto is a struct field, not a slot — direct heap read.
         let mut proto = self.heap.get(defining_proto).proto;
         const MAX_PROTO_DEPTH: usize = 256;
         for _ in 0..MAX_PROTO_DEPTH {
             match proto {
                 Value::Form(proto_id) => {
-                    let f = self.heap.get(proto_id);
-                    if let Some(handler) = f.handler(selector) {
+                    if let Some(handler) = self.form_handler(proto_id, selector) {
                         return Some((handler, proto_id));
                     }
-                    proto = f.proto;
+                    proto = self.heap.get(proto_id).proto;
                 }
                 _ => return None,
             }
@@ -1623,7 +1648,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "passes after Task 7 migrates env_bind to form_slot_set"]
     fn raise_in_eval_program_aborts_implicit_turn_no_state_leak() {
         let mut w = crate::new_world_bare();
         let env_id = w.global_env;
