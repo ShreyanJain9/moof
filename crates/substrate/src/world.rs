@@ -129,6 +129,12 @@ impl std::fmt::Display for RaiseError {
 
 impl std::error::Error for RaiseError {}
 
+/// max depth for proto-chain walks across the substrate. acyclicity
+/// is enforced by the absence of `set-proto!` at phase A; this bound
+/// is purely defensive against rust-side mistakes. used by
+/// `lookup_handler`, `lookup_handler_super`, and `is_live` (V2).
+const MAX_PROTO_DEPTH: usize = 256;
+
 /// the substrate's per-vat root. owns everything.
 pub struct World {
     pub heap: Heap,
@@ -971,10 +977,16 @@ impl World {
             // captured by new_allocs. note: the watermark advance
             // happens after this loop, so `self.turn_watermark` here
             // still reads the pre-turn value.
+            //
+            // invariant: if `delta.frozen` is true here, `canonical.frozen`
+            // is false. `freeze()` short-circuits when `is_frozen(id)`
+            // returns true (which consults canonical), so a delta entry
+            // with `frozen = true` could only have been created when
+            // canonical was unfrozen at the moment of freeze() — and
+            // canonical doesn't get mutated mid-turn except via
+            // commit_turn itself. so this is an unconditional flip.
             if delta.frozen {
-                if !canonical.frozen {
-                    canonical.frozen = true;
-                }
+                canonical.frozen = true;
                 if form_id.payload() < self.turn_watermark {
                     diff.freezings.push(form_id);
                 }
@@ -1087,7 +1099,6 @@ impl World {
     /// `live_protos`. used by `freeze` to refuse vat-Forms /
     /// mailbox-Forms / DataSource handles / cap-tokens.
     pub fn is_live(&self, id: FormId) -> bool {
-        const MAX_PROTO_DEPTH: usize = 256;
         let mut cur = Value::Form(id);
         for _ in 0..MAX_PROTO_DEPTH {
             match cur {
@@ -1338,7 +1349,6 @@ impl World {
             Some(id) => self.heap.get(id).proto,
             None => self.proto_of(receiver),
         };
-        const MAX_PROTO_DEPTH: usize = 256;
         for _ in 0..MAX_PROTO_DEPTH {
             match proto {
                 Value::Form(proto_id) => {
@@ -1363,7 +1373,6 @@ impl World {
     ) -> Option<(Value, FormId)> {
         // proto is a struct field, not a slot — direct heap read.
         let mut proto = self.heap.get(defining_proto).proto;
-        const MAX_PROTO_DEPTH: usize = 256;
         for _ in 0..MAX_PROTO_DEPTH {
             match proto {
                 Value::Form(proto_id) => {
