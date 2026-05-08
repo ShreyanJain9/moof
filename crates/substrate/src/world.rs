@@ -1021,6 +1021,26 @@ impl World {
         self.heap.get(id).meta_at(key)
     }
 
+    /// query the frozen bit on a form, nursery-aware.
+    /// returns `true` if the canonical `Form.frozen` is `true`,
+    /// OR (during a turn, for pre-existing forms below the
+    /// watermark) if the form's nursery `Delta.frozen` is `true`.
+    /// V2's mutation guard inside `form_*_set` calls this to
+    /// decide whether to raise `'frozen-form`.
+    pub fn is_frozen(&self, id: FormId) -> bool {
+        if self.heap.get(id).frozen {
+            return true;
+        }
+        if self.in_turn && id.payload() < self.turn_watermark {
+            if let Some(delta) = self.nursery_deltas.get(&id) {
+                if delta.frozen {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// set a slot value on a form, nursery-aware. for
     /// pre-existing forms (payload < turn_watermark) during an
     /// active turn, writes to the nursery delta. for new-alloc
@@ -1577,6 +1597,53 @@ mod tests {
         w.nursery_deltas.insert(id, d);
         assert_eq!(w.form_meta(id, SymId(7)), Value::Int(77));
         w.abort_turn();
+    }
+
+    #[test]
+    fn is_frozen_reads_canonical_unfrozen() {
+        let mut w = World::new();
+        let id = w.heap.alloc(Form::default());
+        // canonical fresh form is not frozen.
+        assert!(!w.is_frozen(id));
+    }
+
+    #[test]
+    fn is_frozen_reads_canonical_frozen() {
+        let mut w = World::new();
+        let id = w.heap.alloc(Form::default());
+        w.heap.get_mut(id).frozen = true;   // direct write — bypasses nursery for test setup
+        assert!(w.is_frozen(id));
+    }
+
+    #[test]
+    fn is_frozen_reads_delta_when_seeded() {
+        let mut w = World::new();
+        let id = w.heap.alloc(Form::default());
+        // simulate "pre-existing form, frozen this turn" by parking
+        // the form below watermark and seeding the delta.
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        let mut d = Delta::default();
+        d.frozen = true;
+        w.nursery_deltas.insert(id, d);
+        assert!(w.is_frozen(id));
+        w.abort_turn();   // canonical was never touched
+        assert!(!w.is_frozen(id));
+    }
+
+    #[test]
+    fn is_frozen_ignores_delta_when_not_in_turn() {
+        let mut w = World::new();
+        let id = w.heap.alloc(Form::default());
+        w.turn_watermark = w.heap.len() as u32;
+        // craft a stale delta entry without entering a turn.
+        let mut d = Delta::default();
+        d.frozen = true;
+        w.nursery_deltas.insert(id, d);
+        // outside a turn, deltas are ignored — defensive against bugs.
+        assert!(!w.is_frozen(id));
+        // tidy up so other tests don't see the orphan delta.
+        w.nursery_deltas.clear();
     }
 
     #[test]
