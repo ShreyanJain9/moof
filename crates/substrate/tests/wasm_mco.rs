@@ -21,7 +21,7 @@ fn bind_global(w: &mut moof::world::World, name: &str, value: Value) {
     if !was_in_turn { w.start_turn(); }
     let sym = w.intern(name);
     let global = w.global_env;
-    w.env_bind(global, sym, value);
+    w.env_bind(global, sym, value).expect("env_bind in mutable test");
     if !was_in_turn { let _ = w.commit_turn(); }
 }
 

@@ -15,7 +15,7 @@ fn explicit_turn_alloc_mutate_commit() {
     // alloc a form (above watermark — new-alloc path).
     let id = w.heap.alloc(moof::form::Form::default());
     let key = w.intern("hello");
-    w.form_slot_set(id, key, Value::Int(42));
+    w.form_slot_set(id, key, Value::Int(42)).unwrap();
 
     // mid-turn: read sees the value (direct canonical for new alloc).
     assert_eq!(w.form_slot(id, key), Value::Int(42));
@@ -41,12 +41,12 @@ fn explicit_turn_mutate_pre_existing_emits_diff_entry() {
     w.start_turn();
     let id = w.heap.alloc(moof::form::Form::default());
     let key = w.intern("count");
-    w.form_slot_set(id, key, Value::Int(0));
+    w.form_slot_set(id, key, Value::Int(0)).unwrap();
     let _ = w.commit_turn();
 
     // now mutate the pre-existing form in a new turn.
     w.start_turn();
-    w.form_slot_set(id, key, Value::Int(99));
+    w.form_slot_set(id, key, Value::Int(99)).unwrap();
     let diff = w.commit_turn();
 
     // diff has the (id, slots, key) entry with prior=0, new=99.
@@ -66,14 +66,14 @@ fn explicit_turn_abort_rolls_back_alloc_and_mutation() {
     w.start_turn();
     let id = w.heap.alloc(moof::form::Form::default());
     let key = w.intern("count");
-    w.form_slot_set(id, key, Value::Int(0));
+    w.form_slot_set(id, key, Value::Int(0)).unwrap();
     let _ = w.commit_turn();
     let watermark_after_first_commit = w.turn_watermark;
 
     // second turn: alloc another form, mutate the first, then abort.
     w.start_turn();
     let _id2 = w.heap.alloc(moof::form::Form::default());
-    w.form_slot_set(id, key, Value::Int(99));
+    w.form_slot_set(id, key, Value::Int(99)).unwrap();
     w.abort_turn();
 
     // canonical state preserved.
@@ -121,7 +121,10 @@ fn mutation_outside_turn_panics() {
 
     let x_sym = w.intern("x");
     let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        w.form_slot_set(id, x_sym, Value::Int(1));
+        // panic fires from form_slot_set's `assert!(in_turn)` before
+        // the Result is constructed — `let _ =` for the silenced Result
+        // shape on the rare path it survives.
+        let _ = w.form_slot_set(id, x_sym, Value::Int(1));
     }));
     assert!(panicked.is_err(), "expected panic on mutation outside turn");
 }
@@ -138,9 +141,9 @@ fn diff_handles_handlers_and_meta_faces() {
     // mutate all three faces.
     w.start_turn();
     let k = w.intern("k");
-    w.form_slot_set(id, k, Value::Int(1));
-    w.form_handler_set(id, k, Value::Int(2));
-    w.form_meta_set(id, k, Value::Int(3));
+    w.form_slot_set(id, k, Value::Int(1)).unwrap();
+    w.form_handler_set(id, k, Value::Int(2)).unwrap();
+    w.form_meta_set(id, k, Value::Int(3)).unwrap();
     let diff = w.commit_turn();
 
     assert_eq!(diff.mutations.len(), 3);
