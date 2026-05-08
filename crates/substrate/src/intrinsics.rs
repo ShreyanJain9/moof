@@ -115,7 +115,15 @@ fn install_table_methods(w: &mut World) {
     // alloc an empty Form whose :emit: / :at: / etc. would all
     // fail on the missing :rep handle.)
     w.install_native(w.protos.table, "new", |w, _self, _args| {
-        Ok(w.make_table())
+        let inst = w.make_table();
+        // V2 task-9 — seal-after-initialize. Tables don't run a user
+        // :initialize, but the seal still applies in FrozenByDefault.
+        if w.vat_mode == crate::VatMode::FrozenByDefault {
+            if let Value::Form(id) = inst {
+                w.freeze(id)?;
+            }
+        }
+        Ok(inst)
     }).expect("install_native at boot — substrate bug");
 
     w.install_native(w.protos.table, "length", |w, self_, _| {
@@ -1702,6 +1710,10 @@ fn install_object_reflection(w: &mut World) {
         // override.
         let initialize = w.intern("initialize");
         w.send(instance, initialize, &[])?;
+        // V2 task-9 — seal-after-initialize in frozen-by-default mode.
+        if w.vat_mode == crate::VatMode::FrozenByDefault {
+            w.freeze(id)?;
+        }
         Ok(instance)
     }).expect("install_native at boot — substrate bug");
 

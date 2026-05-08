@@ -26,3 +26,19 @@ fn mode_scope_post_bootstrap_runs_bootstrap_mutable() {
     );
     // reaching this line means bootstrap completed.
 }
+
+#[test]
+fn mutable_by_default_new_returns_mutable_form() {
+    let mut w = moof::new_world_bare_with_mode(VatMode::MutableByDefault);
+    let result = moof::eval_program(&mut w, "[Object new]").unwrap();
+    let id = result.as_form_id().unwrap();
+    assert!(!w.heap.get(id).frozen);
+}
+
+#[test]
+fn frozen_by_default_new_returns_frozen_form() {
+    let mut w = moof::new_world_bare_with_mode(VatMode::FrozenByDefault);
+    let result = moof::eval_program(&mut w, "[Object new]").unwrap();
+    let id = result.as_form_id().unwrap();
+    assert!(w.heap.get(id).frozen);
+}
