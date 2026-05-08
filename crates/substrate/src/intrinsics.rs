@@ -639,11 +639,7 @@ fn ensure_opcode_proto(world: &mut World) -> crate::form::FormId {
         world.protos.object,
     )));
     let name_meta = world.intern("name");
-    world
-        .heap
-        .get_mut(proto_id)
-        .meta
-        .insert(name_meta, Value::Sym(name_sym));
+    world.form_meta_set(proto_id, name_meta, Value::Sym(name_sym));
     world.env_bind(global, name_sym, Value::Form(proto_id));
 
     // slot-getters for :op and :operands.
@@ -652,14 +648,14 @@ fn ensure_opcode_proto(world: &mut World) -> crate::form::FormId {
             RaiseError::new(w.intern("type-error"), "op: receiver not a Form")
         })?;
         let op_sym = w.intern("op");
-        Ok(w.heap.get(id).slot(op_sym))
+        Ok(w.form_slot(id, op_sym))
     });
     world.install_native(proto_id, "operands", |w, self_, _| {
         let id = self_.as_form_id().ok_or_else(|| {
             RaiseError::new(w.intern("type-error"), "operands: receiver not a Form")
         })?;
         let operands_sym = w.intern("operands");
-        Ok(w.heap.get(id).slot(operands_sym))
+        Ok(w.form_slot(id, operands_sym))
     });
     // [opcode toString] → "<LoadConst 0>" etc.
     world.install_native(proto_id, "toString", |w, self_, _| {
@@ -668,11 +664,11 @@ fn ensure_opcode_proto(world: &mut World) -> crate::form::FormId {
         })?;
         let op_sym = w.intern("op");
         let operands_sym = w.intern("operands");
-        let name = match w.heap.get(id).slot(op_sym) {
+        let name = match w.form_slot(id, op_sym) {
             Value::Sym(s) => w.resolve(s).to_string(),
             _ => "?".to_string(),
         };
-        let operands_v = w.heap.get(id).slot(operands_sym);
+        let operands_v = w.form_slot(id, operands_sym);
         let mut parts = vec![name];
         if let Some(r) = w.table_repr(operands_v) {
             for v in r.positional.clone() {
@@ -776,11 +772,11 @@ fn decode_op_form(
     })?;
     let op_sym = world.intern("op");
     let operands_sym = world.intern("operands");
-    let name = match world.heap.get(id).slot(op_sym) {
+    let name = match world.form_slot(id, op_sym) {
         Value::Sym(s) => s,
         _ => return Err(raise(world, "compile-error", "opcode :op must be a Symbol")),
     };
-    let operands_v = world.heap.get(id).slot(operands_sym);
+    let operands_v = world.form_slot(id, operands_sym);
     let operands: Vec<Value> = world
         .table_repr(operands_v)
         .map(|r| r.positional.clone())
@@ -1048,7 +1044,7 @@ fn install_proto_globals(w: &mut World) {
         w.env_bind(global, s, Value::Form(id));
         // also stash the name in the proto's `:name` meta so
         // `[Integer toString]` → `Integer`, not `<Form#3>`.
-        w.heap.get_mut(id).meta.insert(name_meta, Value::Sym(s));
+        w.form_meta_set(id, name_meta, Value::Sym(s));
     }
     // also expose the canonical macro registry as `Macros`. moof
     // code introspects via `[Macros slots]`, fetches via
@@ -1056,10 +1052,7 @@ fn install_proto_globals(w: &mut World) {
     let macros_id = w.macros_form;
     let macros_sym = w.intern("Macros");
     w.env_bind(global, macros_sym, Value::Form(macros_id));
-    w.heap
-        .get_mut(macros_id)
-        .meta
-        .insert(name_meta, Value::Sym(macros_sym));
+    w.form_meta_set(macros_id, name_meta, Value::Sym(macros_sym));
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1076,7 +1069,7 @@ fn install_call_on_method(w: &mut World) {
             RaiseError::new(world.intern("dispatch"), "receiver of :call is not a Form")
         })?;
         let captured_sym = world.intern("captured-self");
-        let captured = world.heap.get(id).slot(captured_sym);
+        let captured = world.form_slot(id, captured_sym);
         // closures-as-callables have no defining-proto in the OO
         // sense (they're not "found on" a proto). super-send from
         // inside a closure body raises a useful error.
@@ -1337,14 +1330,14 @@ fn install_cons_and_nil_primitives(w: &mut World) {
             RaiseError::new(w.intern("type-error"), "car on non-Cons")
         })?;
         let car_sym = w.car_sym;
-        Ok(w.heap.get(id).slot(car_sym))
+        Ok(w.form_slot(id, car_sym))
     });
     w.install_native(w.protos.cons, "cdr", |w, self_, _| {
         let id = self_.as_form_id().ok_or_else(|| {
             RaiseError::new(w.intern("type-error"), "cdr on non-Cons")
         })?;
         let cdr_sym = w.cdr_sym;
-        Ok(w.heap.get(id).slot(cdr_sym))
+        Ok(w.form_slot(id, cdr_sym))
     });
     w.install_native(w.protos.cons, "cons:", make_cons_method);
     w.install_native(w.protos.nil, "cons:", make_cons_method);
@@ -1427,7 +1420,7 @@ fn install_heap_singleton(w: &mut World) {
             type_error(w, "slotOf:at: expects a Symbol key")
         })?;
         match w.effective_form_id(v) {
-            Some(id) => Ok(w.heap.get(id).slot(sym)),
+            Some(id) => Ok(w.form_slot(id, sym)),
             None => Ok(Value::Nil),
         }
     });
@@ -1439,13 +1432,7 @@ fn install_heap_singleton(w: &mut World) {
             type_error(w, "handlerOf:at: expects a Symbol key")
         })?;
         match w.effective_form_id(v) {
-            Some(id) => Ok(w
-                .heap
-                .get(id)
-                .handlers
-                .get(&sel)
-                .copied()
-                .unwrap_or(Value::Nil)),
+            Some(id) => Ok(w.form_handler(id, sel).unwrap_or(Value::Nil)),
             None => Ok(Value::Nil),
         }
     });
@@ -1457,7 +1444,7 @@ fn install_heap_singleton(w: &mut World) {
             type_error(w, "metaOf:at: expects a Symbol key")
         })?;
         match v {
-            Value::Form(id) => Ok(w.heap.get(id).meta_at(sym)),
+            Value::Form(id) => Ok(w.form_meta(id, sym)),
             _ => Ok(Value::Nil),
         }
     });
@@ -1493,7 +1480,7 @@ fn install_heap_singleton(w: &mut World) {
     let global = w.global_env;
     let name = w.intern("Heap");
     let name_meta = w.intern("name");
-    w.heap.get_mut(proto).meta.insert(name_meta, Value::Sym(name));
+    w.form_meta_set(proto, name_meta, Value::Sym(name));
     w.env_bind(global, name, Value::Form(proto));
 
 }
@@ -1528,12 +1515,12 @@ fn install_chunks_singleton(w: &mut World) {
             Value::Form(id) => id,
             _ => return Ok(Value::Nil),
         };
-        let p = w.heap.get(id).slot(w.params_sym);
+        let p = w.form_slot(id, w.params_sym);
         if !p.is_nil() {
             return Ok(p);
         }
         if let Some(cid) = chunk_id_of(w, v) {
-            return Ok(w.heap.get(cid).slot(w.params_sym));
+            return Ok(w.form_slot(cid, w.params_sym));
         }
         Ok(Value::Nil)
     });
@@ -1613,7 +1600,7 @@ fn install_chunks_singleton(w: &mut World) {
             Value::Form(id) => id,
             _ => return Ok(Value::Nil),
         };
-        let body = w.heap.get(id).slot(w.body_sym);
+        let body = w.form_slot(id, w.body_sym);
         if let Some(bid) = body.as_form_id() {
             if w.chunk_ops.contains_key(&bid) {
                 return Ok(Value::Form(bid));
@@ -1628,7 +1615,7 @@ fn install_chunks_singleton(w: &mut World) {
     let global = w.global_env;
     let name = w.intern("Chunks");
     let name_meta = w.intern("name");
-    w.heap.get_mut(proto).meta.insert(name_meta, Value::Sym(name));
+    w.form_meta_set(proto, name_meta, Value::Sym(name));
     w.env_bind(global, name, Value::Form(proto));
 }
 
@@ -1662,7 +1649,7 @@ fn install_object_reflection(w: &mut World) {
         let text = match self_ {
             Value::Form(id) => {
                 let name_meta = w.intern("name");
-                match w.heap.get(id).meta_at(name_meta) {
+                match w.form_meta(id, name_meta) {
                     Value::Sym(s) => w.resolve(s).to_string(),
                     _ => format!("<Form#{}>", id.0),
                 }
@@ -1837,7 +1824,7 @@ fn install_console_proto_and_caps(w: &mut World) {
             RaiseError::new(w.intern("type-error"), "emit: receiver is not a Form")
         })?;
         let fd_sym = w.intern("fd");
-        let fd_value = w.heap.get(id).slot(fd_sym);
+        let fd_value = w.form_slot(id, fd_sym);
         let foreign_id = match fd_value {
             Value::Foreign(fid) => fid,
             _ => {
@@ -2114,7 +2101,7 @@ fn install_globals(w: &mut World) {
         // singleton-only: tagged immediates without a singleton-
         // Form have no per-instance slots; return nil.
         match w.effective_form_id(args[0]) {
-            Some(id) => Ok(w.heap.get(id).slot(name)),
+            Some(id) => Ok(w.form_slot(id, name)),
             None => Ok(Value::Nil),
         }
     });
@@ -2131,7 +2118,7 @@ fn install_globals(w: &mut World) {
         let name = args[1].as_sym().ok_or_else(|| {
             RaiseError::new(w.intern("type-error"), "slot name must be a symbol")
         })?;
-        w.heap.get_mut(id).slots.insert(name, args[2]);
+        w.form_slot_set(id, name, args[2]);
         Ok(args[2])
     });
     // (metaSet! v 'name value) — analog of slotSet! for the meta
@@ -2148,7 +2135,7 @@ fn install_globals(w: &mut World) {
         let name = args[1].as_sym().ok_or_else(|| {
             type_error(w, "meta-set!: name must be a symbol")
         })?;
-        w.heap.get_mut(id).meta.insert(name, args[2]);
+        w.form_meta_set(id, name, args[2]);
         Ok(args[2])
     });
     // (globalEnv) — return the world's global env Form. used by
@@ -2217,7 +2204,7 @@ fn install_globals(w: &mut World) {
         let sel = args[1].as_sym().ok_or_else(|| {
             RaiseError::new(w.intern("type-error"), "set-handler! selector must be a symbol")
         })?;
-        w.heap.get_mut(proto_id).handlers.insert(sel, args[2]);
+        w.form_handler_set(proto_id, sel, args[2]);
         // bump generation so existing ICs invalidate.
         // (`docs/laws/substrate-laws.md` L10.)
         w.bump_proto_generation(proto_id);
@@ -2619,9 +2606,9 @@ fn install_compiler_primitives(w: &mut World) {
         f.slots.insert(w.env_sym, Value::Form(w.global_env));
         let captured_self_sym = w.intern("captured-self");
         f.slots.insert(captured_self_sym, Value::Nil);
-        let params = w.heap.get(chunk_id).slot(w.params_sym);
+        let params = w.form_slot(chunk_id, w.params_sym);
         f.slots.insert(w.params_sym, params);
-        let source = w.heap.get(chunk_id).meta_at(w.source_sym);
+        let source = w.form_meta(chunk_id, w.source_sym);
         if !source.is_nil() {
             f.meta.insert(w.source_sym, source);
         }
