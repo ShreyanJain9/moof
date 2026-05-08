@@ -1726,11 +1726,18 @@ fn install_object_reflection(w: &mut World) {
     // inherently immutable: :frozen? answers true, :freezable?
     // answers false (no mutable state to seal).
     w.install_native(w.protos.object, "freeze", |w, self_, _args| {
-        let id = self_.as_form_id().ok_or_else(|| {
-            RaiseError::new(w.intern("type-error"), ":freeze on non-Form value")
-        })?;
-        w.freeze(id)?;
-        Ok(self_)
+        // tagged immediates (Int, Bool, Sym, Char, Float, Nil) are
+        // inherently immutable — no-op return self. matches the
+        // spec §7.3 "non-Form values: no-op (already-immutable)"
+        // policy and stays consistent with :frozen? returning true
+        // and :freezable? returning false on the same receivers.
+        match self_.as_form_id() {
+            Some(id) => {
+                w.freeze(id)?;
+                Ok(self_)
+            }
+            None => Ok(self_),
+        }
     })
     .expect("install_native :freeze at boot — substrate bug");
 

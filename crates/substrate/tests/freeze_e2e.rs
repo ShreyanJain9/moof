@@ -85,3 +85,15 @@ fn freeze_on_cap_raises_cannot_freeze_live() {
     assert!(r.is_err());
     assert_eq!(w.resolve(r.unwrap_err().kind), "cannot-freeze-live");
 }
+
+#[test]
+fn freeze_on_tagged_immediate_is_noop() {
+    // tagged immediates are inherently immutable; :freeze returns
+    // self unchanged rather than raising. matches :frozen? which
+    // returns true and :freezable? which returns false on the same.
+    let mut w = moof::new_world_bare();
+    let r = moof::eval_program(&mut w, "[42 freeze]").unwrap();
+    assert_eq!(r, Value::Int(42));
+    let r2 = moof::eval_program(&mut w, "[#true freeze]").unwrap();
+    assert_eq!(r2, Value::Bool(true));
+}
