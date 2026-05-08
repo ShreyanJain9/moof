@@ -91,7 +91,8 @@ pub fn new_world() -> world::World {
             });
         let dollar_hash = w.intern("$hash");
         let global = w.global_env;
-        w.env_bind(global, dollar_hash, hash_instance);
+        w.env_bind(global, dollar_hash, hash_instance)
+            .expect("env_bind at boot — substrate bug");
     }
 
     let _ = w.commit_turn();

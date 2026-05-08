@@ -330,7 +330,7 @@ fn load_wasm_bytes_inner(
         world
             .wasm_export_map
             .insert((proto_id, sel_id), (export_name.clone(), *shape));
-        world.install_native(proto_id, export_name, wasm_method_trampoline);
+        world.install_native(proto_id, export_name, wasm_method_trampoline)?;
     }
 
     // apply meta entries declared in the manifest to the proto-Form.
@@ -338,7 +338,7 @@ fn load_wasm_bytes_inner(
     // like :infinite-source and :infinite-source-flavor.
     if let Some(m) = &manifest {
         for (k, v) in &m.meta {
-            world.form_meta_set(proto_id, *k, *v);
+            world.form_meta_set(proto_id, *k, *v)?;
         }
     }
 

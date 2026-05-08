@@ -63,7 +63,7 @@ pub fn install(w: &mut World) {
                 RaiseError::new(w.intern("tx-bad-arg"), ":load: expects a String path")
             })?;
         load_relative(w, &rel)
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // :loadAll: — walks a Cons of Strings, calls :load: on each.
     w.install_native(proto, "loadAll:", |w, _self, args| {
@@ -82,7 +82,7 @@ pub fn install(w: &mut World) {
             last = load_relative(w, &rel)?;
         }
         Ok(last)
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // :root — diagnostic; returns the resolved root as a String.
     w.install_native(proto, "root", |w, _self, _args| {
@@ -96,7 +96,7 @@ pub fn install(w: &mut World) {
                 "transporter has no root configured",
             )),
         }
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // :dump:toFile: — RESERVED. The Transporter's name promises a
     // round-trip; the second half lands in a future session that
@@ -107,13 +107,14 @@ pub fn install(w: &mut World) {
             w.intern("tx-unimplemented"),
             ":dump:toFile: is reserved — the file→image direction lands in a future session",
         ))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // bind the proto-Form as the `$transporter` global. that's the
     // cap itself; receiving methods sends to it.
     let global = w.global_env;
     let dollar = w.intern("$transporter");
-    w.env_bind(global, dollar, Value::Form(proto));
+    w.env_bind(global, dollar, Value::Form(proto))
+        .expect("env_bind at boot — substrate bug");
 }
 
 /// shared implementation for `:load:` and `:loadAll:`. resolves rel

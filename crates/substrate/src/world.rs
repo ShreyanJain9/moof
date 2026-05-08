@@ -611,8 +611,8 @@ impl World {
     }
 
     /// bind a name in an env's local scope (does not walk parents).
-    pub fn env_bind(&mut self, env: FormId, name: SymId, value: Value) {
-        self.form_slot_set(env, name, value);
+    pub fn env_bind(&mut self, env: FormId, name: SymId, value: Value) -> Result<(), RaiseError> {
+        self.form_slot_set(env, name, value)
     }
 
     /// `set!` semantics: walk the parent chain looking for an
@@ -626,7 +626,7 @@ impl World {
     /// where a name *was originally bound* is what `set!` must
     /// touch, not whatever frame happens to be active at the call
     /// site (which may shadow the original).
-    pub fn env_set(&mut self, env: FormId, name: SymId, value: Value) -> bool {
+    pub fn env_set(&mut self, env: FormId, name: SymId, value: Value) -> Result<bool, RaiseError> {
         let mut cur = env;
         loop {
             // contains_key semantics: present in delta OR canonical.
@@ -640,14 +640,14 @@ impl World {
                 .unwrap_or(false);
             let bound_in_canonical = self.heap.get(cur).slots.contains_key(&name);
             if bound_in_delta || bound_in_canonical {
-                self.form_slot_set(cur, name, value);
-                return true;
+                self.form_slot_set(cur, name, value)?;
+                return Ok(true);
             }
             // walk parent — nursery-aware.
             let parent = self.form_meta(cur, self.parent_sym);
             match parent {
                 Value::Form(id) => cur = id,
-                _ => return false,
+                _ => return Ok(false),
             }
         }
     }
@@ -670,7 +670,7 @@ impl World {
         proto: FormId,
         selector: &str,
         native_fn: NativeFn,
-    ) -> FormId {
+    ) -> Result<FormId, RaiseError> {
         let sel_id = self.intern(selector);
         let method_form = Form::with_proto(Value::Form(self.protos.method));
         let method_id = self.heap.alloc(method_form);
@@ -681,12 +681,12 @@ impl World {
         let sym_v = Value::Sym(sel_id);
         // method_id is freshly allocated this turn (above the
         // watermark) — form_meta_set writes directly to canonical.
-        self.form_meta_set(method_id, self.source_sym, sym_v);
+        self.form_meta_set(method_id, self.source_sym, sym_v)?;
         self.native_fns.insert(method_id, native_fn);
         // proto may be pre-existing — form_handler_set buffers in
         // the delta when so, writes directly when above watermark.
-        self.form_handler_set(proto, sel_id, Value::Form(method_id));
-        method_id
+        self.form_handler_set(proto, sel_id, Value::Form(method_id))?;
+        Ok(method_id)
     }
 
     /// reader entry — uses the canonical List + String protos.
@@ -796,8 +796,8 @@ impl World {
 
     /// register a macro: install `method` under `name` in the
     /// canonical `Macros` Form.
-    pub fn macro_register(&mut self, name: SymId, method: Value) {
-        self.form_slot_set(self.macros_form, name, method);
+    pub fn macro_register(&mut self, name: SymId, method: Value) -> Result<(), RaiseError> {
+        self.form_slot_set(self.macros_form, name, method)
     }
 
     /// the current generation for `proto_id`. zero is the default
@@ -818,10 +818,10 @@ impl World {
     /// table mutation so existing inline caches invalidate.
     ///
     /// writes to the proto Form's `:meta at: 'generation` slot.
-    pub fn bump_proto_generation(&mut self, proto_id: FormId) {
+    pub fn bump_proto_generation(&mut self, proto_id: FormId) -> Result<(), RaiseError> {
         let cur = self.proto_generation(proto_id);
         let next = cur.wrapping_add(1);
-        self.form_meta_set(proto_id, self.generation_sym, Value::Int(next as i64));
+        self.form_meta_set(proto_id, self.generation_sym, Value::Int(next as i64))
     }
 
     /// the FormId where this value's per-instance state lives, if
@@ -1147,7 +1147,7 @@ impl World {
     /// canonical heap (they're already nursery-semantic).
     /// panics if `!in_turn` — substrate disallows mutation
     /// outside a turn (V1 invariant: turn = unit of atomicity).
-    pub fn form_slot_set(&mut self, id: FormId, key: SymId, value: Value) {
+    pub fn form_slot_set(&mut self, id: FormId, key: SymId, value: Value) -> Result<(), RaiseError> {
         assert!(
             self.in_turn,
             "form_slot_set called outside a turn"
@@ -1163,11 +1163,12 @@ impl World {
                 .slots
                 .insert(key, value);
         }
+        Ok(())
     }
 
     /// set a handler entry on a form, nursery-aware. semantics
     /// mirror `form_slot_set`.
-    pub fn form_handler_set(&mut self, id: FormId, key: SymId, value: Value) {
+    pub fn form_handler_set(&mut self, id: FormId, key: SymId, value: Value) -> Result<(), RaiseError> {
         assert!(
             self.in_turn,
             "form_handler_set called outside a turn"
@@ -1181,11 +1182,12 @@ impl World {
                 .handlers
                 .insert(key, value);
         }
+        Ok(())
     }
 
     /// set a meta entry on a form, nursery-aware. semantics
     /// mirror `form_slot_set`.
-    pub fn form_meta_set(&mut self, id: FormId, key: SymId, value: Value) {
+    pub fn form_meta_set(&mut self, id: FormId, key: SymId, value: Value) -> Result<(), RaiseError> {
         assert!(
             self.in_turn,
             "form_meta_set called outside a turn"
@@ -1199,6 +1201,7 @@ impl World {
                 .meta
                 .insert(key, value);
         }
+        Ok(())
     }
 
     /// list slot keys for a form, nursery-aware. union of canonical's
@@ -1402,8 +1405,8 @@ mod tests {
         let inner = w.alloc_env(Some(outer));
         let foo = w.intern("foo");
         let bar = w.intern("bar");
-        w.env_bind(outer, foo, Value::Int(1));
-        w.env_bind(inner, bar, Value::Int(2));
+        w.env_bind(outer, foo, Value::Int(1)).expect("env_bind in mutable test");
+        w.env_bind(inner, bar, Value::Int(2)).expect("env_bind in mutable test");
         // outer's foo is reachable from inner.
         assert_eq!(w.env_lookup(inner, foo), Some(Value::Int(1)));
         // inner's bar is reachable from inner.
@@ -1424,8 +1427,8 @@ mod tests {
         let outer = w.alloc_env(None);
         let inner = w.alloc_env(Some(outer));
         let x = w.intern("x");
-        w.env_bind(outer, x, Value::Int(10));
-        w.env_bind(inner, x, Value::Int(20));
+        w.env_bind(outer, x, Value::Int(10)).expect("env_bind in mutable test");
+        w.env_bind(inner, x, Value::Int(20)).expect("env_bind in mutable test");
         assert_eq!(w.env_lookup(inner, x), Some(Value::Int(20)));
         assert_eq!(w.env_lookup(outer, x), Some(Value::Int(10)));
         let _ = w.commit_turn();
@@ -1467,7 +1470,7 @@ mod tests {
         // install_native writes :source meta and a handler entry —
         // both go through nursery-aware setters that require in_turn.
         w.start_turn();
-        let method_id = w.install_native(w.protos.integer, "test-echo", echo);
+        let method_id = w.install_native(w.protos.integer, "test-echo", echo).expect("install_native in mutable test");
         let _ = w.commit_turn();
         // method-Form is a Method.
         assert_eq!(
@@ -1807,7 +1810,7 @@ mod tests {
     fn form_slot_set_outside_turn_panics() {
         let mut w = World::new();
         let id = w.heap.alloc(Form::default());
-        w.form_slot_set(id, SymId(1), Value::Int(42));
+        let _ = w.form_slot_set(id, SymId(1), Value::Int(42));
     }
 
     #[test]
@@ -1815,7 +1818,7 @@ mod tests {
     fn form_handler_set_outside_turn_panics() {
         let mut w = World::new();
         let id = w.heap.alloc(Form::default());
-        w.form_handler_set(id, SymId(1), Value::Int(42));
+        let _ = w.form_handler_set(id, SymId(1), Value::Int(42));
     }
 
     #[test]
@@ -1823,7 +1826,7 @@ mod tests {
     fn form_meta_set_outside_turn_panics() {
         let mut w = World::new();
         let id = w.heap.alloc(Form::default());
-        w.form_meta_set(id, SymId(1), Value::Int(42));
+        let _ = w.form_meta_set(id, SymId(1), Value::Int(42));
     }
 
     #[test]
@@ -1833,7 +1836,7 @@ mod tests {
         // mark id as pre-existing.
         w.turn_watermark = w.heap.len() as u32;
         w.start_turn();
-        w.form_slot_set(id, SymId(1), Value::Int(42));
+        w.form_slot_set(id, SymId(1), Value::Int(42)).expect("form_slot_set in mutable test");
         // canonical heap still has empty slots for this form.
         assert!(w.heap.get(id).slots.is_empty());
         // delta should have the entry.
@@ -1852,7 +1855,7 @@ mod tests {
         w.start_turn();
         let id = w.heap.alloc(Form::default());
         // id.payload() >= turn_watermark, so the form is new-alloc.
-        w.form_slot_set(id, SymId(1), Value::Int(42));
+        w.form_slot_set(id, SymId(1), Value::Int(42)).expect("form_slot_set in mutable test");
         // canonical heap has the value directly (no delta needed).
         assert_eq!(w.heap.get(id).slot(SymId(1)), Value::Int(42));
         // delta is empty (new-alloc forms don't use the delta map).
@@ -1868,8 +1871,8 @@ mod tests {
         let id = w.heap.alloc(f);
         w.turn_watermark = w.heap.len() as u32;
         w.start_turn();
-        w.form_slot_set(id, SymId(1), Value::Int(20));
-        w.form_slot_set(id, SymId(2), Value::Int(30));
+        w.form_slot_set(id, SymId(1), Value::Int(20)).expect("form_slot_set in mutable test");
+        w.form_slot_set(id, SymId(2), Value::Int(30)).expect("form_slot_set in mutable test");
         let diff = w.commit_turn();
         // canonical now has updated values.
         assert_eq!(w.heap.get(id).slot(SymId(1)), Value::Int(20));
@@ -1888,9 +1891,9 @@ mod tests {
         let id = w.heap.alloc(Form::default());
         w.turn_watermark = w.heap.len() as u32;
         w.start_turn();
-        w.form_slot_set(id, SymId(1), Value::Int(1));
-        w.form_slot_set(id, SymId(1), Value::Int(2));
-        w.form_slot_set(id, SymId(1), Value::Int(3));
+        w.form_slot_set(id, SymId(1), Value::Int(1)).expect("form_slot_set in mutable test");
+        w.form_slot_set(id, SymId(1), Value::Int(2)).expect("form_slot_set in mutable test");
+        w.form_slot_set(id, SymId(1), Value::Int(3)).expect("form_slot_set in mutable test");
         let diff = w.commit_turn();
         // diff has the final value 3, with prior nil (key was absent).
         let e = diff.mutations.get(&(id, FaceKind::Slots, SymId(1))).copied();
@@ -1905,7 +1908,7 @@ mod tests {
         let id = w.heap.alloc(f);
         w.turn_watermark = w.heap.len() as u32;
         w.start_turn();
-        w.form_slot_set(id, SymId(1), Value::Int(99));
+        w.form_slot_set(id, SymId(1), Value::Int(99)).expect("form_slot_set in mutable test");
         // mid-turn: read sees new value via delta.
         assert_eq!(w.form_slot(id, SymId(1)), Value::Int(99));
         w.abort_turn();
@@ -1919,9 +1922,9 @@ mod tests {
         let id = w.heap.alloc(Form::default());
         w.turn_watermark = w.heap.len() as u32;
         w.start_turn();
-        w.form_slot_set(id, SymId(1), Value::Int(11));
-        w.form_handler_set(id, SymId(2), Value::Int(22));
-        w.form_meta_set(id, SymId(3), Value::Int(33));
+        w.form_slot_set(id, SymId(1), Value::Int(11)).expect("form_slot_set in mutable test");
+        w.form_handler_set(id, SymId(2), Value::Int(22)).expect("form_handler_set in mutable test");
+        w.form_meta_set(id, SymId(3), Value::Int(33)).expect("form_meta_set in mutable test");
         let diff = w.commit_turn();
         assert_eq!(diff.mutations.len(), 3);
         assert!(diff.mutations.contains_key(&(id, FaceKind::Slots, SymId(1))));

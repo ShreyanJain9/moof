@@ -534,16 +534,16 @@ mod tests {
         if !was_in_turn { w.start_turn(); }
         w.install_native(w.protos.integer, "+", |_, self_, args| {
             Ok(Value::Int(self_.as_int().unwrap() + args[0].as_int().unwrap()))
-        });
+        }).expect("install_native in mutable test");
         w.install_native(w.protos.integer, "-", |_, self_, args| {
             Ok(Value::Int(self_.as_int().unwrap() - args[0].as_int().unwrap()))
-        });
+        }).expect("install_native in mutable test");
         w.install_native(w.protos.integer, "*", |_, self_, args| {
             Ok(Value::Int(self_.as_int().unwrap() * args[0].as_int().unwrap()))
-        });
+        }).expect("install_native in mutable test");
         w.install_native(w.protos.integer, "=", |_, self_, args| {
             Ok(Value::Bool(self_.as_int().unwrap() == args[0].as_int().unwrap()))
-        });
+        }).expect("install_native in mutable test");
         if !was_in_turn { let _ = w.commit_turn(); }
     }
 
@@ -555,7 +555,7 @@ mod tests {
                 .as_form_id()
                 .ok_or_else(|| RaiseError::new(world.intern("dispatch"), "not a closure"))?;
             world.invoke(id, Value::Nil, args, crate::form::FormId::NONE)
-        });
+        }).expect("install_native in mutable test");
         if !was_in_turn { let _ = w.commit_turn(); }
     }
 

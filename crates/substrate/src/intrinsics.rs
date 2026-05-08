@@ -116,7 +116,7 @@ fn install_table_methods(w: &mut World) {
     // fail on the missing :rep handle.)
     w.install_native(w.protos.table, "new", |w, _self, _args| {
         Ok(w.make_table())
-    });
+    }).expect("install_native at boot — substrate bug");
 
     w.install_native(w.protos.table, "length", |w, self_, _| {
         let n = match w.table_repr(self_) {
@@ -129,7 +129,7 @@ fn install_table_methods(w: &mut World) {
             }
         };
         Ok(Value::Int(n))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // :size, :empty? are derived in lib/bootstrap.moof from :keys
     // and :length.
@@ -184,7 +184,7 @@ fn install_table_methods(w: &mut World) {
                 Ok(Value::Nil)
             }
         }
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [t at: k put: v] — keyword shape, sets positional or keyed
     // based on key type. positional :at:put: at index = length pushes;
@@ -244,7 +244,7 @@ fn install_table_methods(w: &mut World) {
                 }
             }
         }
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [t push: v] — positional append.
     w.install_native(w.protos.table, "push:", |w, self_, args| {
@@ -260,7 +260,7 @@ fn install_table_methods(w: &mut World) {
         };
         r.positional.push(v);
         Ok(self_)
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [t pop] — remove and return the last positional. raises if empty.
     w.install_native(w.protos.table, "pop", |w, self_, _| {
@@ -274,7 +274,7 @@ fn install_table_methods(w: &mut World) {
             }
         };
         Ok(v)
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [t containsKey?: k] — works on keyed + positional (via index range).
     w.install_native(w.protos.table, "containsKey?:", |w, self_, args| {
@@ -288,7 +288,7 @@ fn install_table_methods(w: &mut World) {
             other => r.keyed.contains_key(&other),
         };
         Ok(Value::Bool(present))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [t remove: k] — remove the keyed entry; positional indices
     // not supported (use :at:put: with the new value, or :pop).
@@ -305,7 +305,7 @@ fn install_table_methods(w: &mut World) {
         };
         let v = r.keyed.shift_remove(&key).unwrap_or(Value::Nil);
         Ok(v)
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [t keys] — list of all keys (positional indices first, then
     // keyed keys in insertion order).
@@ -320,7 +320,7 @@ fn install_table_methods(w: &mut World) {
             }
         }
         Ok(w.make_list(&keys))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [t values] — list of all values (positional in order, then keyed).
     w.install_native(w.protos.table, "values", |w, self_, _| {
@@ -334,7 +334,7 @@ fn install_table_methods(w: &mut World) {
             }
         }
         Ok(w.make_list(&vals))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // :toList, :forEach:, :map:, :filter:, :reduce:from: are all
     // derived in lib/bootstrap.moof from :keys, :values, :at: and
@@ -352,7 +352,7 @@ fn install_table_methods(w: &mut World) {
             )),
             _ => Ok(Value::Bool(false)),
         }
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // :!= is derived in lib/bootstrap.moof from :=.
 
@@ -378,7 +378,7 @@ fn install_char_methods(w: &mut World) {
                 "codepoint on non-Char",
             )),
         }
-    });
+    }).expect("install_native at boot — substrate bug");
     // :toString lives on Object; its default handles `Value::Char`
     // (printing the single character). [Char toString] hits the
     // Object handler with the proto-Form receiver and returns
@@ -395,7 +395,7 @@ fn install_char_methods(w: &mut World) {
     w.install_native(w.protos.char_, "<", |_, self_, args| match (self_, args[0]) {
         (Value::Char(a), Value::Char(b)) => Ok(Value::Bool(a < b)),
         _ => Ok(Value::Bool(false)),
-    });
+    }).expect("install_native at boot — substrate bug");
     // unicode predicates: each one is "decode the codepoint to a
     // char, ask `char::is_X()`, fall back to false". macroized.
     macro_rules! char_predicate {
@@ -405,7 +405,7 @@ fn install_char_methods(w: &mut World) {
                     char::from_u32(cp).map($pred).unwrap_or(false),
                 )),
                 _ => Ok(Value::Bool(false)),
-            });
+            }).expect("install_native at boot — substrate bug");
         };
     }
     char_predicate!(w, "letter?",     |c: char| c.is_alphabetic());
@@ -426,7 +426,7 @@ fn install_char_methods(w: &mut World) {
                     Ok(Value::Char(mapped))
                 }
                 v => Ok(v),
-            });
+            }).expect("install_native at boot — substrate bug");
         };
     }
     char_case!(w, "upcase",   to_uppercase);
@@ -446,14 +446,14 @@ fn install_string_methods(w: &mut World) {
     w.install_native(w.protos.string, "length", |w, self_, _| {
         let n = str_arg(w, self_, "length")?.chars().count() as i64;
         Ok(Value::Int(n))
-    });
+    }).expect("install_native at boot — substrate bug");
     w.install_native(w.protos.string, "byteLength", |w, self_, _| {
         let n = w
             .string_bytes(self_)
             .map(|b| b.len() as i64)
             .ok_or_else(|| type_error(w, "byteLength on non-String"))?;
         Ok(Value::Int(n))
-    });
+    }).expect("install_native at boot — substrate bug");
     w.install_native(w.protos.string, "at:", |w, self_, args| {
         let idx = match args.first().copied() {
             Some(Value::Int(n)) => n,
@@ -477,7 +477,7 @@ fn install_string_methods(w: &mut World) {
                     format!("[String at: {}] out of range", idx),
                 )
             })
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [s toList] — walk the string into a List of Chars. lets
     // users compose with List's protocol. (`concepts/strings.md`
@@ -488,7 +488,7 @@ fn install_string_methods(w: &mut World) {
             .map(|c| Value::Char(c as u32))
             .collect();
         Ok(w.make_list(&chars))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // unicode case mapping stays rust — needs Char::to_uppercase /
     // to_lowercase tables that aren't reasonable to write in moof.
@@ -497,7 +497,7 @@ fn install_string_methods(w: &mut World) {
             $w.install_native($w.protos.string, $sel, |w, self_, _| {
                 let s = str_arg(w, self_, $sel)?.$method();
                 Ok(w.make_string(&s))
-            });
+            }).expect("install_native at boot — substrate bug");
         };
     }
     str_unary_string!(w, "upcase",   to_uppercase);
@@ -529,7 +529,7 @@ fn install_string_methods(w: &mut World) {
             .take(len as usize)
             .collect();
         Ok(w.make_string(&collected))
-    });
+    }).expect("install_native at boot — substrate bug");
     w.install_native(w.protos.string, "=", |w, self_, args| {
         // structural equality. mismatched proto → false; never
         // raises (so `[Symbol = String]` is well-defined).
@@ -538,7 +538,7 @@ fn install_string_methods(w: &mut World) {
             _ => false,
         };
         Ok(Value::Bool(eq))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [s + other] — concatenation. accepts String or Symbol on the
     // RHS for ergonomics; falls through to :toString otherwise.
@@ -565,7 +565,7 @@ fn install_string_methods(w: &mut World) {
         };
         out.push_str(&appended);
         Ok(w.make_string(&out))
-    });
+    }).expect("install_native at boot — substrate bug");
     // [s concat: t] is :+ in lib/bootstrap.moof; [s empty?] is
     // [[s byteLength] = 0] there.
 
@@ -577,7 +577,7 @@ fn install_string_methods(w: &mut World) {
             .map(|b| b.to_vec())
             .ok_or_else(|| type_error(w, "asUtf8Bytes on non-String"))?;
         Ok(w.make_bytes(&raw))
-    });
+    }).expect("install_native at boot — substrate bug");
 }
 
 // install_method_methods is gone — Method's :toString and :inspect
@@ -639,8 +639,10 @@ fn ensure_opcode_proto(world: &mut World) -> crate::form::FormId {
         world.protos.object,
     )));
     let name_meta = world.intern("name");
-    world.form_meta_set(proto_id, name_meta, Value::Sym(name_sym));
-    world.env_bind(global, name_sym, Value::Form(proto_id));
+    world.form_meta_set(proto_id, name_meta, Value::Sym(name_sym))
+        .expect("form_meta_set at boot — substrate bug");
+    world.env_bind(global, name_sym, Value::Form(proto_id))
+        .expect("env_bind at boot — substrate bug");
 
     // slot-getters for :op and :operands.
     world.install_native(proto_id, "op", |w, self_, _| {
@@ -649,14 +651,14 @@ fn ensure_opcode_proto(world: &mut World) -> crate::form::FormId {
         })?;
         let op_sym = w.intern("op");
         Ok(w.form_slot(id, op_sym))
-    });
+    }).expect("install_native at boot — substrate bug");
     world.install_native(proto_id, "operands", |w, self_, _| {
         let id = self_.as_form_id().ok_or_else(|| {
             RaiseError::new(w.intern("type-error"), "operands: receiver not a Form")
         })?;
         let operands_sym = w.intern("operands");
         Ok(w.form_slot(id, operands_sym))
-    });
+    }).expect("install_native at boot — substrate bug");
     // [opcode toString] → "<LoadConst 0>" etc.
     world.install_native(proto_id, "toString", |w, self_, _| {
         let id = self_.as_form_id().ok_or_else(|| {
@@ -677,7 +679,7 @@ fn ensure_opcode_proto(world: &mut World) -> crate::form::FormId {
         }
         let s = format!("<{}>", parts.join(" "));
         Ok(w.make_string(&s))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     proto_id
 }
@@ -983,7 +985,7 @@ fn install_bytes_methods(w: &mut World) {
             .map(|b| b.len() as i64)
             .ok_or_else(|| type_error(w, "length on non-Bytes"))?;
         Ok(Value::Int(n))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [b at: i] — byte at index i (0-based). returns an Integer 0..255.
     // raises 'index-out-of-bounds for i < 0 or i >= length.
@@ -1005,7 +1007,7 @@ fn install_bytes_methods(w: &mut World) {
             ));
         }
         Ok(Value::Int(data[idx as usize] as i64))
-    });
+    }).expect("install_native at boot — substrate bug");
 }
 
 /// expose the canonical protos as moof globals (`Object`, `List`,
@@ -1041,18 +1043,22 @@ fn install_proto_globals(w: &mut World) {
     let name_meta = w.intern("name");
     for (name, id) in bindings {
         let s = w.intern(name);
-        w.env_bind(global, s, Value::Form(id));
+        w.env_bind(global, s, Value::Form(id))
+            .expect("env_bind at boot — substrate bug");
         // also stash the name in the proto's `:name` meta so
         // `[Integer toString]` → `Integer`, not `<Form#3>`.
-        w.form_meta_set(id, name_meta, Value::Sym(s));
+        w.form_meta_set(id, name_meta, Value::Sym(s))
+            .expect("form_meta_set at boot — substrate bug");
     }
     // also expose the canonical macro registry as `Macros`. moof
     // code introspects via `[Macros slots]`, fetches via
     // `[Macros at: 'when]`, etc. honors reflection-contract R6.
     let macros_id = w.macros_form;
     let macros_sym = w.intern("Macros");
-    w.env_bind(global, macros_sym, Value::Form(macros_id));
-    w.form_meta_set(macros_id, name_meta, Value::Sym(macros_sym));
+    w.env_bind(global, macros_sym, Value::Form(macros_id))
+        .expect("env_bind at boot — substrate bug");
+    w.form_meta_set(macros_id, name_meta, Value::Sym(macros_sym))
+        .expect("form_meta_set at boot — substrate bug");
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1074,7 +1080,7 @@ fn install_call_on_method(w: &mut World) {
         // sense (they're not "found on" a proto). super-send from
         // inside a closure body raises a useful error.
         world.invoke(id, captured, args, FormId::NONE)
-    });
+    }).expect("install_native at boot — substrate bug");
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1098,7 +1104,7 @@ fn install_integer_methods(w: &mut World) {
                     )),
                     _ => Err(type_error(w, format!("{} expected a numeric rhs", $sel))),
                 }
-            });
+            }).expect("install_native at boot — substrate bug");
         };
     }
     int_arith!(w, "+", wrapping_add, +);
@@ -1118,7 +1124,7 @@ fn install_integer_methods(w: &mut World) {
             Value::Float(_) => Ok(Value::float(a as f64 / args[0].as_float().unwrap())),
             _ => Err(type_error(w, "/ expected a numeric rhs")),
         }
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // `=` allows Int-vs-Float comparison; `:!=`, `:<=`, `:>=`
     // derive in lib/bootstrap.moof.
@@ -1135,7 +1141,7 @@ fn install_integer_methods(w: &mut World) {
             // → fall through to identity, like Object's `=`.
             _ => self_ == args[0],
         }))
-    });
+    }).expect("install_native at boot — substrate bug");
     macro_rules! int_cmp {
         ($w:expr, $sel:literal, $op:tt) => {
             $w.install_native($w.protos.integer, $sel, |w, self_, args| {
@@ -1147,7 +1153,7 @@ fn install_integer_methods(w: &mut World) {
                 };
                 let b = num_f64(w, args[0], $sel)?;
                 Ok(Value::Bool((a as f64) $op b))
-            });
+            }).expect("install_native at boot — substrate bug");
         };
     }
     int_cmp!(w, "<", <);
@@ -1162,7 +1168,7 @@ fn install_integer_methods(w: &mut World) {
     w.install_native(w.protos.integer, "asFloat", |w, self_, _args| {
         let a = int_arg(w, self_, "asFloat")?;
         Ok(Value::float(a as f64))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [n asChar] — construct a Char-tagged-immediate from a non-
     // negative codepoint. inverse of Char:codepoint.
@@ -1176,7 +1182,7 @@ fn install_integer_methods(w: &mut World) {
             )),
             _ => Err(type_error(w, "asChar: receiver is not an Integer")),
         }
-    });
+    }).expect("install_native at boot — substrate bug");
 }
 
 fn int_arg(w: &mut World, v: Value, op: &str) -> Result<i64, RaiseError> {
@@ -1202,7 +1208,7 @@ fn install_float_methods(w: &mut World) {
                 let a = float_arg(w, self_, $sel)?;
                 let b = num_f64(w, args[0], $sel)?;
                 Ok(Value::float(a $op b))
-            });
+            }).expect("install_native at boot — substrate bug");
         };
     }
     float_arith!(w, "+", +);
@@ -1220,14 +1226,14 @@ fn install_float_methods(w: &mut World) {
             None => return Ok(Value::Bool(self_ == args[0])),
         };
         Ok(Value::Bool(args[0].as_number_f64().map_or(false, |b| a == b)))
-    });
+    }).expect("install_native at boot — substrate bug");
     macro_rules! float_cmp {
         ($w:expr, $sel:literal, $op:tt) => {
             $w.install_native($w.protos.float, $sel, |w, self_, args| {
                 let a = float_arg(w, self_, $sel)?;
                 let b = num_f64(w, args[0], $sel)?;
                 Ok(Value::Bool(a $op b))
-            });
+            }).expect("install_native at boot — substrate bug");
         };
     }
     float_cmp!(w, "<", <);
@@ -1243,7 +1249,7 @@ fn install_float_methods(w: &mut World) {
             $w.install_native($w.protos.float, $sel, |w, self_, _| {
                 let a = float_arg(w, self_, $sel)?;
                 Ok(Value::float(a.$method()))
-            });
+            }).expect("install_native at boot — substrate bug");
         };
     }
     float_unary!(w, "sqrt",  sqrt);
@@ -1258,7 +1264,7 @@ fn install_float_methods(w: &mut World) {
     w.install_native(w.protos.float, "asInteger", |w, self_, _| {
         let a = float_arg(w, self_, "asInteger")?;
         Ok(Value::Int(a as i64))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // f64-classification — same shape, parametrize over the
     // predicate.
@@ -1266,7 +1272,7 @@ fn install_float_methods(w: &mut World) {
         ($w:expr, $sel:expr, $pred:expr) => {
             $w.install_native($w.protos.float, $sel, |_, self_, _| {
                 Ok(Value::Bool(self_.as_float().map_or(false, $pred)))
-            });
+            }).expect("install_native at boot — substrate bug");
         };
     }
     float_predicate!(w, "nan?",    |f: f64| f.is_nan());
@@ -1331,30 +1337,30 @@ fn install_cons_and_nil_primitives(w: &mut World) {
         })?;
         let car_sym = w.car_sym;
         Ok(w.form_slot(id, car_sym))
-    });
+    }).expect("install_native at boot — substrate bug");
     w.install_native(w.protos.cons, "cdr", |w, self_, _| {
         let id = self_.as_form_id().ok_or_else(|| {
             RaiseError::new(w.intern("type-error"), "cdr on non-Cons")
         })?;
         let cdr_sym = w.cdr_sym;
         Ok(w.form_slot(id, cdr_sym))
-    });
-    w.install_native(w.protos.cons, "cons:", make_cons_method);
-    w.install_native(w.protos.nil, "cons:", make_cons_method);
+    }).expect("install_native at boot — substrate bug");
+    w.install_native(w.protos.cons, "cons:", make_cons_method).expect("install_native at boot — substrate bug");
+    w.install_native(w.protos.nil, "cons:", make_cons_method).expect("install_native at boot — substrate bug");
 
     // empty? / null? / nonEmpty? — trivial constants. these get
     // shadowed by stdlib/cons.moof and stdlib/nil.moof's defmethods,
     // but they MUST exist before defmethod runs (used by
     // __decode-header / __decode-keyword on Cons or nil receivers).
-    w.install_native(w.protos.cons, "empty?", |_, _, _| Ok(Value::Bool(false)));
-    w.install_native(w.protos.cons, "null?", |_, _, _| Ok(Value::Bool(false)));
-    w.install_native(w.protos.cons, "nonEmpty?", |_, _, _| Ok(Value::Bool(true)));
-    w.install_native(w.protos.nil, "empty?", |_, _, _| Ok(Value::Bool(true)));
+    w.install_native(w.protos.cons, "empty?", |_, _, _| Ok(Value::Bool(false))).expect("install_native at boot — substrate bug");
+    w.install_native(w.protos.cons, "null?", |_, _, _| Ok(Value::Bool(false))).expect("install_native at boot — substrate bug");
+    w.install_native(w.protos.cons, "nonEmpty?", |_, _, _| Ok(Value::Bool(true))).expect("install_native at boot — substrate bug");
+    w.install_native(w.protos.nil, "empty?", |_, _, _| Ok(Value::Bool(true))).expect("install_native at boot — substrate bug");
 
     // nil's :proto returns nil itself — observationally a singleton.
     // without this override Object:proto returns the hidden
     // nil-proto-Form (substrate-level structure).
-    w.install_native(w.protos.nil, "proto", |_, _, _| Ok(Value::Nil));
+    w.install_native(w.protos.nil, "proto", |_, _, _| Ok(Value::Nil)).expect("install_native at boot — substrate bug");
 
     // :reverse — used by __decode-keyword on the params accumulator.
     // rust impl is a tight loop; stdlib/cons.moof shadows with
@@ -1365,7 +1371,7 @@ fn install_cons_and_nil_primitives(w: &mut World) {
             .map_err(|_| type_error(w, "reverse on non-Cons"))?;
         let rev: Vec<Value> = elems.into_iter().rev().collect();
         Ok(w.make_list(&rev))
-    });
+    }).expect("install_native at boot — substrate bug");
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1388,7 +1394,7 @@ fn install_heap_singleton(w: &mut World) {
     // immediates).
     w.install_native(proto, "protoOf:", |w, _self, args| {
         Ok(w.proto_of(args.first().copied().unwrap_or(Value::Nil)))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [Heap heapIdOf: v] — heap-id Int for Forms / Foreigns; 0 for
     // tagged immediates.
@@ -1398,7 +1404,7 @@ fn install_heap_singleton(w: &mut World) {
             Value::Foreign(id) => Ok(Value::Int(id.0 as i64)),
             _ => Ok(Value::Int(0)),
         }
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [Heap allocFormWithProto: p] — heap-alloc a fresh Form whose
     // proto is `p` (which must be a Form).
@@ -1411,7 +1417,7 @@ fn install_heap_singleton(w: &mut World) {
         let f = Form::with_proto(Value::Form(proto_id));
         let id = w.alloc(f);
         Ok(Value::Form(id))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [Heap slotOf: v at: 'name] — single-slot read.
     w.install_native(proto, "slotOf:at:", |w, _self, args| {
@@ -1423,7 +1429,7 @@ fn install_heap_singleton(w: &mut World) {
             Some(id) => Ok(w.form_slot(id, sym)),
             None => Ok(Value::Nil),
         }
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [Heap handlerOf: v at: 'sel] — single-handler read.
     w.install_native(proto, "handlerOf:at:", |w, _self, args| {
@@ -1435,7 +1441,7 @@ fn install_heap_singleton(w: &mut World) {
             Some(id) => Ok(w.form_handler(id, sel).unwrap_or(Value::Nil)),
             None => Ok(Value::Nil),
         }
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [Heap metaOf: v at: 'sym] — single-meta read.
     w.install_native(proto, "metaOf:at:", |w, _self, args| {
@@ -1447,7 +1453,7 @@ fn install_heap_singleton(w: &mut World) {
             Value::Form(id) => Ok(w.form_meta(id, sym)),
             _ => Ok(Value::Nil),
         }
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [Heap slotKeysOf: v] — Cons of slot keys (Symbols). nil for
     // tagged immediates without a singleton-Form. nursery-aware:
@@ -1469,7 +1475,7 @@ fn install_heap_singleton(w: &mut World) {
                     }
                     None => Ok(Value::Nil),
                 }
-            });
+            }).expect("install_native at boot — substrate bug");
         };
     }
     key_list_on_heap!(w, proto, "slotKeysOf:", form_slot_keys);
@@ -1481,8 +1487,10 @@ fn install_heap_singleton(w: &mut World) {
     let global = w.global_env;
     let name = w.intern("Heap");
     let name_meta = w.intern("name");
-    w.form_meta_set(proto, name_meta, Value::Sym(name));
-    w.env_bind(global, name, Value::Form(proto));
+    w.form_meta_set(proto, name_meta, Value::Sym(name))
+        .expect("form_meta_set at boot — substrate bug");
+    w.env_bind(global, name, Value::Form(proto))
+        .expect("env_bind at boot — substrate bug");
 
 }
 
@@ -1505,7 +1513,7 @@ fn install_chunks_singleton(w: &mut World) {
             return Ok(Value::Bool(w.chunk_ops.contains_key(&id)));
         }
         Ok(Value::Bool(false))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [Chunks paramsListOf: m] — Cons of param symbols. closures
     // store them on :params; chunks store on the chunk's :params
@@ -1524,7 +1532,7 @@ fn install_chunks_singleton(w: &mut World) {
             return Ok(w.form_slot(cid, w.params_sym));
         }
         Ok(Value::Nil)
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [Chunks constsListOf: m] — Cons of the chunk's constants.
     w.install_native(proto, "constsListOf:", |w, _self, args| {
@@ -1535,7 +1543,7 @@ fn install_chunks_singleton(w: &mut World) {
         };
         let consts = w.chunk_consts.get(&cid).cloned().unwrap_or_default();
         Ok(w.make_list(&consts))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [Chunks opsListOf: m] — Cons of opcode-Forms decoded from
     // the chunk. each Op enum variant becomes a Form via opcode_form.
@@ -1548,7 +1556,7 @@ fn install_chunks_singleton(w: &mut World) {
         let ops = w.chunk_ops.get(&cid).cloned().unwrap_or_default();
         let entries: Vec<Value> = ops.into_iter().map(|op| opcode_form(w, op)).collect();
         Ok(w.make_list(&entries))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [Chunks icsListOf: m] — Cons of IC snapshot Forms. each entry
     // is a small Form with `:cached-proto, :cached-method,
@@ -1591,7 +1599,7 @@ fn install_chunks_singleton(w: &mut World) {
             entries.push(Value::Form(w.alloc(form)));
         }
         Ok(w.make_list(&entries))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [Chunks bodyOf: m] — chunk-Form for a closure (via :body slot)
     // or self if m IS a chunk; nil otherwise.
@@ -1611,13 +1619,15 @@ fn install_chunks_singleton(w: &mut World) {
             return Ok(Value::Form(id));
         }
         Ok(Value::Nil)
-    });
+    }).expect("install_native at boot — substrate bug");
 
     let global = w.global_env;
     let name = w.intern("Chunks");
     let name_meta = w.intern("name");
-    w.form_meta_set(proto, name_meta, Value::Sym(name));
-    w.env_bind(global, name, Value::Form(proto));
+    w.form_meta_set(proto, name_meta, Value::Sym(name))
+        .expect("form_meta_set at boot — substrate bug");
+    w.env_bind(global, name, Value::Form(proto))
+        .expect("env_bind at boot — substrate bug");
 }
 
 fn install_object_reflection(w: &mut World) {
@@ -1633,13 +1643,13 @@ fn install_object_reflection(w: &mut World) {
     w.install_native(w.protos.object, "is", |_, self_, args| {
         // identity equality (same heap-id or same tagged-immediate).
         Ok(Value::Bool(self_ == args[0]))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // Object's `:=` is identity equality by default. specific protos
     // (Integer, Symbol, etc.) override with structural equality.
     w.install_native(w.protos.object, "=", |_, self_, args| {
         Ok(Value::Bool(self_ == args[0]))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     w.install_native(w.protos.object, "toString", |w, self_, _| {
         // default rendering: `<Form#N>` for heap forms; tagged
@@ -1671,13 +1681,13 @@ fn install_object_reflection(w: &mut World) {
             }
         };
         Ok(w.make_string(&text))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // :inspect and :!= are defmethods in stdlib/object.moof. :initialize
     // stays here because Object:new (above) sends :initialize to every
     // freshly allocated Form, including [Object new] in compiler/00-
     // helpers.moof which loads BEFORE stdlib/object.moof.
-    w.install_native(w.protos.object, "initialize", |_, self_, _| Ok(self_));
+    w.install_native(w.protos.object, "initialize", |_, self_, _| Ok(self_)).expect("install_native at boot — substrate bug");
 
     w.install_native(w.protos.object, "new", |w, self_, _args| {
         // (Proto :new) → fresh instance, then [self initialize].
@@ -1693,7 +1703,7 @@ fn install_object_reflection(w: &mut World) {
         let initialize = w.intern("initialize");
         w.send(instance, initialize, &[])?;
         Ok(instance)
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // default :initialize is a no-op. user protos override.
     // :initialize is defined in lib/bootstrap.moof as an identity
@@ -1716,7 +1726,7 @@ fn install_object_reflection(w: &mut World) {
                 ),
             ))
         },
-    );
+    ).expect("install_native at boot — substrate bug");
 }
 
 fn fmt_short(w: &World, v: Value) -> String {
@@ -1874,10 +1884,10 @@ fn install_console_proto_and_caps(w: &mut World) {
         };
         result.map_err(|e| RaiseError::new(w.intern("io-error"), e.to_string()))?;
         Ok(Value::Nil)
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // :close — phase A: no-op. phase B's mco wires up real fd cleanup.
-    w.install_native(console_proto, "close", |_, _, _| Ok(Value::Nil));
+    w.install_native(console_proto, "close", |_, _, _| Ok(Value::Nil)).expect("install_native at boot — substrate bug");
 
     // :next — Console is sink-only. raising lives here because we
     // don't yet expose a `raise` primitive to moof; phase B adds it
@@ -1887,7 +1897,7 @@ fn install_console_proto_and_caps(w: &mut World) {
             w.intern("not-supported"),
             ":next on a Console (write-only)",
         ))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // :say:, :show:, :done? are derived in lib/bootstrap.moof.
 
@@ -1902,15 +1912,18 @@ fn install_console_proto_and_caps(w: &mut World) {
     let global = w.global_env;
     let dollar_out = w.intern("$out");
     let dollar_err = w.intern("$err");
-    w.env_bind(global, dollar_out, Value::Form(out_id));
-    w.env_bind(global, dollar_err, Value::Form(err_id));
+    w.env_bind(global, dollar_out, Value::Form(out_id))
+        .expect("env_bind at boot — substrate bug");
+    w.env_bind(global, dollar_err, Value::Form(err_id))
+        .expect("env_bind at boot — substrate bug");
 
     // expose the proto by name so user code can subclass.
     // (`[Console new]` would yield a Console without an :fd slot;
     // `:emit:` would raise. real fd capture lands in phase A.9
     // when the mco loader exposes os-side primitives.)
     let console_name = w.intern("Console");
-    w.env_bind(global, console_name, Value::Form(console_proto));
+    w.env_bind(global, console_name, Value::Form(console_proto))
+        .expect("env_bind at boot — substrate bug");
 }
 
 fn install_compiler_cap(w: &mut World) {
@@ -1924,15 +1937,16 @@ fn install_compiler_cap(w: &mut World) {
     w.install_native(proto, "useMoof", |w, _self, _args| {
         w.use_moof_compiler = true;
         Ok(Value::Nil)
-    });
+    }).expect("install_native at boot — substrate bug");
     w.install_native(proto, "useSeed", |w, _self, _args| {
         w.use_moof_compiler = false;
         Ok(Value::Nil)
-    });
+    }).expect("install_native at boot — substrate bug");
 
     let global = w.global_env;
     let dollar = w.intern("$compiler");
-    w.env_bind(global, dollar, Value::Form(proto));
+    w.env_bind(global, dollar, Value::Form(proto))
+        .expect("env_bind at boot — substrate bug");
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -2119,7 +2133,7 @@ fn install_globals(w: &mut World) {
         let name = args[1].as_sym().ok_or_else(|| {
             RaiseError::new(w.intern("type-error"), "slot name must be a symbol")
         })?;
-        w.form_slot_set(id, name, args[2]);
+        w.form_slot_set(id, name, args[2])?;
         Ok(args[2])
     });
     // (metaSet! v 'name value) — analog of slotSet! for the meta
@@ -2136,7 +2150,7 @@ fn install_globals(w: &mut World) {
         let name = args[1].as_sym().ok_or_else(|| {
             type_error(w, "meta-set!: name must be a symbol")
         })?;
-        w.form_meta_set(id, name, args[2]);
+        w.form_meta_set(id, name, args[2])?;
         Ok(args[2])
     });
     // (globalEnv) — return the world's global env Form. used by
@@ -2184,7 +2198,7 @@ fn install_globals(w: &mut World) {
         form.meta.insert(name_meta, Value::Sym(name_sym));
         let new_id = w.alloc(form);
         let v = Value::Form(new_id);
-        w.env_bind(global, name_sym, v);
+        w.env_bind(global, name_sym, v)?;
         Ok(v)
     });
     // (set-handler! Proto 'sel fn) — moldable-substrate primitive.
@@ -2205,10 +2219,10 @@ fn install_globals(w: &mut World) {
         let sel = args[1].as_sym().ok_or_else(|| {
             RaiseError::new(w.intern("type-error"), "set-handler! selector must be a symbol")
         })?;
-        w.form_handler_set(proto_id, sel, args[2]);
+        w.form_handler_set(proto_id, sel, args[2])?;
         // bump generation so existing ICs invalidate.
         // (`docs/laws/substrate-laws.md` L10.)
-        w.bump_proto_generation(proto_id);
+        w.bump_proto_generation(proto_id)?;
         Ok(args[2])
     });
 
@@ -2312,43 +2326,43 @@ fn install_compiler_primitives(w: &mut World) {
             return Err(raise(w, "arity", "[Opcode pushNil] takes no args"));
         }
         Ok(mk_op_form(w, "PushNil", &[]))
-    });
+    }).expect("install_native at boot — substrate bug");
     w.install_native(opcode_proto, "pushTrue", |w, _self, args| {
         if !args.is_empty() {
             return Err(raise(w, "arity", "[Opcode pushTrue] takes no args"));
         }
         Ok(mk_op_form(w, "PushTrue", &[]))
-    });
+    }).expect("install_native at boot — substrate bug");
     w.install_native(opcode_proto, "pushFalse", |w, _self, args| {
         if !args.is_empty() {
             return Err(raise(w, "arity", "[Opcode pushFalse] takes no args"));
         }
         Ok(mk_op_form(w, "PushFalse", &[]))
-    });
+    }).expect("install_native at boot — substrate bug");
     w.install_native(opcode_proto, "pop", |w, _self, args| {
         if !args.is_empty() {
             return Err(raise(w, "arity", "[Opcode pop] takes no args"));
         }
         Ok(mk_op_form(w, "Pop", &[]))
-    });
+    }).expect("install_native at boot — substrate bug");
     w.install_native(opcode_proto, "dup", |w, _self, args| {
         if !args.is_empty() {
             return Err(raise(w, "arity", "[Opcode dup] takes no args"));
         }
         Ok(mk_op_form(w, "Dup", &[]))
-    });
+    }).expect("install_native at boot — substrate bug");
     w.install_native(opcode_proto, "loadSelf", |w, _self, args| {
         if !args.is_empty() {
             return Err(raise(w, "arity", "[Opcode loadSelf] takes no args"));
         }
         Ok(mk_op_form(w, "LoadSelf", &[]))
-    });
+    }).expect("install_native at boot — substrate bug");
     w.install_native(opcode_proto, "return", |w, _self, args| {
         if !args.is_empty() {
             return Err(raise(w, "arity", "[Opcode return] takes no args"));
         }
         Ok(mk_op_form(w, "Return", &[]))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // unary `[Opcode foo: x]` constructors.
     w.install_native(opcode_proto, "loadConst:", |w, _self, args| {
@@ -2356,19 +2370,19 @@ fn install_compiler_primitives(w: &mut World) {
             return Err(raise(w, "arity", "[Opcode loadConst: x] takes 1 arg"));
         }
         Ok(mk_op_form(w, "LoadConst", args))
-    });
+    }).expect("install_native at boot — substrate bug");
     w.install_native(opcode_proto, "loadName:", |w, _self, args| {
         if args.len() != 1 {
             return Err(raise(w, "arity", "[Opcode loadName: 'n] takes 1 arg"));
         }
         Ok(mk_op_form(w, "LoadName", args))
-    });
+    }).expect("install_native at boot — substrate bug");
     w.install_native(opcode_proto, "storeName:", |w, _self, args| {
         if args.len() != 1 {
             return Err(raise(w, "arity", "[Opcode storeName: 'n] takes 1 arg"));
         }
         Ok(mk_op_form(w, "StoreName", args))
-    });
+    }).expect("install_native at boot — substrate bug");
     w.install_native(opcode_proto, "defineGlobal:", |w, _self, args| {
         if args.len() != 1 {
             return Err(raise(
@@ -2378,7 +2392,7 @@ fn install_compiler_primitives(w: &mut World) {
             ));
         }
         Ok(mk_op_form(w, "DefineGlobal", args))
-    });
+    }).expect("install_native at boot — substrate bug");
     w.install_native(opcode_proto, "pushClosure:", |w, _self, args| {
         if args.len() != 1 {
             return Err(raise(
@@ -2388,13 +2402,13 @@ fn install_compiler_primitives(w: &mut World) {
             ));
         }
         Ok(mk_op_form(w, "PushClosure", args))
-    });
+    }).expect("install_native at boot — substrate bug");
     w.install_native(opcode_proto, "jump:", |w, _self, args| {
         if args.len() != 1 {
             return Err(raise(w, "arity", "[Opcode jump: o] takes 1 arg"));
         }
         Ok(mk_op_form(w, "Jump", args))
-    });
+    }).expect("install_native at boot — substrate bug");
     w.install_native(opcode_proto, "jumpIfFalse:", |w, _self, args| {
         if args.len() != 1 {
             return Err(raise(
@@ -2404,7 +2418,7 @@ fn install_compiler_primitives(w: &mut World) {
             ));
         }
         Ok(mk_op_form(w, "JumpIfFalse", args))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [Opcode send: 'sel argc: a ic: i]
     w.install_native(opcode_proto, "send:argc:ic:", |w, _self, args| {
@@ -2416,7 +2430,7 @@ fn install_compiler_primitives(w: &mut World) {
             ));
         }
         Ok(mk_op_form(w, "Send", args))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [Opcode tailSend: 'sel argc: a]
     w.install_native(opcode_proto, "tailSend:argc:", |w, _self, args| {
@@ -2428,7 +2442,7 @@ fn install_compiler_primitives(w: &mut World) {
             ));
         }
         Ok(mk_op_form(w, "TailSend", args))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [Opcode superSend: 'sel argc: a ic: i]
     w.install_native(opcode_proto, "superSend:argc:ic:", |w, _self, args| {
@@ -2440,7 +2454,7 @@ fn install_compiler_primitives(w: &mut World) {
             ));
         }
         Ok(mk_op_form(w, "SuperSend", args))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // ── chunk lifecycle — Chunk class-side and instance-side ─────
 
@@ -2476,7 +2490,7 @@ fn install_compiler_primitives(w: &mut World) {
         w.chunk_consts.insert(chunk_id, Vec::new());
         w.chunk_ics.insert(chunk_id, Vec::new());
         Ok(Value::Form(chunk_id))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [chunk emit: op-form] — append op; return its position.
     w.install_native(w.protos.chunk, "emit:", |w, self_, args| {
@@ -2489,7 +2503,7 @@ fn install_compiler_primitives(w: &mut World) {
         let pos = ops.len();
         ops.push(op);
         Ok(Value::Int(pos as i64))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [chunk addConst: value] — append; return its index.
     w.install_native(w.protos.chunk, "addConst:", |w, self_, args| {
@@ -2508,7 +2522,7 @@ fn install_compiler_primitives(w: &mut World) {
         }
         consts.push(args[0]);
         Ok(Value::Int(idx as i64))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [chunk addIc] — reserve an inline-cache slot; return idx.
     w.install_native(w.protos.chunk, "addIc", |w, self_, args| {
@@ -2527,7 +2541,7 @@ fn install_compiler_primitives(w: &mut World) {
         }
         ics.push(crate::world::ICache::default());
         Ok(Value::Int(idx as i64))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [chunk jumpTarget] — current ops length.
     w.install_native(w.protos.chunk, "jumpTarget", |w, self_, args| {
@@ -2536,7 +2550,7 @@ fn install_compiler_primitives(w: &mut World) {
         }
         let chunk_id = chunk_self(w, self_, "jumpTarget")?;
         Ok(Value::Int(w.chunk_ops[&chunk_id].len() as i64))
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [chunk patchJump: pos to: target] — overwrite the offset of the
     // jump already at `pos`. computes `target - pos` per the VM's
@@ -2593,7 +2607,7 @@ fn install_compiler_primitives(w: &mut World) {
         };
         w.chunk_ops.get_mut(&chunk_id).unwrap()[pos_idx] = new_op;
         Ok(Value::Nil)
-    });
+    }).expect("install_native at boot — substrate bug");
 
     // [chunk asClosure] — wrap the chunk in a Closure-Form ready to
     // call. captures the global env + nil self (top-level).
@@ -2614,7 +2628,7 @@ fn install_compiler_primitives(w: &mut World) {
             f.meta.insert(w.source_sym, source);
         }
         Ok(Value::Form(w.alloc(f)))
-    });
+    }).expect("install_native at boot — substrate bug");
 }
 
 /// allocate a global-dispatcher Form (proto: Method, native fn
@@ -2631,7 +2645,8 @@ fn install_global(w: &mut World, name: &str, native: NativeFn) {
         .insert(w.source_sym, Value::Sym(name_sym));
     w.native_fns.insert(id, native);
     let global = w.global_env;
-    w.env_bind(global, name_sym, Value::Form(id));
+    w.env_bind(global, name_sym, Value::Form(id))
+        .expect("env_bind at boot — substrate bug");
 }
 
 #[cfg(test)]

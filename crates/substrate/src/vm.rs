@@ -232,7 +232,7 @@ impl World {
             let name = param.as_sym().ok_or_else(|| {
                 RaiseError::new(self.intern("bad-param"), "param is not a symbol")
             })?;
-            self.env_bind(call_env, name, arg);
+            self.env_bind(call_env, name, arg)?;
         }
         run_method(self, chunk_id, call_env, self_v, defining_proto)
     }
@@ -374,11 +374,11 @@ fn step(world: &mut World) -> Result<(), RaiseError> {
             // mutual-recursion working.
             let v = pop(world)?;
             let env = world.vm.frames[frame_idx].env;
-            if !world.env_set(env, name, v) {
+            if !world.env_set(env, name, v)? {
                 // no existing binding anywhere — fall back to the
                 // global env. this matches the old behavior for
                 // `(set! …)` outside any let.
-                world.env_bind(world.global_env, name, v);
+                world.env_bind(world.global_env, name, v)?;
             }
             // stores leave nil — `(set! x v)` expressions evaluate to nil.
             world.vm.stack.push(Value::Nil);
@@ -386,7 +386,7 @@ fn step(world: &mut World) -> Result<(), RaiseError> {
         Op::DefineGlobal(name) => {
             let v = pop(world)?;
             let global = world.global_env;
-            world.env_bind(global, name, v);
+            world.env_bind(global, name, v)?;
             // (def …) evaluates to the symbol it bound — useful in
             // a repl, mostly nothing in batch.
             world.vm.stack.push(Value::Sym(name));
@@ -467,7 +467,7 @@ fn step(world: &mut World) -> Result<(), RaiseError> {
                 let name = param.as_sym().ok_or_else(|| {
                     RaiseError::new(world.intern("bad-param"), "param is not a symbol")
                 })?;
-                world.env_bind(call_env, name, arg);
+                world.env_bind(call_env, name, arg)?;
             }
             // truncate stack to the current frame's base — we
             // discard any leftover scratch from this frame's own
@@ -643,7 +643,7 @@ mod tests {
             let a = self_.as_int().unwrap();
             let b = args[0].as_int().unwrap();
             Ok(Value::Int(a + b))
-        });
+        }).expect("install_native in mutable test");
     }
 
     #[test]
@@ -664,7 +664,8 @@ mod tests {
         // install_native mutates handler/meta tables — wrap a turn.
         w.start_turn();
         // install a method on Object that integers should still hit.
-        w.install_native(w.protos.object, "echo", |_, self_, _| Ok(self_));
+        w.install_native(w.protos.object, "echo", |_, self_, _| Ok(self_))
+            .expect("install_native in mutable test");
         let _ = w.commit_turn();
         let echo = w.intern("echo");
         assert_eq!(w.send(Value::Int(42), echo, &[]).unwrap(), Value::Int(42));
@@ -694,7 +695,7 @@ mod tests {
             w.protos.object,
             "doesNotUnderstand:with:",
             |_, _self_, args| Ok(args[0]),
-        );
+        ).expect("install_native in mutable test");
         let _ = w.commit_turn();
         let mystery = w.intern("mystery-selector");
         let r = w.send(Value::Int(5), mystery, &[Value::Int(99)]).unwrap();
