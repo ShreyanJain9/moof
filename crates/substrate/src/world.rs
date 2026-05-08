@@ -1073,8 +1073,9 @@ impl World {
     /// `live_protos`. used by `freeze` to refuse vat-Forms /
     /// mailbox-Forms / DataSource handles / cap-tokens.
     pub fn is_live(&self, id: FormId) -> bool {
+        const MAX_PROTO_DEPTH: usize = 256;
         let mut cur = Value::Form(id);
-        loop {
+        for _ in 0..MAX_PROTO_DEPTH {
             match cur {
                 Value::Form(fid) => {
                     if self.live_protos.contains(&fid) {
@@ -1085,6 +1086,11 @@ impl World {
                 _ => return false,
             }
         }
+        // depth-exceeded — conservative "not live"; pathological
+        // proto chains are a rust-side bug, not a substrate-policy
+        // signal. mirrors the discipline of `lookup_handler` /
+        // `lookup_handler_super` in this file.
+        false
     }
 
     /// query "can this form be frozen?" — `true` iff the form is
@@ -1094,6 +1100,14 @@ impl World {
         !self.is_frozen(id) && !self.is_live(id)
     }
 
+    /// freeze a form — set its `frozen` bit, journaling through the
+    /// nursery as a turn-mutation. one-way; there is no thaw.
+    /// raises `'cannot-freeze-live` (FormId in `data`) if the form's
+    /// proto chain crosses any registered `live_protos` proto
+    /// (vat-Forms, mailbox-Forms, cap-tokens). idempotent:
+    /// already-frozen forms return `Ok(())` without re-checking
+    /// liveness — so a form frozen long ago whose chain has since
+    /// crossed a live proto doesn't suddenly start raising.
     pub fn freeze(&mut self, id: FormId) -> Result<(), RaiseError> {
         assert!(self.in_turn, "freeze called outside a turn");
         // already frozen — idempotent no-op (also avoids a bogus
@@ -1113,8 +1127,11 @@ impl World {
             return Err(err);
         }
         if id.payload() >= self.turn_watermark {
+            // new alloc — write directly to canonical (analogous to
+            // form_*_set's fast path for above-watermark forms).
             self.heap.get_mut(id).frozen = true;
         } else {
+            // pre-existing — buffer in the nursery delta.
             self.nursery_deltas
                 .entry(id)
                 .or_default()
