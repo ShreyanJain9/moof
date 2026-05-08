@@ -38,6 +38,12 @@ pub struct Delta {
     pub slots: IndexMap<SymId, Value>,
     pub handlers: IndexMap<SymId, Value>,
     pub meta: IndexMap<SymId, Value>,
+
+    /// V2 — has this turn frozen the corresponding form? one-way
+    /// false→true within a turn. on commit, OR'd into the
+    /// canonical `Form.frozen`. on abort, dropped with the rest
+    /// of the delta.
+    pub frozen: bool,
 }
 
 impl Delta {
@@ -85,6 +91,15 @@ impl Delta {
 pub struct TurnDiff {
     pub mutations: IndexMap<(FormId, FaceKind, SymId), (Value, Value)>,
     pub new_allocs: Vec<FormId>,
+
+    /// V2 — pre-existing forms whose `frozen` bit transitioned
+    /// false→true during this turn. forms that were both allocated
+    /// AND frozen in the same turn (e.g. born-frozen via `:new` in
+    /// FrozenByDefault mode) appear in `new_allocs` but NOT here:
+    /// the new-alloc list already implies their final state, and
+    /// consumers only need a separate signal for transitions on
+    /// already-canonical forms.
+    pub freezings: Vec<FormId>,
 }
 
 #[cfg(test)]
@@ -171,5 +186,17 @@ mod tests {
         assert_ne!(FaceKind::Slots, FaceKind::Handlers);
         assert_ne!(FaceKind::Handlers, FaceKind::Meta);
         assert_ne!(FaceKind::Slots, FaceKind::Meta);
+    }
+
+    #[test]
+    fn delta_default_unfrozen() {
+        let d = Delta::default();
+        assert!(!d.frozen);
+    }
+
+    #[test]
+    fn turn_diff_default_has_empty_freezings() {
+        let td = TurnDiff::default();
+        assert!(td.freezings.is_empty());
     }
 }
