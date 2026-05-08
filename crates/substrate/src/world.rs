@@ -22,6 +22,8 @@
 //! `ForeignHandle` slot values, but the moof interface
 //! (`[m bytecodes]`, etc.) stays the same.
 
+use std::collections::HashSet;
+
 use indexmap::IndexMap;
 
 use crate::foreign::ForeignTable;
@@ -242,6 +244,15 @@ pub struct World {
     /// one active turn at a time.
     pub in_turn: bool,
 
+    /// V2 — protos whose forms refuse `world.freeze` and raise
+    /// `'cannot-freeze-live`. liveness is a property of the proto
+    /// chain (vat-Forms have Vat proto, mailbox-Forms have Mailbox
+    /// proto, etc.) — `world.freeze` walks the chain and refuses
+    /// if any ancestor is in this set. populated at boot in
+    /// `intrinsics.rs::install` with cap-bearing protos. V4+ phases
+    /// add Vat / Mailbox / DataSource protos.
+    pub live_protos: HashSet<FormId>,
+
     // cached SymIds for hot paths.
     pub car_sym: SymId,
     pub cdr_sym: SymId,
@@ -310,6 +321,7 @@ impl World {
             nursery_deltas: IndexMap::new(),
             turn_watermark: 0,
             in_turn: false,
+            live_protos: HashSet::new(),
             car_sym,
             cdr_sym,
             body_sym,
@@ -1056,24 +1068,53 @@ impl World {
         false
     }
 
-    /// freeze a form — set its `frozen` bit, journaling through
-    /// the nursery as a turn-mutation. one-way; there is no thaw.
-    /// V2 task-4 lands the bit-setting and journal handling;
-    /// V2 task-5 adds the live-proto refusal that raises
-    /// `'cannot-freeze-live` when the form's proto chain crosses
-    /// `World.live_protos`. for now, this method always succeeds.
+    /// query liveness — walks the proto chain from `id` upward
+    /// and returns `true` if any ancestor proto is in
+    /// `live_protos`. used by `freeze` to refuse vat-Forms /
+    /// mailbox-Forms / DataSource handles / cap-tokens.
+    pub fn is_live(&self, id: FormId) -> bool {
+        let mut cur = Value::Form(id);
+        loop {
+            match cur {
+                Value::Form(fid) => {
+                    if self.live_protos.contains(&fid) {
+                        return true;
+                    }
+                    cur = self.heap.get(fid).proto;
+                }
+                _ => return false,
+            }
+        }
+    }
+
+    /// query "can this form be frozen?" — `true` iff the form is
+    /// neither already frozen nor live. lets policy code branch
+    /// without try / raise / catch.
+    pub fn freezable(&self, id: FormId) -> bool {
+        !self.is_frozen(id) && !self.is_live(id)
+    }
+
     pub fn freeze(&mut self, id: FormId) -> Result<(), RaiseError> {
         assert!(self.in_turn, "freeze called outside a turn");
-        // already frozen — idempotent no-op.
+        // already frozen — idempotent no-op (also avoids a bogus
+        // 'cannot-freeze-live raise on a form that's already frozen
+        // and happens to inherit from a now-mutable proto).
         if self.is_frozen(id) {
             return Ok(());
         }
+        // V2 task-5: refuse forms whose proto chain hits live_protos.
+        if self.is_live(id) {
+            let kind = self.intern("cannot-freeze-live");
+            let mut err = RaiseError::new(
+                kind,
+                "cannot freeze form: proto chain includes a live (mutable-by-design) proto",
+            );
+            err.data = Value::Form(id);
+            return Err(err);
+        }
         if id.payload() >= self.turn_watermark {
-            // new alloc — write directly to canonical (analogous to
-            // form_*_set's fast path for above-watermark forms).
             self.heap.get_mut(id).frozen = true;
         } else {
-            // pre-existing — buffer in the nursery delta.
             self.nursery_deltas
                 .entry(id)
                 .or_default()
@@ -1989,5 +2030,72 @@ mod tests {
         let diff = w.commit_turn();
         assert!(diff.new_allocs.contains(&id));
         assert!(!diff.freezings.contains(&id));
+    }
+
+    #[test]
+    fn is_live_returns_false_for_unregistered_proto() {
+        let mut w = World::new();
+        let id = w.heap.alloc(Form::with_proto(Value::Form(w.protos.object)));
+        assert!(!w.is_live(id));
+    }
+
+    #[test]
+    fn is_live_returns_true_when_proto_in_live_set() {
+        let mut w = World::new();
+        let custom = w.heap.alloc(Form::default());
+        w.live_protos.insert(custom);
+        let inst = w.heap.alloc(Form::with_proto(Value::Form(custom)));
+        assert!(w.is_live(inst));
+    }
+
+    #[test]
+    fn is_live_walks_proto_chain() {
+        let mut w = World::new();
+        let live = w.heap.alloc(Form::default());
+        w.live_protos.insert(live);
+        // intermediate proto inherits from `live`.
+        let mid = w.heap.alloc(Form::with_proto(Value::Form(live)));
+        let inst = w.heap.alloc(Form::with_proto(Value::Form(mid)));
+        assert!(w.is_live(inst));
+    }
+
+    #[test]
+    fn freezable_unfrozen_unlive_returns_true() {
+        let mut w = World::new();
+        let id = w.heap.alloc(Form::with_proto(Value::Form(w.protos.object)));
+        assert!(w.freezable(id));
+    }
+
+    #[test]
+    fn freezable_frozen_returns_false() {
+        let mut w = World::new();
+        let id = w.heap.alloc(Form::default());
+        w.heap.get_mut(id).frozen = true;
+        assert!(!w.freezable(id));
+    }
+
+    #[test]
+    fn freezable_live_returns_false() {
+        let mut w = World::new();
+        let live = w.heap.alloc(Form::default());
+        w.live_protos.insert(live);
+        let inst = w.heap.alloc(Form::with_proto(Value::Form(live)));
+        assert!(!w.freezable(inst));
+    }
+
+    #[test]
+    fn freeze_on_live_proto_raises_cannot_freeze_live() {
+        let mut w = World::new();
+        let live = w.heap.alloc(Form::default());
+        w.live_protos.insert(live);
+        let inst = w.heap.alloc(Form::with_proto(Value::Form(live)));
+        w.start_turn();
+        let r = w.freeze(inst);
+        assert!(r.is_err());
+        let err = r.unwrap_err();
+        assert_eq!(w.resolve(err.kind), "cannot-freeze-live");
+        // FormId of the offending form travels in `data`.
+        assert_eq!(err.data, Value::Form(inst));
+        w.abort_turn();
     }
 }
