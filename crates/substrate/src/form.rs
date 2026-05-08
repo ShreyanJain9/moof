@@ -131,6 +131,13 @@ pub struct Form {
     /// metadata: source-loc, doc, journal-id, type, etc.
     /// extensible by user code (`laws/reflection-contract.md` R7).
     pub meta: IndexMap<SymId, Value>,
+
+    /// V2 — freezing. once `true`, `World::form_slot_set` /
+    /// `form_handler_set` / `form_meta_set` raise `'frozen-form` on
+    /// any write to this form's slots/handlers/meta. one-way
+    /// (no thaw). transition itself is a turn-mutation: journals
+    /// via the nursery, rolls back on abort.
+    pub frozen: bool,
 }
 
 impl Form {
@@ -141,6 +148,7 @@ impl Form {
             slots: IndexMap::new(),
             handlers: IndexMap::new(),
             meta: IndexMap::new(),
+            frozen: false,
         }
     }
 
@@ -325,5 +333,17 @@ mod tests {
     #[should_panic(expected = "payload exceeds 30-bit limit")]
     fn far_ref_constructor_panics_on_overflow() {
         let _ = FormId::far_ref(MAX_PAYLOAD);
+    }
+
+    #[test]
+    fn form_default_is_unfrozen() {
+        let f = Form::default();
+        assert!(!f.frozen);
+    }
+
+    #[test]
+    fn form_with_proto_is_unfrozen() {
+        let f = Form::with_proto(Value::Nil);
+        assert!(!f.frozen);
     }
 }
