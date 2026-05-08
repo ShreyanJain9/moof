@@ -115,9 +115,22 @@ impl World {
             .and_then(|ics| ics.get(ic_idx as usize))
             .copied()
             .unwrap_or_default();
+        // when the cached handler came from a singleton (tagged-
+        // immediate per-instance state, e.g. #true's :toString), we
+        // must also verify the receiver's effective singleton matches
+        // — otherwise we'd hand Bool(true)'s :toString to Bool(false).
+        // for handlers from the proto chain (cached_singleton ==
+        // NONE), the proto+generation check is sufficient because
+        // proto handlers are shared across all instances of that proto.
+        let singleton_ok = if cached.cached_singleton.is_none() {
+            true
+        } else {
+            self.effective_form_id(receiver) == Some(cached.cached_singleton)
+        };
         if !cached.cached_proto.is_none()
             && cached.cached_proto == receiver_proto
             && cached.cached_generation == self.proto_generation(receiver_proto)
+            && singleton_ok
         {
             // cache hit — invoke the cached method directly with the
             // cached defining-proto so super-sends in the body
@@ -144,12 +157,23 @@ impl World {
                 // mutable borrow can't co-exist with proto_generation's
                 // heap borrow).
                 let gen = self.proto_generation(receiver_proto);
+                // if the handler was found on the receiver's own
+                // singleton (per-instance state), record the singleton
+                // so the IC hit-check can distinguish Bool(true) from
+                // Bool(false) etc. for proto-chain handlers, leave
+                // cached_singleton as NONE so the cache shares freely
+                // across instances of the same proto.
+                let cached_singleton = match self.effective_form_id(receiver) {
+                    Some(eff) if eff == defining => eff,
+                    _ => FormId::NONE,
+                };
                 if let Some(ics) = self.chunk_ics.get_mut(&chunk) {
                     if let Some(slot) = ics.get_mut(ic_idx as usize) {
                         slot.cached_proto = receiver_proto;
                         slot.cached_method = method;
                         slot.cached_defining = defining;
                         slot.cached_generation = gen;
+                        slot.cached_singleton = cached_singleton;
                     }
                 }
                 self.vm.last_send_sel = Some(selector);

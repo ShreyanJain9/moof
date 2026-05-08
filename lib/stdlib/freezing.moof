@@ -1,0 +1,53 @@
+;; lib/stdlib/freezing.moof
+;;
+;; V2 — moof-side helpers for deep-freezing.
+;;
+;; the substrate exposes :freeze (one form), :frozen? (query), and
+;; :freezable? (= not(live or already-frozen)). this module wraps
+;; them in a transitive walk with sensible defaults.
+;;
+;; cycle policy: stop at already-frozen forms (cycles + idempotency).
+;; we freeze self before recursing, so a back-edge to self short-
+;; circuits on the first :frozen? check.
+;;
+;; boundary policy: stop at live forms silently (vats / mailboxes /
+;; DataSources / cap-tokens). the user's data graph terminates at
+;; the live boundary without raising.
+
+;; parameterized core. faces is a Cons of face symbols, e.g.
+;; '(slots), '(slots handlers), '(slots handlers meta).
+;; user-extensible.
+(defmethod Object (freezeRecursiveWalking: faces)
+  ;; cycle / idempotency check first; live-boundary check second.
+  (if [self frozen?]
+      self
+      (if [[self freezable?] not]
+          ;; live boundary — silent skip.
+          self
+          (do
+            [self freeze]
+            [faces forEach:
+              (fn (face)
+                (if [face is 'slots]
+                    [[Heap slotKeysOf: self] forEach:
+                      (fn (k) [[Heap slotOf: self at: k] freezeRecursiveWalking: faces])]
+                (if [face is 'handlers]
+                    [[Heap handlerKeysOf: self] forEach:
+                      (fn (k) [[Heap handlerOf: self at: k] freezeRecursiveWalking: faces])]
+                (if [face is 'meta]
+                    [[Heap metaKeysOf: self] forEach:
+                      (fn (k) [[Heap metaOf: self at: k] freezeRecursiveWalking: faces])]
+                    (raise: 'unknown-face "freezeRecursiveWalking: unknown face symbol")))))]
+            self))))
+
+;; named convenience variants.
+
+;; default: slots only — the OOP "freeze my data tree" intent.
+(defmethod Object (freezeRecursive)
+  [self freezeRecursiveWalking: '(slots)])
+
+;; slots + handlers — pure-ML-y mode. seals behavior too.
+;; what you reach for when freezing the output of a parser-vat
+;; or sealing a computation kernel's protos.
+(defmethod Object (freezeRecursiveSealed)
+  [self freezeRecursiveWalking: '(slots handlers)])

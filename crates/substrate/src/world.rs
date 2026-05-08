@@ -88,6 +88,14 @@ pub struct ICache {
     pub cached_defining: FormId,
     /// the proto's generation at the time of caching.
     pub cached_generation: u32,
+    /// when the handler was found on a singleton (per-instance for
+    /// tagged immediates like Bool(true) vs Bool(false)), this is
+    /// that singleton's FormId; the IC hit must check
+    /// `effective_form_id(receiver) == cached_singleton` so we don't
+    /// re-use Bool(true)'s `:toString` for Bool(false). FormId::NONE
+    /// when the handler came from the proto chain (safe to share
+    /// across all instances of the same proto).
+    pub cached_singleton: FormId,
 }
 
 /// a raised error — propagated up the call stack until caught.

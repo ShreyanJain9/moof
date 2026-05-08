@@ -40,8 +40,9 @@
 [$transporter load: "stdlib/bool.moof"]
 [$transporter load: "stdlib/nil.moof"]
 [$transporter load: "stdlib/cons.moof"]
-;; can cascade here though!! 
-[$transporter load: "stdlib/integer.moof" ;
+;; can cascade here though!!
+[$transporter load: "stdlib/freezing.moof" ;
+              load: "stdlib/integer.moof" ;
               load: "stdlib/float.moof" ;
               load: "stdlib/string.moof" ;
               load: "stdlib/char.moof" ;
