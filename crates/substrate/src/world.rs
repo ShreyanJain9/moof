@@ -1152,6 +1152,15 @@ impl World {
             self.in_turn,
             "form_slot_set called outside a turn"
         );
+        // V2 task-7 — frozen guard. raise immediately at call site
+        // per spec §4. FormId travels in `data` for diagnostic /
+        // pattern-match use.
+        if self.is_frozen(id) {
+            let kind = self.intern("frozen-form");
+            let mut err = RaiseError::new(kind, "mutation on frozen form (slots)");
+            err.data = Value::Form(id);
+            return Err(err);
+        }
         if id.payload() >= self.turn_watermark {
             // new alloc — write directly to canonical.
             self.heap.get_mut(id).slots.insert(key, value);
@@ -1173,6 +1182,15 @@ impl World {
             self.in_turn,
             "form_handler_set called outside a turn"
         );
+        // V2 task-7 — frozen guard. raise immediately at call site
+        // per spec §4. FormId travels in `data` for diagnostic /
+        // pattern-match use.
+        if self.is_frozen(id) {
+            let kind = self.intern("frozen-form");
+            let mut err = RaiseError::new(kind, "mutation on frozen form (handlers)");
+            err.data = Value::Form(id);
+            return Err(err);
+        }
         if id.payload() >= self.turn_watermark {
             self.heap.get_mut(id).handlers.insert(key, value);
         } else {
@@ -1192,6 +1210,15 @@ impl World {
             self.in_turn,
             "form_meta_set called outside a turn"
         );
+        // V2 task-7 — frozen guard. raise immediately at call site
+        // per spec §4. FormId travels in `data` for diagnostic /
+        // pattern-match use.
+        if self.is_frozen(id) {
+            let kind = self.intern("frozen-form");
+            let mut err = RaiseError::new(kind, "mutation on frozen form (meta)");
+            err.data = Value::Form(id);
+            return Err(err);
+        }
         if id.payload() >= self.turn_watermark {
             self.heap.get_mut(id).meta.insert(key, value);
         } else {
@@ -2117,5 +2144,83 @@ mod tests {
         // FormId of the offending form travels in `data`.
         assert_eq!(err.data, Value::Form(inst));
         w.abort_turn();
+    }
+
+    #[test]
+    fn frozen_slot_set_raises_frozen_form() {
+        let mut w = World::new();
+        let id = w.heap.alloc(Form::default());
+        w.start_turn();
+        w.freeze(id).unwrap();
+        let key = w.intern("x");
+        let r = w.form_slot_set(id, key, Value::Int(42));
+        assert!(r.is_err());
+        let err = r.unwrap_err();
+        assert_eq!(w.resolve(err.kind), "frozen-form");
+        assert_eq!(err.data, Value::Form(id));
+        let _ = w.commit_turn();
+    }
+
+    #[test]
+    fn frozen_handler_set_raises_frozen_form() {
+        let mut w = World::new();
+        let id = w.heap.alloc(Form::default());
+        w.start_turn();
+        w.freeze(id).unwrap();
+        let sel = w.intern("foo:");
+        let r = w.form_handler_set(id, sel, Value::Nil);
+        assert!(r.is_err());
+        assert_eq!(w.resolve(r.unwrap_err().kind), "frozen-form");
+        let _ = w.commit_turn();
+    }
+
+    #[test]
+    fn frozen_meta_set_raises_frozen_form() {
+        let mut w = World::new();
+        let id = w.heap.alloc(Form::default());
+        w.start_turn();
+        w.freeze(id).unwrap();
+        let k = w.intern("source");
+        let r = w.form_meta_set(id, k, Value::Nil);
+        assert!(r.is_err());
+        assert_eq!(w.resolve(r.unwrap_err().kind), "frozen-form");
+        let _ = w.commit_turn();
+    }
+
+    #[test]
+    fn same_turn_freeze_then_mutate_raises_immediately() {
+        let mut w = World::new();
+        let id = w.heap.alloc(Form::default());
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        w.freeze(id).unwrap();
+        let key = w.intern("x");
+        // before commit, mid-turn — already raises.
+        let r = w.form_slot_set(id, key, Value::Int(1));
+        assert!(r.is_err());
+        w.abort_turn();
+        // after abort, the freeze is gone — mutation works again.
+        w.start_turn();
+        w.form_slot_set(id, key, Value::Int(1)).unwrap();
+        let _ = w.commit_turn();
+        assert_eq!(w.heap.get(id).slot(key), Value::Int(1));
+    }
+
+    #[test]
+    fn frozen_form_in_turn_then_abort_can_mutate_after() {
+        let mut w = World::new();
+        let id = w.heap.alloc(Form::default());
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        w.freeze(id).unwrap();
+        w.abort_turn();   // freeze rolled back
+        // canonical was never frozen.
+        assert!(!w.heap.get(id).frozen);
+        w.start_turn();
+        let key = w.intern("x");
+        let r = w.form_slot_set(id, key, Value::Int(7));
+        assert!(r.is_ok());
+        let _ = w.commit_turn();
+        assert_eq!(w.heap.get(id).slot(key), Value::Int(7));
     }
 }
