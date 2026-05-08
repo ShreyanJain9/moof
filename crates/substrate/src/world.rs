@@ -1082,6 +1082,55 @@ impl World {
         }
     }
 
+    /// list slot keys for a form, nursery-aware. union of canonical's
+    /// slot keys and the nursery delta's slot keys (during a turn,
+    /// for pre-existing forms only). preserves insertion order:
+    /// canonical first, then delta keys not already in canonical
+    /// (D5 determinism).
+    pub fn form_slot_keys(&self, id: FormId) -> Vec<SymId> {
+        let mut keys: Vec<SymId> = self.heap.get(id).slots.keys().copied().collect();
+        if self.in_turn && id.payload() < self.turn_watermark {
+            if let Some(delta) = self.nursery_deltas.get(&id) {
+                for k in delta.slots.keys() {
+                    if !keys.contains(k) {
+                        keys.push(*k);
+                    }
+                }
+            }
+        }
+        keys
+    }
+
+    /// handler keys, nursery-aware. analogous to `form_slot_keys`.
+    pub fn form_handler_keys(&self, id: FormId) -> Vec<SymId> {
+        let mut keys: Vec<SymId> = self.heap.get(id).handlers.keys().copied().collect();
+        if self.in_turn && id.payload() < self.turn_watermark {
+            if let Some(delta) = self.nursery_deltas.get(&id) {
+                for k in delta.handlers.keys() {
+                    if !keys.contains(k) {
+                        keys.push(*k);
+                    }
+                }
+            }
+        }
+        keys
+    }
+
+    /// meta keys, nursery-aware. analogous to `form_slot_keys`.
+    pub fn form_meta_keys(&self, id: FormId) -> Vec<SymId> {
+        let mut keys: Vec<SymId> = self.heap.get(id).meta.keys().copied().collect();
+        if self.in_turn && id.payload() < self.turn_watermark {
+            if let Some(delta) = self.nursery_deltas.get(&id) {
+                for k in delta.meta.keys() {
+                    if !keys.contains(k) {
+                        keys.push(*k);
+                    }
+                }
+            }
+        }
+        keys
+    }
+
     /// look up a handler by walking the proto chain. returns the
     /// (method-Form, defining-proto-FormId) pair, or `None` if no
     /// handler is found before the chain bottoms out.
@@ -1527,6 +1576,63 @@ mod tests {
         d.meta.insert(SymId(7), Value::Int(77));
         w.nursery_deltas.insert(id, d);
         assert_eq!(w.form_meta(id, SymId(7)), Value::Int(77));
+        w.abort_turn();
+    }
+
+    #[test]
+    fn form_slot_keys_unions_canonical_and_delta() {
+        let mut w = World::new();
+        let mut f = Form::default();
+        f.slots.insert(SymId(1), Value::Int(10));
+        f.slots.insert(SymId(2), Value::Int(20));
+        let id = w.heap.alloc(f);
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        // delta adds key 3 and overwrites key 2.
+        let mut d = Delta::default();
+        d.slots.insert(SymId(3), Value::Int(30));
+        d.slots.insert(SymId(2), Value::Int(99));
+        w.nursery_deltas.insert(id, d);
+        let keys = w.form_slot_keys(id);
+        // canonical keys 1, 2 first; then delta's new key 3.
+        // key 2 is in canonical so no duplicate from delta.
+        assert_eq!(keys, vec![SymId(1), SymId(2), SymId(3)]);
+        w.abort_turn();
+    }
+
+    #[test]
+    fn form_handler_keys_unions_canonical_and_delta() {
+        let mut w = World::new();
+        let mut f = Form::default();
+        f.handlers.insert(SymId(1), Value::Int(10));
+        f.handlers.insert(SymId(2), Value::Int(20));
+        let id = w.heap.alloc(f);
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        let mut d = Delta::default();
+        d.handlers.insert(SymId(3), Value::Int(30));
+        d.handlers.insert(SymId(2), Value::Int(99));
+        w.nursery_deltas.insert(id, d);
+        let keys = w.form_handler_keys(id);
+        assert_eq!(keys, vec![SymId(1), SymId(2), SymId(3)]);
+        w.abort_turn();
+    }
+
+    #[test]
+    fn form_meta_keys_unions_canonical_and_delta() {
+        let mut w = World::new();
+        let mut f = Form::default();
+        f.meta.insert(SymId(1), Value::Int(10));
+        f.meta.insert(SymId(2), Value::Int(20));
+        let id = w.heap.alloc(f);
+        w.turn_watermark = w.heap.len() as u32;
+        w.start_turn();
+        let mut d = Delta::default();
+        d.meta.insert(SymId(3), Value::Int(30));
+        d.meta.insert(SymId(2), Value::Int(99));
+        w.nursery_deltas.insert(id, d);
+        let keys = w.form_meta_keys(id);
+        assert_eq!(keys, vec![SymId(1), SymId(2), SymId(3)]);
         w.abort_turn();
     }
 

@@ -1450,19 +1450,20 @@ fn install_heap_singleton(w: &mut World) {
     });
 
     // [Heap slotKeysOf: v] — Cons of slot keys (Symbols). nil for
-    // tagged immediates without a singleton-Form.
+    // tagged immediates without a singleton-Form. nursery-aware:
+    // unions canonical keys with delta keys during an active turn
+    // for pre-existing forms (so in-turn writes show up in
+    // reflection without waiting for commit).
     macro_rules! key_list_on_heap {
-        ($w:expr, $proto:expr, $sel:literal, $field:ident) => {
+        ($w:expr, $proto:expr, $sel:literal, $keys_method:ident) => {
             $w.install_native($proto, $sel, |w, _self, args| {
                 let v = args.first().copied().unwrap_or(Value::Nil);
                 match w.effective_form_id(v) {
                     Some(id) => {
                         let keys: Vec<Value> = w
-                            .heap
-                            .get(id)
-                            .$field
-                            .keys()
-                            .map(|s| Value::Sym(*s))
+                            .$keys_method(id)
+                            .into_iter()
+                            .map(Value::Sym)
                             .collect();
                         Ok(w.make_list(&keys))
                     }
@@ -1471,9 +1472,9 @@ fn install_heap_singleton(w: &mut World) {
             });
         };
     }
-    key_list_on_heap!(w, proto, "slotKeysOf:", slots);
-    key_list_on_heap!(w, proto, "handlerKeysOf:", handlers);
-    key_list_on_heap!(w, proto, "metaKeysOf:", meta);
+    key_list_on_heap!(w, proto, "slotKeysOf:", form_slot_keys);
+    key_list_on_heap!(w, proto, "handlerKeysOf:", form_handler_keys);
+    key_list_on_heap!(w, proto, "metaKeysOf:", form_meta_keys);
 
     // bind globally as `Heap`. capitalized like Compiler / Match —
     // module-style, not primordial cap (no `$`).
