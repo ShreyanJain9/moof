@@ -100,6 +100,7 @@ pub fn install(w: &mut World) {
     install_compiler_primitives(w);
     install_proto_globals(w);
     install_env_proto_methods(w);
+    install_closure_proto_methods(w);
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1169,6 +1170,41 @@ fn install_env_proto_methods(w: &mut World) {
         })?;
         Ok(Value::Form(env))
     }).expect("install_native :current at boot — substrate bug");
+}
+
+// ─────────────────────────────────────────────────────────────────
+// V3 Closure proto methods — :callIn:withSelf:. the irreducible
+// "run closure body with explicit env+self" primitive. used by
+// Object:eval: (lib/stdlib/object.moof, task 14) and future
+// vau / fexpr (V8). bypasses the closure's own :env slot — caller
+// specifies scope explicitly. per
+// docs/superpowers/plans/2026-05-09-vat-V3-here-form.md task 6.
+// ─────────────────────────────────────────────────────────────────
+
+fn install_closure_proto_methods(w: &mut World) {
+    // [closure callIn: env withSelf: self] — run the closure's body
+    // chunk with `env` as the frame env and `self` as the receiver.
+    // ignores the closure's stored :env slot (which :call would use
+    // for lexical scope). defining_proto is FormId::NONE because
+    // this isn't a method dispatch — super-sends from within will
+    // raise the usual "no defining proto" error.
+    w.install_native(w.protos.closure, "callIn:withSelf:", |w, self_, args| {
+        let closure_id = self_.as_form_id().ok_or_else(|| {
+            type_error(w, ":callIn:withSelf: on non-closure")
+        })?;
+        if args.len() != 2 {
+            return Err(raise(w, "arity", ":callIn:withSelf: expects 2 args (env, self)"));
+        }
+        let call_env = args[0].as_form_id().ok_or_else(|| {
+            type_error(w, ":callIn: requires a Form env")
+        })?;
+        let new_self = args[1];
+        let body_v = w.form_slot(closure_id, w.body_sym);
+        let chunk_id = body_v.as_form_id().ok_or_else(|| {
+            type_error(w, "closure has no :body chunk")
+        })?;
+        crate::vm::run_method(w, chunk_id, call_env, new_self, FormId::NONE)
+    }).expect("install_native :callIn:withSelf: at boot — substrate bug");
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -3584,5 +3620,45 @@ mod tests {
         let mut w = fresh();
         let r = ev(&mut w, "[Env current]").unwrap();
         assert!(r.as_form_id().is_some(), "[Env current] should return a Form");
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // V3 Closure proto methods — :callIn:withSelf:. the irreducible
+    // "run body with explicit env+self" primitive. covers the
+    // dispatch path; underlying vm::run_method is exercised by
+    // every method invocation already.
+    // ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn closure_call_in_with_self_runs_body_with_explicit_env() {
+        // (fn () x) — body is a single LoadName(x). normally walks
+        // its captured env (the global, where x is unbound). via
+        // :callIn:withSelf: we hand it a fresh env where x is bound,
+        // and the body resolves x against THAT env, not the captured
+        // one. proves the env-override path works end-to-end.
+        let mut w = crate::new_world();
+        let closure_v = crate::eval(&mut w, "(fn () x)").unwrap();
+
+        let x_sym = w.intern("x");
+
+        // env_a: x = 10. parent → here_form (so other globals still
+        // resolve, though the body doesn't need them here).
+        let env_a = w.alloc_env(Some(w.here_form));
+        w.start_turn();
+        w.form_slot_set(env_a, x_sym, Value::Int(10)).unwrap();
+        let _ = w.commit_turn();
+
+        // env_b: x = 20.
+        let env_b = w.alloc_env(Some(w.here_form));
+        w.start_turn();
+        w.form_slot_set(env_b, x_sym, Value::Int(20)).unwrap();
+        let _ = w.commit_turn();
+
+        let call_in_sym = w.intern("callIn:withSelf:");
+        let r1 = w.send(closure_v, call_in_sym, &[Value::Form(env_a), Value::Nil]).unwrap();
+        assert_eq!(r1, Value::Int(10));
+
+        let r2 = w.send(closure_v, call_in_sym, &[Value::Form(env_b), Value::Nil]).unwrap();
+        assert_eq!(r2, Value::Int(20));
     }
 }

@@ -329,7 +329,13 @@ impl World {
 ///
 /// pushes a fresh frame, runs the loop until *that* frame returns,
 /// pops the result.
-fn run_method(
+///
+/// `pub(crate)` so substrate-internal natives (e.g.
+/// `Closure :callIn:withSelf:` in `intrinsics.rs`) can dispatch a
+/// chunk against an explicit env + self without going through
+/// `World::invoke`'s param-binding path. external callers should
+/// still go through `World::send` / `World::run_top`.
+pub(crate) fn run_method(
     world: &mut World,
     chunk: FormId,
     env: FormId,
