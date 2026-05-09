@@ -35,7 +35,9 @@
 ;; ─────────────────────────────────────────────────────────────────
 ;; compileDef:chunk:
 ;;
-;; (def name expr)        — single binding: eval expr, DefineGlobal.
+;; (def name expr)        — single binding: emit Send-based bytecode
+;;                          equivalent to (do [$here bind: 'name to:
+;;                          expr] 'name). V3: no Op::DefineGlobal.
 ;; (def name |p| b |p| b…) — multi-clause: reroute to `defn` macro.
 ;; ─────────────────────────────────────────────────────────────────
 
@@ -72,9 +74,18 @@
         (let ((name [Heap slotOf: rest at: 'car])
               (rhs [Heap slotOf: [Heap slotOf: rest at: 'cdr] at: 'car]))
           (if [self symbol?: name]
+              ;; V3: emit Send-based bytecode equivalent to
+              ;;   (do [$here bind: 'name to: rhs] 'name)
+              ;; LoadName $here → LoadConst 'name → <rhs> →
+              ;; Send :bind:to: argc=2 → Pop → LoadConst 'name.
               (do
+                [chunk emit: [Opcode loadName: '$here]]
+                [chunk emit: [Opcode loadConst: [chunk addConst: name]]]
                 [self compileForm: rhs chunk: chunk tail: #false]
-                [chunk emit: [Opcode defineGlobal: name]])
+                (let ((ic [chunk addIc]))
+                  [chunk emit: [Opcode send: 'bind:to: argc: 2 ic: ic]])
+                [chunk emit: [Opcode pop]]
+                [chunk emit: [Opcode loadConst: [chunk addConst: name]]])
               (raise: 'compile-error "def first arg must be a symbol"))))))
 
 ;; ─────────────────────────────────────────────────────────────────

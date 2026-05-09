@@ -374,10 +374,14 @@ impl<'a> Compiler<'a> {
     }
 
     fn compile_def(&mut self, elems: &[Value]) -> Result<(), RaiseError> {
-        // single-binding: (def name expr).
-        // multi-clause defs are a moof-side concern — `defn` macro
-        // and `compile-def`'s detect-and-reroute. the seed never
-        // sees those because compiler.moof uses only single-binding.
+        // V3: (def name value) compiles to Send-based bytecode equivalent
+        // to (do [$here bind: 'name to: value] 'name). Op::DefineGlobal is
+        // no longer emitted — the only path to env_bind on $here is now
+        // method dispatch on Env's :bind:to:.
+        //
+        // single-binding only: multi-clause defs are a moof-side concern
+        // (`defn` macro + compileDef:'s detect-and-reroute). the seed
+        // never sees those because compiler.moof uses only single-binding.
         if elems.len() != 3 {
             return Err(self.err(
                 "seed compiler: def requires 2 args (multi-clause is moof-only)",
@@ -386,8 +390,29 @@ impl<'a> Compiler<'a> {
         let name = elems[1]
             .as_sym()
             .ok_or_else(|| self.err("def's first arg must be a symbol"))?;
+        let here_sym = self.world.intern("$here");
+        let bind_to_sym = self.world.intern("bind:to:");
+
+        // LoadName $here  (push receiver)
+        self.emit(Op::LoadName(here_sym));
+        // LoadConst 'name  (push first arg — the symbol)
+        let name_const = self.add_const(Value::Sym(name));
+        self.emit(Op::LoadConst(name_const));
+        // compile rhs  (push second arg — the value)
+        // NOTE: use compile_expr (not compile_form) — the rhs may be
+        // any expression, including a literal like Value::Int(42).
         self.compile_expr(elems[2], false)?;
-        self.emit(Op::DefineGlobal(name));
+        // Send :bind:to: arity=2  (pops receiver + 2 args, pushes result)
+        let ic_idx = self.next_ic();
+        self.emit(Op::Send {
+            selector: bind_to_sym,
+            argc: 2,
+            ic_idx,
+        });
+        // discard bind result (the value); push 'name as def's return value
+        self.emit(Op::Pop);
+        let name_const2 = self.add_const(Value::Sym(name));
+        self.emit(Op::LoadConst(name_const2));
         Ok(())
     }
 
@@ -559,6 +584,34 @@ mod tests {
         if !was_in_turn { let _ = w.commit_turn(); }
     }
 
+    /// V3 — the seed `compile_def` now emits `LoadName $here` +
+    /// `Send :bind:to: argc=2`. tests using `World::new()` directly
+    /// (which skips `intrinsics::install`) must wire up just enough:
+    /// bind `$here` self-referentially and install `Env :bind:to:`.
+    /// matches what `intrinsics::install_proto_globals` and
+    /// `install_env_proto_methods` do for V3 def to work.
+    fn install_def_prereqs(w: &mut World) {
+        let was_in_turn = w.in_turn();
+        if !was_in_turn { w.start_turn(); }
+        // bind $here self-referentially in the global env.
+        let here_sym = w.intern("$here");
+        w.env_bind(w.here_form, here_sym, Value::Form(w.here_form))
+            .expect("env_bind in mutable test");
+        // install Env's :bind:to: so the Send dispatches.
+        // matches `intrinsics::install_env_proto_methods`'s impl:
+        // form_slot_set on self, return the bound value.
+        w.install_native(w.protos.env, "bind:to:", |world, self_, args| {
+            let env_id = self_.as_form_id()
+                .ok_or_else(|| RaiseError::new(world.intern("type-error"), ":bind:to: receiver must be a Form"))?;
+            let name = args.first().copied().and_then(Value::as_sym)
+                .ok_or_else(|| RaiseError::new(world.intern("type-error"), ":bind:to: name must be a Symbol"))?;
+            let value = args.get(1).copied().unwrap_or(Value::Nil);
+            world.form_slot_set(env_id, name, value)?;
+            Ok(value)
+        }).expect("install_native in mutable test");
+        if !was_in_turn { let _ = w.commit_turn(); }
+    }
+
     fn ev(w: &mut World, src: &str) -> Result<Value, RaiseError> {
         // route through crate::eval so read+compile+run_top all run
         // inside an implicit turn (the moof-side compiler dispatches
@@ -575,6 +628,9 @@ mod tests {
     #[test]
     fn compile_def_then_lookup() {
         let mut w = World::new();
+        // V3: (def x 5) lowers to Send :bind:to: on $here.
+        // wire up the prereqs (since World::new() skips intrinsics).
+        install_def_prereqs(&mut w);
         // (def x 5) goes through the seed compiler — and at the
         // moof-compiler flag-on path, `compile` itself dispatches
         // sends that mutate. wrap a turn around the manual
@@ -651,6 +707,7 @@ mod tests {
     fn compile_fn_and_call() {
         let mut w = World::new();
         install_closure_call(&mut w);
+        install_def_prereqs(&mut w);
         // wrap manual compile + run_top in a turn (compile may send-
         // dispatch via the moof-compiler path, which mutates).
         w.start_turn();
@@ -667,6 +724,7 @@ mod tests {
         let mut w = World::new();
         install_arith(&mut w);
         install_closure_call(&mut w);
+        install_def_prereqs(&mut w);
         let src = "(def make-add (fn (n) (fn (x) (let ((y x)) y))))";
         // wrap manual compile + run_top in a turn.
         w.start_turn();
@@ -716,6 +774,7 @@ mod tests {
         // arithmetic to avoid unbound `=` etc.
         let mut w = World::new();
         install_closure_call(&mut w);
+        install_def_prereqs(&mut w);
         // wrap manual compile + run_top in a turn.
         w.start_turn();
         let f = w.read("(def f (fn (n) (if n n 'done)))").unwrap();
