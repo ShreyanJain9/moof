@@ -1067,6 +1067,13 @@ fn install_proto_globals(w: &mut World) {
         .expect("env_bind at boot — substrate bug");
     w.form_meta_set(macros_id, name_meta, Value::Sym(macros_sym))
         .expect("form_meta_set at boot — substrate bug");
+
+    // V3 — bind $here as a self-reference to the here_form.
+    // moof code reaches the global env via this binding; reflection
+    // (e.g. [Heap slotKeysOf: $here]) lists path-bound names.
+    let here_sym = w.intern("$here");
+    w.env_bind(w.here_form, here_sym, Value::Form(w.here_form))
+        .expect("env_bind at boot — substrate bug");
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -2930,6 +2937,14 @@ mod tests {
         let mut w = fresh();
         let r = ev(&mut w, "[42 inspect]").unwrap();
         assert_eq!(w.string_text(r).unwrap(), "42");
+    }
+
+    #[test]
+    fn here_is_bound_to_self() {
+        let mut w = crate::new_world_bare();
+        let here_sym = w.intern("$here");
+        let here_v = w.env_lookup(w.here_form, here_sym);
+        assert_eq!(here_v, Some(Value::Form(w.here_form)));
     }
 
     #[test]
