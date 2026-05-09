@@ -99,6 +99,7 @@ pub fn install(w: &mut World) {
     install_globals(w);
     install_compiler_primitives(w);
     install_proto_globals(w);
+    install_env_proto_methods(w);
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1074,6 +1075,100 @@ fn install_proto_globals(w: &mut World) {
     let here_sym = w.intern("$here");
     w.env_bind(w.here_form, here_sym, Value::Form(w.here_form))
         .expect("env_bind at boot — substrate bug");
+}
+
+// ─────────────────────────────────────────────────────────────────
+// V3 Env proto methods — :bind:to:, :set:to:, :lookup:, :parent,
+// :current. wraps the existing world env_* APIs so moof code can
+// reach the env layer through ordinary message-send. used by the
+// def / set! macros and (eventually) fexpr-style metaprogramming.
+// per docs/superpowers/plans/2026-05-09-vat-V3-here-form.md task 5.
+// ─────────────────────────────────────────────────────────────────
+
+fn install_env_proto_methods(w: &mut World) {
+    let env_proto = w.protos.env;
+
+    // [env bind: 'name to: value] — non-walking bind. writes
+    // name → value in self's slots only. returns the bound value
+    // so callers can chain (matches V3 spec §4.1).
+    w.install_native(env_proto, "bind:to:", |w, self_, args| {
+        let env = self_.as_form_id().ok_or_else(|| {
+            type_error(w, ":bind:to: receiver must be an Env Form")
+        })?;
+        let name = args
+            .first()
+            .copied()
+            .and_then(Value::as_sym)
+            .ok_or_else(|| type_error(w, ":bind:to: name must be a Symbol"))?;
+        let value = args.get(1).copied().unwrap_or(Value::Nil);
+        w.form_slot_set(env, name, value)?;
+        Ok(value)
+    }).expect("install_native :bind:to: at boot — substrate bug");
+
+    // [env set: 'name to: value] — walks the parent chain (and
+    // consults view-target). raises 'unbound on miss instead of
+    // silently falling through (V3 tightens the V1 footgun).
+    // returns the value on success.
+    w.install_native(env_proto, "set:to:", |w, self_, args| {
+        let env = self_.as_form_id().ok_or_else(|| {
+            type_error(w, ":set:to: receiver must be an Env Form")
+        })?;
+        let name = args
+            .first()
+            .copied()
+            .and_then(Value::as_sym)
+            .ok_or_else(|| type_error(w, ":set:to: name must be a Symbol"))?;
+        let value = args.get(1).copied().unwrap_or(Value::Nil);
+        let found = w.env_set(env, name, value)?;
+        if !found {
+            let msg = format!("set!: '{} is unbound", w.resolve(name));
+            return Err(raise(w, "unbound", msg));
+        }
+        Ok(value)
+    }).expect("install_native :set:to: at boot — substrate bug");
+
+    // [env lookup: 'name] — walks chain (with view-target
+    // consultation). returns Nil on miss (caller-friendly default;
+    // ':set:to:' is the strict variant).
+    w.install_native(env_proto, "lookup:", |w, self_, args| {
+        let env = self_.as_form_id().ok_or_else(|| {
+            type_error(w, ":lookup: receiver must be an Env Form")
+        })?;
+        let name = args
+            .first()
+            .copied()
+            .and_then(Value::as_sym)
+            .ok_or_else(|| type_error(w, ":lookup: name must be a Symbol"))?;
+        Ok(w.env_lookup(env, name).unwrap_or(Value::Nil))
+    }).expect("install_native :lookup: at boot — substrate bug");
+
+    // [env parent] — convenience accessor for `[env :meta at:
+    // 'parent]`. returns the parent env Form, or Nil at chain root.
+    w.install_native(env_proto, "parent", |w, self_, _args| {
+        let env = self_.as_form_id().ok_or_else(|| {
+            type_error(w, ":parent receiver must be a Form")
+        })?;
+        let parent_sym = w.parent_sym;
+        Ok(w.form_meta(env, parent_sym))
+    }).expect("install_native :parent at boot — substrate bug");
+
+    // [Env current] — class-method-style. returns the LIVE current
+    // frame's env (i.e., the caller's lexical env). receiver is
+    // ignored: [Env current], [$here current], or any env-receiver
+    // all return the same thing. natives don't push a VM frame
+    // (verified at vm.rs:258), so frames.last().env IS the caller's
+    // env. used by the future set! macro to find lexical scope at
+    // the call site.
+    w.install_native(env_proto, "current", |w, _self_, _args| {
+        let env = w.vm.frames.last().map(|f| f.env).ok_or_else(|| {
+            raise(
+                w,
+                "env-out-of-scope",
+                "[Env current] called outside any active method dispatch",
+            )
+        })?;
+        Ok(Value::Form(env))
+    }).expect("install_native :current at boot — substrate bug");
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -3434,5 +3529,60 @@ mod tests {
         assert!(w.env_lookup(w.here_form, dollar_out).is_some());
         assert!(w.env_lookup(w.here_form, dollar_err).is_some());
         assert!(w.env_lookup(w.here_form, dollar_x).is_none());
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // V3 Env proto methods — :bind:to:, :set:to:, :lookup:, :parent,
+    // :current. dispatch-level coverage; the underlying world env_*
+    // APIs are tested directly in world.rs.
+    // ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn env_bind_to_via_dispatch() {
+        let mut w = fresh();
+        let r = ev(&mut w, "[$here bind: 'newGlobal to: 42]").unwrap();
+        assert_eq!(r, Value::Int(42));
+        let r2 = ev(&mut w, "newGlobal").unwrap();
+        assert_eq!(r2, Value::Int(42));
+    }
+
+    #[test]
+    fn env_set_to_walks_chain_and_returns_value() {
+        let mut w = fresh();
+        ev(&mut w, "[$here bind: 'x to: 1]").unwrap();
+        let r = ev(&mut w, "[$here set: 'x to: 99]").unwrap();
+        assert_eq!(r, Value::Int(99));
+        let r2 = ev(&mut w, "x").unwrap();
+        assert_eq!(r2, Value::Int(99));
+    }
+
+    #[test]
+    fn env_set_to_raises_unbound_when_not_in_chain() {
+        let mut w = fresh();
+        let r = ev(&mut w, "[$here set: 'definitelyNotBound to: 5]");
+        assert!(r.is_err());
+        let err = r.unwrap_err();
+        assert_eq!(w.resolve(err.kind), "unbound");
+    }
+
+    #[test]
+    fn env_lookup_returns_nil_on_miss() {
+        let mut w = fresh();
+        let r = ev(&mut w, "[$here lookup: 'definitelyNotBound]").unwrap();
+        assert_eq!(r, Value::Nil);
+    }
+
+    #[test]
+    fn env_parent_returns_nil_at_root() {
+        let mut w = fresh();
+        let r = ev(&mut w, "[$here parent]").unwrap();
+        assert_eq!(r, Value::Nil);
+    }
+
+    #[test]
+    fn env_current_returns_caller_env() {
+        let mut w = fresh();
+        let r = ev(&mut w, "[Env current]").unwrap();
+        assert!(r.as_form_id().is_some(), "[Env current] should return a Form");
     }
 }
