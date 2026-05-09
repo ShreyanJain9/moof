@@ -290,6 +290,12 @@ pub struct World {
     pub bytes_sym: SymId,
     pub rep_sym: SymId,
     pub generation_sym: SymId,
+    /// V3 — meta key recognized by `env_lookup` and `env_set`.
+    /// when an env-Form has `:meta at: 'view-target` set to another
+    /// Form, the walker also consults that Form's slots after its
+    /// own. used by `Object:eval:` to splice an obj's slots into
+    /// the lookup chain without mutating obj.
+    pub view_target_sym: SymId,
 }
 
 impl World {
@@ -323,6 +329,7 @@ impl World {
         let bytes_sym = syms.intern("bytes");
         let rep_sym = syms.intern("rep");
         let generation_sym = syms.intern("generation");
+        let view_target_sym = syms.intern("view-target");
 
         let mut world = World {
             heap,
@@ -359,6 +366,7 @@ impl World {
             bytes_sym,
             rep_sym,
             generation_sym,
+            view_target_sym,
         };
 
         // boot turn auto-commit: all allocations during World::new
@@ -623,6 +631,28 @@ impl World {
             let f = self.heap.get(cur);
             if let Some(v) = f.slots.get(&name).copied() {
                 return Some(v);
+            }
+            // V3 — view-target consultation. forms with
+            // :meta at: 'view-target = Some(Form(target)) get
+            // their lookup chain extended through target's slots
+            // (one level — does not recurse into target's parent
+            // chain). used by Object:eval: for live forwarding.
+            if let Some(target_v) = f.meta.get(&self.view_target_sym).copied() {
+                if let Some(target_id) = target_v.as_form_id() {
+                    // also consult target's nursery delta if in-turn —
+                    // delta first to mirror the env-walker's own ordering.
+                    if self.in_turn && target_id.payload() < self.turn_watermark {
+                        if let Some(delta) = self.nursery_deltas.get(&target_id) {
+                            if let Some(v) = delta.slots.get(&name).copied() {
+                                return Some(v);
+                            }
+                        }
+                    }
+                    let tf = self.heap.get(target_id);
+                    if let Some(v) = tf.slots.get(&name).copied() {
+                        return Some(v);
+                    }
+                }
             }
             // walk parent — nursery-aware via form_meta.
             let parent = self.form_meta(cur, self.parent_sym);
@@ -1486,6 +1516,52 @@ mod tests {
         assert_eq!(w.env_lookup(inner, x), Some(Value::Int(20)));
         assert_eq!(w.env_lookup(outer, x), Some(Value::Int(10)));
         let _ = w.commit_turn();
+    }
+
+    #[test]
+    fn env_lookup_consults_view_target_after_own_slots() {
+        let mut w = World::new();
+        // alloc a "viewed-into" form (e.g. an obj with slots)
+        let obj_form = w.alloc(Form::default());
+        let foo = w.intern("foo");
+        let val = Value::Int(42);
+        // bind 'foo on obj via direct heap (test setup; bypasses turn machinery)
+        w.heap.get_mut(obj_form).slots.insert(foo, val);
+
+        // alloc an env with view-target = obj
+        let env = w.alloc_env(None);
+        w.heap.get_mut(env).meta.insert(w.view_target_sym, Value::Form(obj_form));
+
+        // lookup 'foo in env: env's own slots are empty, but view-target hits.
+        assert_eq!(w.env_lookup(env, foo), Some(val));
+    }
+
+    #[test]
+    fn env_lookup_own_slots_shadow_view_target() {
+        let mut w = World::new();
+        let obj_form = w.alloc(Form::default());
+        let foo = w.intern("foo");
+        // obj has foo → 1
+        w.heap.get_mut(obj_form).slots.insert(foo, Value::Int(1));
+
+        let env = w.alloc_env(None);
+        // env has foo → 2 in its own slots
+        w.heap.get_mut(env).slots.insert(foo, Value::Int(2));
+        // env's view-target is obj
+        w.heap.get_mut(env).meta.insert(w.view_target_sym, Value::Form(obj_form));
+
+        // env's own foo (2) wins over view-target's foo (1)
+        assert_eq!(w.env_lookup(env, foo), Some(Value::Int(2)));
+    }
+
+    #[test]
+    fn env_lookup_without_view_target_unchanged() {
+        // regression: pre-V3 behavior preserved when view-target meta absent.
+        let mut w = World::new();
+        let env = w.alloc_env(None);
+        let foo = w.intern("foo");
+        w.heap.get_mut(env).slots.insert(foo, Value::Int(7));
+        assert_eq!(w.env_lookup(env, foo), Some(Value::Int(7)));
     }
 
     #[test]
