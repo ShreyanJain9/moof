@@ -637,21 +637,22 @@ impl World {
             // their lookup chain extended through target's slots
             // (one level — does not recurse into target's parent
             // chain). used by Object:eval: for live forwarding.
-            if let Some(target_v) = f.meta.get(&self.view_target_sym).copied() {
-                if let Some(target_id) = target_v.as_form_id() {
-                    // also consult target's nursery delta if in-turn —
-                    // delta first to mirror the env-walker's own ordering.
-                    if self.in_turn && target_id.payload() < self.turn_watermark {
-                        if let Some(delta) = self.nursery_deltas.get(&target_id) {
-                            if let Some(v) = delta.slots.get(&name).copied() {
-                                return Some(v);
-                            }
+            // use the delta-aware accessor so view-target set
+            // mid-turn via form_meta_set is observed.
+            let target_v = self.form_meta(cur, self.view_target_sym);
+            if let Some(target_id) = target_v.as_form_id() {
+                // delta first, then canonical — mirrors the
+                // env-walker's own ordering at the top of this loop.
+                if self.in_turn && target_id.payload() < self.turn_watermark {
+                    if let Some(delta) = self.nursery_deltas.get(&target_id) {
+                        if let Some(v) = delta.slots.get(&name).copied() {
+                            return Some(v);
                         }
                     }
-                    let tf = self.heap.get(target_id);
-                    if let Some(v) = tf.slots.get(&name).copied() {
-                        return Some(v);
-                    }
+                }
+                let tf = self.heap.get(target_id);
+                if let Some(v) = tf.slots.get(&name).copied() {
+                    return Some(v);
                 }
             }
             // walk parent — nursery-aware via form_meta.
@@ -1562,6 +1563,42 @@ mod tests {
         let foo = w.intern("foo");
         w.heap.get_mut(env).slots.insert(foo, Value::Int(7));
         assert_eq!(w.env_lookup(env, foo), Some(Value::Int(7)));
+    }
+
+    #[test]
+    fn env_lookup_view_target_consults_target_delta_during_turn() {
+        // verifies the in-turn nursery-delta consultation. setup
+        // pre-existing env + obj outside a turn; mutate inside a
+        // turn; assert lookup reads the delta value, not the canonical.
+        let mut w = World::new();
+        let obj_form = w.alloc(Form::default());
+        let foo = w.intern("foo");
+        // canonical pre-turn slot value
+        w.heap.get_mut(obj_form).slots.insert(foo, Value::Int(1));
+
+        let env = w.alloc_env(None);
+        // canonical pre-turn meta — view-target = obj
+        w.heap.get_mut(env).meta.insert(w.view_target_sym, Value::Form(obj_form));
+
+        // bump turn_watermark past these allocs so they count as
+        // "pre-existing" — only commit_turn advances the watermark.
+        w.start_turn();
+        let _ = w.commit_turn();
+
+        // start a turn and mutate obj.foo via form_slot_set (writes to delta)
+        w.start_turn();
+        w.form_slot_set(obj_form, foo, Value::Int(99)).unwrap();
+
+        // sanity: canonical still reads 1 (mutation is in delta).
+        assert_eq!(w.heap.get(obj_form).slots.get(&foo).copied(), Some(Value::Int(1)));
+
+        // lookup BEFORE commit_turn — should read the delta (99), not canonical (1)
+        assert_eq!(w.env_lookup(env, foo), Some(Value::Int(99)));
+
+        // tidy: commit so we don't leak turn state across tests
+        let _ = w.commit_turn();
+        // after commit, canonical reflects the value
+        assert_eq!(w.env_lookup(env, foo), Some(Value::Int(99)));
     }
 
     #[test]
