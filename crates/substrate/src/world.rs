@@ -698,6 +698,22 @@ impl World {
                 self.form_slot_set(cur, name, value)?;
                 return Ok(true);
             }
+            // V3 — view-target consultation. if this env has
+            // :meta at: 'view-target = Some(Form(target)) AND target
+            // has 'name bound, write through to target LIVE.
+            let target_v = self.form_meta(cur, self.view_target_sym);
+            if let Some(target_id) = target_v.as_form_id() {
+                let bound_in_target_delta = self
+                    .nursery_deltas
+                    .get(&target_id)
+                    .map(|d| d.slots.contains_key(&name))
+                    .unwrap_or(false);
+                let bound_in_target_canonical = self.heap.get(target_id).slots.contains_key(&name);
+                if bound_in_target_delta || bound_in_target_canonical {
+                    self.form_slot_set(target_id, name, value)?;
+                    return Ok(true);
+                }
+            }
             // walk parent — nursery-aware.
             let parent = self.form_meta(cur, self.parent_sym);
             match parent {
@@ -1599,6 +1615,49 @@ mod tests {
         let _ = w.commit_turn();
         // after commit, canonical reflects the value
         assert_eq!(w.env_lookup(env, foo), Some(Value::Int(99)));
+    }
+
+    #[test]
+    fn env_set_writes_to_view_target_when_name_found_there() {
+        let mut w = World::new();
+        let obj_form = w.alloc(Form::default());
+        let foo = w.intern("foo");
+        // obj.foo = 1 (initial)
+        w.heap.get_mut(obj_form).slots.insert(foo, Value::Int(1));
+
+        // env: own slots empty, view-target = obj
+        let env = w.alloc_env(None);
+        w.heap.get_mut(env).meta.insert(w.view_target_sym, Value::Form(obj_form));
+
+        // env_set walks chain. env.slots doesn't have 'foo, but
+        // view-target does. mutation writes through to obj LIVE.
+        w.start_turn();
+        let found = w.env_set(env, foo, Value::Int(99)).unwrap();
+        let _ = w.commit_turn();
+        assert!(found, "env_set should report found");
+        // verify the LIVE mutation: obj.foo is now 99
+        assert_eq!(w.heap.get(obj_form).slot(foo), Value::Int(99));
+        // env's own slots are still empty
+        assert!(w.heap.get(env).slots.get(&foo).is_none());
+    }
+
+    #[test]
+    fn env_set_own_slots_take_priority_over_view_target() {
+        let mut w = World::new();
+        let obj_form = w.alloc(Form::default());
+        let foo = w.intern("foo");
+        w.heap.get_mut(obj_form).slots.insert(foo, Value::Int(1));
+
+        let env = w.alloc_env(None);
+        w.heap.get_mut(env).slots.insert(foo, Value::Int(2));
+        w.heap.get_mut(env).meta.insert(w.view_target_sym, Value::Form(obj_form));
+
+        w.start_turn();
+        w.env_set(env, foo, Value::Int(99)).unwrap();
+        let _ = w.commit_turn();
+        // env's own foo updated; obj's foo unchanged
+        assert_eq!(w.heap.get(env).slot(foo), Value::Int(99));
+        assert_eq!(w.heap.get(obj_form).slot(foo), Value::Int(1));
     }
 
     #[test]
