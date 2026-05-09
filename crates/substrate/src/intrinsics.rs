@@ -636,7 +636,7 @@ fn chunk_id_of(world: &World, value: Value) -> Option<crate::form::FormId> {
 /// dispatch nicely.
 fn ensure_opcode_proto(world: &mut World) -> crate::form::FormId {
     let name_sym = world.intern("Opcode");
-    let global = world.global_env;
+    let global = world.here_form;
     if let Some(existing) = world.env_lookup(global, name_sym) {
         if let Some(id) = existing.as_form_id() {
             return id;
@@ -1047,7 +1047,7 @@ fn install_proto_globals(w: &mut World) {
         ("ForeignHandle", w.protos.foreign),
         ("Frame", w.protos.frame),
     ];
-    let global = w.global_env;
+    let global = w.here_form;
     let name_meta = w.intern("name");
     for (name, id) in bindings {
         let s = w.intern(name);
@@ -1492,7 +1492,7 @@ fn install_heap_singleton(w: &mut World) {
 
     // bind globally as `Heap`. capitalized like Compiler / Match —
     // module-style, not primordial cap (no `$`).
-    let global = w.global_env;
+    let global = w.here_form;
     let name = w.intern("Heap");
     let name_meta = w.intern("name");
     w.form_meta_set(proto, name_meta, Value::Sym(name))
@@ -1629,7 +1629,7 @@ fn install_chunks_singleton(w: &mut World) {
         Ok(Value::Nil)
     }).expect("install_native at boot — substrate bug");
 
-    let global = w.global_env;
+    let global = w.here_form;
     let name = w.intern("Chunks");
     let name_meta = w.intern("name");
     w.form_meta_set(proto, name_meta, Value::Sym(name))
@@ -1968,7 +1968,7 @@ fn install_console_proto_and_caps(w: &mut World) {
     let out_id = make_primordial_console(w, console_proto, ConsoleTarget::Stdout);
     let err_id = make_primordial_console(w, console_proto, ConsoleTarget::Stderr);
 
-    let global = w.global_env;
+    let global = w.here_form;
     let dollar_out = w.intern("$out");
     let dollar_err = w.intern("$err");
     w.env_bind(global, dollar_out, Value::Form(out_id))
@@ -2002,7 +2002,7 @@ fn install_compiler_cap(w: &mut World) {
         Ok(Value::Nil)
     }).expect("install_native at boot — substrate bug");
 
-    let global = w.global_env;
+    let global = w.here_form;
     let dollar = w.intern("$compiler");
     w.env_bind(global, dollar, Value::Form(proto))
         .expect("env_bind at boot — substrate bug");
@@ -2221,7 +2221,7 @@ fn install_globals(w: &mut World) {
         if !args.is_empty() {
             return Err(raise(w, "arity", "(globalEnv) takes no args"));
         }
-        Ok(Value::Form(w.global_env))
+        Ok(Value::Form(w.here_form))
     });
     // (getOrCreateProto 'Name Parent) — defproto's reopen helper.
     // - if Name is already bound in the global env to a Form,
@@ -2245,7 +2245,7 @@ fn install_globals(w: &mut World) {
                 "getOrCreateProto: name must be a symbol",
             )
         })?;
-        let global = w.global_env;
+        let global = w.here_form;
         if let Some(existing) = w.env_lookup(global, name_sym) {
             if existing.as_form_id().is_some() {
                 return Ok(existing);
@@ -2677,7 +2677,7 @@ fn install_compiler_primitives(w: &mut World) {
         let chunk_id = chunk_self(w, self_, "asClosure")?;
         let mut f = Form::with_proto(Value::Form(w.protos.closure));
         f.slots.insert(w.body_sym, Value::Form(chunk_id));
-        f.slots.insert(w.env_sym, Value::Form(w.global_env));
+        f.slots.insert(w.env_sym, Value::Form(w.here_form));
         let captured_self_sym = w.intern("captured-self");
         f.slots.insert(captured_self_sym, Value::Nil);
         let params = w.form_slot(chunk_id, w.params_sym);
@@ -2703,7 +2703,7 @@ fn install_global(w: &mut World, name: &str, native: NativeFn) {
         .meta
         .insert(w.source_sym, Value::Sym(name_sym));
     w.native_fns.insert(id, native);
-    let global = w.global_env;
+    let global = w.here_form;
     w.env_bind(global, name_sym, Value::Form(id))
         .expect("env_bind at boot — substrate bug");
 }
@@ -2933,10 +2933,10 @@ mod tests {
     }
 
     #[test]
-    fn out_cap_is_bound_in_global_env() {
+    fn out_cap_is_bound_in_here_form() {
         let mut w = fresh();
         let dollar_out = w.intern("$out");
-        let v = w.env_lookup(w.global_env, dollar_out).unwrap();
+        let v = w.env_lookup(w.here_form, dollar_out).unwrap();
         // it's a Form (a Console instance).
         let id = v.as_form_id().unwrap();
         // its proto is Console.
@@ -2944,7 +2944,7 @@ mod tests {
         // Console isn't on `Protos` (it's a user-visible intrinsic
         // proto living in the global env). check via name lookup.
         let console_sym = w.intern("Console");
-        let console_proto = w.env_lookup(w.global_env, console_sym).unwrap();
+        let console_proto = w.env_lookup(w.here_form, console_sym).unwrap();
         assert_eq!(proto, console_proto);
     }
 
@@ -2954,7 +2954,7 @@ mod tests {
         // that :emit: dispatches without panicking on a valid call.
         let mut w = fresh();
         let dollar_out = w.intern("$out");
-        let out = w.env_lookup(w.global_env, dollar_out).unwrap();
+        let out = w.env_lookup(w.here_form, dollar_out).unwrap();
         let emit = w.intern("emit:");
         // we deliberately use stderr for the test so test runner's
         // captured stdout isn't disrupted. switch out's label.
@@ -2976,7 +2976,7 @@ mod tests {
         w.start_turn();
         // route to stderr so test runner stays happy.
         let dollar_out = w.intern("$out");
-        let out = w.env_lookup(w.global_env, dollar_out).unwrap();
+        let out = w.env_lookup(w.here_form, dollar_out).unwrap();
         let label_sym = w.intern("label");
         let stderr_sym = w.intern("stderr");
         let id = out.as_form_id().unwrap();
@@ -3007,7 +3007,7 @@ mod tests {
         ];
         for forbidden in forbidden_io.iter().chain(forbidden_user_data_ops.iter()) {
             let s = w.intern(forbidden);
-            let v = w.env_lookup(w.global_env, s);
+            let v = w.env_lookup(w.here_form, s);
             assert!(
                 v.is_none(),
                 "forbidden global `{}` is bound (must not be)",
@@ -3048,8 +3048,8 @@ mod tests {
         let mut w = fresh();
         let nil_proto_sym = w.intern("Nil-proto");
         let nil_sym = w.intern("Nil");
-        assert!(w.env_lookup(w.global_env, nil_proto_sym).is_none());
-        assert!(w.env_lookup(w.global_env, nil_sym).is_none());
+        assert!(w.env_lookup(w.here_form, nil_proto_sym).is_none());
+        assert!(w.env_lookup(w.here_form, nil_sym).is_none());
         // nil's proto IS nil.
         let r = ev(&mut w, "[nil proto]").unwrap();
         assert_eq!(r, Value::Nil);
@@ -3279,7 +3279,7 @@ mod tests {
         let v = ev(&mut w, "[Opcode loadConst: 5]").unwrap();
         let id = v.as_form_id().unwrap();
         let opcode_sym = w.intern("Opcode");
-        let opcode_proto_v = w.env_lookup(w.global_env, opcode_sym).unwrap();
+        let opcode_proto_v = w.env_lookup(w.here_form, opcode_sym).unwrap();
         assert_eq!(w.heap.get(id).proto, opcode_proto_v);
         // :op is the symbol 'LoadConst.
         let op_sym = w.intern("op");
@@ -3416,8 +3416,8 @@ mod tests {
         let dollar_out = w.intern("$out");
         let dollar_err = w.intern("$err");
         let dollar_x = w.intern("$x");
-        assert!(w.env_lookup(w.global_env, dollar_out).is_some());
-        assert!(w.env_lookup(w.global_env, dollar_err).is_some());
-        assert!(w.env_lookup(w.global_env, dollar_x).is_none());
+        assert!(w.env_lookup(w.here_form, dollar_out).is_some());
+        assert!(w.env_lookup(w.here_form, dollar_err).is_some());
+        assert!(w.env_lookup(w.here_form, dollar_x).is_none());
     }
 }

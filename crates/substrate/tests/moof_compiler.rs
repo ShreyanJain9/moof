@@ -55,7 +55,7 @@ fn assert_compilers_agree(w: &mut World, src: &str) {
     // path 2: moof compiler.
     let helper_sym = w.intern("__mc-compile-and-run");
     let helper = w
-        .env_lookup(w.global_env, helper_sym)
+        .env_lookup(w.here_form, helper_sym)
         .expect("__mc-compile-and-run is unbound — compiler.moof didn't load");
     let call_sym = w.intern("call");
     let moof_result = w

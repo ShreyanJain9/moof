@@ -111,7 +111,7 @@ pub fn install(w: &mut World) {
 
     // bind the proto-Form as the `$transporter` global. that's the
     // cap itself; receiving methods sends to it.
-    let global = w.global_env;
+    let global = w.here_form;
     let dollar = w.intern("$transporter");
     w.env_bind(global, dollar, Value::Form(proto))
         .expect("env_bind at boot — substrate bug");

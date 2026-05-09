@@ -316,7 +316,7 @@ fn when_unless_letstar_letrec_are_user_inspectable_macros() {
         "__cascade__", "__table__", "__obj__",
     ] {
         let sym = w.intern(name);
-        let v = w.env_lookup(w.global_env, sym).unwrap_or_else(|| {
+        let v = w.env_lookup(w.here_form, sym).unwrap_or_else(|| {
             panic!("expected macro `{}` bound in global env", name)
         });
         let id = v

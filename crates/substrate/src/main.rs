@@ -139,7 +139,7 @@ fn print_via_out_text(
 ) -> Result<(), moof::world::RaiseError> {
     let dollar_out = world.intern("$out");
     let emit = world.intern("emit:");
-    let out = world.env_lookup(world.global_env, dollar_out).ok_or_else(|| {
+    let out = world.env_lookup(world.here_form, dollar_out).ok_or_else(|| {
         moof::world::RaiseError::new(world.intern("missing-cap"), "$out unbound")
     })?;
     let payload = world.make_string(text);
@@ -152,7 +152,7 @@ fn print_via_err(
 ) -> Result<(), moof::world::RaiseError> {
     let dollar_err = world.intern("$err");
     let emit = world.intern("emit:");
-    let err = match world.env_lookup(world.global_env, dollar_err) {
+    let err = match world.env_lookup(world.here_form, dollar_err) {
         Some(v) => v,
         None => {
             // shouldn't happen — $err is a primordial cap.

@@ -94,7 +94,7 @@ fn build_world_with_initial_mode(initial_mode: VatMode) -> world::World {
                 panic!("Hash mco [new] failed during bootstrap: {}", e.message)
             });
         let dollar_hash = w.intern("$hash");
-        let global = w.global_env;
+        let global = w.here_form;
         w.env_bind(global, dollar_hash, hash_instance)
             .expect("env_bind at boot — substrate bug");
     }

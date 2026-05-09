@@ -129,7 +129,7 @@ fn forcing_function_no_print_globals() {
     for forbidden in ["print", "println", "puts", "simulated_println"] {
         let s = w.intern(forbidden);
         assert!(
-            w.env_lookup(w.global_env, s).is_none(),
+            w.env_lookup(w.here_form, s).is_none(),
             "forbidden global `{}` exists in seed",
             forbidden
         );
@@ -141,8 +141,8 @@ fn forcing_function_out_cap_in_scope() {
     let mut w = moof::new_world();
     let dollar_out = w.intern("$out");
     let dollar_err = w.intern("$err");
-    assert!(w.env_lookup(w.global_env, dollar_out).is_some());
-    assert!(w.env_lookup(w.global_env, dollar_err).is_some());
+    assert!(w.env_lookup(w.here_form, dollar_out).is_some());
+    assert!(w.env_lookup(w.here_form, dollar_err).is_some());
 }
 
 #[test]
@@ -356,7 +356,7 @@ fn bootstrap_no_free_function_predicates() {
     ] {
         let s = w.intern(forbidden);
         assert!(
-            w.env_lookup(w.global_env, s).is_none(),
+            w.env_lookup(w.here_form, s).is_none(),
             "`{}` should not be a free-function global",
             forbidden
         );
@@ -642,7 +642,7 @@ fn console_emit_accepts_string() {
     // route to $err (stderr) so test runner's captured stdout
     // stays happy.
     let dollar_err = w.intern("$err");
-    let err = w.env_lookup(w.global_env, dollar_err).unwrap();
+    let err = w.env_lookup(w.here_form, dollar_err).unwrap();
     let emit = w.intern("emit:");
     let payload = w.make_string("");
     assert_eq!(w.send(err, emit, &[payload]).unwrap(), Value::Nil);

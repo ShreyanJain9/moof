@@ -87,7 +87,7 @@ fn explicit_turn_abort_rolls_back_alloc_and_mutation() {
 #[test]
 fn raise_in_eval_program_aborts_implicit_turn() {
     let mut w = moof::new_world_bare();
-    let env_id = w.global_env;
+    let env_id = w.here_form;
     let foo_sym = w.intern("foo");
     assert_eq!(w.heap.get(env_id).slot(foo_sym), Value::Nil);
 
@@ -104,7 +104,7 @@ fn raise_in_eval_program_aborts_implicit_turn() {
 #[test]
 fn successful_eval_program_commits_state_visibly() {
     let mut w = moof::new_world_bare();
-    let env_id = w.global_env;
+    let env_id = w.here_form;
     let foo_sym = w.intern("foo");
 
     let result = moof::eval_program(&mut w, "(def foo 42) foo");

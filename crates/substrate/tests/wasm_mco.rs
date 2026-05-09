@@ -12,7 +12,7 @@
 
 use moof::value::Value;
 
-/// bind `name → value` in `w.global_env`, transparently wrapping a
+/// bind `name → value` in `w.here_form`, transparently wrapping a
 /// turn so the underlying nursery-aware `form_slot_set` invariant
 /// holds. used by tests that load a wasm proto and want to make it
 /// reachable from moof source via a global name.
@@ -20,7 +20,7 @@ fn bind_global(w: &mut moof::world::World, name: &str, value: Value) {
     let was_in_turn = w.in_turn();
     if !was_in_turn { w.start_turn(); }
     let sym = w.intern(name);
-    let global = w.global_env;
+    let global = w.here_form;
     w.env_bind(global, sym, value).expect("env_bind in mutable test");
     if !was_in_turn { let _ = w.commit_turn(); }
 }

@@ -269,7 +269,7 @@ impl World {
         let captured_env = self
             .form_slot(method, self.env_sym)
             .as_form_id()
-            .unwrap_or(self.global_env);
+            .unwrap_or(self.here_form);
         let params_v = self.form_slot(method, self.params_sym);
         let params = self
             .list_to_vec(params_v)
@@ -309,7 +309,7 @@ impl World {
         if !was_in_turn {
             self.start_turn();
         }
-        let env = self.global_env;
+        let env = self.here_form;
         let result = run_method(self, chunk, env, Value::Nil, FormId::NONE);
         if !was_in_turn {
             match &result {
@@ -435,14 +435,14 @@ fn step(world: &mut World) -> Result<(), RaiseError> {
                 // no existing binding anywhere — fall back to the
                 // global env. this matches the old behavior for
                 // `(set! …)` outside any let.
-                world.env_bind(world.global_env, name, v)?;
+                world.env_bind(world.here_form, name, v)?;
             }
             // stores leave nil — `(set! x v)` expressions evaluate to nil.
             world.vm.stack.push(Value::Nil);
         }
         Op::DefineGlobal(name) => {
             let v = pop(world)?;
-            let global = world.global_env;
+            let global = world.here_form;
             world.env_bind(global, name, v)?;
             // (def …) evaluates to the symbol it bound — useful in
             // a repl, mostly nothing in batch.
@@ -504,7 +504,7 @@ fn step(world: &mut World) -> Result<(), RaiseError> {
             let captured_env = world
                 .form_slot(resolved, world.env_sym)
                 .as_form_id()
-                .unwrap_or(world.global_env);
+                .unwrap_or(world.here_form);
             let params_v = world.form_slot(resolved, world.params_sym);
             let params = world
                 .list_to_vec(params_v)

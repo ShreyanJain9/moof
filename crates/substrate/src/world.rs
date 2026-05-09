@@ -206,8 +206,12 @@ pub struct World {
     // exposed through reflection"). reads via `proto_generation`,
     // writes via `bump_proto_generation`.
 
-    /// the world's global environment Form.
-    pub global_env: FormId,
+    /// V3 — the "here" Form for this vat. exposes as `$here` in
+    /// moof code (a self-referential binding in `here_form.slots`).
+    /// renamed from `global_env` in V3; V4 will move this from
+    /// `World` to `Vat` per the vat-as-Form structure in
+    /// `2026-05-04-vats-and-references-protocol-design.md` §9.
+    pub here_form: FormId,
 
     /// when `true`, [`crate::compiler::compile`] delegates to the
     /// moof-side `compile-top` (defined in `lib/compiler.moof`).
@@ -297,10 +301,10 @@ impl World {
         let protos = Protos::bootstrap(&mut heap);
 
         // an env-Form serves as the world's globals.
-        let mut global_env_form = Form::with_proto(Value::Form(protos.env));
+        let mut here_form_form = Form::with_proto(Value::Form(protos.env));
         let parent_sym = syms.intern("parent");
-        global_env_form.meta.insert(parent_sym, Value::Nil);
-        let global_env = heap.alloc(global_env_form);
+        here_form_form.meta.insert(parent_sym, Value::Nil);
+        let here_form = heap.alloc(here_form_form);
 
         // the canonical macro registry: a plain Form (proto: Object)
         // whose slots are macro-name -> method-Form. exposed as the
@@ -333,7 +337,7 @@ impl World {
             wasm_instances: IndexMap::new(),
             wasm_export_map: IndexMap::new(),
             macros_form,
-            global_env,
+            here_form,
             transporter_root: None,
             use_moof_compiler: false,
             vm: Vm::default(),
@@ -1985,7 +1989,7 @@ mod tests {
     #[test]
     fn raise_in_eval_program_aborts_implicit_turn_no_state_leak() {
         let mut w = crate::new_world_bare();
-        let env_id = w.global_env;
+        let env_id = w.here_form;
         let foo_sym = w.intern("foo");
         let snapshot_before = w.heap.get(env_id).slot(foo_sym);
         assert_eq!(snapshot_before, Value::Nil);

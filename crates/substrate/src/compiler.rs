@@ -59,7 +59,7 @@ pub fn compile(world: &mut World, form: Value) -> Result<FormId, RaiseError> {
 fn compile_via_moof(world: &mut World, form: Value) -> Result<FormId, RaiseError> {
     let compiler_sym = world.intern("Compiler");
     let compiler = world
-        .env_lookup(world.global_env, compiler_sym)
+        .env_lookup(world.here_form, compiler_sym)
         .ok_or_else(|| {
             RaiseError::new(
                 world.intern("bootstrap-error"),
