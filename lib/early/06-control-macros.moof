@@ -18,10 +18,11 @@
 ;;
 ;; the only true compiler-level special forms remaining (after these
 ;; macros load) are: `if`, `let`, `do`, `quote`, `set!`, `fn`,
-;; `def`, `defmacro`, plus the reader-emitted helper `__send__`
+;; `defmacro`, plus the reader-emitted helper `__send__`
 ;; (its operand grammar is private to the reader). each genuinely
-;; needs bytecode-level access (jumps, closure construction, name
-;; binding, compile-time evaluation order).
+;; needs bytecode-level access (jumps, closure construction,
+;; compile-time evaluation order). `set!` and `if` will be removed
+;; from this list in V3 tasks 11 and 13.
 ;; ─────────────────────────────────────────────────────────────────
 ;; reader-emitted markers — these are the head-symbols the reader
 ;; uses to convey surface-syntax to the compiler:
@@ -135,6 +136,29 @@
                ,@slot-setters
                ,@user-methods
                __objLit__))))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; def — purified to a macro in V3.
+;;
+;; (def name value) → (do [$here bind: 'name to: value] 'name)
+;;
+;; Returns 'name (a Symbol) so `(def x 42)` evaluates to `'x` —
+;; matches the existing rust-seed Op::DefineGlobal behavior.
+;;
+;; Multi-clause shape `(def name |p| b |p| b …)` (where each
+;; `|p| b` reader-desugars to `(fn (p) b)`) is detected and
+;; rerouted to the `defn` macro in early/08. mirrors the
+;; `multiClauseDef?:` predicate in lib/compiler/02-special.moof.
+;; ─────────────────────────────────────────────────────────────────
+(defmacro def (args)
+  (if [Compiler multiClauseDef?: args]
+      ;; reroute to defn — same shape, defn walks the clauses.
+      (cons 'defn args)
+      (let ((name [args car])
+            (value [[args cdr] car]))
+        `(do
+           [$here bind: ',name to: ,value]
+           ',name))))
 
 ;; (when cond body...) ≡ (if cond (do body...) nil)
 (defmacro when (args)
