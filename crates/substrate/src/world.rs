@@ -262,6 +262,12 @@ pub struct World {
     /// one active turn at a time.
     pub in_turn: bool,
 
+    /// V3+ — `become:` rollback state. for each form whose redirect
+    /// was changed this turn, records the pre-turn mapping (`None`
+    /// for "wasn't redirected"). `commit_turn` drops the table;
+    /// `abort_turn` re-applies originals.
+    pub turn_redirect_originals: IndexMap<FormId, Option<FormId>>,
+
     /// V2 — protos whose forms refuse `world.freeze` and raise
     /// `'cannot-freeze-live`. liveness is a property of the proto
     /// chain (vat-Forms have Vat proto, mailbox-Forms have Mailbox
@@ -351,6 +357,7 @@ impl World {
             nursery_deltas: IndexMap::new(),
             turn_watermark: 0,
             in_turn: false,
+            turn_redirect_originals: IndexMap::new(),
             live_protos: HashSet::new(),
             vat_mode: crate::VatMode::MutableByDefault,
             car_sym,
@@ -964,6 +971,60 @@ impl World {
         // nursery_deltas should already be empty (clear on commit/abort);
         // assert defensively.
         debug_assert!(self.nursery_deltas.is_empty());
+        debug_assert!(self.turn_redirect_originals.is_empty());
+    }
+
+    /// `[a become: b]` — at the next dereference of `a` (and forever
+    /// after), the heap resolves to `b`. nursery-aware: records the
+    /// pre-turn redirect mapping for `a` so abort_turn can restore.
+    ///
+    /// resolves `b` through any existing redirects before inserting,
+    /// so we never extend a chain. self-become (`a == b_resolved`)
+    /// is a no-op.
+    ///
+    /// also bumps `b_resolved`'s proto generation so caches that
+    /// resolved through `a` re-check on next dispatch. (this catches
+    /// the most common moldability scenario: replacing a proto in
+    /// place. ICs that cached `cached_proto = a` will still hit but
+    /// the generation mismatch on the new resolution forces a
+    /// re-lookup, which now finds b's handlers.)
+    ///
+    /// preconditions:
+    /// - an active turn (`in_turn`), matching every other substrate
+    ///   mutation.
+    /// - neither `a` nor `b` is `FormId::NONE`.
+    pub fn become_(
+        &mut self,
+        a: FormId,
+        b: FormId,
+    ) -> Result<(), RaiseError> {
+        assert!(self.in_turn, "become_ requires an active turn");
+        if a.is_none() || b.is_none() {
+            return Err(RaiseError::new(
+                self.intern("type-error"),
+                "become: requires non-NONE Form ids",
+            ));
+        }
+        let b_resolved = self.heap.resolve_id(b);
+        let a_resolved = self.heap.resolve_id(a);
+        if a_resolved == b_resolved {
+            // identity become — no-op. avoids creating a useless
+            // self-redirect and never extends a chain.
+            return Ok(());
+        }
+        // record the original redirect mapping for `a` before mutating,
+        // so abort_turn can restore. only record the FIRST mutation
+        // this turn — subsequent re-becomes overwrite but the
+        // pre-turn original is what we'd restore.
+        if !self.turn_redirect_originals.contains_key(&a) {
+            self.turn_redirect_originals
+                .insert(a, self.heap.redirects.get(&a).copied());
+        }
+        self.heap.redirects.insert(a, b_resolved);
+        // bump generation of the resolution target so existing
+        // proto-chain caches re-resolve on next dispatch. (L10.)
+        self.bump_proto_generation(b_resolved)?;
+        Ok(())
     }
 
     /// commit the active turn. computes and returns the
@@ -1053,6 +1114,8 @@ impl World {
 
         // advance watermark to include this turn's allocs.
         self.turn_watermark = new_high;
+        // `become:` rollback state is canonical post-commit — clear.
+        self.turn_redirect_originals.clear();
         self.in_turn = false;
 
         diff
@@ -1075,6 +1138,17 @@ impl World {
 
         // drop buffered mutations (no canonical writes occurred).
         self.nursery_deltas.clear();
+
+        // restore pre-turn `become:` redirects. for each form we
+        // mutated, the originals map holds its pre-turn redirect
+        // (or None for "wasn't redirected"). re-applying restores
+        // canonical state.
+        for (form_id, original) in std::mem::take(&mut self.turn_redirect_originals) {
+            match original {
+                Some(target) => { self.heap.redirects.insert(form_id, target); }
+                None => { self.heap.redirects.shift_remove(&form_id); }
+            }
+        }
 
         self.in_turn = false;
     }

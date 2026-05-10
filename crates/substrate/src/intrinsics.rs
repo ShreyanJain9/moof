@@ -127,6 +127,25 @@ fn install_if_dispatch(w: &mut World) {
     w.install_native(w.protos.object, "!!", |_, _self, _args| {
         Ok(Value::Bool(true))
     }).expect("install_native at boot — substrate bug");
+
+    // [a become: b] — heap-level indirection. at the next dereference
+    // of `a` (and forever), the substrate resolves to `b`. used for
+    // live proto migration: replace a proto in place; every reference
+    // catches up on next access.
+    //
+    // returns `a` (chainable). nursery-aware: aborting the turn
+    // restores the pre-turn redirect mapping. self-become is a no-op.
+    w.install_native(w.protos.object, "become:", |w, self_, args| {
+        let a = self_.as_form_id().ok_or_else(|| {
+            type_error(w, ":become: receiver must be a Form")
+        })?;
+        let b_val = args.first().copied().unwrap_or(Value::Nil);
+        let b = b_val.as_form_id().ok_or_else(|| {
+            type_error(w, ":become: argument must be a Form")
+        })?;
+        w.become_(a, b)?;
+        Ok(self_)
+    }).expect("install_native :become: at boot — substrate bug");
     w.install_native(w.protos.nil, "!!", |_, _self, _args| {
         Ok(Value::Bool(false))
     }).expect("install_native at boot — substrate bug");

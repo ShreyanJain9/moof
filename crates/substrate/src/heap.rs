@@ -20,7 +20,20 @@ use crate::form::{Form, FormId};
 /// a contiguous, single-vat heap of Forms.
 pub struct Heap {
     pub(crate) forms: Vec<Form>,
+    /// `become:` indirection table — `[a become: b]` adds `a → b`.
+    /// `get` / `get_mut` chase redirects before indexing `forms`.
+    /// enables live proto migration: replace a proto in place; every
+    /// reference catches up on next access. used by `World::become_`
+    /// (nursery-aware) — callers should not insert here directly.
+    pub(crate) redirects: indexmap::IndexMap<FormId, FormId>,
 }
+
+/// max indirection-chain length. `become:` resolves the target before
+/// inserting, so a fresh insertion never extends a chain; existing
+/// chains arise only when two `become:`s race in a way the current
+/// scheduler doesn't permit (single-vat). the bound is purely
+/// defensive against future-phase scheduler regressions.
+const MAX_BECOME_HOPS: usize = 32;
 
 impl Heap {
     pub fn new() -> Self {
@@ -28,7 +41,25 @@ impl Heap {
         // so we never hand it out.
         Heap {
             forms: vec![Form::default()],
+            redirects: indexmap::IndexMap::new(),
         }
+    }
+
+    /// chase the redirects table to find the canonical FormId for
+    /// `id`. when `id` is not a redirect source, returns `id`. used
+    /// internally by `get` / `get_mut` — direct callers rare.
+    pub fn resolve_id(&self, id: FormId) -> FormId {
+        let mut cur = id;
+        for _ in 0..MAX_BECOME_HOPS {
+            match self.redirects.get(&cur).copied() {
+                Some(next) if next != cur => cur = next,
+                _ => return cur,
+            }
+        }
+        panic!(
+            "become: redirect chain exceeds {} hops starting at FormId payload {} — cycle?",
+            MAX_BECOME_HOPS, id.payload()
+        )
     }
 
     /// allocate a new Form, returning its id.
@@ -49,10 +80,12 @@ impl Heap {
         FormId::vat_local(id as u32)
     }
 
-    /// borrow a Form by id.
+    /// borrow a Form by id. chases `become:` redirects before
+    /// indexing — every reference catches up automatically.
     pub fn get(&self, id: FormId) -> &Form {
         use crate::form::Scope;
         debug_assert!(!id.is_none(), "Heap::get on FormId::NONE");
+        let id = self.resolve_id(id);
         match id.scope() {
             Scope::VatLocal => &self.forms[id.payload() as usize],
             Scope::Shared => panic!(
@@ -70,10 +103,11 @@ impl Heap {
         }
     }
 
-    /// mutably borrow a Form by id.
+    /// mutably borrow a Form by id. chases `become:` redirects.
     pub fn get_mut(&mut self, id: FormId) -> &mut Form {
         use crate::form::Scope;
         debug_assert!(!id.is_none(), "Heap::get_mut on FormId::NONE");
+        let id = self.resolve_id(id);
         match id.scope() {
             Scope::VatLocal => &mut self.forms[id.payload() as usize],
             Scope::Shared => panic!(
