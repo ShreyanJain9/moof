@@ -7,3 +7,5 @@ examples/*/Cargo.lock
 *.swp
 *.swo
 .DS_Store
+scheduled_tasks.lock
+.claude/scheduled_tasks.lock
