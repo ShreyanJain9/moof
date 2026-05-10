@@ -129,3 +129,37 @@ fn obj_eval_works_on_frozen_obj() {
     let r = moof::eval(&mut w, "[obj eval: (fn () foo)]").unwrap();
     assert_eq!(r, Value::Int(42));
 }
+
+// V3 Task 15 — final integration coverage. these round out the
+// user-facing behaviors that span multiple V3 features.
+
+#[test]
+fn here_lookup_works() {
+    let mut w = moof::new_world();
+    moof::eval(&mut w, "(def myValue 12345)").unwrap();
+    let r = moof::eval(&mut w, "[$here lookup: 'myValue]").unwrap();
+    assert_eq!(r, Value::Int(12345));
+}
+
+#[test]
+fn here_bind_to_works() {
+    let mut w = moof::new_world();
+    moof::eval(&mut w, "[$here bind: 'newName to: 'newValue]").unwrap();
+    let r = moof::eval(&mut w, "newName").unwrap();
+    let new_value = w.intern("newValue");
+    assert_eq!(r, Value::Sym(new_value));
+}
+
+#[test]
+fn here_parent_returns_nil() {
+    let mut w = moof::new_world();
+    let r = moof::eval(&mut w, "[$here parent]").unwrap();
+    assert_eq!(r, Value::Nil);
+}
+
+#[test]
+fn here_self_reference_is_value_form_of_here() {
+    let mut w = moof::new_world();
+    let here_v = moof::eval(&mut w, "$here").unwrap();
+    assert_eq!(here_v, Value::Form(w.here_form));
+}
