@@ -38,9 +38,12 @@
 ;; meta are not rendered — they're introspection territory, not
 ;; structural identity.
 ;;
-;; cycle detection is deferred: a slot pointing back to self will
-;; stack-overflow. acceptable known limitation; users can override
-;; :inspect on protos that need cycle-safe rendering.
+;; cycle handling: direct self-references render as `#<self>` to
+;; prevent stack overflow on `$here` (which binds `$here -> self` per
+;; V3 task 4) and analogous configurations. mutual cycles (a -> b -> a)
+;; still recurse — full cycle detection across the print walk needs a
+;; visited-set, which we defer to phase-G. users can override :inspect
+;; on protos that need richer cycle handling.
 (defmethod Object (inspect)
   (let ((nm [self metaAt: 'name]))
     (if [nm is nil]
@@ -51,7 +54,12 @@
               [["{ " + proto-rendered] + " }"]
               [[[["{ " + proto-rendered] + " "]
                 + [slot-keys joinedBy: " " with:
-                    (fn (k) [[[k toString] + ": "] + [(slot self k) inspect]])]]
+                    (fn (k)
+                      (let ((v (slot self k)))
+                        [[[k toString] + ": "] +
+                         (if [v is self]
+                             "#<self>"
+                             [v inspect])]))]]
                + " }"]))
         ;; proto-Form: short-circuit to the name
         [nm toString])))
