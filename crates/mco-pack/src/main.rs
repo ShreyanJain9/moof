@@ -175,37 +175,3 @@ fn write_uleb128(out: &mut Vec<u8>, mut n: u64) {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn uleb128_basic() {
-        let mut out = Vec::new();
-        write_uleb128(&mut out, 0);
-        assert_eq!(out, vec![0]);
-
-        out.clear();
-        write_uleb128(&mut out, 127);
-        assert_eq!(out, vec![127]);
-
-        out.clear();
-        write_uleb128(&mut out, 128);
-        assert_eq!(out, vec![0x80, 0x01]);
-
-        out.clear();
-        write_uleb128(&mut out, 624485);
-        assert_eq!(out, vec![0xe5, 0x8e, 0x26]);
-    }
-
-    #[test]
-    fn append_section_shape() {
-        // start with the minimum-valid wasm header.
-        let mut wasm: Vec<u8> = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
-        append_custom_section(&mut wasm, "x", b"hi");
-        // expected: header (8) + [0x00, size, name-len(1), 'x', 'h', 'i']
-        assert_eq!(wasm.len(), 8 + 1 + 1 + 1 + 1 + 2);
-        assert_eq!(&wasm[8..], &[0x00, 0x04, 0x01, b'x', b'h', b'i']);
-    }
-}

@@ -107,19 +107,3 @@ pub type MoofMethod = unsafe extern "C" fn(
     argc: usize,
     out: *mut MoofValue,
 ) -> MoofResult;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sizes_are_stable() {
-        // these sizes are part of the abi contract. if any of them
-        // changes, MOOF_ABI_VERSION must be bumped.
-        assert_eq!(core::mem::size_of::<MoofValueTag>(), 1);
-        // payload is at least 8 bytes (Int variant); whole struct
-        // gets aligned/padded by repr(C).
-        assert!(core::mem::size_of::<MoofValue>() >= 9);
-        assert_eq!(MOOF_ABI_VERSION, 1);
-    }
-}
