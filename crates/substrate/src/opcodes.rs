@@ -41,9 +41,6 @@ pub enum Op {
     /// push its value.
     LoadName(SymId),
 
-    /// pop a value; bind it to `name` in the current scope.
-    StoreName(SymId),
-
     /// push the receiver (`self`) of the current method frame.
     LoadSelf,
 
@@ -121,7 +118,6 @@ mod tests {
         assert!(Op::LoadName(SymId(1)).pushes());
         assert!(Op::LoadSelf.pushes());
         assert!(!Op::Pop.pushes());
-        assert!(!Op::StoreName(SymId(1)).pushes());
         assert!(!Op::Return.pushes());
     }
 

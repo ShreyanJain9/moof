@@ -17,12 +17,11 @@
 ;; and return a Form, which the compiler then compiles in-place.
 ;;
 ;; the only true compiler-level special forms remaining (after these
-;; macros load) are: `if`, `let`, `do`, `quote`, `set!`, `fn`,
-;; `defmacro`, plus the reader-emitted helper `__send__`
-;; (its operand grammar is private to the reader). each genuinely
-;; needs bytecode-level access (jumps, closure construction,
-;; compile-time evaluation order). `set!` and `if` will be removed
-;; from this list in V3 tasks 11 and 13.
+;; macros load) are: `if`, `let`, `do`, `quote`, `fn`, `defmacro`,
+;; plus the reader-emitted helper `__send__` (its operand grammar is
+;; private to the reader). each genuinely needs bytecode-level
+;; access (jumps, closure construction, compile-time evaluation
+;; order). `if` will be removed from this list in V3 task 13.
 ;; ─────────────────────────────────────────────────────────────────
 ;; reader-emitted markers — these are the head-symbols the reader
 ;; uses to convey surface-syntax to the compiler:
@@ -159,6 +158,20 @@
         `(do
            [$here bind: ',name to: ,value]
            ',name))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; set! — purified to a macro in V3.
+;;
+;; (set! name value) → [[Env current] set: 'name to: value]
+;;
+;; raises 'unbound if name isn't reachable from the lexical chain
+;; (V3 tightens the V1 silent-fallback-to-global footgun).
+;; returns the bound value (per :set:to:).
+;; ─────────────────────────────────────────────────────────────────
+(defmacro set! (args)
+  (let ((name [args car])
+        (value [[args cdr] car]))
+    `[[Env current] set: ',name to: ,value]))
 
 ;; (when cond body...) ≡ (if cond (do body...) nil)
 (defmacro when (args)

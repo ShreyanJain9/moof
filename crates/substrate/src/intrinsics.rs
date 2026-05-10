@@ -728,7 +728,6 @@ fn opcode_form(world: &mut World, op: crate::opcodes::Op) -> Value {
         Op::Pop => ("Pop", vec![]),
         Op::Dup => ("Dup", vec![]),
         Op::LoadName(s) => ("LoadName", vec![Value::Sym(s)]),
-        Op::StoreName(s) => ("StoreName", vec![Value::Sym(s)]),
         Op::LoadSelf => ("LoadSelf", vec![]),
         Op::Send {
             selector,
@@ -878,7 +877,6 @@ fn decode_op_form(
         "Pop" => Op::Pop,
         "Dup" => Op::Dup,
         "LoadName" => Op::LoadName(need_sym(world, "LoadName", &operands, 0)?),
-        "StoreName" => Op::StoreName(need_sym(world, "StoreName", &operands, 0)?),
         "LoadSelf" => Op::LoadSelf,
         "Send" => {
             let sel = need_sym(world, "Send", &operands, 0)?;
@@ -2569,12 +2567,6 @@ fn install_compiler_primitives(w: &mut World) {
             return Err(raise(w, "arity", "[Opcode loadName: 'n] takes 1 arg"));
         }
         Ok(mk_op_form(w, "LoadName", args))
-    }).expect("install_native at boot — substrate bug");
-    w.install_native(opcode_proto, "storeName:", |w, _self, args| {
-        if args.len() != 1 {
-            return Err(raise(w, "arity", "[Opcode storeName: 'n] takes 1 arg"));
-        }
-        Ok(mk_op_form(w, "StoreName", args))
     }).expect("install_native at boot — substrate bug");
     w.install_native(opcode_proto, "pushClosure:", |w, _self, args| {
         if args.len() != 1 {
