@@ -96,3 +96,33 @@
 ;; Cons:any?: with an identity predicate against T.
 (defmethod Object (satisfies?: v)
   [[v protos] any?: (fn (p) [p is self])])
+
+;; ─────────────────────────────────────────────────────────────────
+;; Object :eval: — Ruby instance_eval-style evaluation.
+;;
+;; [obj eval: closure] runs the closure body with obj's slots as a
+;; "view" into the lookup chain. lookups AND mutations propagate
+;; LIVE to both obj and closure's captured env. obj is NOT mutated
+;; structurally (uses the substrate's view-target meta key for
+;; non-mutating delegation — works on frozen receivers).
+;;
+;; lookup chain inside the closure body:
+;;   body-env's let-locals
+;;     → self's slots (LIVE; via view-target)
+;;     → closure.captured_env (closure's lexical chain)
+;;     → closure.captured_env's parents → globals
+;;
+;; mutations via (set! name value):
+;;   - body-local: writes to body-env
+;;   - obj-slot: writes to obj LIVE (via view-target's :set:to: hit)
+;;   - closure.captured-name: writes to that env LIVE
+;;   - else: raises 'unbound
+;; ─────────────────────────────────────────────────────────────────
+(defmethod Object (eval: closure)
+  (let ((captured-env [Heap slotOf: closure at: 'env])
+        (body-env [Env new]))
+    ;; configure body-env: parent = captured-env, view-target = self
+    (metaSet! body-env 'parent captured-env)
+    (metaSet! body-env 'view-target self)
+    ;; run the closure body with body-env, self bound to obj
+    [closure callIn: body-env withSelf: self]))

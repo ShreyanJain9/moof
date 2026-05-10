@@ -78,3 +78,54 @@ fn if_with_non_syntactic_closure_args_uses_send_dispatch() {
     let yes = w.intern("yes");
     assert_eq!(r, Value::Sym(yes));
 }
+
+// V3 Task 14 — Object :eval: implements Ruby instance_eval semantics
+// in pure moof on top of `:callIn:withSelf:` (Task 6) and the
+// `view-target` meta key (Tasks 2-3).
+
+#[test]
+fn obj_eval_lookups_find_obj_slots() {
+    let mut w = moof::new_world();
+    // bind a slot on obj, then [obj eval: (fn () foo)] should find it
+    // via the view-target hop into obj's slots.
+    moof::eval(&mut w, "(def obj [Object new])").unwrap();
+    moof::eval(&mut w, "(slotSet! obj 'foo 42)").unwrap();
+    let r = moof::eval(&mut w, "[obj eval: (fn () foo)]").unwrap();
+    assert_eq!(r, Value::Int(42));
+}
+
+#[test]
+fn obj_eval_lookups_also_find_closure_captured_names() {
+    let mut w = moof::new_world();
+    // captured-env names still resolve — view-target augments, not
+    // replaces, the lexical chain.
+    moof::eval(&mut w, "(def obj [Object new])").unwrap();
+    moof::eval(&mut w, "(slotSet! obj 'foo 42)").unwrap();
+    moof::eval(&mut w, "(def captured 99)").unwrap();
+    let r = moof::eval(&mut w, "[obj eval: (fn () captured)]").unwrap();
+    assert_eq!(r, Value::Int(99));
+}
+
+#[test]
+fn obj_eval_set_propagates_live_to_obj_via_view_target() {
+    let mut w = moof::new_world();
+    // (set! counter 100) inside the closure body should walk the
+    // chain via env_set, hit view-target = obj, and write LIVE.
+    moof::eval(&mut w, "(def obj [Object new])").unwrap();
+    moof::eval(&mut w, "(slotSet! obj 'counter 0)").unwrap();
+    moof::eval(&mut w, "[obj eval: (fn () (set! counter 100))]").unwrap();
+    let r = moof::eval(&mut w, "(slot obj 'counter)").unwrap();
+    assert_eq!(r, Value::Int(100));
+}
+
+#[test]
+fn obj_eval_works_on_frozen_obj() {
+    // V3's view-env doesn't mutate receiver — so frozen obj is fine
+    // for read-only :eval: bodies.
+    let mut w = moof::new_world();
+    moof::eval(&mut w, "(def obj [Object new])").unwrap();
+    moof::eval(&mut w, "(slotSet! obj 'foo 42)").unwrap();
+    moof::eval(&mut w, "[obj freeze]").unwrap();
+    let r = moof::eval(&mut w, "[obj eval: (fn () foo)]").unwrap();
+    assert_eq!(r, Value::Int(42));
+}
