@@ -47,9 +47,6 @@ pub enum Op {
     /// push the receiver (`self`) of the current method frame.
     LoadSelf,
 
-    /// pop a value; define a new global binding `name = value`.
-    DefineGlobal(SymId),
-
     /// pop `argc` args and a receiver; send `selector` to the
     /// receiver. `ic_idx` is this site's inline-cache slot.
     Send {

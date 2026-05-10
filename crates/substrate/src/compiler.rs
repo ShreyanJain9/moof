@@ -11,7 +11,7 @@
 //!
 //! | form                           | emits                          |
 //! |--------------------------------|--------------------------------|
-//! | `def name expr`                | rhs + `DefineGlobal`           |
+//! | `def name expr`                | `[$here bind: 'name to: rhs]`  |
 //! | `fn (params…) body…`           | sub-chunk + `PushClosure`      |
 //! | `if cond then [else]`          | `JumpIfFalse` + `Jump`         |
 //! | `let ((name val)…) body…`      | `((fn …) values…)` desugar     |

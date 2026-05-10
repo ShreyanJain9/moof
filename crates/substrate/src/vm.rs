@@ -446,14 +446,6 @@ fn step(world: &mut World) -> Result<(), RaiseError> {
             // stores leave nil — `(set! x v)` expressions evaluate to nil.
             world.vm.stack.push(Value::Nil);
         }
-        Op::DefineGlobal(name) => {
-            let v = pop(world)?;
-            let global = world.here_form;
-            world.env_bind(global, name, v)?;
-            // (def …) evaluates to the symbol it bound — useful in
-            // a repl, mostly nothing in batch.
-            world.vm.stack.push(Value::Sym(name));
-        }
         Op::LoadSelf => {
             let s = world.vm.frames[frame_idx].self_;
             world.vm.stack.push(s);

@@ -141,10 +141,18 @@
           (metaSet! method 'macro name)
           ;; eagerly register in the canonical Macros form.
           (slotSet! Macros name method)
-          ;; emit runtime ops: bind `name` globally + push nil.
+          ;; V3: emit Send-based bytecode equivalent to
+          ;;   (do [$here bind: 'name to: method] nil)
+          ;; Same env_bind under the hood but reached via method dispatch
+          ;; on Env's :bind:to:. Stack delta: +1 (Nil) — defmacro → nil.
+          ;; (Prior emission left both Sym(name) AND Nil on the stack.)
+          [chunk emit: [Opcode loadName: '$here]]
+          [chunk emit: [Opcode loadConst: [chunk addConst: name]]]
           (let ((idx [chunk addConst: method]))
             [chunk emit: [Opcode loadConst: idx]])
-          [chunk emit: [Opcode defineGlobal: name]]
+          (let ((ic [chunk addIc]))
+            [chunk emit: [Opcode send: 'bind:to: argc: 2 ic: ic]])
+          [chunk emit: [Opcode pop]]
           [chunk emit: [Opcode pushNil]])))))
 
 ;; ─────────────────────────────────────────────────────────────────
