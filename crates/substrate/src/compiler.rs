@@ -170,12 +170,11 @@ impl<'a> Compiler<'a> {
     /// emit a placeholder jump. returns the position of the jump op
     /// for later patching.
     ///
-    /// V3 task 12 — the seed `compile_if` no longer uses this (it
-    /// emits Send-based bytecode instead). Kept for task 13's
-    /// peephole optimizer, which will recognize the if-shape Send
-    /// pattern in `compile_send` and fold it back into Jump-based
-    /// emission inline.
-    #[allow(dead_code)]
+    /// V3 task 13 — the seed `compile_if` lowers to Send-based
+    /// bytecode (so user code can override `:ifTrue:ifFalse:`); the
+    /// peephole in `compile_send` recognizes the post-expansion
+    /// shape and folds it back into Jump-based emission inline,
+    /// using these helpers.
     fn emit_placeholder_jump(&mut self, branch_kind: BranchKind) -> usize {
         let pos = self.ops.len();
         self.emit(match branch_kind {
@@ -188,9 +187,8 @@ impl<'a> Compiler<'a> {
     /// patch a previously-emitted jump to land at the next op
     /// position.
     ///
-    /// V3 task 12 — see `emit_placeholder_jump`'s note: kept for
-    /// task 13's peephole optimizer.
-    #[allow(dead_code)]
+    /// V3 task 13 — see `emit_placeholder_jump`'s note: used by the
+    /// if-peephole in `compile_send`.
     fn patch_jump_to_here(&mut self, jump_pos: usize) {
         let target = self.ops.len();
         let off = target as isize - jump_pos as isize;
@@ -302,6 +300,20 @@ impl<'a> Compiler<'a> {
         if elems.len() < 3 {
             return Err(self.err("malformed __send__ form"));
         }
+        // V3 task 13 peephole — recognize the post-macro-expansion
+        // shape of `if`:
+        //   (__send__ (__send__ c '!!) 'ifTrue:ifFalse:
+        //             (fn () t) (fn () e))
+        // where the two thunks are syntactic (fn () body) literals.
+        // emit Jump-based bytecode inline — no closure allocations,
+        // no method dispatch on Bool. preserves the user-overridable
+        // macro semantic at the source layer (user code calling
+        // `[recv ifTrue:ifFalse: tThunk eThunk]` explicitly does NOT
+        // match the syntactic shape and falls through to standard
+        // Send dispatch).
+        if let Some((c_form, t_body, e_body)) = self.match_if_pattern(elems) {
+            return self.compile_if_inline(c_form, t_body, e_body, tail);
+        }
         let receiver = elems[1];
         let selector = elems[2]
             .as_sym()
@@ -334,6 +346,106 @@ impl<'a> Compiler<'a> {
                 ic_idx: ic,
             }
         });
+        Ok(())
+    }
+
+    /// V3 task 13 — recognize the post-macro-expansion shape of `if`:
+    ///   `(__send__ (__send__ c '!!) 'ifTrue:ifFalse: (fn () t) (fn () e))`.
+    /// returns Some((c, t-body, e-body)) on match; None otherwise.
+    fn match_if_pattern(&self, elems: &[Value]) -> Option<(Value, Value, Value)> {
+        // elems[0] = '__send__, elems[1] = receiver, elems[2] = selector,
+        // elems[3..] = args. expect exactly 5 elements (recv + sel + 2 args).
+        if elems.len() != 5 {
+            return None;
+        }
+        let selector = elems[2].as_sym()?;
+        if self.world.resolve(selector) != "ifTrue:ifFalse:" {
+            return None;
+        }
+        // receiver must be `(__send__ c '!!)` — three elems.
+        let recv_elems = self.list_elems_lenient(elems[1])?;
+        if recv_elems.len() != 3 {
+            return None;
+        }
+        let outer_head = recv_elems[0].as_sym()?;
+        if self.world.resolve(outer_head) != "__send__" {
+            return None;
+        }
+        let recv_inner_sel = recv_elems[2].as_sym()?;
+        if self.world.resolve(recv_inner_sel) != "!!" {
+            return None;
+        }
+        let c_form = recv_elems[1];
+        // both args must be syntactic (fn () body) literals.
+        let t_body = self.match_zero_arg_fn(elems[3])?;
+        let e_body = self.match_zero_arg_fn(elems[4])?;
+        Some((c_form, t_body, e_body))
+    }
+
+    /// recognize `(fn () body)`. returns Some(body) if matched.
+    fn match_zero_arg_fn(&self, form: Value) -> Option<Value> {
+        let elems = self.list_elems_lenient(form)?;
+        if elems.len() != 3 {
+            return None;
+        }
+        let head = elems[0].as_sym()?;
+        if self.world.resolve(head) != "fn" {
+            return None;
+        }
+        // empty params list is Value::Nil after make_list(&[]).
+        if !matches!(elems[1], Value::Nil) {
+            return None;
+        }
+        Some(elems[2])
+    }
+
+    /// like `list_elems` but Option instead of Result — used by the
+    /// peephole matcher where mismatch is "no opt", not error.
+    fn list_elems_lenient(&self, form: Value) -> Option<Vec<Value>> {
+        self.world.list_to_vec(form).ok()
+    }
+
+    /// emit Jump-based bytecode for the if-shape inline:
+    ///   <compile c>
+    ///   Send :!! argc=0          ; coerce to Bool — preserves user
+    ///                            ; overrides of :!!.
+    ///   JumpIfFalse else_label
+    ///   <compile t inline>
+    ///   Jump end_label
+    ///   else_label: <compile e inline>
+    ///   end_label:
+    fn compile_if_inline(
+        &mut self,
+        c_form: Value,
+        t_body: Value,
+        e_body: Value,
+        tail: bool,
+    ) -> Result<(), RaiseError> {
+        // compile c — non-tail.
+        self.compile_expr(c_form, false)?;
+        // Send :!! argc=0 — preserves user overrides of :!!. (the
+        // VM's JumpIfFalse uses is_truthy, which already maps nil
+        // and #false to falsy; user types can override :!! to
+        // redefine truthiness, so we keep the coercion.)
+        let bang_bang = self.world.intern("!!");
+        let ic_bang = self.next_ic();
+        self.emit(Op::Send {
+            selector: bang_bang,
+            argc: 0,
+            ic_idx: ic_bang,
+        });
+        // JumpIfFalse else_label (placeholder — patched later).
+        let jif = self.emit_placeholder_jump(BranchKind::IfFalse);
+        // compile then-branch inline; tail iff `if` was tail.
+        self.compile_expr(t_body, tail)?;
+        // Jump end_label (placeholder — patched after else compiles).
+        let jmp = self.emit_placeholder_jump(BranchKind::Always);
+        // patch JumpIfFalse to land here (start of else).
+        self.patch_jump_to_here(jif);
+        // compile else-branch inline; tail iff `if` was tail.
+        self.compile_expr(e_body, tail)?;
+        // patch unconditional Jump to land here (after else).
+        self.patch_jump_to_here(jmp);
         Ok(())
     }
 
@@ -585,11 +697,9 @@ impl<'a> Compiler<'a> {
     }
 }
 
-/// V3 task 12 — kept for task 13's peephole optimizer (the seed's
-/// `compile_if` no longer references it directly, but the peephole
-/// over `compile_send`'s ifTrue:ifFalse: Send shape will reuse the
-/// jump-emission helpers).
-#[allow(dead_code)]
+/// V3 task 13 — used by the if-peephole optimizer in `compile_send`,
+/// which recognizes the post-macro-expansion shape of `if` and folds
+/// it back into Jump-based emission inline.
 #[derive(Copy, Clone)]
 enum BranchKind {
     Always,

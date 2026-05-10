@@ -121,6 +121,17 @@
     (let ((receiver [Heap slotOf: rest at: 'car])
           (selector [Heap slotOf: [Heap slotOf: rest at: 'cdr] at: 'car])
           (args [Heap slotOf: [Heap slotOf: rest at: 'cdr] at: 'cdr]))
+      ;; V3 task 13 peephole — recognize the post-macro-expansion shape
+      ;; of `if`:
+      ;;   (__send__ (__send__ c '!!) 'ifTrue:ifFalse: (fn () t) (fn () e))
+      ;; where the two thunks are syntactic (fn () body) literals. emit
+      ;; Jump-based bytecode inline — no closure allocations, no method
+      ;; dispatch on Bool. preserves the user-overridable :ifTrue:ifFalse:
+      ;; for code that calls it explicitly: when args aren't syntactic
+      ;; (fn () body) literals (e.g. `[c ifTrue: someThunk ifFalse: ...]`),
+      ;; the matcher returns #false and standard Send dispatch runs.
+      (if [self matchIfShape: receiver selector: selector args: args]
+          [self compileIfInline: receiver args: args chunk: chunk tail: tail]
       (if [self symbol?: selector]
           (let ((isSuper (if [self symbol?: receiver]
                              [receiver is 'super]
@@ -143,7 +154,135 @@
                       [chunk emit: [Opcode send: selector
                                            argc: argc
                                            ic: ic]]))))
-          (raise: 'compile-error "__send__ selector must be a symbol")))))
+          (raise: 'compile-error "__send__ selector must be a symbol"))))))
+
+;; V3 task 13 — match the post-macro-expansion if-shape. predicate;
+;; returns #true iff the Send is `(__send__ (__send__ c '!!)
+;; 'ifTrue:ifFalse: (fn () t) (fn () e))` exactly.
+(setHandler! Compiler 'matchIfShape:selector:args:
+  (fn (receiver selector args)
+    ;; selector must be 'ifTrue:ifFalse:.
+    (if [selector is 'ifTrue:ifFalse:]
+        ;; receiver must be a `(__send__ c '!!)` form.
+        (if [self isBangBangSend?: receiver]
+            ;; args must have exactly two elements (the two thunks),
+            ;; both syntactic `(fn () body)` literals.
+            [self bothZeroArgFns?: args]
+            #false)
+        #false)))
+
+;; predicate — receiver is `(__send__ <c> '!!)` (a 3-element list).
+(setHandler! Compiler 'isBangBangSend?:
+  (fn (form)
+    (if [self cons?: form]
+        (if [form is nil]
+            #false
+            (let ((head [Heap slotOf: form at: 'car])
+                  (tail [Heap slotOf: form at: 'cdr]))
+              (if [head is '__send__]
+                  (if [tail is nil]
+                      #false
+                      (let ((tail2 [Heap slotOf: tail at: 'cdr]))
+                        (if [tail2 is nil]
+                            #false
+                            (let ((sel [Heap slotOf: tail2 at: 'car])
+                                  (rest [Heap slotOf: tail2 at: 'cdr]))
+                              (if [rest is nil]
+                                  [sel is '!!]
+                                  #false)))))
+                  #false)))
+        #false)))
+
+;; predicate — args is a 2-element list, each element a (fn () body)
+;; syntactic literal.
+(setHandler! Compiler 'bothZeroArgFns?:
+  (fn (args)
+    (if [args is nil]
+        #false
+        (let ((tail [Heap slotOf: args at: 'cdr]))
+          (if [tail is nil]
+              #false
+              (let ((tail2 [Heap slotOf: tail at: 'cdr]))
+                (if [tail2 is nil]
+                    (if [self isZeroArgFn?: [Heap slotOf: args at: 'car]]
+                        [self isZeroArgFn?: [Heap slotOf: tail at: 'car]]
+                        #false)
+                    #false)))))))
+
+;; predicate — form is `(fn () body)`: a 3-element list whose head is
+;; 'fn, second elem is the empty params list, and third elem is the
+;; body. matches the rust seed's `match_zero_arg_fn`.
+(setHandler! Compiler 'isZeroArgFn?:
+  (fn (form)
+    (if [self cons?: form]
+        (if [form is nil]
+            #false
+            (let ((head [Heap slotOf: form at: 'car])
+                  (tail [Heap slotOf: form at: 'cdr]))
+              (if [head is 'fn]
+                  (if [tail is nil]
+                      #false
+                      (let ((params [Heap slotOf: tail at: 'car])
+                            (rest [Heap slotOf: tail at: 'cdr]))
+                        ;; params must be the empty list (nil); rest must
+                        ;; be a single-element list (body and nothing
+                        ;; after) — i.e. rest is non-nil and its cdr is nil.
+                        (if [params is nil]
+                            (if [rest is nil]
+                                #false
+                                [[Heap slotOf: rest at: 'cdr] is nil])
+                            #false)))
+                  #false)))
+        #false)))
+
+;; emit Jump-based bytecode inline for the matched if-shape:
+;;   <compile c>
+;;   Send :!! argc=0          ; coerce to Bool — preserves user
+;;                            ; overrides of :!! semantics.
+;;   JumpIfFalse else_label
+;;   <compile t inline>
+;;   Jump end_label
+;;   else_label: <compile e inline>
+;;   end_label:
+;;
+;; receiver is `(__send__ c '!!)`; `c` is its second element. args is
+;; `((fn () t) (fn () e))`; `t` and `e` are the body forms.
+(setHandler! Compiler 'compileIfInline:args:chunk:tail:
+  (fn (receiver args chunk tail)
+    ;; receiver: (__send__ c '!!) — c is at [[receiver cdr] car].
+    ;; args: ((fn () t) (fn () e)).
+    ;; for `(fn () body)`, body is at [[[form cdr] cdr] car] —
+    ;; cdr past `fn`, cdr past `()`, then car is body.
+    (let ((c [Heap slotOf: [Heap slotOf: receiver at: 'cdr] at: 'car])
+          (tFn [Heap slotOf: args at: 'car])
+          (eFn [Heap slotOf: [Heap slotOf: args at: 'cdr] at: 'car]))
+      (let ((tForm [Heap slotOf:
+                     [Heap slotOf:
+                       [Heap slotOf: tFn at: 'cdr]
+                       at: 'cdr]
+                     at: 'car])
+            (eForm [Heap slotOf:
+                     [Heap slotOf:
+                       [Heap slotOf: eFn at: 'cdr]
+                       at: 'cdr]
+                     at: 'car]))
+        ;; compile c — non-tail.
+        [self compileForm: c chunk: chunk tail: #false]
+        ;; Send :!! argc=0 — preserves user overrides of :!!.
+        (let ((icBang [chunk addIc]))
+          [chunk emit: [Opcode send: '!! argc: 0 ic: icBang]])
+        ;; JumpIfFalse else (placeholder offset 0; patched later).
+        (let ((jif [chunk emit: [Opcode jumpIfFalse: 0]]))
+          ;; compile then-branch inline; tail iff `if` was tail.
+          [self compileForm: tForm chunk: chunk tail: tail]
+          ;; Jump end (placeholder offset 0; patched after else).
+          (let ((jmp [chunk emit: [Opcode jump: 0]]))
+            ;; patch JumpIfFalse to land here (start of else).
+            [chunk patchJump: jif to: [chunk jumpTarget]]
+            ;; compile else-branch inline; tail iff `if` was tail.
+            [self compileForm: eForm chunk: chunk tail: tail]
+            ;; patch unconditional Jump to land here (after else).
+            [chunk patchJump: jmp to: [chunk jumpTarget]]))))))
 
 ;; helper: walk a list of arg-forms and compile each in non-tail
 ;; position. used by compileSend and compileCall.
