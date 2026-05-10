@@ -169,6 +169,13 @@ impl<'a> Compiler<'a> {
 
     /// emit a placeholder jump. returns the position of the jump op
     /// for later patching.
+    ///
+    /// V3 task 12 — the seed `compile_if` no longer uses this (it
+    /// emits Send-based bytecode instead). Kept for task 13's
+    /// peephole optimizer, which will recognize the if-shape Send
+    /// pattern in `compile_send` and fold it back into Jump-based
+    /// emission inline.
+    #[allow(dead_code)]
     fn emit_placeholder_jump(&mut self, branch_kind: BranchKind) -> usize {
         let pos = self.ops.len();
         self.emit(match branch_kind {
@@ -180,6 +187,10 @@ impl<'a> Compiler<'a> {
 
     /// patch a previously-emitted jump to land at the next op
     /// position.
+    ///
+    /// V3 task 12 — see `emit_placeholder_jump`'s note: kept for
+    /// task 13's peephole optimizer.
+    #[allow(dead_code)]
     fn patch_jump_to_here(&mut self, jump_pos: usize) {
         let target = self.ops.len();
         let off = target as isize - jump_pos as isize;
@@ -333,19 +344,58 @@ impl<'a> Compiler<'a> {
     }
 
     fn compile_if(&mut self, elems: &[Value], tail: bool) -> Result<(), RaiseError> {
+        // V3: (if c t [e]) compiles to Send-based bytecode equivalent to
+        //   [[c !!] ifTrue: (fn () t) ifFalse: (fn () e)]
+        // The peephole optimizer (Task 13) recognizes this shape and
+        // emits Jump-based bytecode inline — recovering pre-V3 perf
+        // without sacrificing the user-overridable macro semantic at
+        // the source layer.
+        //
+        // Op::JumpIfFalse / Op::Jump are still emitted by other forms
+        // (let / desugarings); only `if` itself stops using them here.
         let (cond, then_branch, else_branch) = match elems.len() {
             3 => (elems[1], elems[2], Value::Nil),
             4 => (elems[1], elems[2], elems[3]),
             _ => return Err(self.err("if takes 2 or 3 args: (if cond then [else])")),
         };
+        let bang_bang = self.world.intern("!!");
+        let if_true_if_false = self.world.intern("ifTrue:ifFalse:");
+
+        // compile c, then Send :!! to coerce to Bool.
         self.compile_expr(cond, false)?;
-        let jmp_to_else = self.emit_placeholder_jump(BranchKind::IfFalse);
-        self.compile_expr(then_branch, tail)?;
-        let jmp_to_end = self.emit_placeholder_jump(BranchKind::Always);
-        self.patch_jump_to_here(jmp_to_else);
-        self.compile_expr(else_branch, tail)?;
-        self.patch_jump_to_here(jmp_to_end);
+        let ic_bang = self.next_ic();
+        self.emit(Op::Send {
+            selector: bang_bang,
+            argc: 0,
+            ic_idx: ic_bang,
+        });
+        // wrap each branch as a zero-arg thunk (fn () branch).
+        let t_chunk = self.compile_thunk(then_branch)?;
+        self.emit(Op::PushClosure { chunk: t_chunk });
+        let e_chunk = self.compile_thunk(else_branch)?;
+        self.emit(Op::PushClosure { chunk: e_chunk });
+        // Send :ifTrue:ifFalse: argc=2 — tail iff `if` was tail.
+        if tail {
+            self.emit(Op::TailSend {
+                selector: if_true_if_false,
+                argc: 2,
+            });
+        } else {
+            let ic_dispatch = self.next_ic();
+            self.emit(Op::Send {
+                selector: if_true_if_false,
+                argc: 2,
+                ic_idx: ic_dispatch,
+            });
+        }
         Ok(())
+    }
+
+    /// V3 — compile `body` into a fresh zero-arg chunk-Form and return
+    /// its FormId. Used by `compile_if` to wrap each branch as a thunk
+    /// suitable for `:ifTrue:ifFalse:` Send dispatch.
+    fn compile_thunk(&mut self, body: Value) -> Result<FormId, RaiseError> {
+        compile_fn_body(self.world, Vec::new(), body)
     }
 
     fn compile_do(&mut self, elems: &[Value], tail: bool) -> Result<(), RaiseError> {
@@ -535,6 +585,11 @@ impl<'a> Compiler<'a> {
     }
 }
 
+/// V3 task 12 — kept for task 13's peephole optimizer (the seed's
+/// `compile_if` no longer references it directly, but the peephole
+/// over `compile_send`'s ifTrue:ifFalse: Send shape will reuse the
+/// jump-emission helpers).
+#[allow(dead_code)]
 #[derive(Copy, Clone)]
 enum BranchKind {
     Always,
@@ -580,6 +635,46 @@ mod tests {
                 .as_form_id()
                 .ok_or_else(|| RaiseError::new(world.intern("dispatch"), "not a closure"))?;
             world.invoke(id, Value::Nil, args, crate::form::FormId::NONE)
+        }).expect("install_native in mutable test");
+        if !was_in_turn { let _ = w.commit_turn(); }
+    }
+
+    /// V3 — the seed `compile_if` now lowers to
+    /// `[[c !!] ifTrue: (fn () t) ifFalse: (fn () e)]`. tests using
+    /// `World::new()` directly (which skips `intrinsics::install`)
+    /// must install the three involved selectors:
+    ///   - `:!!` on Object (returns `#true`), Nil-proto (returns
+    ///     `#false`), Bool (returns self)
+    ///   - `:ifTrue:ifFalse:` on Bool (branches on self, calls the
+    ///     chosen thunk)
+    ///   - `:call` on Closure — done separately by `install_closure_call`.
+    /// matches what `lib/early/02-bool.moof` installs at boot.
+    fn install_if_prereqs(w: &mut World) {
+        let was_in_turn = w.in_turn();
+        if !was_in_turn { w.start_turn(); }
+        // :!! — coerce to Bool. Object → #true, nil → #false, Bool → self.
+        w.install_native(w.protos.object, "!!", |_, _self, _args| {
+            Ok(Value::Bool(true))
+        }).expect("install_native in mutable test");
+        w.install_native(w.protos.nil, "!!", |_, _self, _args| {
+            Ok(Value::Bool(false))
+        }).expect("install_native in mutable test");
+        w.install_native(w.protos.bool_, "!!", |_, self_, _args| {
+            Ok(self_)
+        }).expect("install_native in mutable test");
+        // :ifTrue:ifFalse: on Bool — branch on self, call chosen thunk.
+        w.install_native(w.protos.bool_, "ifTrue:ifFalse:", |world, self_, args| {
+            let chosen = match self_ {
+                Value::Bool(true) => args[0],
+                Value::Bool(false) => args[1],
+                _ => return Err(RaiseError::new(
+                    world.intern("type-error"),
+                    ":ifTrue:ifFalse: receiver must be a Bool",
+                )),
+            };
+            // dispatch :call on the chosen thunk.
+            let call_sym = world.intern("call");
+            world.send(chosen, call_sym, &[])
         }).expect("install_native in mutable test");
         if !was_in_turn { let _ = w.commit_turn(); }
     }
@@ -646,6 +741,10 @@ mod tests {
     #[test]
     fn compile_if_true_branch() {
         let mut w = World::new();
+        // V3: if lowers to [[c !!] ifTrue: (fn () t) ifFalse: (fn () e)]
+        // — needs Bool/Object/Nil :!!, Bool :ifTrue:ifFalse:, Closure :call.
+        install_if_prereqs(&mut w);
+        install_closure_call(&mut w);
         let r = ev(&mut w, "(if #true 'yes 'no)").unwrap();
         let yes = w.intern("yes");
         assert_eq!(r, Value::Sym(yes));
@@ -654,6 +753,8 @@ mod tests {
     #[test]
     fn compile_if_false_branch() {
         let mut w = World::new();
+        install_if_prereqs(&mut w);
+        install_closure_call(&mut w);
         let r = ev(&mut w, "(if #false 'yes 'no)").unwrap();
         let no = w.intern("no");
         assert_eq!(r, Value::Sym(no));
@@ -662,6 +763,8 @@ mod tests {
     #[test]
     fn compile_if_nil_is_falsy() {
         let mut w = World::new();
+        install_if_prereqs(&mut w);
+        install_closure_call(&mut w);
         let r = ev(&mut w, "(if nil 'yes 'no)").unwrap();
         let no = w.intern("no");
         assert_eq!(r, Value::Sym(no));
@@ -763,6 +866,9 @@ mod tests {
     #[test]
     fn nested_if_works() {
         let mut w = World::new();
+        // V3: if needs Bool/Object/Nil :!! and Bool :ifTrue:ifFalse:.
+        install_if_prereqs(&mut w);
+        install_closure_call(&mut w);
         let r = ev(&mut w, "(if #true (if #false 'a 'b) 'c)").unwrap();
         let b = w.intern("b");
         assert_eq!(r, Value::Sym(b));
@@ -773,6 +879,7 @@ mod tests {
         // recursion through a `def`-bound name. tested without
         // arithmetic to avoid unbound `=` etc.
         let mut w = World::new();
+        install_if_prereqs(&mut w);
         install_closure_call(&mut w);
         install_def_prereqs(&mut w);
         // wrap manual compile + run_top in a turn.

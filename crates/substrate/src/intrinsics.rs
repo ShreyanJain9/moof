@@ -84,6 +84,7 @@ fn num_f64(w: &mut World, v: Value, op: &str) -> Result<f64, RaiseError> {
 pub fn install(w: &mut World) {
     crate::transporter::install(w);
     install_call_on_method(w);
+    install_if_dispatch(w);
     install_integer_methods(w);
     install_float_methods(w);
     install_char_methods(w);
@@ -101,6 +102,55 @@ pub fn install(w: &mut World) {
     install_proto_globals(w);
     install_env_proto_methods(w);
     install_closure_proto_methods(w);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// V3 task 12 — `if` dispatch primitives.
+//
+// the seed `compile_if` lowers to `[[c !!] ifTrue: t-thunk ifFalse:
+// e-thunk]`. this requires `:!!` (Bool coercion) and
+// `:ifTrue:ifFalse:` (the conditional itself) to exist *before* the
+// seed compiles compiler/*.moof — which uses `if` extensively.
+//
+// the moof-side `lib/early/02-bool.moof` re-installs these via
+// `setHandler!`, but its load happens AFTER compiler.moof has run.
+// we install rust-side defaults here so the seed-emitted Send-based
+// `if` bytecode can dispatch during phase-1 bootstrap. early/02
+// then overwrites them with the canonical moof versions.
+// ─────────────────────────────────────────────────────────────────
+
+fn install_if_dispatch(w: &mut World) {
+    // :!! — coerce any value to Bool.
+    //   Object → #true (default truthy).
+    //   nil    → #false (the only non-Bool falsy value).
+    //   Bool   → self  (#true and #false are their own coercions).
+    w.install_native(w.protos.object, "!!", |_, _self, _args| {
+        Ok(Value::Bool(true))
+    }).expect("install_native at boot — substrate bug");
+    w.install_native(w.protos.nil, "!!", |_, _self, _args| {
+        Ok(Value::Bool(false))
+    }).expect("install_native at boot — substrate bug");
+    w.install_native(w.protos.bool_, "!!", |_, self_, _args| {
+        Ok(self_)
+    }).expect("install_native at boot — substrate bug");
+
+    // :ifTrue:ifFalse: on Bool — branch on self, dispatch :call on
+    // the chosen thunk. early/02-bool re-installs per-singleton on
+    // #true and #false; this Bool-proto fallback is observationally
+    // equivalent and lets the seed's `if` bytecode run during
+    // phase-1 (before early/02 loads).
+    w.install_native(w.protos.bool_, "ifTrue:ifFalse:", |w, self_, args| {
+        let chosen = match self_ {
+            Value::Bool(true) => args.first().copied().unwrap_or(Value::Nil),
+            Value::Bool(false) => args.get(1).copied().unwrap_or(Value::Nil),
+            _ => return Err(RaiseError::new(
+                w.intern("type-error"),
+                ":ifTrue:ifFalse: receiver must be a Bool",
+            )),
+        };
+        let call_sym = w.intern("call");
+        w.send(chosen, call_sym, &[])
+    }).expect("install_native at boot — substrate bug");
 }
 
 // ─────────────────────────────────────────────────────────────────

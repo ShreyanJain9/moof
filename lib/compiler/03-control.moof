@@ -8,7 +8,22 @@
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; compileIf:chunk:tail:
-;; (if cond then [else]) — JumpIfFalse + Jump pair, offsets patched.
+;;
+;; V3: (if c t [e]) compiles to Send-based bytecode equivalent to
+;;   [[c !!] ifTrue: (fn () t) ifFalse: (fn () e)]
+;; — Op::JumpIfFalse / Op::Jump are NOT emitted by `if` anymore (they
+;; remain in the bytecode set, used by other constructs like the
+;; let → fn-call desugaring). The peephole optimizer (Task 13)
+;; recognizes this Send-shape in compileSend: and folds it back into
+;; Jump-based emission inline — recovers pre-V3 perf without
+;; sacrificing the user-overridable macro semantic at the source
+;; layer.
+;;
+;; Note the bootstrap chicken-and-egg: this handler's own body uses
+;; `if`. Before this rewrite, the rust seed compiled that `if` with
+;; Jump-based bytecode; after the rewrite, both the seed and this
+;; handler emit the same Send-based shape — so a recompile by either
+;; side produces semantically equivalent bytecode.
 ;; ─────────────────────────────────────────────────────────────────
 
 (setHandler! Compiler 'compileIf:chunk:tail:
@@ -20,18 +35,34 @@
                         [Heap slotOf: [Heap slotOf: [Heap slotOf: rest at: 'cdr] at: 'cdr] at: 'car])))
       ;; cond — non-tail.
       [self compileForm: condForm chunk: chunk tail: #false]
-      ;; placeholder: jmp-to-else-if-false.
-      (let ((jElse [chunk emit: [Opcode jumpIfFalse: 0]]))
-        ;; then — tail iff if was tail.
-        [self compileForm: thenForm chunk: chunk tail: tail]
-        ;; placeholder: jmp-to-end.
-        (let ((jEnd [chunk emit: [Opcode jump: 0]]))
-          ;; patch j-else to land here (start of else block).
-          [chunk patchJump: jElse to: [chunk jumpTarget]]
-          ;; else.
-          [self compileForm: elseForm chunk: chunk tail: tail]
-          ;; patch j-end to land here.
-          [chunk patchJump: jEnd to: [chunk jumpTarget]])))))
+      ;; Send :!! argc=0 — coerce condition to Bool.
+      (let ((icBang [chunk addIc]))
+        [chunk emit: [Opcode send: '!! argc: 0 ic: icBang]])
+      ;; wrap then-branch as (fn () thenForm) — PushClosure t-thunk.
+      (let ((tThunk [self compileThunk: thenForm]))
+        [chunk emit: [Opcode pushClosure: tThunk]])
+      ;; wrap else-branch as (fn () elseForm) — PushClosure e-thunk.
+      (let ((eThunk [self compileThunk: elseForm]))
+        [chunk emit: [Opcode pushClosure: eThunk]])
+      ;; Send :ifTrue:ifFalse: argc=2 — tail iff if was tail.
+      (let ((icDispatch [chunk addIc]))
+        (if tail
+            [chunk emit: [Opcode tailSend: 'ifTrue:ifFalse: argc: 2]]
+            [chunk emit: [Opcode send: 'ifTrue:ifFalse: argc: 2 ic: icDispatch]])))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; compileThunk: — V3 helper. Allocates a fresh zero-arg chunk-Form,
+;; compiles `body` in tail position, returns the chunk-Form. Used by
+;; compileIf: to wrap each branch as a (fn () body) suitable for
+;; :ifTrue:ifFalse: dispatch.
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! Compiler 'compileThunk:
+  (fn (body)
+    (let ((subChunk [Chunk new: '() source: body]))
+      [self compileForm: body chunk: subChunk tail: #true]
+      [subChunk emit: [Opcode return]]
+      subChunk)))
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; compileFn:chunk:
