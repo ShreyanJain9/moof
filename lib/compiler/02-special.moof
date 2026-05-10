@@ -19,7 +19,18 @@
         (raise: 'compile-error "quote requires 1 arg: (quote v)"))))
 
 ;; ─────────────────────────────────────────────────────────────────
-;; compileSet:chunk: — eval expr, StoreName name.
+;; compileSet:chunk:
+;;
+;; (set! name expr) — V3: emit Send-based bytecode equivalent to
+;;   [[Env current] set: 'name to: expr]
+;; LoadName Env → Send :current argc=0 → LoadConst 'name → <expr> →
+;; Send :set:to: argc=2.
+;;
+;; Semantic change vs pre-V3 Op::StoreName:
+;;   - (set! x v) now evaluates to v (per :set:to:'s return) rather
+;;     than nil.
+;;   - (set! unbound v) now raises 'unbound rather than silently
+;;     creating a global.
 ;; ─────────────────────────────────────────────────────────────────
 
 (setHandler! Compiler 'compileSet:chunk:
@@ -28,8 +39,19 @@
           (expr [Heap slotOf: [Heap slotOf: rest at: 'cdr] at: 'car]))
       (if [self symbol?: name]
           (do
+            ;; LoadName Env (the Env proto, globally bound).
+            [chunk emit: [Opcode loadName: 'Env]]
+            ;; Send :current argc=0 — pops Env, pushes the caller's
+            ;; lexical env Form.
+            (let ((icCurrent [chunk addIc]))
+              [chunk emit: [Opcode send: 'current argc: 0 ic: icCurrent]])
+            ;; LoadConst 'name
+            [chunk emit: [Opcode loadConst: [chunk addConst: name]]]
+            ;; compile rhs
             [self compileForm: expr chunk: chunk tail: #false]
-            [chunk emit: [Opcode storeName: name]])
+            ;; Send :set:to: argc=2 — pops env+name+value, pushes value.
+            (let ((icSet [chunk addIc]))
+              [chunk emit: [Opcode send: 'set:to: argc: 2 ic: icSet]]))
           (raise: 'compile-error "set! first arg must be a symbol")))))
 
 ;; ─────────────────────────────────────────────────────────────────
