@@ -121,17 +121,19 @@
     (let ((receiver [Heap slotOf: rest at: 'car])
           (selector [Heap slotOf: [Heap slotOf: rest at: 'cdr] at: 'car])
           (args [Heap slotOf: [Heap slotOf: rest at: 'cdr] at: 'cdr]))
-      ;; V3 task 13 peephole — recognize the post-macro-expansion shape
-      ;; of `if`:
-      ;;   (__send__ (__send__ c '!!) 'ifTrue:ifFalse: (fn () t) (fn () e))
-      ;; where the two thunks are syntactic (fn () body) literals. emit
-      ;; Jump-based bytecode inline — no closure allocations, no method
-      ;; dispatch on Bool. preserves the user-overridable :ifTrue:ifFalse:
-      ;; for code that calls it explicitly: when args aren't syntactic
-      ;; (fn () body) literals (e.g. `[c ifTrue: someThunk ifFalse: ...]`),
-      ;; the matcher returns #false and standard Send dispatch runs.
-      (if [self matchIfShape: receiver selector: selector args: args]
-          [self compileIfInline: receiver args: args chunk: chunk tail: tail]
+      ;; Constant-folding peephole — when receiver and all args are
+      ;; literal constants AND the selector is in the known-pure set,
+      ;; evaluate at compile time and emit a single LoadConst.
+      ;; Preserves user-overridability for the same reason if-peephole
+      ;; does: the fold only fires when the args are SYNTACTIC literals.
+      ;; `[x + y]` with `x` and `y` runtime values takes the normal path.
+      (let ((folded [self tryConstFold: receiver
+                              selector: selector
+                              args: args]))
+        (if [folded is nil]
+            ;; not foldable — V3 task 13 if-shape peephole + standard.
+            (if [self matchIfShape: receiver selector: selector args: args]
+                [self compileIfInline: receiver args: args chunk: chunk tail: tail]
       (if [self symbol?: selector]
           (let ((isSuper (if [self symbol?: receiver]
                              [receiver is 'super]
@@ -154,7 +156,87 @@
                       [chunk emit: [Opcode send: selector
                                            argc: argc
                                            ic: ic]]))))
-          (raise: 'compile-error "__send__ selector must be a symbol"))))))
+          (raise: 'compile-error "__send__ selector must be a symbol")))
+            ;; folded — emit a LoadConst of the precomputed result.
+            (let ((idx [chunk addConst: folded]))
+              [chunk emit: [Opcode loadConst: idx]]))))))
+
+;; Constant-folding peephole — when receiver and all args are literal
+;; constants AND the selector is in the known-pure set, evaluate the
+;; send at compile time and return the result. otherwise returns nil
+;; (which `compileSend:` treats as "not foldable").
+;;
+;; "literal constant" means a leaf value (Int / Bool / Char / Nil /
+;; non-Cons Form) — not something requiring lookup or compilation.
+;; symbols are excluded because they would otherwise be runtime lookups
+;; (`x` in source is a LoadName, not a literal `'x`).
+;;
+;; the whitelist is intentionally minimal — pure arithmetic, comparison,
+;; and logical ops on numeric/bool/nil receivers. user overrides on
+;; these selectors take precedence because the fold ONLY fires when args
+;; are syntactic literals; runtime `[x + y]` always dispatches normally.
+;; preserves L3 (user moldability) while paying back the dispatch cost
+;; for the constants compilers see every day.
+(setHandler! Compiler 'tryConstFold:selector:args:
+  (fn (receiver selector args)
+    (if [self foldableSend?: receiver selector: selector args: args]
+        ;; safe to evaluate — send to the live receiver. compile-time
+        ;; lookup runs through the same dispatch chain as runtime
+        ;; (any user-installed handler on the receiver's proto wins).
+        [receiver perform: selector withArgs: args]
+        nil)))
+
+;; predicate — is the receiver+args+selector triple safe to fold at
+;; compile time? receiver and every arg must be a literal value
+;; (Heap leaf, non-Cons); selector must be in the pure-op set.
+(setHandler! Compiler 'foldableSend?:selector:args:
+  (fn (receiver selector args)
+    (if [self literalValue?: receiver]
+        (if [self pureSelector?: selector]
+            [self allLiteralArgs?: args]
+            #false)
+        #false)))
+
+;; predicate — is `v` a literal value the compiler can eval directly?
+;; excludes Cons (would require recursive compilation) and Symbol
+;; (would require name lookup at the use site).
+(setHandler! Compiler 'literalValue?:
+  (fn (v)
+    (if [self cons?: v]
+        #false
+        (if [self symbol?: v]
+            #false
+            #true))))
+
+;; predicate — every arg in the (possibly nil) cons-list is a literal.
+(setHandler! Compiler 'allLiteralArgs?:
+  (fn (args)
+    (if [args is nil]
+        #true
+        (if [self literalValue?: [Heap slotOf: args at: 'car]]
+            [self allLiteralArgs?: [Heap slotOf: args at: 'cdr]]
+            #false))))
+
+;; the pure-selector whitelist. nothing here can have side effects or
+;; depend on world state beyond the receiver+args values. user code
+;; CAN override these on their own protos at runtime — the fold only
+;; fires when args are syntactic literals (a tiny fraction of sends).
+(setHandler! Compiler 'pureSelector?:
+  (fn (sel)
+    (if [sel is '+] #true
+    (if [sel is '-] #true
+    (if [sel is '*] #true
+    (if [sel is '/] #true
+    (if [sel is '=] #true
+    (if [sel is '<] #true
+    (if [sel is '>] #true
+    (if [sel is '<=] #true
+    (if [sel is '>=] #true
+    (if [sel is '!=] #true
+    (if [sel is '!!] #true
+    (if [sel is 'and] #true
+    (if [sel is 'or] #true
+    #false)))))))))))))))
 
 ;; V3 task 13 — match the post-macro-expansion if-shape. predicate;
 ;; returns #true iff the Send is `(__send__ (__send__ c '!!)

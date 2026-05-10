@@ -128,6 +128,30 @@ fn install_if_dispatch(w: &mut World) {
         Ok(Value::Bool(true))
     }).expect("install_native at boot — substrate bug");
 
+    // [receiver perform: sel withArgs: argList] — dynamic dispatch.
+    // sends `sel` to `receiver` with `argList`'s elements as args.
+    // the reflection-complete escape hatch from a static selector:
+    // user code can dispatch on a computed selector. used by the
+    // moof Compiler's const-fold peephole (lib/compiler/02-special.moof)
+    // to evaluate pure sends at compile time.
+    //
+    // selector must be a Symbol; argList must be a proper list
+    // (cons-chain terminating in nil). honors regular dispatch:
+    // walks proto chain, hits any user override, raises 'doesNotUnderstand'
+    // on miss — i.e. observationally identical to `[receiver sel args…]`
+    // when sel and the args are known at parse time.
+    w.install_native(w.protos.object, "perform:withArgs:", |w, self_, args| {
+        let sel_v = args.first().copied().unwrap_or(Value::Nil);
+        let sel = sel_v.as_sym().ok_or_else(|| {
+            type_error(w, ":perform:withArgs: selector must be a Symbol")
+        })?;
+        let arg_list = args.get(1).copied().unwrap_or(Value::Nil);
+        let arg_vec = w.list_to_vec(arg_list).map_err(|e| {
+            RaiseError::new(w.intern("type-error"), e)
+        })?;
+        w.send(self_, sel, &arg_vec)
+    }).expect("install_native :perform:withArgs: at boot — substrate bug");
+
     // [a become: b] — heap-level indirection. at the next dereference
     // of `a` (and forever), the substrate resolves to `b`. used for
     // live proto migration: replace a proto in place; every reference
