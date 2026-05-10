@@ -1202,16 +1202,18 @@ fn install_env_proto_methods(w: &mut World) {
     // ignored: [Env current], [$here current], or any env-receiver
     // all return the same thing. natives don't push a VM frame
     // (verified at vm.rs:258), so frames.last().env IS the caller's
-    // env. used by the future set! macro to find lexical scope at
-    // the call site.
+    // env. used by the `set!` macro to find lexical scope at the
+    // call site.
+    //
+    // `frames` is never empty at a native call: every send pushes a
+    // frame before dispatching, including the implicit top-level
+    // frame from `run_top`. an empty-`frames` `:current` is a
+    // substrate invariant violation, not a user error — so we panic
+    // rather than raise.
     w.install_native(env_proto, "current", |w, _self_, _args| {
-        let env = w.vm.frames.last().map(|f| f.env).ok_or_else(|| {
-            raise(
-                w,
-                "env-out-of-scope",
-                "[Env current] called outside any active method dispatch",
-            )
-        })?;
+        let env = w.vm.frames.last()
+            .expect("[Env current]: vm.frames is empty — substrate invariant violation")
+            .env;
         Ok(Value::Form(env))
     }).expect("install_native :current at boot — substrate bug");
 }
