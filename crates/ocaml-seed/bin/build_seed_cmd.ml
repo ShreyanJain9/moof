@@ -598,21 +598,69 @@ let run (args : string array) : unit =
         Printf.eprintf "compile error in %s: %s\n" step.source_path msg;
         exit 1
   ) steps;
+  (* Allocate a fresh source-form Form per compiled chunk. zig's
+     image-loader keys world.chunk_bytecode by source_form_id, so each
+     chunk needs a distinct FormId or all chunks collapse into one
+     entry (Bug 3). The chunk's compiler-id (cb.id) is the operand
+     PushClosure emits — to keep that operand valid as a FormId after
+     load, we rewrite the operand to point at the matching source-form
+     FormId below.
+
+     Each source-form Form is a minimal stub: proto=Chunk, no slots,
+     no handlers. Eventually we'll lift the actual parsed source Form
+     here (for reflection), but the empty-stub keeps dispatch happy. *)
+  let all_cbs = Compiler.all_chunks () in
+  let chunk_form_ids = List.map (fun (_ : Compiler.chunk_builder) ->
+    alloc_form_raw Image.{
+      proto = Ast.FormRef bp.chunk_id;
+      slots = [];
+      handlers = [];
+      meta = [];
+      frozen = true;
+    }
+  ) all_cbs in
+  (* Map: chunk's compiler-id (cb.id) → its allocated FormId.
+     We use this both for source_form_id on emission AND for rewriting
+     PushClosure operands inside each chunk's op list. *)
+  let id_map : (int, int) Hashtbl.t = Hashtbl.create 256 in
+  List.iter2 (fun (cb : Compiler.chunk_builder) fid ->
+    Hashtbl.add id_map cb.id fid
+  ) all_cbs chunk_form_ids;
+  let map_chunk_id (cid : int) : int =
+    match Hashtbl.find_opt id_map cid with
+    | Some f -> f
+    | None ->
+        failwith (Printf.sprintf
+          "build-seed: PushClosure references unknown chunk-id %d" cid)
+  in
+  (* Rewrite every chunk's op list, substituting PushClosure operands.
+     finalize re-encodes from b.ops on each call, so this mutation is
+     picked up. Op sizes don't change (PushClosure is fixed at 5 bytes
+     regardless of operand value), so byte positions / jump offsets
+     are unaffected. *)
+  List.iter (fun (cb : Compiler.chunk_builder) ->
+    Dynarray.iteri (fun i op ->
+      match op with
+      | Opcodes.PushClosure cid ->
+          Dynarray.set cb.ops i (Opcodes.PushClosure (map_chunk_id cid))
+      | _ -> ()
+    ) cb.ops
+  ) all_cbs;
   (* Lift non-scalar consts into FormRefs. We walk every chunk's
      consts in registry order (deterministic) and rewrite each
      non-scalar to a FormRef pointing at a pre-allocated Form. *)
   let chunks =
-    List.map (fun (cb : Compiler.chunk_builder) ->
+    List.map2 (fun (cb : Compiler.chunk_builder) source_fid ->
       let f = Compiler.finalize cb in
       let lifted_consts = List.map lift_value f.consts in
       Image.{
-        source_form_id = 0;   (* W4/W5: real source Form pre-alloc *)
+        source_form_id = source_fid;
         body = f.body;
         consts = lifted_consts;
         ic_count = f.ic_count;
         params = f.params;
       }
-    ) (Compiler.all_chunks ())
+    ) all_cbs chunk_form_ids
   in
   let forms = List.rev !lifted_forms in
   let vat = Image.{
