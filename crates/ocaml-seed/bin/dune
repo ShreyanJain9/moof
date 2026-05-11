@@ -1,0 +1,4 @@
+(executable
+ (name seed)
+ (public_name moof-seed)
+ (libraries moof_seed))

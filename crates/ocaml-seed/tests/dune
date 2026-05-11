@@ -1,0 +1,1 @@
+(executable (name b3test) (libraries moof_seed))

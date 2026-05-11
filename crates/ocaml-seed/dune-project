@@ -1,0 +1,9 @@
+(lang dune 3.0)
+(name moof_seed)
+
+(generate_opam_files true)
+
+(package
+ (name moof_seed)
+ (synopsis "Moof V4 seed compiler — reader, compiler, image serializer")
+ (license MIT))
