@@ -191,6 +191,25 @@ pub const World = struct {
     /// (tests) still work — natives that need io must check.
     io: ?std.Io = null,
 
+    /// the `$transporter` cap's resolved lib root — `MOOF_LIB` env var,
+    /// `<exe>/../lib`, or `./lib`. set by the host when launching `moof
+    /// run`; natives consult it via `transporter:load:` / `:loadAll:`.
+    /// owned by the world's allocator; freed in deinit.
+    transporter_root: ?[]u8 = null,
+
+    /// mirror of `crates/substrate/src/world.rs::use_moof_compiler`.
+    /// when `true`, `$compiler` is in-image — every compile routes
+    /// through `[Compiler compileTop: form]`. zig substrate has no
+    /// native compiler, so this MUST be true for any compile to
+    /// happen. defaulted false; flipped by `[$compiler useMoof]`.
+    use_moof_compiler: bool = false,
+
+    /// mirror of `crates/substrate/src/world.rs::use_moof_reader`.
+    /// when `true`, `$reader` is in-image — every parse routes through
+    /// `[Parser parse: src]`. zig has no native reader, so this MUST
+    /// be true. defaulted false; flipped by `[$reader useMoof]`.
+    use_moof_reader: bool = false,
+
     /// chunk-FormId → byte-encoded bytecode (owned). V4 spec §4.3:
     /// chunks are serializable as `:body` Bytes.
     chunk_bytecode: std.AutoArrayHashMapUnmanaged(FormId, []u8),
@@ -466,6 +485,7 @@ pub const World = struct {
         self.vm.deinit(self.allocator);
         self.syms.deinit();
         self.heap.deinit();
+        if (self.transporter_root) |root| self.allocator.free(root);
     }
 
     // ---- env machinery (V3 spec §6) ------------------------------
@@ -820,6 +840,14 @@ pub const World = struct {
         const id = try self.heap.alloc(f);
         _ = &f;
         return .{ .form = id };
+    }
+
+    /// set the transporter root. takes ownership of `root` (caller
+    /// passes a heap slice or arena-allocated bytes; world frees in
+    /// deinit). prior root, if any, is freed.
+    pub fn setTransporterRoot(self: *World, root: []const u8) !void {
+        if (self.transporter_root) |old| self.allocator.free(old);
+        self.transporter_root = try self.allocator.dupe(u8, root);
     }
 
     /// look up a named native in the process intrinsics table.
