@@ -106,14 +106,34 @@ let put_u8  = Bytecode.write_u8
 let put_u16 = Bytecode.write_u16_be
 let put_u32 = Bytecode.write_u32_be
 (* i64 + f64 helpers — not in Bytecode (which only deals with op
-   operands up to u32). define locally here. *)
+   operands up to u32). define locally here.
+
+   Note: OCaml's native int is 63 bits (one bit stolen for the GC tag).
+   We use `asr` (arithmetic shift right) rather than `lsr` so the sign
+   bit propagates correctly through all eight emitted bytes — `lsr`
+   would zero-fill from bit 63 and turn -1 into 0x7FFF_FFFF_FFFF_FFFF
+   on the wire (which the zig loader then rejects as out-of-i48-range,
+   because Value::Int is i48 ∪ BigInt and i64::MAX overflows i48).
+   For positive values `asr` and `lsr` are identical, so the change is
+   safe across the whole int range. *)
 let put_i64 (b : Buffer.t) (v : int) : unit =
   for i = 7 downto 0 do
-    Buffer.add_char b (Char.chr ((v lsr (i * 8)) land 0xff))
+    Buffer.add_char b (Char.chr ((v asr (i * 8)) land 0xff))
   done
 
+(* For Float we want the *raw* u64 bit pattern, no sign-extension —
+   so go through Int64 directly rather than reusing put_i64 (which
+   could only handle the 63-bit OCaml-int range anyway). *)
 let put_f64 (b : Buffer.t) (v : float) : unit =
-  put_i64 b (Int64.to_int (Int64.bits_of_float v))
+  let bits = Int64.bits_of_float v in
+  for i = 7 downto 0 do
+    let byte = Int64.to_int
+                 (Int64.logand
+                   (Int64.shift_right_logical bits (i * 8))
+                   0xffL)
+    in
+    Buffer.add_char b (Char.chr byte)
+  done
 
 (* ------- Value (inline byte-tagged) encoder per spec §4 ------- *)
 
