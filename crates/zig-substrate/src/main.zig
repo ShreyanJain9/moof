@@ -130,7 +130,7 @@ pub fn main(init: std.process.Init) !void {
             }
         }
         defer if (serialize_to) |s| allocator.free(s);
-        return runRun(allocator, init.io, vat_copy, serialize_to);
+        return runRun(allocator, init.io, init.minimal.environ, vat_copy, serialize_to);
     }
 
     return runSmoke(allocator);
@@ -635,6 +635,43 @@ fn runSerialize(allocator: std.mem.Allocator, io: std.Io, in_path: []const u8, o
 }
 
 // ============================================================
+// transporter lib-root resolution (port of rust transporter.rs::resolve_lib_root)
+// ============================================================
+
+/// check if `path` is a directory via io. zig 0.16 dropped
+/// `std.fs.cwd()` in favor of `std.Io.Dir.cwd()`; the helper here
+/// keeps the resolve-loop terse.
+fn isDir(io: std.Io, path: []const u8) bool {
+    var dir = std.Io.Dir.cwd().openDir(io, path, .{}) catch return false;
+    defer dir.close(io);
+    // openDir succeeded → it's a directory (Zig errors on file-as-dir).
+    return true;
+}
+
+/// resolve the moof lib root: MOOF_LIB env var → ./lib.
+/// (the <exe>/../lib path is intentionally skipped — selfExePath
+/// requires Io plumbing that's not yet stable in 0.16; main.zig
+/// callers usually run from the workspace root so ./lib suffices.)
+/// returns the first directory that exists; caller owns the slice.
+/// returns null if none found.
+fn resolveLibRoot(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ) ?[]u8 {
+    // 1. MOOF_LIB
+    if (std.process.Environ.getAlloc(environ, allocator, "MOOF_LIB")) |env_path| {
+        if (isDir(io, env_path)) return env_path;
+        allocator.free(env_path);
+    } else |_| {}
+
+    // 2. ./lib
+    {
+        const candidate = allocator.dupe(u8, "./lib") catch return null;
+        if (isDir(io, candidate)) return candidate;
+        allocator.free(candidate);
+    }
+
+    return null;
+}
+
+// ============================================================
 // run subcommand (W4 Piece 3 — boot + run main + optional serialize)
 // ============================================================
 
@@ -647,7 +684,7 @@ fn runSerialize(allocator: std.mem.Allocator, io: std.Io, in_path: []const u8, o
 /// look for a `'main` slot on `here_form` and run its chunk if
 /// present, otherwise treat the vat as already-bootstrapped and
 /// skip directly to the optional serialize step.
-fn runRun(allocator: std.mem.Allocator, io: std.Io, vat_path: []const u8, serialize_to: ?[]const u8) !void {
+fn runRun(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, vat_path: []const u8, serialize_to: ?[]const u8) !void {
     const p = std.debug.print;
 
     var world = try World.initBare(allocator);
@@ -665,6 +702,27 @@ fn runRun(allocator: std.mem.Allocator, io: std.Io, vat_path: []const u8, serial
         world.chunk_bytecode.count(),
         world.native_fns.count(),
     });
+
+    // install primordial caps ($transporter / $compiler / $reader)
+    // post-load. these can't ride the NativeRefsSection rebind path
+    // because rust v4_export labels their anonymous protos with
+    // <anon-N>:selector names that vary per-image. mirrors the rust
+    // boot sequence (install_compiler_cap / install_reader_cap /
+    // transporter::install run AFTER image hydrate).
+    intrinsics.installCaps(&world) catch |err| {
+        p("warning: installCaps failed: {s}\n", .{@errorName(err)});
+    };
+
+    // resolve transporter root: MOOF_LIB > ./lib > nothing.
+    if (resolveLibRoot(allocator, io, environ)) |root| {
+        defer allocator.free(root);
+        world.setTransporterRoot(root) catch |err| {
+            p("warning: setTransporterRoot failed: {s}\n", .{@errorName(err)});
+        };
+        p("  transporter root = {s}\n", .{root});
+    } else {
+        p("  transporter root = <unset> (no MOOF_LIB, no <exe>/../lib, no ./lib)\n", .{});
+    }
 
     // is there a `main` slot on $here? if so, it should hold either
     // a chunk FormId directly OR a method-Form whose :body is a chunk.
