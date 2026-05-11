@@ -78,6 +78,18 @@ pub const FormId = packed struct(u32) {
     pub fn vatLocal(payload: u30) FormId {
         return .{ .payload = payload, .scope = .vat_local };
     }
+
+    /// reinterpret the FormId as its u32 wire representation. used
+    /// by `bytecode.zig` and `image.zig` to serialize FormIds.
+    pub fn toU32(self: FormId) u32 {
+        return @bitCast(self);
+    }
+
+    /// inverse of `toU32` — construct a FormId from its u32 wire
+    /// representation. preserves scope tag in top 2 bits.
+    pub fn fromU32(raw: u32) FormId {
+        return @bitCast(raw);
+    }
 };
 
 /// canonical alias for the slot/handler/meta map type. keyed by

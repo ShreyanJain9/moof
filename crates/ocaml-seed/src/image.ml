@@ -102,11 +102,18 @@ type vat_image = {
 
 let put_bytes buf (b : bytes) = Buffer.add_bytes buf b
 
-let put_u8  = Bytecode.put_u8
-let put_u16 = Bytecode.put_u16
-let put_u32 = Bytecode.put_u32
-let put_i64 = Bytecode.put_i64
-let put_f64 = Bytecode.put_f64
+let put_u8  = Bytecode.write_u8
+let put_u16 = Bytecode.write_u16_be
+let put_u32 = Bytecode.write_u32_be
+(* i64 + f64 helpers — not in Bytecode (which only deals with op
+   operands up to u32). define locally here. *)
+let put_i64 (b : Buffer.t) (v : int) : unit =
+  for i = 7 downto 0 do
+    Buffer.add_char b (Char.chr ((v lsr (i * 8)) land 0xff))
+  done
+
+let put_f64 (b : Buffer.t) (v : float) : unit =
+  put_i64 b (Int64.to_int (Int64.bits_of_float v))
 
 (* ------- Value (inline byte-tagged) encoder per spec §4 ------- *)
 

@@ -1,95 +1,51 @@
-//! moof-zig — entrypoint. for now: a hello-world that confirms
-//! the toolchain compiles + a stub FormId/Value smoke that proves
-//! tagged-union encoding works the way we want.
+//! moof-zig — entrypoint. V4 polyglot substrate.
 //!
-//! once phase γ tasks start landing, this file becomes a tiny CLI
-//! shim (parse argv, load bytecode, instantiate World, run).
+//! parses argv, loads a V4 vat-image (or runs an inline smoke),
+//! instantiates a World, runs.
 
 const std = @import("std");
-
-/// the universal heap-id. matches the rust `FormId` layout: 2-bit
-/// scope tag in the top, 30-bit payload below. derived from the V0
-/// scope-tagging design.
-pub const FormId = packed struct(u32) {
-    payload: u30,
-    scope: Scope,
-
-    pub const Scope = enum(u2) {
-        vat_local = 0b00,
-        shared = 0b01,
-        far_ref = 0b10,
-        reserved = 0b11,
-    };
-
-    pub const NONE: FormId = .{ .payload = 0, .scope = .vat_local };
-
-    pub fn isNone(self: FormId) bool {
-        return self.payload == 0 and self.scope == .vat_local;
-    }
-
-    pub fn vatLocal(payload: u30) FormId {
-        return .{ .payload = payload, .scope = .vat_local };
-    }
-};
-
-/// the runtime value. tagged-immediate per the V0 design.
-pub const Value = union(enum) {
-    nil,
-    bool_: bool,
-    int: i48,  // moof's bignum-ready integer width
-    sym: u32,  // SymId
-    char: u32, // codepoint
-    float: f64,
-    form: FormId,
-
-    pub fn isNil(self: Value) bool {
-        return self == .nil;
-    }
-
-    pub fn isTruthy(self: Value) bool {
-        return switch (self) {
-            .nil => false,
-            .bool_ => |b| b,
-            else => true,
-        };
-    }
-};
+const value = @import("value.zig");
+const form = @import("form.zig");
+const sym = @import("sym.zig");
+const heap = @import("heap.zig");
+const opcodes = @import("opcodes.zig");
+const bytecode = @import("bytecode.zig");
 
 pub fn main() !void {
-    const allocator = std.heap.page_allocator;
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
     const p = std.debug.print;
 
-    p("moof-zig v0.0.0 — V4 substrate prototype\n", .{});
-    p("  FormId size: {} bits\n", .{@bitSizeOf(FormId)});
-    p("  Value size: {} bytes\n", .{@sizeOf(Value)});
+    p("moof-zig v0.0.0 — V4 polyglot substrate\n", .{});
+    p("  FormId size: {} bits\n", .{@bitSizeOf(form.FormId)});
+    p("  Value size:  {} bytes\n", .{@sizeOf(value.Value)});
+    p("  Form size:   {} bytes\n", .{@sizeOf(form.Form)});
 
-    // tiny smoke: alloc a few FormIds, push them onto an ArrayList,
-    // verify the scope-tag round-trips. this proves the toolchain
-    // + the packed-struct encoding work as expected.
-    var ids: std.ArrayList(FormId) = .empty;
-    defer ids.deinit(allocator);
+    // smoke: alloc heap, intern syms, encode an op
+    var h = try heap.Heap.init(allocator);
+    defer h.deinit();
 
-    try ids.append(allocator, FormId.vatLocal(1));
-    try ids.append(allocator, FormId.vatLocal(42));
-    try ids.append(allocator, FormId{ .payload = 7, .scope = .shared });
-    try ids.append(allocator, FormId.NONE);
+    var st = try sym.SymTable.init(allocator);
+    defer st.deinit();
 
-    p("  allocated {} FormIds:\n", .{ids.items.len});
-    for (ids.items, 0..) |id, i| {
-        p("    [{}] scope={s} payload={} none?={}\n",
-            .{ i, @tagName(id.scope), id.payload, id.isNone() });
-    }
+    const foo = try st.intern("foo");
+    const bar = try st.intern("bar");
+    p("  interned: foo={}, bar={}, foo-resolve={s}\n",
+        .{ foo, bar, st.resolve(foo) });
 
-    // tiny smoke on Value too
-    const values = [_]Value{
-        .nil,
-        .{ .bool_ = true },
-        .{ .int = 42 },
-        .{ .form = FormId.vatLocal(99) },
-    };
-    p("  values:\n", .{});
-    for (values, 0..) |v, i| {
-        p("    [{}] tag={s} truthy?={}\n",
-            .{ i, @tagName(v), v.isTruthy() });
-    }
+    // encode + decode an Op roundtrip
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+
+    const op = opcodes.Op{ .send = .{ .selector = foo, .argc = 2, .ic_idx = 4 } };
+    try bytecode.encodeOp(op, &buf, allocator);
+    p("  encoded Send :foo argc=2 ic=4 → {} bytes\n", .{buf.items.len});
+
+    const decoded = try bytecode.decodeOp(buf.items, 0);
+    p("  decoded: tag={s}, advance={}\n",
+        .{ @tagName(decoded.op), decoded.advance });
+
+    p("  V4 polyglot substrate skeleton ready ٩(◕‿◕｡)۶\n", .{});
 }

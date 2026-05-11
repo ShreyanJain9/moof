@@ -261,9 +261,8 @@ let patch_jump_to_here (b : chunk_builder) (jump_bytepos : int) : unit =
     | Jump _ -> Jump off
     | JumpIfFalse _ -> JumpIfFalse off
     | JumpIfTrue _ -> JumpIfTrue off
-    | other ->
-        err (Printf.sprintf "patch_jump_to_here: not a jump op (idx=%d): %s"
-               idx (op_name other))
+    | _ ->
+        err (Printf.sprintf "patch_jump_to_here: not a jump op (idx=%d)" idx)
   in
   Dynarray.set b.ops idx new_op
 
@@ -554,7 +553,7 @@ and compile_fn (b : chunk_builder) (rest : form list) : unit =
       let inner_b = make ~params body in
       compile_form inner_b body ~tail:true;
       ignore (emit inner_b Return);
-      ignore (emit b (PushClosure { chunk = inner_b.id }))
+      ignore (emit b (PushClosure inner_b.id))
   | _ -> err "fn requires params list and body"
 
 (* ─────────────────────────────────────────────────────────────────
@@ -592,7 +591,7 @@ and compile_let (b : chunk_builder) (rest : form list) ~(tail : bool) : unit =
       compile_form inner_b body ~tail:true;
       ignore (emit inner_b Return);
       (* outer: PushClosure; <eval each value>; Send :call argc=N. *)
-      ignore (emit b (PushClosure { chunk = inner_b.id }));
+      ignore (emit b (PushClosure inner_b.id));
       List.iter (fun v -> compile_form b v ~tail:false) values;
       let argc = List.length values in
       if argc > 255 then err "let: too many bindings (max 255)";
