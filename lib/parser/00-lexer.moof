@@ -1,0 +1,536 @@
+;; lib/parser/00-lexer.moof — char-by-char tokenizer.
+;;
+;; produces tokens as 3-element lists: (type value position).
+;; loaded BEFORE compiler/*.moof so that subsequent parses
+;; (including all stdlib) can route through [Lexer tokenize: src].
+;;
+;; written in the minimal-subset moof: raw setHandler!, no macros,
+;; no quasiquote, no defmethod sugar, no pattern-match params.
+;; see docs/superpowers/specs/2026-05-10-self-host-and-rust-deletion-design.md §4.
+;;
+;; ---------------------------------------------------------------
+;;
+;; token shape:
+;;   (type value pos)
+;;     type  — a Sym ('lparen, 'int, 'sym, ...)
+;;     value — Sym | Int | String | Char | nil
+;;     pos   — Int byte/char offset into src where the token began
+;;
+;; token types:
+;;   'lparen 'rparen 'lbracket 'rbracket 'lbrace 'rbrace
+;;   'quote 'quasiquote 'unquote 'unquote-splice
+;;   'int 'float 'char 'string 'sym
+;;   'true 'false 'nil
+;;   'colon-sym                — keyword-arg identifier ending in `:`
+;;   'cascade                  — the standalone `;`
+;;   'hash-vec                 — the `#[` opener (followed by usual tokens
+;;                               and a closing 'rbracket)
+;;
+;; the resulting list is in source order, nil-terminated.
+;;
+;; pos uses char-indexing via [src at: i] (not byte offsets); the
+;; spec calls this "byte-offset into the source string" but moof's
+;; String:at: is char-indexed and that is what we have at this
+;; stage. β2 / FormLoc machinery threads whatever pos we emit.
+;;
+;; floats are emitted as 'float tokens whose VALUE is a String of
+;; the source lexeme (not yet a Float value); the parser converts.
+;; (no string→float primitive available at this load phase.)
+
+;; ───────────────────────────────────────────────────────────────
+;; the Lexer singleton.
+;; ───────────────────────────────────────────────────────────────
+
+(def Lexer [Object new])
+
+;; ───────────────────────────────────────────────────────────────
+;; primitive predicates over Chars (compare codepoints to constants).
+;; codepoints used:
+;;   9  \t      10 \n      13 \r      32 space      11 \v      12 \f
+;;   40 (       41 )       91 [       93 ]          123 {      125 }
+;;   34 "       35 #       39 '       44 ,          58 :       59 ;
+;;   64 @       92 \\      96 `       45 -          43 +       46 .
+;;   48 '0'     57 '9'     97 'a'     122 'z'       65 'A'     90 'Z'
+;;   95 _
+;; ───────────────────────────────────────────────────────────────
+
+(setHandler! Lexer 'isWhitespace:
+  (fn (cp)
+    (if [cp = 32] #true
+    (if [cp = 10] #true
+    (if [cp = 9]  #true
+    (if [cp = 13] #true
+    (if [cp = 11] #true
+    (if [cp = 12] #true
+        #false))))))))
+
+(setHandler! Lexer 'isDigit:
+  (fn (cp)
+    (if [cp < 48] #false
+        (if [cp > 57] #false #true))))
+
+(setHandler! Lexer 'isLower:
+  (fn (cp)
+    (if [cp < 97] #false
+        (if [cp > 122] #false #true))))
+
+(setHandler! Lexer 'isUpper:
+  (fn (cp)
+    (if [cp < 65] #false
+        (if [cp > 90] #false #true))))
+
+(setHandler! Lexer 'isLetter:
+  (fn (cp)
+    (if [self isLower: cp] #true
+        [self isUpper: cp])))
+
+;; delimiters that terminate an atom (per reader.rs is_delim).
+;; ( ) [ ] { } ' " ; ` , and ASCII whitespace.
+(setHandler! Lexer 'isDelim:
+  (fn (cp)
+    (if [self isWhitespace: cp] #true
+    (if [cp = 40] #true       ;; (
+    (if [cp = 41] #true       ;; )
+    (if [cp = 91] #true       ;; [
+    (if [cp = 93] #true       ;; ]
+    (if [cp = 123] #true      ;; {
+    (if [cp = 125] #true      ;; }
+    (if [cp = 39] #true       ;; '
+    (if [cp = 34] #true       ;; "
+    (if [cp = 59] #true       ;; ;
+    (if [cp = 96] #true       ;; `
+    (if [cp = 44] #true       ;; ,
+        #false))))))))))))))
+
+;; identifier-extending chars: anything that's not a delim and not
+;; `|` (the block-bracket / binary operator). matches reader.rs's
+;; read_atom loop.
+(setHandler! Lexer 'isIdentExt:
+  (fn (cp)
+    (if [self isDelim: cp] #false
+        (if [cp = 124] #false #true))))    ;; 124 = `|`
+
+;; ───────────────────────────────────────────────────────────────
+;; [Lexer charAtCp: src index: i] — char's codepoint at index i,
+;; or -1 if past end. (-1 sentinel keeps the dispatch logic flat;
+;; no nil-check noise on every call.)
+;; ───────────────────────────────────────────────────────────────
+
+(setHandler! Lexer 'charAtCp:index:
+  (fn (src i)
+    (if [i < [src length]]
+        [[src at: i] codepoint]
+        -1)))
+
+;; [Lexer charAt: src index: i] — Char at i, or nil if past end.
+(setHandler! Lexer 'charAt:index:
+  (fn (src i)
+    (if [i < [src length]]
+        [src at: i]
+        nil)))
+
+;; [Lexer lexemeFrom: src start: a end: b] — substring (char-indexed).
+(setHandler! Lexer 'lexemeFrom:start:end:
+  (fn (src a b)
+    [src slice: a length: [b - a]]))
+
+;; ───────────────────────────────────────────────────────────────
+;; trivia — whitespace + ;; / ;: / ;~ comments. returns new index
+;; past all consumed trivia. standalone `;` is NOT a comment
+;; (it's the cascade separator).
+;; ───────────────────────────────────────────────────────────────
+
+(setHandler! Lexer 'skipTrivia:from:
+  (fn (src i)
+    (let ((cp [self charAtCp: src index: i]))
+      (if [cp = -1]
+          i
+      (if [self isWhitespace: cp]
+          [self skipTrivia: src from: [i + 1]]
+      (if [cp = 59]      ;; `;`
+          (let ((cp2 [self charAtCp: src index: [i + 1]]))
+            (if (if [cp2 = 59] #true
+                (if [cp2 = 58] #true
+                (if [cp2 = 126] #true #false)))
+                [self skipToLineEnd: src from: i]
+                i))
+          i))))))
+
+(setHandler! Lexer 'skipToLineEnd:from:
+  (fn (src i)
+    (let ((cp [self charAtCp: src index: i]))
+      (if [cp = -1]
+          i
+      (if [cp = 10]
+          [self skipTrivia: src from: [i + 1]]
+          [self skipToLineEnd: src from: [i + 1]])))))
+
+;; ───────────────────────────────────────────────────────────────
+;; readNumber — at this point we KNOW the first char is a digit
+;; (or `-` followed by a digit). accumulates an Integer value
+;; via base-10 digit-walking. switches to float-string lexeme
+;; if it encounters `.`, `e`, or `E`.
+;;
+;; returns a 2-list (token new-i).
+;; ───────────────────────────────────────────────────────────────
+
+;; [Lexer accumulateDigits: src from: i acc: n]
+;;   walk forward while chars are digits, accumulating into n.
+;;   returns (n new-i).
+(setHandler! Lexer 'accumulateDigits:from:acc:
+  (fn (src i n)
+    (let ((cp [self charAtCp: src index: i]))
+      (if [self isDigit: cp]
+          [self accumulateDigits: src from: [i + 1]
+                acc: [[n * 10] + [cp - 48]]]
+          (cons n (cons i nil))))))
+
+;; [Lexer numberLikely:src from: i] — returns #true if the run at i
+;; looks like a number (i.e. is a digit, OR is `-` followed by a
+;; digit, OR is `.` followed by a digit). mirrors reader.rs's
+;; try_parse_number gate.
+(setHandler! Lexer 'numberLikely:from:
+  (fn (src i)
+    (let ((cp [self charAtCp: src index: i]))
+      (if [self isDigit: cp]
+          #true
+      (if [cp = 45]          ;; `-`
+          [self isDigit: [self charAtCp: src index: [i + 1]]]
+      (if [cp = 46]          ;; `.`
+          [self isDigit: [self charAtCp: src index: [i + 1]]]
+          #false))))))
+
+;; scan an atom-text run starting at i; return (end-i).
+;; identifier-extending chars only (per isIdentExt:).
+(setHandler! Lexer 'scanAtomEnd:from:
+  (fn (src i)
+    (let ((cp [self charAtCp: src index: i]))
+      (if [cp = -1]
+          i
+      (if [self isIdentExt: cp]
+          [self scanAtomEnd: src from: [i + 1]]
+          i)))))
+
+;; [Lexer textHasDot?: src from: a to: b] — does the slice [a,b)
+;; contain `.`, `e`, or `E`? if so, treat as float.
+(setHandler! Lexer 'textHasDot?:from:to:
+  (fn (src a b)
+    (if [a >= b]
+        #false
+        (let ((cp [self charAtCp: src index: a]))
+          (if [cp = 46] #true              ;; `.`
+          (if [cp = 101] #true             ;; `e`
+          (if [cp = 69] #true              ;; `E`
+              [self textHasDot?: src from: [a + 1] to: b])))))))
+
+;; [Lexer parseIntInRange: src from: a to: b sign: s acc: n]
+;; walk [a,b) of src as decimal digits, accumulate. assumes [a,b)
+;; is JUST digits (and possibly a leading `-` that's already been
+;; consumed into `sign`). returns Integer.
+(setHandler! Lexer 'parseIntInRange:from:to:sign:acc:
+  (fn (src a b sign n)
+    (if [a >= b]
+        [sign * n]
+        (let ((cp [self charAtCp: src index: a]))
+          (if [self isDigit: cp]
+              [self parseIntInRange: src from: [a + 1] to: b
+                    sign: sign acc: [[n * 10] + [cp - 48]]]
+              ;; non-digit inside what should be all-digits — bail;
+              ;; treat what we have. (shouldn't happen on well-formed input.)
+              [sign * n])))))
+
+;; [Lexer readNumberOrSign: src from: i] — main number-or-`-sym`
+;; dispatcher. caller has already determined isDelim/whitespace
+;; ended; we own this run.
+;;
+;; strategy: scan to end of atom run (end-i); inspect text:
+;;   - if it has `.`, `e`, or `E` → 'float (value = lexeme String)
+;;   - else parse as Integer (handling leading `-`).
+;;
+;; returns (token new-i).
+(setHandler! Lexer 'readNumber:from:
+  (fn (src i)
+    (let ((start i))
+      (let ((endi [self scanAtomEnd: src from: i]))
+        (let ((isFloat [self textHasDot?: src from: start to: endi]))
+          (if isFloat
+              ;; float: emit lexeme as String value.
+              (let ((lex [self lexemeFrom: src start: start end: endi]))
+                (cons (cons 'float (cons lex (cons start nil)))
+                      (cons endi nil)))
+              ;; integer: parse digits. handle leading `-`.
+              (let ((firstCp [self charAtCp: src index: start]))
+                (if [firstCp = 45]
+                    (let ((n [self parseIntInRange: src from: [start + 1] to: endi
+                                   sign: 1 acc: 0]))
+                      (cons (cons 'int (cons [-1 * n] (cons start nil)))
+                            (cons endi nil)))
+                    (let ((n [self parseIntInRange: src from: start to: endi
+                                   sign: 1 acc: 0]))
+                      (cons (cons 'int (cons n (cons start nil)))
+                            (cons endi nil)))))))))))
+
+;; ───────────────────────────────────────────────────────────────
+;; readString — `"…"` with escapes \n \t \\ \" \0.
+;; build the string by repeated concatenation. cursor starts at
+;; the opening `"` (caller positions); we consume it here.
+;;
+;; returns (token new-i).
+;; ───────────────────────────────────────────────────────────────
+
+;; [Lexer charForEscape: cp] — given the codepoint of the char
+;; after `\`, return the corresponding Char value (or nil on
+;; unknown). matches reader.rs's read_string escape table.
+(setHandler! Lexer 'charForEscape:
+  (fn (cp)
+    (if [cp = 110] [10 asChar]     ;; \n → newline
+    (if [cp = 116] [9 asChar]      ;; \t → tab
+    (if [cp = 114] [13 asChar]     ;; \r → return
+    (if [cp = 92]  [92 asChar]     ;; \\ → backslash
+    (if [cp = 34]  [34 asChar]     ;; \" → dquote
+    (if [cp = 48]  [0 asChar]      ;; \0 → NUL
+        nil))))))))
+
+;; [Lexer readStringTail: src i acc] — i is past the opening `"`.
+;; build acc String char-by-char; on closing `"`, return acc.
+;; (\x.. hex escapes are punted — not used in lib/. throws on
+;; unknown escapes.)
+(setHandler! Lexer 'readStringTail:from:acc:
+  (fn (src i acc)
+    (let ((cp [self charAtCp: src index: i]))
+      (if [cp = -1]
+          (raise: 'unterminated-string "unterminated string literal")
+      (if [cp = 34]                 ;; closing `"`
+          (cons acc (cons [i + 1] nil))
+      (if [cp = 92]                 ;; `\` — escape
+          (let ((nextCp [self charAtCp: src index: [i + 1]]))
+            (let ((ch [self charForEscape: nextCp]))
+              (if [ch is nil]
+                  (raise: 'bad-escape "unknown escape in string literal")
+                  [self readStringTail: src from: [i + 2]
+                        acc: [acc + [ch toString]]])))
+          [self readStringTail: src from: [i + 1]
+                acc: [acc + [[self charAt: src index: i] toString]]]))))))
+
+;; [Lexer readString: src from: i] — assumes [src at: i] is `"`.
+(setHandler! Lexer 'readString:from:
+  (fn (src i)
+    (let ((start i))
+      (let ((pair [self readStringTail: src from: [i + 1] acc: ""]))
+        (let ((text [pair car])
+              (endi [[pair cdr] car]))
+          (cons (cons 'string (cons text (cons start nil)))
+                (cons endi nil)))))))
+
+;; ───────────────────────────────────────────────────────────────
+;; readChar — `#\` already consumed by caller; we start at the
+;; character after. handles single-char and named (space,
+;; newline, tab, return, null, backspace, delete, escape).
+;;
+;; returns (token new-i). `start` is the index of the `#`.
+;; ───────────────────────────────────────────────────────────────
+
+;; [Lexer charNameToCp: name] — lookup table by String equality.
+(setHandler! Lexer 'charNameToCp:
+  (fn (name)
+    (if [name = "space"] 32
+    (if [name = "newline"] 10
+    (if [name = "tab"] 9
+    (if [name = "return"] 13
+    (if [name = "null"] 0
+    (if [name = "backspace"] 8
+    (if [name = "delete"] 127
+    (if [name = "escape"] 27
+        -1)))))))) ))
+
+(setHandler! Lexer 'readChar:from:start:
+  (fn (src i start)
+    ;; consume one char (cp1); then look ahead — if the next char
+    ;; is identifier-extending, this is a named char; else cp1 is
+    ;; the literal.
+    (let ((cp1 [self charAtCp: src index: i]))
+      (if [cp1 = -1]
+          (raise: 'unterminated-char "unterminated #\\ char literal")
+          (let ((after [self scanAtomEnd: src from: [i + 1]])
+                (one-end [i + 1]))
+            (if [after = one-end]
+                ;; single char.
+                (cons (cons 'char (cons [cp1 asChar] (cons start nil)))
+                      (cons after nil))
+                ;; multi-char run — named char.
+                (let ((name [self lexemeFrom: src start: i end: after]))
+                  (let ((named [self charNameToCp: name]))
+                    (if [named = -1]
+                        (raise: 'unknown-char-name "unknown #\\ char name")
+                        (cons (cons 'char (cons [named asChar] (cons start nil)))
+                              (cons after nil)))))))))))
+
+;; ───────────────────────────────────────────────────────────────
+;; readHash — `#` already at `i`. dispatches:
+;;   #true / #false      → bool tokens
+;;   #\X                 → char (via readChar:)
+;;   #[                  → 'hash-vec opener
+;;   #anything-else      → error
+;;
+;; returns (token new-i). `start` is i.
+;; ───────────────────────────────────────────────────────────────
+
+(setHandler! Lexer 'readHash:from:
+  (fn (src i)
+    (let ((start i))
+      (let ((nextCp [self charAtCp: src index: [i + 1]]))
+        (if [nextCp = 92]                  ;; #\
+            [self readChar: src from: [i + 2] start: start]
+        (if [nextCp = 91]                  ;; #[
+            (cons (cons 'hash-vec (cons nil (cons start nil)))
+                  (cons [i + 2] nil))
+            ;; bareword after #
+            (let ((endi [self scanAtomEnd: src from: [i + 1]]))
+              (let ((word [self lexemeFrom: src start: [i + 1] end: endi]))
+                (if [word = "true"]
+                    (cons (cons 'true (cons nil (cons start nil)))
+                          (cons endi nil))
+                (if [word = "false"]
+                    (cons (cons 'false (cons nil (cons start nil)))
+                          (cons endi nil))
+                    (raise: 'unknown-hash-form "unknown #-form")))))))))))
+
+;; ───────────────────────────────────────────────────────────────
+;; readSymbol — scan atom run, classify as:
+;;   - "nil"             → 'nil
+;;   - ends with `:`     → 'colon-sym
+;;   - else              → 'sym
+;;
+;; the value of 'sym / 'colon-sym is the interned Sym for the run.
+;; returns (token new-i).
+;; ───────────────────────────────────────────────────────────────
+
+(setHandler! Lexer 'readSymbol:from:
+  (fn (src i)
+    (let ((start i))
+      (let ((endi [self scanAtomEnd: src from: i]))
+        (let ((text [self lexemeFrom: src start: start end: endi]))
+          (if [text = "nil"]
+              (cons (cons 'nil (cons nil (cons start nil)))
+                    (cons endi nil))
+              ;; colon-sym?
+              (let ((lastCp [self charAtCp: src index: [endi - 1]]))
+                (if [lastCp = 58]
+                    (cons (cons 'colon-sym (cons (intern text) (cons start nil)))
+                          (cons endi nil))
+                    (cons (cons 'sym (cons (intern text) (cons start nil)))
+                          (cons endi nil))))))))))
+
+;; ───────────────────────────────────────────────────────────────
+;; readPipe — `|` is overloaded: as an atom-starting char it means
+;; either a binary-operator selector (a run of `|`) or a block
+;; bracket. for the lexer we don't try to disambiguate; emit a
+;; single `'sym` token whose value is the interned text of a
+;; maximal run of `|` chars. (mirrors reader.rs's read_atom
+;; pipe special-case; β2 distinguishes block-vs-operator from
+;; context.)
+;; ───────────────────────────────────────────────────────────────
+
+(setHandler! Lexer 'scanPipeRun:from:
+  (fn (src i)
+    (let ((cp [self charAtCp: src index: i]))
+      (if [cp = 124]
+          [self scanPipeRun: src from: [i + 1]]
+          i))))
+
+(setHandler! Lexer 'readPipe:from:
+  (fn (src i)
+    (let ((start i))
+      (let ((endi [self scanPipeRun: src from: i]))
+        (let ((text [self lexemeFrom: src start: start end: endi]))
+          (cons (cons 'sym (cons (intern text) (cons start nil)))
+                (cons endi nil)))))))
+
+;; ───────────────────────────────────────────────────────────────
+;; readUnquote — `,` already at i. peek: if next is `@`, emit
+;; 'unquote-splice; else 'unquote.
+;;
+;; returns (token new-i). pos = i (the `,`).
+;; ───────────────────────────────────────────────────────────────
+
+(setHandler! Lexer 'readUnquote:from:
+  (fn (src i)
+    (let ((start i))
+      (let ((nextCp [self charAtCp: src index: [i + 1]]))
+        (if [nextCp = 64]                 ;; `@`
+            (cons (cons 'unquote-splice (cons nil (cons start nil)))
+                  (cons [i + 2] nil))
+            (cons (cons 'unquote (cons nil (cons start nil)))
+                  (cons [i + 1] nil)))))))
+
+;; ───────────────────────────────────────────────────────────────
+;; one-char punctuation tokens. caller positions us at the punct.
+;; returns (token new-i).
+;; ───────────────────────────────────────────────────────────────
+
+(setHandler! Lexer 'punctToken:from:type:
+  (fn (src i ty)
+    (cons (cons ty (cons nil (cons i nil)))
+          (cons [i + 1] nil))))
+
+;; ───────────────────────────────────────────────────────────────
+;; nextToken — read ONE token starting at i (after trivia). returns
+;; either nil (if at end of input) or a 2-list (token new-i).
+;; ───────────────────────────────────────────────────────────────
+
+(setHandler! Lexer 'nextToken:from:
+  (fn (src i)
+    (let ((j [self skipTrivia: src from: i]))
+      (let ((cp [self charAtCp: src index: j]))
+        (if [cp = -1]
+            nil
+        ;; structural punctuation.
+        (if [cp = 40]
+            [self punctToken: src from: j type: 'lparen]
+        (if [cp = 41]
+            [self punctToken: src from: j type: 'rparen]
+        (if [cp = 91]
+            [self punctToken: src from: j type: 'lbracket]
+        (if [cp = 93]
+            [self punctToken: src from: j type: 'rbracket]
+        (if [cp = 123]
+            [self punctToken: src from: j type: 'lbrace]
+        (if [cp = 125]
+            [self punctToken: src from: j type: 'rbrace]
+        (if [cp = 39]            ;; '
+            [self punctToken: src from: j type: 'quote]
+        (if [cp = 96]            ;; `
+            [self punctToken: src from: j type: 'quasiquote]
+        (if [cp = 44]            ;; ,
+            [self readUnquote: src from: j]
+        (if [cp = 59]            ;; ;  (cascade — comments handled by skipTrivia)
+            [self punctToken: src from: j type: 'cascade]
+        (if [cp = 34]            ;; "
+            [self readString: src from: j]
+        (if [cp = 35]            ;; #
+            [self readHash: src from: j]
+        (if [cp = 124]           ;; |
+            [self readPipe: src from: j]
+        ;; numbers (incl. leading `-digit` and `.digit`).
+        (if [self numberLikely: src from: j]
+            [self readNumber: src from: j]
+        ;; everything else: a symbol-ish atom run.
+            [self readSymbol: src from: j])))))))))))))))))))
+
+;; ───────────────────────────────────────────────────────────────
+;; tokenize — entry point. drives a tail-recursive loop accumulating
+;; tokens in reverse, then reverses at the end.
+;; ───────────────────────────────────────────────────────────────
+
+(setHandler! Lexer 'tokenLoop:from:acc:
+  (fn (src i acc)
+    (let ((step [self nextToken: src from: i]))
+      (if [step is nil]
+          [acc reverse]
+          (let ((tok [step car])
+                (newi [[step cdr] car]))
+            [self tokenLoop: src from: newi acc: (cons tok acc)])))))
+
+(setHandler! Lexer 'tokenize:
+  (fn (src)
+    [self tokenLoop: src from: 0 acc: nil]))
