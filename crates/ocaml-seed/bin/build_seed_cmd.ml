@@ -252,6 +252,124 @@ let reset_lifter () =
   next_form_id := 1;
   lifted_forms := []
 
+(* Allocate a fresh Form at the next FormId, append to the FormSection
+   list, return the assigned FormId. NOT memoized — caller is responsible
+   for de-duplication when appropriate. Used by proto / here_form /
+   macros_form / per-chunk-source allocation. *)
+let alloc_form_raw (f : Image.vat_form) : int =
+  let id = !next_form_id in
+  incr next_form_id;
+  lifted_forms := f :: !lifted_forms;
+  id
+
+(* ----------------------------------------------------------------
+   boot proto allocation
+
+   Mirror crates/substrate/src/protos.rs::Protos::bootstrap and
+   crates/zig-substrate/src/protos.zig::bootstrap. The 18 canonical
+   protos are allocated in a fixed order so the image's Header.protos
+   table can name them by FormId.
+
+   Each proto Form gets a :name meta slot (sym) so reflection works
+   from the moment the image loads. Inheritance:
+     - Object proto:Nil    (root)
+     - Closure proto:Method
+     - everything else proto:Object
+   ---------------------------------------------------------------- *)
+
+(* The boot proto FormIds, captured after allocation. Order in this
+   record matches the V4 image header's proto-table order (spec §10.3
+   and image.ml::proto_table). *)
+type boot_protos = {
+  object_id   : int;
+  nil_id      : int;
+  bool_id     : int;
+  integer_id  : int;
+  char_id     : int;
+  sym_id      : int;
+  cons_id     : int;
+  string_id   : int;
+  bytes_id    : int;
+  method_id   : int;
+  chunk_id    : int;
+  closure_id  : int;
+  env_id      : int;
+  foreign_id  : int;
+  table_id    : int;
+  frame_id    : int;
+  macros_id   : int;
+  opcode_id   : int;
+}
+
+(* Allocate one empty proto Form. `parent` is the parent proto's value
+   (Nil for Object, Form(object_id) for normal protos, Form(method_id)
+   for Closure). `name` is the proto's reflection name — populated into
+   the :name meta slot. *)
+let alloc_proto (parent : Ast.form) (name : string) : int =
+  let name_meta = Compiler.intern "name" in
+  let name_sym = Compiler.intern name in
+  alloc_form_raw Image.{
+    proto = parent;
+    slots = [];
+    handlers = [];
+    meta = [(name_meta, Ast.Sym name)];
+    frozen = false;
+  } |> fun id ->
+  let _ = name_sym in
+  id
+
+let bootstrap_protos () : boot_protos =
+  (* Object is the root; its proto is Nil so the chain terminates. *)
+  let object_id = alloc_proto Ast.Nil "Object" in
+  let object_ref = Ast.FormRef object_id in
+  let p name = alloc_proto object_ref name in
+  let nil_id = p "Nil" in
+  let bool_id = p "Bool" in
+  let integer_id = p "Integer" in
+  let char_id = p "Char" in
+  let sym_id = p "Sym" in
+  let cons_id = p "Cons" in
+  let string_id = p "String" in
+  let bytes_id = p "Bytes" in
+  let method_id = p "Method" in
+  let chunk_id = p "Chunk" in
+  (* Closure proto = Method (closures inherit Method dispatch). *)
+  let closure_id = alloc_proto (Ast.FormRef method_id) "Closure" in
+  let env_id = p "Env" in
+  let foreign_id = p "ForeignHandle" in
+  let table_id = p "Table" in
+  let frame_id = p "Frame" in
+  let macros_id = p "Macros" in
+  let opcode_id = p "Opcode" in
+  {
+    object_id; nil_id; bool_id; integer_id; char_id; sym_id; cons_id;
+    string_id; bytes_id; method_id; chunk_id; closure_id; env_id;
+    foreign_id; table_id; frame_id; macros_id; opcode_id;
+  }
+
+(* Convert boot_protos -> Image.proto_table for the image header. *)
+let protos_table (bp : boot_protos) : Image.proto_table =
+  Image.{
+    object_id = bp.object_id;
+    nil_id = bp.nil_id;
+    bool_id = bp.bool_id;
+    integer_id = bp.integer_id;
+    char_id = bp.char_id;
+    sym_id = bp.sym_id;
+    cons_id = bp.cons_id;
+    string_id = bp.string_id;
+    bytes_id = bp.bytes_id;
+    method_id = bp.method_id;
+    chunk_id = bp.chunk_id;
+    closure_id = bp.closure_id;
+    env_id = bp.env_id;
+    foreign_handle_id = bp.foreign_id;
+    table_id = bp.table_id;
+    frame_id = bp.frame_id;
+    macros_id = bp.macros_id;
+    opcode_id = bp.opcode_id;
+  }
+
 (* Lift a single Ast.form into the FormSection, returning a scalar
    replacement (FormRef for non-scalars, or the value itself for
    scalars). Recursive: nested compounds inside a Cons are lifted
@@ -352,6 +470,11 @@ let run (args : string array) : unit =
       opts.root;
     exit 1
   end;
+  (* Pre-allocate boot protos so zig's installCaps + dispatch find
+     them at known FormIds. Must happen BEFORE chunk compilation +
+     lifting so the protos sit at the low FormIds the header expects.
+     See bootstrap_protos doc. *)
+  let bp = bootstrap_protos () in
   (* Compile every form. Each compile_top registers its chunk + nested
      closures into the global chunk registry. *)
   List.iter (fun step ->
@@ -392,7 +515,7 @@ let run (args : string array) : unit =
     external_vat_refs = [];
     here_form_id = 0;                    (* runtime alloc *)
     macros_form_id = 0;
-    protos = Image.empty_protos;         (* runtime alloc *)
+    protos = protos_table bp;
   } in
   let bytes = Image.serialize vat in
   let oc = open_out_bin opts.output in
