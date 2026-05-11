@@ -472,6 +472,255 @@ let patch_form_slots (target_id : int) (slot : int * Ast.form) : unit =
   in
   lifted_forms := patch_at 0 [] !lifted_forms
 
+(* Append a single (sym, value) pair to an already-allocated Form's
+   handlers list. Mirrors patch_form_slots but writes to .handlers.
+   Used by wire_natives to install method-Forms on proto handler
+   tables (same shape rust's `form_handler_set` produces). *)
+let patch_form_handlers (target_id : int) (handler : int * Ast.form) : unit =
+  let cur_top = !next_form_id - 1 in
+  let target_offset = cur_top - target_id in
+  let rec patch_at i acc = function
+    | [] ->
+        failwith (Printf.sprintf
+          "patch_form_handlers: FormId %d not in lifted_forms" target_id)
+    | f :: rest when i = target_offset ->
+        let patched = Image.{ f with handlers = f.handlers @ [handler] } in
+        List.rev_append acc (patched :: rest)
+    | f :: rest -> patch_at (i + 1) (f :: acc) rest
+  in
+  lifted_forms := patch_at 0 [] !lifted_forms
+
+(* ----------------------------------------------------------------
+   native handler wiring (NativeRefsSection)
+
+   Mirror of crates/zig-substrate/src/intrinsics.zig REGISTRY: a list
+   of "ProtoName:selector" keys that the zig host's image-load step
+   rebinds to NativeFn pointers via World.lookupNativeByName.
+
+   For each entry:
+     1. Look up (or allocate) the target proto Form by name.
+     2. Alloc a fresh method-Form (proto=Method, no body, no slots).
+     3. Append (selector-sym-id, FormRef method-id) to the proto's
+        handlers list.
+     4. Emit (method-id, "ProtoName:selector") into NativeRefsSection.
+
+   At load time, zig's readNativeRefs does:
+        world.native_fns.put(method_id, REGISTRY.get(name).?)
+   so dispatch finds the native via the same path moof methods use
+   (lookup on proto.handlers → method-Form → native_fns).
+
+   Protos handled:
+     - The 18 canonical boot protos (Object, Cons, Nil, ..., Opcode):
+       allocated by bootstrap_protos already.
+     - Two singletons created here: `Heap`, `Chunks`. These are
+       Object-proto Forms with :name meta + bound on here_form so
+       moof code can write `[Heap slotOf: x at: 'car]`.
+     - Skipped: Transporter, Compiler, Reader. zig's host calls
+       intrinsics.installCaps AFTER image-load to wire those — they
+       carry $-prefixed env bindings (`$transporter` etc.), not
+       canonical proto names, so seed.vat doesn't pre-bind them.
+
+   ---------------------------------------------------------------- *)
+
+(* The list of native REGISTRY keys, hardcoded to mirror zig's
+   intrinsics.zig::REGISTRY. Order doesn't matter for correctness —
+   readNativeRefs is order-independent — but matching the zig file's
+   order is easier to audit. Keep this in sync manually when zig adds
+   natives; future cleanup could read a shared manifest file. *)
+let zig_registry_keys : string list = [
+  (* Integer arithmetic *)
+  "Integer:+";
+  "Integer:-";
+  "Integer:*";
+  "Integer:/";
+  "Integer:=";
+  "Integer:<";
+  "Integer:>";
+  "Integer:toString";
+  (* truthiness *)
+  "Object:!!";
+  "Nil:!!";
+  "Bool:!!";
+  (* Object basics — identity / reflection *)
+  "Object:is";
+  "Object:proto";
+  "Object:identity";
+  "Object:slot:";
+  "Object:slotSet!:";
+  (* Cons accessors *)
+  "Cons:car";
+  "Cons:cdr";
+  (* Env API *)
+  "Env:bind:to:";
+  "Env:set:to:";
+  "Env:lookup:";
+  "Env:parent";
+  "Env:current";
+  (* Closure invocation *)
+  "Closure:callIn:withSelf:";
+  (* Object meta *)
+  "Object:become:";
+  "Object:doesNotUnderstand:with:";
+  "Object:perform:withArgs:";
+  "Bool:ifTrue:ifFalse:";
+  "Object:toString";
+  "Object:serializeTo:";
+  (* Opcode constructors *)
+  "Opcode:pushNil";
+  "Opcode:pushTrue";
+  "Opcode:pushFalse";
+  "Opcode:pop";
+  "Opcode:dup";
+  "Opcode:loadSelf";
+  "Opcode:return";
+  "Opcode:loadConst:";
+  "Opcode:loadName:";
+  "Opcode:pushClosure:";
+  "Opcode:jump:";
+  "Opcode:jumpIfFalse:";
+  "Opcode:send:argc:ic:";
+  "Opcode:tailSend:argc:";
+  "Opcode:superSend:argc:ic:";
+  (* Opcode reflection *)
+  "Opcode:op";
+  "Opcode:operands";
+  "Opcode:toString";
+  (* Chunks singleton *)
+  "Chunks:isChunk?:";
+  "Chunks:paramsListOf:";
+  "Chunks:constsListOf:";
+  "Chunks:opsListOf:";
+  "Chunks:icsListOf:";
+  "Chunks:bodyOf:";
+  (* Heap singleton *)
+  "Heap:protoOf:";
+  "Heap:heapIdOf:";
+  "Heap:allocFormWithProto:";
+  "Heap:slotOf:at:";
+  "Heap:handlerOf:at:";
+  "Heap:metaOf:at:";
+  (* Method invocation *)
+  "Method:call";
+  (* Object equality + lifecycle *)
+  "Object:=";
+  "Object:new";
+  "Object:initialize";
+  "Object:freeze";
+  "Object:frozen?";
+  "Object:freezable?";
+  (* Cons / Nil *)
+  "Cons:cons:";
+  "Nil:cons:";
+  "Cons:empty?";
+  "Cons:null?";
+  "Cons:nonEmpty?";
+  "Nil:empty?";
+  "Nil:proto";
+  "Cons:reverse";
+  (* Transporter / Compiler / Reader are SKIPPED — host installCaps
+     wires those AFTER image-load (anonymous-proto names + $-env
+     binding diverge from canonical NativeRefs path). *)
+]
+
+(* Split "ProtoName:rest" into (proto, selector). Selector keeps any
+   internal colons (e.g. "bind:to:" stays as a single selector). *)
+let split_native_key (key : string) : string * string =
+  match String.index_opt key ':' with
+  | None -> failwith (Printf.sprintf "native key missing colon: %S" key)
+  | Some i ->
+      let proto = String.sub key 0 i in
+      let sel = String.sub key (i + 1) (String.length key - i - 1) in
+      (proto, sel)
+
+(* Build a name → FormId map for the 18 canonical boot protos. Used to
+   resolve REGISTRY keys; entries for Heap / Chunks are added on
+   demand once those singletons are allocated. *)
+let canonical_proto_map (bp : boot_protos) : (string, int) Hashtbl.t =
+  let h = Hashtbl.create 32 in
+  Hashtbl.add h "Object"        bp.object_id;
+  Hashtbl.add h "Nil"           bp.nil_id;
+  Hashtbl.add h "Bool"          bp.bool_id;
+  Hashtbl.add h "Integer"       bp.integer_id;
+  Hashtbl.add h "Char"          bp.char_id;
+  Hashtbl.add h "Sym"           bp.sym_id;
+  Hashtbl.add h "Cons"          bp.cons_id;
+  Hashtbl.add h "String"        bp.string_id;
+  Hashtbl.add h "Bytes"         bp.bytes_id;
+  Hashtbl.add h "Method"        bp.method_id;
+  Hashtbl.add h "Chunk"         bp.chunk_id;
+  Hashtbl.add h "Closure"       bp.closure_id;
+  Hashtbl.add h "Env"           bp.env_id;
+  Hashtbl.add h "ForeignHandle" bp.foreign_id;
+  Hashtbl.add h "Table"         bp.table_id;
+  Hashtbl.add h "Frame"         bp.frame_id;
+  Hashtbl.add h "Macros"        bp.macros_id;
+  Hashtbl.add h "Opcode"        bp.opcode_id;
+  h
+
+(* Allocate an Object-proto singleton named `name`. Returns the
+   FormId. Used for Heap / Chunks singletons that aren't in the 18
+   canonical protos but still need a proto-Form with handlers + a
+   `:name` meta tag so reflection works. *)
+let alloc_singleton (bp : boot_protos) (name : string) : int =
+  let name_meta = Compiler.intern "name" in
+  alloc_form_raw Image.{
+    proto = Ast.FormRef bp.object_id;
+    slots = [];
+    handlers = [];
+    meta = [(name_meta, Ast.Sym name)];
+    frozen = false;
+  }
+
+(* Wire every REGISTRY native onto its target proto. Returns the
+   list of (method_form_id, "ProtoName:selector") pairs that will
+   populate NativeRefsSection.
+
+   Side effects:
+     - allocates Heap + Chunks singleton Forms
+     - binds Heap / Chunks on here_form
+     - allocates one method-Form per REGISTRY entry
+     - patches proto handlers tables with the method-Forms
+
+   The here_form binding for Heap / Chunks is APPENDED (via
+   patch_form_slots) so we don't disturb the proto bindings that
+   patch_here_form set up earlier. *)
+let wire_natives (bp : boot_protos) (here_form_id : int)
+                 : Image.native_ref list =
+  let proto_ids = canonical_proto_map bp in
+  (* Allocate singletons + bind them on here_form. *)
+  let heap_id = alloc_singleton bp "Heap" in
+  let chunks_id = alloc_singleton bp "Chunks" in
+  Hashtbl.add proto_ids "Heap" heap_id;
+  Hashtbl.add proto_ids "Chunks" chunks_id;
+  patch_form_slots here_form_id
+    (Compiler.intern "Heap", Ast.FormRef heap_id);
+  patch_form_slots here_form_id
+    (Compiler.intern "Chunks", Ast.FormRef chunks_id);
+  (* For each REGISTRY key: alloc method-Form, patch proto handlers,
+     accrue the NativeRefs entry. *)
+  List.fold_left (fun acc key ->
+    let (proto_name, selector) = split_native_key key in
+    match Hashtbl.find_opt proto_ids proto_name with
+    | None ->
+        Printf.eprintf
+          "build-seed: warning: REGISTRY key %S has no proto target; skipping\n"
+          key;
+        acc
+    | Some proto_id ->
+        let sel_sym = Compiler.intern selector in
+        (* alloc method-Form: proto = Method, otherwise empty. *)
+        let method_id = alloc_form_raw Image.{
+          proto = Ast.FormRef bp.method_id;
+          slots = [];
+          handlers = [];
+          meta = [];
+          frozen = false;
+        } in
+        patch_form_handlers proto_id (sel_sym, Ast.FormRef method_id);
+        Image.{ method_form_id = method_id; native_name = key } :: acc
+  ) [] zig_registry_keys
+  |> List.rev
+
 (* Convert boot_protos -> Image.proto_table for the image header. *)
 let protos_table (bp : boot_protos) : Image.proto_table =
   Image.{
@@ -730,6 +979,14 @@ let run (args : string array) : unit =
      here_form's slots once we know its FormId. *)
   let (macros_form_id, here_form_id) = alloc_here_and_macros bp in
   patch_here_form here_form_id bp;
+  (* Wire native methods onto proto handler tables + emit a matching
+     NativeRefsSection. This unblocks the moof source from doing
+     [Object new] / [cons :car ...] / etc. after image-load — the
+     handlers point at method-Forms whose `:body` is implicit, and
+     zig's readNativeRefs binds REGISTRY[name] to each method's id.
+     Also allocates Heap + Chunks singletons and binds them on
+     here_form so parser/01-tokens.moof's `[Heap slotOf: ...]` works. *)
+  let native_refs = wire_natives bp here_form_id in
   (* Compile a single synthetic "main" top-level chunk wrapping every
      gathered step in `(do step1 step2 ...)`. zig's runRun expects one
      entry-point chunk reachable via the `main` slot on here_form; we
@@ -829,7 +1086,7 @@ let run (args : string array) : unit =
     syms = Compiler.all_syms ();
     forms;
     chunks;
-    natives = [];
+    natives = native_refs;
     mcos = [];
     far_refs = [];
     external_vat_refs = [];
@@ -841,11 +1098,12 @@ let run (args : string array) : unit =
   let oc = open_out_bin opts.output in
   output_bytes oc bytes;
   close_out oc;
-  Printf.printf "wrote %s (%d bytes, %d chunks, %d syms, %d forms, %d files)\n"
+  Printf.printf "wrote %s (%d bytes, %d chunks, %d syms, %d forms, %d natives, %d files)\n"
     opts.output
     (Bytes.length bytes)
     (List.length chunks)
     (List.length vat.syms)
     (List.length forms)
+    (List.length native_refs)
     (List.length (List.sort_uniq compare
                     (List.map (fun s -> s.source_path) steps)))
