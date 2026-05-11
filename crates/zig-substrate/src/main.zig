@@ -2,6 +2,18 @@
 //!
 //! parses argv, loads a V4 vat-image (or runs an inline smoke),
 //! instantiates a World, runs.
+//!
+//! subcommands:
+//!   moof-zig                  — built-in smoke (boots a World, runs two
+//!                                hand-constructed chunks).
+//!   moof-zig decode <path>    — read raw V4 bytecode bytes from <path>
+//!                                (use `/dev/stdin` for piped input on
+//!                                POSIX systems) and print each decoded
+//!                                opcode + operands.
+//!                                used by the cross-stack roundtrip smoke
+//!                                that verifies OCaml's `moof-seed bytes`
+//!                                output decodes byte-for-byte under the
+//!                                zig substrate's `bytecode.decodeOp`.
 
 const std = @import("std");
 const value_mod = @import("value.zig");
@@ -10,6 +22,7 @@ const form_mod = @import("form.zig");
 const FormId = form_mod.FormId;
 const Form = form_mod.Form;
 const bytecode = @import("bytecode.zig");
+const opcodes = @import("opcodes.zig");
 const world_mod = @import("world.zig");
 const World = world_mod.World;
 const ICache = world_mod.ICache;
@@ -17,11 +30,144 @@ const intrinsics = @import("intrinsics.zig");
 const vm = @import("vm.zig");
 const image = @import("image.zig");
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    // we still want our own DebugAllocator for the World / heap (its
+    // leak-checking is the test harness for substrate lifetimes). the
+    // runtime-supplied `init.gpa` and `init.io` are only used for
+    // filesystem reads in the decode subcommand.
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    // ------------------------------------------------------------
+    // argv dispatch
+    //
+    // zig 0.16 dropped `std.process.argsAlloc` and `std.fs.cwd()`. the
+    // new pattern is to accept `std.process.Init` (or .Minimal) as
+    // main's first parameter, iterate `init.minimal.args`, and route
+    // filesystem access through `init.io` + `std.Io.Dir.cwd()`.
+    //
+    // we just sniff for `decode <path>` here — anything else falls
+    // through to the smoke.
+    // ------------------------------------------------------------
+    var it = init.minimal.args.iterate();
+    _ = it.next(); // skip argv[0]
+    const sub_raw = it.next();
+    const path_raw = it.next();
+
+    if (sub_raw != null and path_raw != null and std.mem.eql(u8, sub_raw.?, "decode")) {
+        const path_copy = try allocator.dupe(u8, path_raw.?);
+        defer allocator.free(path_copy);
+        return runDecode(allocator, init.io, path_copy);
+    }
+
+    return runSmoke(allocator);
+}
+
+// ============================================================
+// decode subcommand
+// ============================================================
+
+/// read all bytes from `path` and decode each opcode in turn via
+/// `bytecode.decodeOp`. prints one line per op, prefixed with the byte
+/// offset, then a final summary.
+///
+/// `path` may be `/dev/stdin` to read from stdin on POSIX systems —
+/// macOS/Linux both expose stdin as a regular file path.
+///
+/// the byte-offset prefix lets you visually align this output against
+/// `xxd` / `hexdump -C` and against OCaml's `moof-seed compile` hex
+/// dump, which is the whole point of the cross-stack smoke.
+fn runDecode(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !void {
+    const p = std.debug.print;
+
+    // 1 MiB cap is plenty for any V4 chunk body the smoke will feed
+    // through this command. larger images should use the (future)
+    // moof-zig load-image subcommand instead.
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024));
+    defer allocator.free(bytes);
+
+    p("=== decoding {d} bytes from {s} ===\n", .{ bytes.len, path });
+
+    var pos: usize = 0;
+    var op_count: usize = 0;
+    while (pos < bytes.len) {
+        const decoded = bytecode.decodeOp(bytes, pos) catch |err| {
+            p("  [{d:>4}] decode error at offset {d}: {s} (byte=0x{x:0>2})\n", .{
+                pos,
+                pos,
+                @errorName(err),
+                bytes[pos],
+            });
+            return err;
+        };
+        printOp(pos, decoded.op);
+        pos += decoded.advance;
+        op_count += 1;
+    }
+    p("=== decoded {d} ops in {d} bytes ===\n", .{ op_count, bytes.len });
+}
+
+/// print one decoded op on a single line, prefixed by its byte offset.
+/// the operand-field naming mirrors `opcodes.zig` exactly so that grep
+/// for e.g. `selector=` works across both stacks' diagnostics.
+fn printOp(offset: usize, op: opcodes.Op) void {
+    const p = std.debug.print;
+    p("  [{d:>4}] {s}", .{ offset, @tagName(op) });
+    switch (op) {
+        // 1-byte ops: tag only, no operands.
+        .push_nil,
+        .push_true,
+        .push_false,
+        .pop,
+        .dup,
+        .load_self,
+        .load_here,
+        .return_op,
+        => {},
+
+        .load_const => |c| p(" idx={d}", .{c.idx}),
+        .load_name => |n| p(" sym={d}", .{n.name}),
+
+        // 8-byte sends (with IC)
+        .send, .super_send, .send_self, .send_here => |s| {
+            p(" sel={d} argc={d} ic={d}", .{ s.selector, s.argc, s.ic_idx });
+        },
+
+        // 6-byte tail sends (no IC)
+        .tail_send, .tail_send_self, .tail_send_here => |s| {
+            p(" sel={d} argc={d}", .{ s.selector, s.argc });
+        },
+
+        .send_dynamic => |s| p(" argc={d} ic={d}", .{ s.argc, s.ic_idx }),
+
+        .jump, .jump_if_false, .jump_if_true => |j| {
+            p(" offset={d}", .{j.offset});
+        },
+
+        .push_closure => |c| {
+            // print the raw u32 + the structured fields — handy when
+            // cross-checking against OCaml's `chunk#N` which encodes
+            // as a u32 FormId on the wire.
+            const raw: u32 = @bitCast(c.chunk);
+            p(" chunk=0x{x:0>8} (scope={s} payload={d})", .{
+                raw,
+                @tagName(c.chunk.scope),
+                @as(u32, c.chunk.payload),
+            });
+        },
+
+        .suspend_op => |s| p(" promise_ic={d}", .{s.promise_ic}),
+        .resume_op => |s| p(" frame_ic={d}", .{s.frame_ic}),
+    }
+    p("\n", .{});
+}
+
+// ============================================================
+// default smoke (unchanged behavior — boots a World, runs chunks)
+// ============================================================
+
+fn runSmoke(allocator: std.mem.Allocator) !void {
     const p = std.debug.print;
 
     p("moof-zig v0.0.0 — V4 polyglot substrate\n", .{});
