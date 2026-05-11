@@ -119,7 +119,7 @@ fn installNative(
     var method_form = Form.init();
     method_form.proto = .{ .form = world.protos.method };
     const method_id = try world.heap.alloc(method_form);
-    try world.native_fns.put(method_id, native_fn);
+    try world.native_fns.put(world.allocator, method_id, native_fn);
     // install on proto's handlers table.
     var proto_form = world.heap.getMut(proto);
     try proto_form.handlers.put(world.allocator, sel, .{ .form = method_id });
@@ -186,7 +186,7 @@ fn intEq(_: *World, self_: Value, args: []const Value) anyerror!Value {
     const a_opt = self_.asInt();
     const b_opt = args[0].asInt();
     if (a_opt) |a| if (b_opt) |b| return .{ .bool_ = a == b };
-    return .{ .bool_ = value.equals(self_, args[0]) };
+    return .{ .bool_ = self_.equals(args[0]) };
 }
 
 // port of crates/substrate/src/intrinsics.rs::install_integer_methods `:<`
@@ -238,7 +238,7 @@ fn boolBangBang(_: *World, self_: Value, _: []const Value) anyerror!Value {
 // port of crates/substrate/src/intrinsics.rs::install_object_reflection `:is`
 // identity equality (same heap-id or same tagged-immediate).
 fn objIs(_: *World, self_: Value, args: []const Value) anyerror!Value {
-    return .{ .bool_ = value.equals(self_, args[0]) };
+    return .{ .bool_ = self_.equals(args[0]) };
 }
 
 // port of crates/substrate/src/intrinsics.rs (Heap singleton `protoOf:` /

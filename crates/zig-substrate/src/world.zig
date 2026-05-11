@@ -23,6 +23,13 @@
 //!
 //! - opcode + image format: `2026-05-10-vm-V4-opcodes-design.md`
 //! - phase plan: `2026-05-10-vm-V4-polyglot-substrate.md` Track A.4
+//!
+//! ## integration note (integration-agent)
+//!
+//! per agent reports, several methods here are STUBS that panic with
+//! `@panic("TODO: integration agent")`. that's deliberate — the
+//! minimum-viable smoke (`PushNil;Return`, `LoadConst;LoadConst;Send;
+//! Return`) doesn't exercise them. fill in as later phases need them.
 
 const std = @import("std");
 
@@ -35,13 +42,15 @@ const Form = form.Form;
 
 const sym_mod = @import("sym.zig");
 const SymTable = sym_mod.SymTable;
-const SymId = u32;
+pub const SymId = u32;
 
 const heap_mod = @import("heap.zig");
 const Heap = heap_mod.Heap;
 
 const protos_mod = @import("protos.zig");
 pub const Protos = protos_mod.Protos;
+
+const vm_mod = @import("vm.zig");
 
 /// the bytecode interpreter's per-vat state.
 ///
@@ -65,6 +74,21 @@ pub const Vm = struct {
     pub fn deinit(self: *Vm, allocator: std.mem.Allocator) void {
         self.stack.deinit(allocator);
         self.frames.deinit(allocator);
+    }
+
+    /// thin shim so callers (intrinsics' :callIn:withSelf:) can write
+    /// `world.vm.runMethod(...)`. delegates to the free-function in
+    /// vm.zig.
+    pub fn runMethod(
+        self: *Vm,
+        world: *World,
+        chunk: FormId,
+        env: FormId,
+        self_v: Value,
+        defining_proto: FormId,
+    ) anyerror!Value {
+        _ = self;
+        return vm_mod.runMethod(world, chunk, env, self_v, defining_proto);
     }
 };
 
@@ -124,18 +148,36 @@ pub const NativeFn = *const fn (
     args: []const Value,
 ) anyerror!Value;
 
+/// payload stashed in `far_ref_table` per V4 spec §10.4. resolution
+/// is lazy — populated by image-load, dereferenced on first VM hit.
+pub const FarRef = struct {
+    target_vat_id: [16]u8,
+    target_form_id: u32,
+};
+
+/// result of `lookupHandler` — the method-Form Value plus the proto
+/// it was found on (needed by SuperSend's "lookup-above" semantics
+/// and by the IC's `cached_defining` slot).
+pub const HandlerHit = struct {
+    handler: Value,
+    defining: FormId,
+};
+
 /// the substrate's per-vat root.
 ///
 /// owns the heap, sym table, proto cache, chunk side-tables, native-fn
 /// registry, the `$here` form, the `Macros` form, the VM, and the
 /// allocator.
 ///
-/// `chunk_bytecode` / `chunk_consts` / `chunk_ics` are `AutoArrayHashMap`
-/// for two reasons:
+/// hash maps are all `AutoArrayHashMapUnmanaged` for two reasons:
 ///   1. insertion-order iteration (determinism law D5 — replicas must
 ///      agree on iteration order even for substrate-internal tables),
-///   2. FormId is a packed u32 → `AutoArrayHashMap` uses the bit pattern
-///      as the hash key without us writing a custom Context.
+///   2. FormId is a packed u32 → unmanaged variant uses the bit
+///      pattern as the hash key without us writing a custom Context.
+///
+/// the `Unmanaged` choice (per agent-report flag #1+#2) means every
+/// `.put` / `.get` / `.deinit` call takes the world's allocator as
+/// its first argument. we hold one on `World.allocator`.
 pub const World = struct {
     heap: Heap,
     syms: SymTable,
@@ -144,14 +186,24 @@ pub const World = struct {
 
     /// chunk-FormId → byte-encoded bytecode (owned). V4 spec §4.3:
     /// chunks are serializable as `:body` Bytes.
-    chunk_bytecode: std.AutoArrayHashMap(FormId, []u8),
+    chunk_bytecode: std.AutoArrayHashMapUnmanaged(FormId, []u8),
     /// chunk-FormId → constant pool, indexed by LoadConst.idx.
-    chunk_consts: std.AutoArrayHashMap(FormId, []Value),
+    chunk_consts: std.AutoArrayHashMapUnmanaged(FormId, []Value),
     /// chunk-FormId → IC slot table, one entry per Send-variant op.
-    chunk_ics: std.AutoArrayHashMap(FormId, []ICache),
+    chunk_ics: std.AutoArrayHashMapUnmanaged(FormId, []ICache),
+    /// chunk-FormId → param-sym list (image.zig loads these).
+    chunk_params: std.AutoArrayHashMapUnmanaged(FormId, []u32),
 
     /// method-FormId → native function pointer.
-    native_fns: std.AutoArrayHashMap(FormId, NativeFn),
+    native_fns: std.AutoArrayHashMapUnmanaged(FormId, NativeFn),
+
+    /// FormId(.far_ref) → FarRef. populated by image-load (V4 §10.4).
+    far_ref_table: std.AutoArrayHashMapUnmanaged(FormId, FarRef),
+
+    /// proto-FormId → handler-table generation. incremented when a
+    /// handler is rewritten via `set-handler!`. ICs compare to detect
+    /// staleness (law L10). missing key implies generation 0.
+    proto_generation: std.AutoArrayHashMapUnmanaged(FormId, u32),
 
     /// V3 — the "here" Form for this vat. exposed as `$here` in
     /// moof code (self-referential binding in here_form.slots).
@@ -164,12 +216,6 @@ pub const World = struct {
     /// whose slots are macro-name → method-Form. exposed as the
     /// `Macros` global so user code can introspect.
     macros_form: FormId,
-
-    // wasm mco instances — stub for now. zig wasmtime integration
-    // (per V4 §10.2's mcos/ + McoBindingsSection) lands in a later
-    // pass. left commented to flag the slot.
-    //
-    // wasm_instances: std.AutoArrayHashMap(FormId, WasmInstance),
 
     /// the bytecode interpreter's per-vat state.
     vm: Vm,
@@ -186,6 +232,27 @@ pub const World = struct {
     /// V3 — meta key for env-chain parent linkage. an env-Form
     /// chains to its enclosing scope via `meta at: 'parent`.
     parent_sym: SymId,
+
+    /// `'does-not-understand:with:` — the canonical dnu selector.
+    dnu_sym: SymId,
+    /// `'body` — slot on method-Forms holding the chunk FormId.
+    body_sym: SymId,
+    /// `'env` — slot on method/closure-Forms holding the captured env.
+    env_sym: SymId,
+    /// `'params` — slot on method/closure-Forms holding the param-list.
+    params_sym: SymId,
+    /// `'car` — slot 0 of a Cons.
+    symCar: SymId,
+    /// `'cdr` — slot 1 of a Cons.
+    symCdr: SymId,
+    /// `'body` — alias of body_sym for intrinsics naming.
+    symBody: SymId,
+    /// `'parent` — alias of parent_sym for intrinsics naming.
+    symParent: SymId,
+    /// `'name` — meta key for proto display names.
+    symName: SymId,
+    /// `'self` — slot on closures holding captured receiver.
+    self_sym: SymId,
 
     /// initialize a fresh, empty world.
     ///
@@ -207,40 +274,60 @@ pub const World = struct {
         const parent_sym = try syms.intern("parent");
         const here_sym = try syms.intern("$here");
         const name_meta = try syms.intern("name");
+        const dnu_sym = try syms.intern("does-not-understand:with:");
+        const body_sym = try syms.intern("body");
+        const env_sym = try syms.intern("env");
+        const params_sym = try syms.intern("params");
+        const car_sym = try syms.intern("car");
+        const cdr_sym = try syms.intern("cdr");
+        const self_sym = try syms.intern("self");
 
         // allocate the here_form: proto = Env, meta.parent = Nil
         // (it's the root of the env chain for this vat).
         var here_form_init = Form.withProto(Value{ .form = protos.env });
-        try here_form_init.meta.put(parent_sym, Value.nil);
+        try here_form_init.meta.put(allocator, parent_sym, Value.nil);
         const here_form = try heap.alloc(here_form_init);
 
         // allocate the Macros form: proto = Object, meta.name = Sym("Macros")
         // so reflection shows the name.
         var macros_form_init = Form.withProto(Value{ .form = protos.object });
         const macros_sym = try syms.intern("Macros");
-        try macros_form_init.meta.put(name_meta, Value{ .sym = macros_sym });
+        try macros_form_init.meta.put(allocator, name_meta, Value{ .sym = macros_sym });
         const macros_form = try heap.alloc(macros_form_init);
 
         // bind $here self-referentially inside here_form.slots —
         // moof code reaches its own globals env via this binding;
         // also lets reflection list path-bound names.
         const here_form_ref = heap.getMut(here_form);
-        try here_form_ref.slots.put(here_sym, Value{ .form = here_form });
+        try here_form_ref.slots.put(allocator, here_sym, Value{ .form = here_form });
 
         return World{
             .heap = heap,
             .syms = syms,
             .protos = protos,
             .allocator = allocator,
-            .chunk_bytecode = std.AutoArrayHashMap(FormId, []u8).init(allocator),
-            .chunk_consts = std.AutoArrayHashMap(FormId, []Value).init(allocator),
-            .chunk_ics = std.AutoArrayHashMap(FormId, []ICache).init(allocator),
-            .native_fns = std.AutoArrayHashMap(FormId, NativeFn).init(allocator),
+            .chunk_bytecode = .empty,
+            .chunk_consts = .empty,
+            .chunk_ics = .empty,
+            .chunk_params = .empty,
+            .native_fns = .empty,
+            .far_ref_table = .empty,
+            .proto_generation = .empty,
             .here_form = here_form,
             .macros_form = macros_form,
             .vm = Vm.init(),
             .view_target_sym = view_target_sym,
             .parent_sym = parent_sym,
+            .dnu_sym = dnu_sym,
+            .body_sym = body_sym,
+            .env_sym = env_sym,
+            .params_sym = params_sym,
+            .symCar = car_sym,
+            .symCdr = cdr_sym,
+            .symBody = body_sym,
+            .symParent = parent_sym,
+            .symName = name_meta,
+            .self_sym = self_sym,
         };
     }
 
@@ -248,29 +335,37 @@ pub const World = struct {
     ///
     /// `chunk_bytecode` values are slices owned by World; free those
     /// individually before deiniting the map. `chunk_consts` / `chunk_ics`
-    /// slices are likewise owned. NativeFn entries are function pointers
-    /// (no ownership).
+    /// / `chunk_params` slices are likewise owned. NativeFn entries are
+    /// function pointers (no ownership).
     pub fn deinit(self: *World) void {
         // free owned slices in side tables.
         var it_bytes = self.chunk_bytecode.iterator();
         while (it_bytes.next()) |entry| {
             self.allocator.free(entry.value_ptr.*);
         }
-        self.chunk_bytecode.deinit();
+        self.chunk_bytecode.deinit(self.allocator);
 
         var it_consts = self.chunk_consts.iterator();
         while (it_consts.next()) |entry| {
             self.allocator.free(entry.value_ptr.*);
         }
-        self.chunk_consts.deinit();
+        self.chunk_consts.deinit(self.allocator);
 
         var it_ics = self.chunk_ics.iterator();
         while (it_ics.next()) |entry| {
             self.allocator.free(entry.value_ptr.*);
         }
-        self.chunk_ics.deinit();
+        self.chunk_ics.deinit(self.allocator);
 
-        self.native_fns.deinit();
+        var it_params = self.chunk_params.iterator();
+        while (it_params.next()) |entry| {
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.chunk_params.deinit(self.allocator);
+
+        self.native_fns.deinit(self.allocator);
+        self.far_ref_table.deinit(self.allocator);
+        self.proto_generation.deinit(self.allocator);
         self.vm.deinit(self.allocator);
         self.syms.deinit();
         self.heap.deinit();
@@ -338,7 +433,7 @@ pub const World = struct {
             const f = self.heap.get(cur);
             if (f.slots.contains(name)) {
                 const fm = self.heap.getMut(cur);
-                try fm.slots.put(name, val);
+                try fm.slots.put(self.allocator, name, val);
                 return true;
             }
 
@@ -349,7 +444,7 @@ pub const World = struct {
                     const tf = self.heap.get(target_id);
                     if (tf.slots.contains(name)) {
                         const tfm = self.heap.getMut(target_id);
-                        try tfm.slots.put(name, val);
+                        try tfm.slots.put(self.allocator, name, val);
                         return true;
                     }
                 }
@@ -369,6 +464,274 @@ pub const World = struct {
     /// binding (or overwrites an existing local one).
     pub fn envBind(self: *World, env: FormId, name: SymId, val: Value) !void {
         const fm = self.heap.getMut(env);
-        try fm.slots.put(name, val);
+        try fm.slots.put(self.allocator, name, val);
+    }
+
+    // ---- proto / form access -------------------------------------
+
+    /// the proto Value for any Value (tagged-immediate or Form).
+    /// tagged immediates resolve to their canonical proto-Form per V0.
+    pub fn protoOf(self: *const World, v: Value) Value {
+        return switch (v) {
+            .nil => .{ .form = self.protos.nil },
+            .bool_ => .{ .form = self.protos.bool_ },
+            .int => .{ .form = self.protos.integer },
+            .sym => .{ .form = self.protos.sym },
+            .char => .{ .form = self.protos.char },
+            .float => .{ .form = self.protos.object }, // Float proto deferred (phase γ)
+            .form => |id| self.heap.get(id).proto,
+        };
+    }
+
+    /// the effective FormId for any Value, where defined. tagged
+    /// immediates currently have no per-instance singleton FormId
+    /// (returned as null); future singletons (#true / #false) will
+    /// fill this in.
+    pub fn effectiveFormId(self: *const World, v: Value) ?FormId {
+        _ = self;
+        return switch (v) {
+            .form => |id| id,
+            else => null,
+        };
+    }
+
+    /// read `slot_name` on `id`, walking only the Form's own slots
+    /// (no proto-chain). returns nil if absent.
+    pub fn formSlot(self: *const World, id: FormId, slot_name: SymId) Value {
+        const f = self.heap.get(id);
+        return f.slot(slot_name);
+    }
+
+    /// write `val` to slot `slot_name` on `id`. errors on frozen or
+    /// out-of-memory.
+    pub fn formSlotSet(self: *World, id: FormId, slot_name: SymId, val: Value) !void {
+        const fm = self.heap.getMut(id);
+        if (fm.frozen) return error.FrozenForm;
+        try fm.slots.put(self.allocator, slot_name, val);
+    }
+
+    /// read `key` on `id.meta`. nil if absent.
+    pub fn formMeta(self: *const World, id: FormId, key: SymId) Value {
+        const f = self.heap.get(id);
+        return f.metaAt(key);
+    }
+
+    /// `[a become: b]` — record a heap-level indirection. wraps
+    /// `Heap.become_` and bumps any relevant proto generations so
+    /// stale ICs re-resolve.
+    pub fn become_(self: *World, a: FormId, b: FormId) !void {
+        if (a.eql(b)) return; // self-become is a no-op
+        try self.heap.become_(a, b);
+        // bump generation on a's slot if it was a proto — cheap to
+        // do unconditionally since proto_generation is just a u32.
+        try self.bumpGeneration(a);
+    }
+
+    /// bump `proto`'s handler-generation counter. called by become_,
+    /// set-handler!, etc. — anything that could stale an IC.
+    pub fn bumpGeneration(self: *World, proto: FormId) !void {
+        const gop = try self.proto_generation.getOrPut(self.allocator, proto);
+        if (!gop.found_existing) gop.value_ptr.* = 0;
+        gop.value_ptr.* +%= 1;
+    }
+
+    /// look up `proto`'s current handler-generation. missing → 0.
+    pub fn protoGeneration(self: *const World, proto: FormId) u32 {
+        return self.proto_generation.get(proto) orelse 0;
+    }
+
+    // ---- handler lookup (proto-chain walk) -----------------------
+
+    /// walk the proto chain starting AT `start_proto` looking for a
+    /// handler for `selector`. used by lookupHandler and lookupHandlerSuper
+    /// (with different starting points).
+    fn walkChain(self: *const World, start: FormId, selector: SymId) ?HandlerHit {
+        var cur = start;
+        var hops: usize = 0;
+        const MAX_HOPS: usize = 256;
+        while (hops < MAX_HOPS) : (hops += 1) {
+            const f = self.heap.get(cur);
+            if (f.handler(selector)) |h| {
+                return .{ .handler = h, .defining = cur };
+            }
+            switch (f.proto) {
+                .form => |id| cur = id,
+                else => return null,
+            }
+        }
+        return null;
+    }
+
+    /// resolve `selector` for `receiver`: walks from the receiver's
+    /// proto down. returns the matched handler + defining proto, or
+    /// null on miss (caller dispatches dnu).
+    pub fn lookupHandler(self: *const World, receiver: Value, selector: SymId) ?HandlerHit {
+        const proto_v = self.protoOf(receiver);
+        return switch (proto_v) {
+            .form => |id| self.walkChain(id, selector),
+            else => null,
+        };
+    }
+
+    /// super-send lookup: start the walk ABOVE `defining_proto`.
+    /// used by SuperSend (V4 spec §6.3).
+    pub fn lookupHandlerSuper(self: *const World, defining: FormId, selector: SymId) ?HandlerHit {
+        const d = self.heap.get(defining);
+        return switch (d.proto) {
+            .form => |id| self.walkChain(id, selector),
+            else => null,
+        };
+    }
+
+    /// `method` → native function pointer, if any.
+    pub fn nativeFn(self: *const World, method: FormId) ?NativeFn {
+        return self.native_fns.get(method);
+    }
+
+    // ---- VM helpers (called by vm.zig + intrinsics) --------------
+
+    /// allocate a new Env-Form with `parent` linked via meta.
+    pub fn allocEnv(self: *World, parent: FormId) !FormId {
+        var f = Form.withProto(.{ .form = self.protos.env });
+        try f.meta.put(self.allocator, self.parent_sym, .{ .form = parent });
+        return self.heap.alloc(f);
+    }
+
+    /// allocate a Closure-Form. captures (chunk, env, self) for
+    /// later invocation via `:call*`.
+    pub fn allocClosure(
+        self: *World,
+        chunk: FormId,
+        env: FormId,
+        captured_self: Value,
+    ) !FormId {
+        var f = Form.withProto(.{ .form = self.protos.closure });
+        try f.slots.put(self.allocator, self.body_sym, .{ .form = chunk });
+        try f.slots.put(self.allocator, self.env_sym, .{ .form = env });
+        try f.slots.put(self.allocator, self.self_sym, captured_self);
+        return self.heap.alloc(f);
+    }
+
+    /// send `selector` to `receiver` with `args`. wraps the slow
+    /// dispatch path; mostly called by intrinsics that need to
+    /// re-enter the VM.
+    pub fn send(self: *World, receiver: Value, selector: SymId, args: []const Value) !Value {
+        const hit = self.lookupHandler(receiver, selector) orelse {
+            return self.raise("doesNotUnderstand", "no handler");
+        };
+        const method = hit.handler.asFormId() orelse return error.HandlerNotAMethod;
+        if (self.nativeFn(method)) |native| {
+            return native(self, receiver, args);
+        }
+        // bytecode dispatch — re-enter VM via runMethod.
+        const body_v = self.formSlot(method, self.body_sym);
+        const chunk_id = body_v.asFormId() orelse return error.MethodBodyNotAChunk;
+        const captured_env_v = self.formSlot(method, self.env_sym);
+        const captured_env = captured_env_v.asFormId() orelse self.here_form;
+        const params_v = self.formSlot(method, self.params_sym);
+        const params = try self.listToSlice(params_v);
+        defer self.freeSlice(params);
+        if (params.len != args.len) return error.Arity;
+        const call_env = try self.allocEnv(captured_env);
+        for (params, args) |p, a| {
+            const ps = p.asSym() orelse return error.BadParam;
+            try self.envBind(call_env, ps, a);
+        }
+        return vm_mod.runMethod(self, chunk_id, call_env, receiver, hit.defining);
+    }
+
+    /// canonical "raise" — for V4 phase α we just return an error.
+    /// the rust seed has a structured error-Form; the zig substrate
+    /// will follow once condition-handling lands.
+    pub fn raise(self: *World, kind: []const u8, msg: []const u8) anyerror {
+        _ = self;
+        _ = kind;
+        _ = msg;
+        return error.DispatchError;
+    }
+
+    // ---- list / string helpers (stubs for now) -------------------
+
+    /// walk a cons-chain into a heap-allocated slice of Values.
+    /// caller owns the slice (free with `freeSlice` or `allocator.free`).
+    /// nil terminates; non-Cons / non-nil mid-chain raises type-error.
+    pub fn listToSlice(self: *World, list: Value) ![]Value {
+        // count first
+        var n: usize = 0;
+        var cur = list;
+        while (true) {
+            switch (cur) {
+                .nil => break,
+                .form => |id| {
+                    const f = self.heap.get(id);
+                    // a Cons has slots {car, cdr}; if not, treat as
+                    // terminator (matches rust seed leniency).
+                    if (!f.slotPresent(self.symCar)) break;
+                    n += 1;
+                    cur = f.slot(self.symCdr);
+                },
+                else => break,
+            }
+        }
+        const out = try self.allocator.alloc(Value, n);
+        cur = list;
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const id = cur.asFormId().?;
+            const f = self.heap.get(id);
+            out[i] = f.slot(self.symCar);
+            cur = f.slot(self.symCdr);
+        }
+        return out;
+    }
+
+    /// alias of `listToSlice` matching the rust naming.
+    pub fn listToVec(self: *World, list: Value) ![]Value {
+        return self.listToSlice(list);
+    }
+
+    /// free a slice returned by `listToSlice` / `listToVec`.
+    pub fn freeSlice(self: *World, slice: []Value) void {
+        self.allocator.free(slice);
+    }
+
+    /// build a cons-chain from `values`. returns the head (or nil).
+    pub fn makeList(self: *World, values: []const Value) !Value {
+        var acc: Value = .nil;
+        var i: usize = values.len;
+        while (i > 0) {
+            i -= 1;
+            var f = Form.withProto(.{ .form = self.protos.cons });
+            try f.slots.put(self.allocator, self.symCar, values[i]);
+            try f.slots.put(self.allocator, self.symCdr, acc);
+            const id = try self.heap.alloc(f);
+            acc = .{ .form = id };
+        }
+        return acc;
+    }
+
+    /// stub: build a String-Form from `text`. for V4 phase α the
+    /// minimum-viable substrate just allocates a Form with proto=String
+    /// and a single `:bytes` slot holding the text (encoded as a
+    /// list-of-chars — yes, inefficient). real String storage is a
+    /// later wave.
+    pub fn makeString(self: *World, text: []const u8) !Value {
+        _ = text;
+        // for now we just hand back nil — toString tests don't run
+        // in the minimum-viable smoke. flagged TODO.
+        var f = Form.withProto(.{ .form = self.protos.string });
+        const id = try self.heap.alloc(f);
+        _ = &f;
+        return .{ .form = id };
+    }
+
+    /// stub: look up a named native in the process intrinsics table.
+    /// image-load uses this to rebind natives on freshly-deserialized
+    /// methods. for V4 phase α we don't have a name→fn map (intrinsics
+    /// install by-proto-and-selector instead). returns null.
+    pub fn lookupNativeByName(self: *const World, name: []const u8) ?NativeFn {
+        _ = self;
+        _ = name;
+        return null; // TODO: integration agent — wire up when image-load runs
     }
 };

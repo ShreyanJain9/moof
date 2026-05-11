@@ -71,6 +71,13 @@ pub const FormId = packed struct(u32) {
         return self.payload == 0 and self.scope == .vat_local;
     }
 
+    /// structural equality on the (scope, payload) pair. since FormId
+    /// is a packed-struct backed by u32, this just compares bit
+    /// patterns.
+    pub fn eql(self: FormId, other: FormId) bool {
+        return self.payload == other.payload and self.scope == other.scope;
+    }
+
     /// construct a vat-local FormId. payload must fit in 30 bits.
     /// callers responsible for the bounds check — the packed struct
     /// truncates silently. use `Heap::alloc` rather than calling this

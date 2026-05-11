@@ -422,7 +422,8 @@ fn sendViaIC(
             break :blk FormId.NONE;
         };
         // populate the IC slot
-        if (world.chunk_ics.getMutable(chunk)) |ics| {
+        if (world.chunk_ics.getPtr(chunk)) |ics_ptr| {
+            const ics = ics_ptr.*;
             if (ic_idx < ics.len) {
                 ics[ic_idx] = .{
                     .cached_proto = receiver_proto,
@@ -523,7 +524,7 @@ fn invokeMethod(
 
 /// run a chunk to completion (push-frame variant). pushes a frame,
 /// runs `step` until that frame returns, returns its stack-top.
-fn runMethod(
+pub fn runMethod(
     world: *World,
     chunk: FormId,
     env: FormId,
@@ -571,7 +572,7 @@ fn replaceFrameWithTailCall(
 ) anyerror!void {
     // copy args out before mutating the stack.
     const argc = world.vm.stack.items.len - args_start;
-    var args_buf = try world.allocator.alloc(Value, argc);
+    const args_buf = try world.allocator.alloc(Value, argc);
     defer world.allocator.free(args_buf);
     @memcpy(args_buf, world.vm.stack.items[args_start..]);
 
@@ -657,7 +658,7 @@ fn doSuperSend(
     const split = world.vm.stack.items.len - argc_u;
 
     // copy args out before any mutation.
-    var args_buf = try world.allocator.alloc(Value, argc_u);
+    const args_buf = try world.allocator.alloc(Value, argc_u);
     defer world.allocator.free(args_buf);
     @memcpy(args_buf, world.vm.stack.items[split..]);
     world.vm.stack.shrinkRetainingCapacity(split);

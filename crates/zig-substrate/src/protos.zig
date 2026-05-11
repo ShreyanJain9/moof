@@ -99,8 +99,6 @@ pub fn bootstrap(
     syms: *SymTable,
     allocator: std.mem.Allocator,
 ) !Protos {
-    _ = allocator; // present for API parity / future per-proto deinit hooks
-
     // intern the `name` meta key once.
     const name_meta = try syms.intern("name");
 
@@ -178,7 +176,7 @@ pub fn bootstrap(
     for (named) |np| {
         const sym_id = try syms.intern(np.name);
         const f = heap.getMut(np.id);
-        try f.meta.put(name_meta, Value{ .sym = sym_id });
+        try f.meta.put(allocator, name_meta, Value{ .sym = sym_id });
     }
 
     return protos;
