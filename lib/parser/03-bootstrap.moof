@@ -1,0 +1,42 @@
+;; lib/parser/03-bootstrap.moof — Parser singleton + [$reader useMoof] flip.
+;;
+;; depends on: 00-lexer.moof, 01-tokens.moof, 02-parser.moof.
+;; after this file loads + the flip fires, every subsequent parse
+;; (including all of compiler/*, early/*, stdlib/*, mcos.moof,
+;; and REPL input) routes through [Parser parse: src].
+;;
+;; written in the minimal-subset moof (raw setHandler!, no macros,
+;; no quasiquote, no defmethod sugar, no pattern-match params, no
+;; send-cascade). see
+;; docs/superpowers/specs/2026-05-10-self-host-and-rust-deletion-design.md
+;; §4 for the contract.
+;;
+;; this is the analog of compiler/00-helpers.moof's tail —
+;; lib/main.moof sends [$compiler useMoof] after the compiler files
+;; load; here, the flip fires *inside* the bootstrap file itself
+;; so a single [$transporter load:] call is enough to complete the
+;; switchover.
+
+(def Parser [Object new])
+
+;; [Parser parse: src] → list of top-level Forms.
+;; threads through 00-lexer.moof's [Lexer tokenize:] and
+;; 02-parser.moof's [ParserCore parseAll:]. matches the rust
+;; `World::read_all` shape (see crates/substrate/src/world.rs).
+(setHandler! Parser 'parse:
+  (fn (src)
+    (let ((tokens [Lexer tokenize: src]))
+      [ParserCore parseAll: tokens])))
+
+;; [Parser parseOne: src] → single top-level Form. matches the
+;; rust `World::read` shape — convenience for single-form callers
+;; (e.g. REPL one-liners, `eval`).
+(setHandler! Parser 'parseOne:
+  (fn (src)
+    (let ((tokens [Lexer tokenize: src]))
+      [[ParserCore parseAll: tokens] car])))
+
+;; flip — every subsequent parse routes through Parser.
+;; no inverse by design: once the moof reader is canonical, the
+;; rust seed reader is dead code. see design doc §10 Q2.
+[$reader useMoof]
