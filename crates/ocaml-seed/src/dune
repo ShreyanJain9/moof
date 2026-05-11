@@ -1,0 +1,4 @@
+(library
+ (name moof_seed)
+ (public_name moof_seed)
+ (libraries))
