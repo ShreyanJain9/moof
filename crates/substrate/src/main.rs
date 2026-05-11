@@ -14,6 +14,12 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
+    // V4 build-time oracle export — walks the rust World and emits a
+    // V4 vat-image consumable by moof-zig. See `v4_export.rs` and the
+    // 2026-05-10 V4 C.3 stdlib-bootstrap plan, Track 1.
+    if args.len() >= 2 && args[1] == "export-v4" {
+        return run_export_v4(&args[2..]);
+    }
     if args.len() == 1 {
         repl()
     } else if args.len() == 2 {
@@ -22,6 +28,30 @@ fn main() -> ExitCode {
         usage();
         ExitCode::from(2)
     }
+}
+
+fn run_export_v4(rest: &[String]) -> ExitCode {
+    // accept either `export-v4 /path/to/file.vat` or
+    // `export-v4 --output /path/to/file.vat`. Default to "system.vat"
+    // in the cwd.
+    let output = if rest.len() >= 2 && rest[0] == "--output" {
+        rest[1].clone()
+    } else if rest.len() == 1 && rest[0] != "--output" {
+        rest[0].clone()
+    } else {
+        "system.vat".to_string()
+    };
+
+    // Build the fully-bootstrapped world (loads lib/main.moof + all
+    // transitively-loaded files). This IS the build-time oracle.
+    let w = moof::new_world();
+    let bytes = moof::v4_export::serialize_world(&w);
+    if let Err(e) = std::fs::write(&output, &bytes) {
+        eprintln!("moof: failed to write {}: {}", output, e);
+        return ExitCode::from(73);
+    }
+    println!("wrote {} ({} bytes)", output, bytes.len());
+    ExitCode::SUCCESS
 }
 
 fn usage() {

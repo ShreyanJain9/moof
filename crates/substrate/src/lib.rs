@@ -31,6 +31,7 @@ pub mod reader;
 pub mod sym;
 pub mod table;
 pub mod transporter;
+pub mod v4_export;
 pub mod value;
 pub mod vm;
 pub mod wasm;
