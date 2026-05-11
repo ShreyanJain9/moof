@@ -420,14 +420,16 @@ fn readNativeRefs(world: *World, bytes: []const u8, pos: *usize) !void {
 
         // look up the named native in the process-wide intrinsics
         // table and install it on world.native_fns[method_form_id].
-        // log the offending name so cross-stack drift is visible (zig
-        // ships a 29-native MVS REGISTRY; the rust v4_export's World
-        // may include more — that gap is resolved at integration time).
-        const native_fn = world.lookupNativeByName(name) orelse {
-            std.log.warn("image-load: unknown native '{s}' for form_id={d}", .{ name, method_form_id });
-            return ImageError.UnknownNative;
-        };
-        try world.native_fns.put(world.allocator, vatLocalId(method_form_id), native_fn);
+        // log + SKIP if missing — zig ships a 29-native MVS REGISTRY;
+        // the rust v4_export's World may have more (~50). methods
+        // that need missing natives will fail at dispatch time
+        // ("method body not callable") but the world LOADS. additions
+        // to zig's REGISTRY are how the gap is closed long-term.
+        if (world.lookupNativeByName(name)) |native_fn| {
+            try world.native_fns.put(world.allocator, vatLocalId(method_form_id), native_fn);
+        } else {
+            std.log.warn("image-load: unknown native '{s}' for form_id={d} — skipping (method will fail at dispatch)", .{ name, method_form_id });
+        }
     }
 }
 
