@@ -34,7 +34,7 @@ fn main() -> ExitCode {
 fn real_main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     // V4 build-time oracle export — walks the rust World and emits a
-    // V4 vat-image consumable by moof-zig. See `v4_export.rs` and the
+    // V4 vat-image consumable by `moof` (the zig runtime). See `v4_export.rs` and the
     // 2026-05-10 V4 C.3 stdlib-bootstrap plan, Track 1.
     if args.len() >= 2 && args[1] == "export-v4" {
         return run_export_v4(&args[2..]);

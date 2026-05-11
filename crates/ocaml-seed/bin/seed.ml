@@ -14,14 +14,14 @@
      moof-seed bytes <file.moof>
        parse + compile, emit ONLY the raw V4 bytecode bytes to stdout
        (binary). for multi-form sources, all chunk bodies are concatenated.
-       intended for piping into moof-zig.
+       intended for piping into moof (zig).
 
      moof-seed build-image <file.moof> <out.vat>
        parse + compile + serialize as a per-vat V4 image. V4-α scope
        (Path B): produces a minimum image — empty Forms / Natives / Mcos /
        FarRefs sections, but a real SymTable + ChunkSection. won't
        bootstrap on its own; useful for round-trip testing the serializer
-       against moof-zig's deserializer. *)
+       against moof (zig)'s deserializer. *)
 
 open Moof_seed
 
@@ -123,7 +123,7 @@ let cmd_bytes (path : string) : unit =
   Compiler.reset_globals ();
   let text = read_file path in
   let forms = Reader.read_all text in
-  (* dump raw bytecode bytes to stdout — caller pipes to moof-zig.
+  (* dump raw bytecode bytes to stdout — caller pipes to moof (zig).
      for multi-form sources we concatenate top-chunk bodies. (V4-α;
      phase ε may want a per-form header.) *)
   set_binary_mode_out stdout true;

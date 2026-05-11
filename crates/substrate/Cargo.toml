@@ -27,7 +27,9 @@ wasmtime-wasi = "26"
 wat = "1"
 
 [[bin]]
-name = "moof"
+# W5b: renamed from `moof` → `moof-rs`. zig substrate now owns the
+# `moof` name. this binary is now build-time-only (rust as oracle).
+name = "moof-rs"
 path = "src/main.rs"
 
 [lib]

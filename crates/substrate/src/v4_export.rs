@@ -10,7 +10,7 @@
 //! ## bypasses / known gaps (intentional for V4 minimum viable)
 //!
 //! - V3 has fewer opcodes than V4. We emit `LoadSelf` + `Send` (not
-//!   the fused `SendSelf`); same for `LoadHere`/`SendHere`. moof-zig
+//!   the fused `SendSelf`); same for `LoadHere`/`SendHere`. moof (zig)
 //!   handles both shapes; the fused emissions are phase-A-self-host's
 //!   job.
 //! - `Value::Foreign(_)` has no V4 inline tag — we encode it as Nil
@@ -22,7 +22,7 @@
 //! - Protos table: V4 spec asks for 18 entries; rust has 17 (+ Float,
 //!   – macros, – opcode). We emit FormId(0) for absent ones and slot
 //!   `world.macros_form` into the macros position.
-//! - Footer image hash is zeros (moof-zig stubs verification).
+//! - Footer image hash is zeros (moof (zig) stubs verification).
 //! - `params_count` for each chunk reads the chunk-Form's `:params`
 //!   slot list — already canonical for closures via `compiler.rs`.
 
@@ -184,7 +184,7 @@ pub fn encode_value(v: Value, buf: &mut Vec<u8>) {
             // the image boundary. Emit Nil; consumer treats it as
             // "this slot held a non-portable handle, re-bind via
             // intrinsics on load." String/Bytes/Table reps will
-            // be re-allocated by the moof-zig side from their
+            // be re-allocated by the moof (zig) side from their
             // owning Form's structure.
             buf.push(0xC0);
         }
@@ -377,7 +377,7 @@ pub fn serialize_world(world: &World) -> Vec<u8> {
         // For V4 minimum viable we emit the chunk's own FormId — the
         // spec calls for the "source Form id"; rust's source is a
         // moof Form deep in the heap. Using the chunk-id itself is
-        // a placeholder (moof-zig doesn't dispatch on this yet).
+        // a placeholder (moof (zig) doesn't dispatch on this yet).
         buf.extend_from_slice(&chunk_id.0.to_be_bytes());
         // body: encoded ops
         let body = encode_chunk_ops(ops);
@@ -432,7 +432,7 @@ pub fn serialize_world(world: &World) -> Vec<u8> {
     }
 
     // ── McoBindingsSection ──────────────────────────────────────
-    // TODO(phase-D): re-emit wasm mco bindings. For V4 MVP, moof-zig
+    // TODO(phase-D): re-emit wasm mco bindings. For V4 MVP, moof (zig)
     // skips wasm at load (the rust runtime carries Hash mco bytes
     // embedded; zig will bootstrap its own copies).
     buf.extend_from_slice(&0_u32.to_be_bytes());
@@ -442,7 +442,7 @@ pub fn serialize_world(world: &World) -> Vec<u8> {
     buf.extend_from_slice(&0_u32.to_be_bytes());
 
     // ── Footer: image hash ──────────────────────────────────────
-    // TODO(phase-9): real blake3 hash of the bytes above. moof-zig
+    // TODO(phase-9): real blake3 hash of the bytes above. moof (zig)
     // currently stubs verification.
     let hash = [0u8; 32];
     buf.extend_from_slice(&hash);

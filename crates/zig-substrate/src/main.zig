@@ -1,12 +1,12 @@
-//! moof-zig — entrypoint. V4 polyglot substrate.
+//! moof — entrypoint. V4 polyglot substrate.
 //!
 //! parses argv, loads a V4 vat-image (or runs an inline smoke),
 //! instantiates a World, runs.
 //!
 //! subcommands:
-//!   moof-zig                  — built-in smoke (boots a World, runs two
+//!   moof                  — built-in smoke (boots a World, runs two
 //!                                hand-constructed chunks).
-//!   moof-zig decode <path>    — read raw V4 bytecode bytes from <path>
+//!   moof decode <path>    — read raw V4 bytecode bytes from <path>
 //!                                (use `/dev/stdin` for piped input on
 //!                                POSIX systems) and print each decoded
 //!                                opcode + operands.
@@ -14,7 +14,7 @@
 //!                                that verifies OCaml's `moof-seed bytes`
 //!                                output decodes byte-for-byte under the
 //!                                zig substrate's `bytecode.decodeOp`.
-//!   moof-zig load <path>      — load a V4 vat-image from <path> into a
+//!   moof load <path>      — load a V4 vat-image from <path> into a
 //!                                fresh bare World, then print world
 //!                                state (heap.len, syms.len, chunks,
 //!                                natives, here_form). V4 Track C.3
@@ -74,9 +74,9 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (sub_raw != null and path_raw != null and std.mem.eql(u8, sub_raw.?, "exec")) {
-        // moof-zig exec <vat> <chunk-id>
+        // moof exec <vat> <chunk-id>
         const chunk_id_raw = it.next() orelse {
-            std.debug.print("usage: moof-zig exec <vat> <chunk-id>\n", .{});
+            std.debug.print("usage: moof exec <vat> <chunk-id>\n", .{});
             return;
         };
         const vat_copy = try allocator.dupe(u8, path_raw.?);
@@ -86,9 +86,9 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (sub_raw != null and path_raw != null and std.mem.eql(u8, sub_raw.?, "serialize")) {
-        // moof-zig serialize <in.vat> <out.vat>
+        // moof serialize <in.vat> <out.vat>
         const out_raw = it.next() orelse {
-            std.debug.print("usage: moof-zig serialize <in.vat> <out.vat>\n", .{});
+            std.debug.print("usage: moof serialize <in.vat> <out.vat>\n", .{});
             return;
         };
         const in_copy = try allocator.dupe(u8, path_raw.?);
@@ -99,7 +99,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (sub_raw != null and path_raw != null and std.mem.eql(u8, sub_raw.?, "smoke-serialize-to")) {
-        // moof-zig smoke-serialize-to <out.vat>
+        // moof smoke-serialize-to <out.vat>
         // boots a fresh World with intrinsics, runs a chunk that does
         // `[$here serializeTo: 'out.vat]` from inside the VM, then prints
         // the result. proves the intrinsic is reachable from moof code.
@@ -109,7 +109,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (sub_raw != null and path_raw != null and std.mem.eql(u8, sub_raw.?, "build-trivial-vat")) {
-        // moof-zig build-trivial-vat <out.vat>
+        // moof build-trivial-vat <out.vat>
         // emits a minimal V4 vat-image whose top-level chunk evaluates
         // [1 + 2] via real native dispatch — used by the W4 smoke.
         const out_copy = try allocator.dupe(u8, path_raw.?);
@@ -118,7 +118,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (sub_raw != null and path_raw != null and std.mem.eql(u8, sub_raw.?, "run")) {
-        // moof-zig run <vat> [--serialize-to <out>]
+        // moof run <vat> [--serialize-to <out>]
         const vat_copy = try allocator.dupe(u8, path_raw.?);
         defer allocator.free(vat_copy);
         var serialize_to: ?[]u8 = null;
@@ -155,7 +155,7 @@ fn runDecode(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !void {
 
     // 1 MiB cap is plenty for any V4 chunk body the smoke will feed
     // through this command. larger images should use the (future)
-    // moof-zig load-image subcommand instead.
+    // moof load-image subcommand instead.
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024));
     defer allocator.free(bytes);
 
@@ -261,9 +261,10 @@ fn runLoad(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !void {
     var world = try World.initBare(allocator);
     defer world.deinit();
 
-    // 64 MiB cap is plenty for a stdlib vat-image (rust's bootstrap
-    // serialization is ~1-5 MB per estimates in the C.3 plan).
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024 * 1024));
+    // 1 GiB cap accommodates current FormLoc-bloated polyglot vats
+    // (~360 MB). once the FormLoc dedup task lands this can shrink
+    // back toward the original 1-5 MB estimate.
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024 * 1024));
     defer allocator.free(bytes);
 
     try image.loadVatImage(&world, bytes, allocator);
@@ -291,7 +292,7 @@ fn runLoad(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !void {
 fn runSmoke(allocator: std.mem.Allocator) !void {
     const p = std.debug.print;
 
-    p("moof-zig v0.0.0 — V4 polyglot substrate\n", .{});
+    p("moof v0.0.0 — V4 polyglot substrate\n", .{});
     p("  FormId size: {} bits\n", .{@bitSizeOf(FormId)});
     p("  Value size:  {} bytes\n", .{@sizeOf(Value)});
     p("  Form size:   {} bytes\n", .{@sizeOf(Form)});
@@ -449,8 +450,8 @@ fn runSmokeSerializeTo(allocator: std.mem.Allocator, io: std.Io, out_path: []con
 /// build a tiny World with one chunk that evaluates `[1 + 2]` and
 /// serialize it as a V4 vat-image. used by the W4 round-trip smoke:
 ///
-///   moof-zig build-trivial-vat /tmp/trivial.vat
-///   moof-zig exec /tmp/trivial.vat <chunk-id>   # → Int(3)
+///   moof build-trivial-vat /tmp/trivial.vat
+///   moof exec /tmp/trivial.vat <chunk-id>   # → Int(3)
 ///
 /// the chunk_id of the trivial chunk is printed to stderr.
 fn runBuildTrivialVat(allocator: std.mem.Allocator, io: std.Io, out_path: []const u8) !void {
@@ -525,7 +526,7 @@ fn runBuildTrivialVat(allocator: std.mem.Allocator, io: std.Io, out_path: []cons
     p("wrote {s} ({d} bytes)\n", .{ out_path, out_buf.items.len });
     p("  trivial chunk id = {d}\n", .{chunk_id.payload});
     p("  exec smoke:\n", .{});
-    p("    moof-zig exec {s} {d}   # → Int(3)\n", .{ out_path, chunk_id.payload });
+    p("    moof exec {s} {d}   # → Int(3)\n", .{ out_path, chunk_id.payload });
 }
 
 // ============================================================
@@ -538,7 +539,7 @@ fn runBuildTrivialVat(allocator: std.mem.Allocator, io: std.Io, out_path: []cons
 ///
 /// the chunk-id arg is the raw FormId payload (u32). e.g. for a
 /// system.vat where the chunk for `[1 + 2]` lives at FormId(42), say
-/// `moof-zig exec /tmp/system.vat 42`.
+/// `moof exec /tmp/system.vat 42`.
 fn runExec(allocator: std.mem.Allocator, io: std.Io, vat_path: []const u8, chunk_id: u32) !void {
     const p = std.debug.print;
 
@@ -546,7 +547,7 @@ fn runExec(allocator: std.mem.Allocator, io: std.Io, vat_path: []const u8, chunk
     defer world.deinit();
     world.io = io;
 
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, vat_path, allocator, .limited(64 * 1024 * 1024));
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, vat_path, allocator, .limited(1024 * 1024 * 1024));
     defer allocator.free(bytes);
 
     try image.loadVatImage(&world, bytes, allocator);
@@ -613,7 +614,7 @@ fn runSerialize(allocator: std.mem.Allocator, io: std.Io, in_path: []const u8, o
     defer world.deinit();
     world.io = io;
 
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, in_path, allocator, .limited(64 * 1024 * 1024));
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, in_path, allocator, .limited(1024 * 1024 * 1024));
     defer allocator.free(bytes);
 
     try image.loadVatImage(&world, bytes, allocator);
@@ -653,7 +654,7 @@ fn runRun(allocator: std.mem.Allocator, io: std.Io, vat_path: []const u8, serial
     defer world.deinit();
     world.io = io;
 
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, vat_path, allocator, .limited(64 * 1024 * 1024));
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, vat_path, allocator, .limited(1024 * 1024 * 1024));
     defer allocator.free(bytes);
 
     try image.loadVatImage(&world, bytes, allocator);

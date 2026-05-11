@@ -15,10 +15,10 @@ to a working polyglot stack where:
   + macros_form resolved.
 
 ```
-$ cargo run -p moof --bin moof -- export-v4 --output /tmp/system.vat
+$ cargo run -p moof --bin moof-rs -- export-v4 --output /tmp/system.vat
   wrote /tmp/system.vat (21,645,729 bytes)
 
-$ ./crates/zig-substrate/zig-out/bin/moof-zig load /tmp/system.vat
+$ ./crates/zig-substrate/zig-out/bin/moof load /tmp/system.vat
   loaded /tmp/system.vat (21,645,729 bytes)
     heap.len    = 596,905
     syms.len    = 685
@@ -67,11 +67,11 @@ three tracks, roughly in dependency order. each is ~half a session.
 
 ### track A — execute moof code against the loaded image
 
-**right now:** moof-zig LOADS the vat-image but doesn't RUN moof code
+**right now:** moof LOADS the vat-image but doesn't RUN moof code
 against it. the world is "alive" but inert.
 
-**what we want:** `moof-zig run /tmp/system.vat <chunk-id>` or similar —
-invoke a specific chunk, observe the result. or: `moof-zig exec /tmp/system.vat
+**what we want:** `moof run /tmp/system.vat <chunk-id>` or similar —
+invoke a specific chunk, observe the result. or: `moof exec /tmp/system.vat
 <bytecode-file>` — load image, then run a hand-constructed bytecode against
 its world.
 
@@ -80,9 +80,9 @@ re-bound native methods. proves chunk_consts / chunk_ics / heap references
 all align across the rust-emit / zig-load boundary.
 
 **concrete plan:**
-1. add `moof-zig exec <vat> <bytecode-file>` — instantiate a top-level
+1. add `moof exec <vat> <bytecode-file>` — instantiate a top-level
    chunk from raw V4 bytes, run via `vm.runTop` against the loaded world.
-2. smoke: `moof-seed bytes /tmp/test.moof | moof-zig exec /tmp/system.vat -`
+2. smoke: `moof-seed bytes /tmp/test.moof | moof exec /tmp/system.vat -`
    for `[1 + 2]` → `Int 3` via real IC dispatch through stdlib's protos.
 3. probable bug-hunt: chunk side-tables, IC slot initialization, dispatch
    against re-bound natives.
@@ -115,17 +115,17 @@ have any chance of running stdlib code that needs these natives.
 
 ### track C — runtime source parsing (the parser problem)
 
-**right now:** moof-zig consumes bytecode but can't parse source. once
-track A works, the natural ask is `moof-zig "(+ 1 2)"` — eval a source
+**right now:** moof consumes bytecode but can't parse source. once
+track A works, the natural ask is `moof "(+ 1 2)"` — eval a source
 string. needs a reader at runtime.
 
 **three approaches:**
 1. **port `reader.rs` → `reader.zig`.** ~1000 LoC of zig. self-contained;
    no dependencies. preferred long-term.
-2. **call ocaml-seed as a subprocess.** `moof-zig` shells out to
+2. **call ocaml-seed as a subprocess.** `moof` shells out to
    `moof-seed bytes -` to compile. simple; introduces a subprocess
    dependency at runtime.
-3. **embed ocaml-seed in moof-zig via wasm.** compile ocaml-seed to wasm
+3. **embed ocaml-seed in moof via wasm.** compile ocaml-seed to wasm
    (with wasm_of_ocaml if it works), call it via the wasm runtime that's
    already in zig substrate. fits the philosophy ("OCaml as mco"); requires
    solving the OCaml→wasm story.
@@ -133,7 +133,7 @@ string. needs a reader at runtime.
 **recommend:** option 1 for V4 maturity, option 2 for tonight if we want
 to ship something running. option 3 is the elegant end state.
 
-once any of these works, plus track A + B, we have **moof-zig replacing
+once any of these works, plus track A + B, we have **moof replacing
 moof entirely** for ordinary use. rust deletion is one step away.
 
 ---
@@ -142,7 +142,7 @@ moof entirely** for ordinary use. rust deletion is one step away.
 
 | step | what | unlocks |
 |---|---|---|
-| this session | tracks A + B + C | moof-zig is feature-complete |
+| this session | tracks A + B + C | moof is feature-complete |
 | next session | rust deletion | only crates/zig-substrate + crates/ocaml-seed remain |
 | then | parser.moof + compiler.moof self-host | phase A-self-host complete; ocaml seed deletion follows |
 | then | phase B (persistence) | save vat per turn; restore from disk; live image is real |
@@ -178,7 +178,7 @@ these are flagged-but-not-blocking. fix when they become hot:
    needed when content-addressing actually matters. phase 9 work.
 4. **Proto count mismatch.** spec §10.3 wants 18 protos; rust has 17 +
    `macros_form` slotted in. `Opcode` proto FormId is emitted as NONE.
-   moof-zig handles NONE gracefully; long-term, add Opcode proto on rust
+   moof handles NONE gracefully; long-term, add Opcode proto on rust
    side OR shrink spec to 17.
 
 ### from track 2 (zig image-load)
@@ -188,7 +188,7 @@ these are flagged-but-not-blocking. fix when they become hot:
    `clearAndKeepCapacity`, those SymIds are stale. fine for load-and-
    inspect, broken for active env walks. **fix:** re-intern after load,
    or read SymIds from the loaded image's table.
-6. **wasm mco loading is stubbed.** moof-zig logs "would load mco" and
+6. **wasm mco loading is stubbed.** moof logs "would load mco" and
    continues. for stdlib methods that genuinely need mcos (Hash, Utf8,
    Clock, etc.), they'll fail at dispatch. acceptable for boot-and-inspect;
    blocks "run stdlib code that hashes things."
@@ -211,12 +211,12 @@ these are flagged-but-not-blocking. fix when they become hot:
 ## starting the next session
 
 1. `git pull` — confirm at `380203b` or later.
-2. `cargo build -p moof --release` — produces `target/release/moof`.
+2. `cargo build -p moof --release --bin moof-rs` — produces `target/release/moof-rs`.
 3. `cd crates/zig-substrate && zig build && cd ..` — produces
-   `crates/zig-substrate/zig-out/bin/moof-zig`.
-4. `cargo run -p moof --bin moof -- export-v4 --output /tmp/system.vat`
+   `crates/zig-substrate/zig-out/bin/moof`.
+4. `cargo run -p moof --bin moof-rs -- export-v4 --output /tmp/system.vat`
    — 21 MB image.
-5. `./crates/zig-substrate/zig-out/bin/moof-zig load /tmp/system.vat`
+5. `./crates/zig-substrate/zig-out/bin/moof load /tmp/system.vat`
    — should print `V4 vat-image alive`.
 6. read `docs/superpowers/plans/2026-05-10-vm-V4-C3-stdlib-bootstrap.md`
    if you need plan context.
