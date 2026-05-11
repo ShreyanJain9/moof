@@ -104,6 +104,62 @@ pub fn install(world: *World) !void {
     try installNative(world, world.protos.object, "serializeTo:", objSerializeTo);
 }
 
+/// install the primordial caps — `$transporter`, `$compiler`, `$reader`.
+/// each is an anonymous Object-proto-Form with the listed handlers,
+/// bound in `world.here_form`'s slots under the dollared name.
+///
+/// **call AFTER image-load** (or after `World.init`). image-load
+/// doesn't preserve anonymous-proto natives across the image
+/// boundary — the v4_export side labels them `<anon-N>:useMoof`
+/// where N varies, so they can't ride the NativeRefsSection rebind
+/// path. instead, the host calls this helper at run-time to wire
+/// the caps in place. mirrors rust install_compiler_cap /
+/// install_reader_cap / transporter::install.
+pub fn installCaps(world: *World) !void {
+    if (world.protos.object.isNone()) return error.NoObjectProto;
+    if (world.here_form.isNone()) return error.NoHereForm;
+
+    const dollar_transporter = try world.syms.intern("$transporter");
+    const dollar_compiler = try world.syms.intern("$compiler");
+    const dollar_reader = try world.syms.intern("$reader");
+    const name_meta = try world.syms.intern("name");
+    const transporter_name = try world.syms.intern("Transporter");
+    const compiler_name = try world.syms.intern("Compiler");
+    const reader_name = try world.syms.intern("Reader");
+
+    // $transporter
+    {
+        var proto = Form.withProto(.{ .form = world.protos.object });
+        // tag with :name so v4_export-style introspection sees
+        // "Transporter:load:" (matches the REGISTRY keys below).
+        try proto.meta.put(world.allocator, name_meta, .{ .sym = transporter_name });
+        const proto_id = try world.heap.alloc(proto);
+        try installNative(world, proto_id, "load:", transporterLoad);
+        try installNative(world, proto_id, "loadAll:", transporterLoadAll);
+        try world.envBind(world.here_form, dollar_transporter, .{ .form = proto_id });
+    }
+
+    // $compiler
+    {
+        var proto = Form.withProto(.{ .form = world.protos.object });
+        try proto.meta.put(world.allocator, name_meta, .{ .sym = compiler_name });
+        const proto_id = try world.heap.alloc(proto);
+        try installNative(world, proto_id, "useMoof", compilerUseMoof);
+        try installNative(world, proto_id, "useSeed", compilerUseSeed);
+        try world.envBind(world.here_form, dollar_compiler, .{ .form = proto_id });
+    }
+
+    // $reader
+    {
+        var proto = Form.withProto(.{ .form = world.protos.object });
+        try proto.meta.put(world.allocator, name_meta, .{ .sym = reader_name });
+        const proto_id = try world.heap.alloc(proto);
+        try installNative(world, proto_id, "useMoof", readerUseMoof);
+        try installNative(world, proto_id, "useSeed", readerUseSeed);
+        try world.envBind(world.here_form, dollar_reader, .{ .form = proto_id });
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────
 // installNative — alloc a method-Form (proto = protos.method),
 // record the rust-side NativeFn in world.native_fns keyed by the
@@ -1058,6 +1114,256 @@ fn capNoOp(_: *World, _: Value, _: []const Value) anyerror!Value {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// $compiler / $reader cap flag-flip natives.
+//
+// the rust intrinsics.rs::install_compiler_cap / install_reader_cap
+// install these on **anonymous** proto-Forms so v4_export labels
+// them `<anon-N>:useMoof` where N changes per-image — no canonical
+// REGISTRY key. but the SEED image-builder doesn't go through
+// v4_export; it builds named protos (or skips natives entirely for
+// the cap, since seed-vat's `$compiler` / `$reader` natives are
+// re-installed on the in-image cap by intrinsics-install at boot).
+//
+// for the zig substrate's view: we want these flip-flops callable
+// from moof code at boot time. installed on the Object proto (which
+// is also where the `$compiler` / `$reader` caps' protos chain to)
+// keyed by canonical "Compiler:useMoof" / "Reader:useMoof" etc.
+// names — the seed.vat may not actually use these names, but our
+// caller (the host) will install the cap separately and bind
+// directly via env_bind.
+//
+// when the host has installed `$compiler` / `$reader` caps, sends
+// to them route to these natives, which toggle the world flag.
+// note that for zig, with no native parser/compiler, useMoof MUST
+// be set or eval-string-in-world raises. useSeed is purely API parity.
+// ─────────────────────────────────────────────────────────────────
+
+fn compilerUseMoof(world: *World, _: Value, _: []const Value) anyerror!Value {
+    world.use_moof_compiler = true;
+    return .nil;
+}
+
+fn compilerUseSeed(world: *World, _: Value, _: []const Value) anyerror!Value {
+    world.use_moof_compiler = false;
+    return .nil;
+}
+
+fn readerUseMoof(world: *World, _: Value, _: []const Value) anyerror!Value {
+    world.use_moof_reader = true;
+    return .nil;
+}
+
+fn readerUseSeed(world: *World, _: Value, _: []const Value) anyerror!Value {
+    world.use_moof_reader = false;
+    return .nil;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// $transporter — Self-style file ↔ image bridge.
+//
+// port of crates/substrate/src/transporter.rs (~160 LoC). subset:
+//
+//   [$transporter load: rel]     — read file, parse, compile, run
+//   [$transporter loadAll: list] — same on each path in a cons-list
+//
+// :root and :dump:toFile: deferred — :root is diagnostics-only and
+// :dump:toFile: was already TODO in rust.
+//
+// implementation skeleton:
+//
+//   1. extract path string from Value (sym or String-Form)
+//   2. refuse absolute / `..`-traversing paths (rust:transporter.rs:124)
+//   3. resolve against world.transporter_root
+//   4. read file via world.io
+//   5. delegate to evalStringInWorld — parse + compile + run via the
+//      in-image Parser / Compiler. requires use_moof_reader and
+//      use_moof_compiler to be true.
+//
+// **CAVEAT** (V4 alpha): the OCaml seed image lifts `Str "..."` into
+// an empty placeholder Form (build_seed_cmd.ml:284). zig's image-load
+// preserves that placeholder. so a path-string from inside a
+// seed.vat chunk arrives as an empty Form — no :bytes, no content.
+// `extractPath` raises a clear error for this case. fix is to teach
+// ocaml-seed to populate :bytes on Str forms (next session task).
+// ─────────────────────────────────────────────────────────────────
+
+/// extract a path string from `v`. accepts:
+///   1. `.sym` — symbol text is the path (boot-test convenience)
+///   2. `.form` — String-Form with a `:bytes` slot that's either a
+///      foreign byte handle (rust-side) or a cons-chain of Char values
+///      (zig-side stand-in).
+///
+/// the caller owns the returned slice and must free with `world.allocator`.
+/// raises if the value isn't a recognized String shape OR the form has
+/// no usable :bytes content (the seed.vat placeholder case).
+fn extractPath(world: *World, v: Value) ![]u8 {
+    switch (v) {
+        .sym => |s| {
+            const text = world.syms.resolve(s);
+            return world.allocator.dupe(u8, text);
+        },
+        .form => |id| {
+            const f = world.heap.get(id);
+            // try :bytes slot — same convention as :serializeTo:.
+            const bytes_sym = lookupSymByName(world, "bytes") orelse {
+                return raise(world, "tx-bad-arg", ":load: path-Form has no :bytes slot (seed.vat string placeholder?)");
+            };
+            const chain = f.slot(bytes_sym);
+            // walk the chain into a growable buffer. unknown maximum
+            // length, so we use ArrayList rather than the 4 KiB stack
+            // buffer used by :serializeTo:.
+            var buf: std.ArrayList(u8) = .empty;
+            errdefer buf.deinit(world.allocator);
+            var cur = chain;
+            var saw_any = false;
+            while (true) {
+                switch (cur) {
+                    .nil => break,
+                    .form => |cid| {
+                        const cf = world.heap.get(cid);
+                        if (!cf.slotPresent(world.symCar)) break;
+                        const car_v = cf.slot(world.symCar);
+                        const cdr_v = cf.slot(world.symCdr);
+                        switch (car_v) {
+                            .char => |cp| {
+                                saw_any = true;
+                                const cp_u21 = std.math.cast(u21, cp) orelse return raise(world, "tx-bad-arg", ":load: path contains invalid char");
+                                var tmp: [4]u8 = undefined;
+                                const n = std.unicode.utf8Encode(cp_u21, &tmp) catch return raise(world, "tx-bad-arg", ":load: path contains un-encodable char");
+                                try buf.appendSlice(world.allocator, tmp[0..n]);
+                            },
+                            else => break,
+                        }
+                        cur = cdr_v;
+                    },
+                    else => break,
+                }
+            }
+            if (!saw_any) {
+                return raise(world, "tx-bad-arg", ":load: path-Form's :bytes is empty (likely the seed.vat string placeholder — ocaml-seed needs to lift Str payload)");
+            }
+            return buf.toOwnedSlice(world.allocator);
+        },
+        else => return typeError(world, ":load: expects a String path (Sym or String-Form)"),
+    }
+}
+
+/// guard against absolute paths and `..`-traversal — mirror of
+/// rust transporter.rs::load_relative path validation.
+fn isUnsafePath(rel: []const u8) bool {
+    if (rel.len == 0) return true;
+    if (std.fs.path.isAbsolute(rel)) return true;
+    // contains ".." segment?
+    var it = std.mem.tokenizeAny(u8, rel, "/\\");
+    while (it.next()) |seg| {
+        if (std.mem.eql(u8, seg, "..")) return true;
+    }
+    return false;
+}
+
+/// parse + compile + run `source` against the in-image Parser / Compiler.
+/// **requires** `use_moof_reader == true` and `use_moof_compiler == true`
+/// because zig has no native parser/compiler. raises otherwise.
+///
+/// looks up `Parser` and `Compiler` by name in `world.here_form`'s slots
+/// (the canonical bindings established by `lib/parser/03-bootstrap.moof`
+/// and `lib/compiler/00-helpers.moof`). returns the last form's result.
+fn evalStringInWorld(world: *World, source_val: Value) anyerror!Value {
+    if (!world.use_moof_reader) return raise(world, "no-reader", "zig has no native reader; flip [$reader useMoof] first");
+    if (!world.use_moof_compiler) return raise(world, "no-compiler", "zig has no native compiler; flip [$compiler useMoof] first");
+
+    // look up Parser + Compiler from $here.slots.
+    const parser_sym = lookupSymByName(world, "Parser") orelse return raise(world, "no-parser", "Parser symbol not interned; lib/parser/03-bootstrap.moof has not loaded");
+    const compiler_sym = lookupSymByName(world, "Compiler") orelse return raise(world, "no-compiler", "Compiler symbol not interned; lib/compiler/00-helpers.moof has not loaded");
+    const parser_v = world.envLookup(world.here_form, parser_sym) orelse return raise(world, "no-parser", "Parser is unbound in $here — expected after parser/03-bootstrap.moof");
+    const compiler_v = world.envLookup(world.here_form, compiler_sym) orelse return raise(world, "no-compiler", "Compiler is unbound in $here — expected after compiler/00-helpers.moof");
+
+    const parse_sel = try world.syms.intern("parse:");
+    const compile_top_sel = try world.syms.intern("compileTop:");
+
+    // [Parser parse: source] → cons-chain of Forms.
+    const forms_v = try world.send(parser_v, parse_sel, &.{source_val});
+
+    // iterate the forms, compile + runTop each. last result wins.
+    var last: Value = .nil;
+    var cur = forms_v;
+    while (true) {
+        switch (cur) {
+            .nil => break,
+            .form => |cid| {
+                const cf = world.heap.get(cid);
+                if (!cf.slotPresent(world.symCar)) break;
+                const form_v = cf.slot(world.symCar);
+                const cdr_v = cf.slot(world.symCdr);
+                // [Compiler compileTop: form] → chunk-Form
+                const chunk_v = try world.send(compiler_v, compile_top_sel, &.{form_v});
+                const chunk_id = chunk_v.asFormId() orelse return raise(world, "no-chunk", "[Compiler compileTop:] did not return a chunk-Form");
+                last = try @import("vm.zig").runTop(world, chunk_id);
+                cur = cdr_v;
+            },
+            else => break,
+        }
+    }
+    return last;
+}
+
+/// `[$transporter load: rel]` — resolve `rel` against transporter_root,
+/// read the file, parse + compile + run it.
+fn transporterLoad(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len < 1) return raise(world, "arity", ":load: expects 1 arg (path)");
+    const rel = try extractPath(world, args[0]);
+    defer world.allocator.free(rel);
+
+    if (isUnsafePath(rel)) return raise(world, "tx-bad-path", ":load: refuses absolute or `..`-traversing paths");
+
+    const root = world.transporter_root orelse return raise(world, "tx-no-root", "transporter has no root configured (set MOOF_LIB or place lib/ next to the binary)");
+
+    const io = world.io orelse return raise(world, "no-io", ":load: requires world.io to be set by host");
+
+    // resolve rel against root, then read via world.io.
+    const abs = try std.fs.path.join(world.allocator, &.{ root, rel });
+    defer world.allocator.free(abs);
+
+    const source = std.Io.Dir.cwd().readFileAlloc(io, abs, world.allocator, .limited(64 * 1024 * 1024)) catch |err| {
+        std.debug.print("transporter load: read failed for {s}: {s}\n", .{ abs, @errorName(err) });
+        return raise(world, "tx-read-error", ":load: file read failed");
+    };
+    defer world.allocator.free(source);
+
+    // wrap source bytes as a String Value — for now, makeString builds
+    // an empty String-Form (storage TODO). when in-image Parser
+    // exists and dispatches on receiver, this needs real bytes. for
+    // V4 alpha we pass the empty form through; Parser dispatch will
+    // fail with a clearer error than us.
+    const source_v = try world.makeString(source);
+    return evalStringInWorld(world, source_v);
+}
+
+/// `[$transporter loadAll: list]` — walk a cons of String paths,
+/// `:load:` each. returns last result.
+fn transporterLoadAll(world: *World, self_: Value, args: []const Value) anyerror!Value {
+    if (args.len < 1) return raise(world, "arity", ":loadAll: expects 1 arg (cons of paths)");
+    const list = args[0];
+    var last: Value = .nil;
+    var cur = list;
+    while (true) {
+        switch (cur) {
+            .nil => break,
+            .form => |id| {
+                const f = world.heap.get(id);
+                if (!f.slotPresent(world.symCar)) break;
+                const car_v = f.slot(world.symCar);
+                const cdr_v = f.slot(world.symCdr);
+                last = try transporterLoad(world, self_, &.{car_v});
+                cur = cdr_v;
+            },
+            else => return typeError(world, ":loadAll: expects a Cons"),
+        }
+    }
+    return last;
+}
+
+// ─────────────────────────────────────────────────────────────────
 // REGISTRY — comptime name → NativeFn map (V4 Track C.3 Task 2.1).
 //
 // keyed by canonical "ProtoName:selector" strings. image-load
@@ -1160,4 +1466,23 @@ pub const REGISTRY = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "Nil:empty?", consEmptyTrue },
     .{ "Nil:proto", nilProto },
     .{ "Cons:reverse", consReverse },
+
+    // $transporter (W5b — port of crates/substrate/src/transporter.rs).
+    // names match what rust would emit if its anonymous-proto issue
+    // were resolved: in rust the transporter proto is anonymous, so
+    // v4_export emits `<anon-N>:load:` which won't match here. these
+    // entries serve as the canonical zig-side surface that the host
+    // installs via the install-cap helper below (intrinsics.install).
+    .{ "Transporter:load:", transporterLoad },
+    .{ "Transporter:loadAll:", transporterLoadAll },
+
+    // $compiler / $reader flag-flip caps (W5b — flag-flip primitives
+    // mirror rust install_compiler_cap / install_reader_cap). same
+    // anonymous-proto caveat as $transporter; host wires these via
+    // a `setCompilerCap` helper at boot rather than the image's
+    // NativeRefsSection.
+    .{ "Compiler:useMoof", compilerUseMoof },
+    .{ "Compiler:useSeed", compilerUseSeed },
+    .{ "Reader:useMoof", readerUseMoof },
+    .{ "Reader:useSeed", readerUseSeed },
 });
