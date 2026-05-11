@@ -18,7 +18,6 @@
    | (let ((n v)…) body…)           | ((fn (n…) body) v…) desugar    |
    | (do e1 … eN)                   | sequence + Pop intermediates   |
    | (quote v)                      | LoadConst                      |
-   | (defmacro name (p) body)       | SendHere :bind:to:; PushNil    |
    | (__send__ recv 'sel args…)     | Send / SendSelf / SendHere /   |
    |                                |   SuperSend / TailSend variants|
    | (callable args…)               | Send :call (call dispatch)     |
@@ -319,9 +318,9 @@ let rec compile_form (b : chunk_builder) (f : form) ~(tail : bool) : unit =
 (* ─────────────────────────────────────────────────────────────────
    compile_list — dispatch on the head of a cons-list.
 
-   the seven special forms compiler.moof itself uses, plus the V4
-   additions (`set!`, `defmacro`) for completeness. order matches
-   crates/substrate/src/compiler.rs's compile_form dispatch.
+   the seven special forms exactly: def, set!, if, fn, do, let, quote.
+   plus __send__ (parser-desugared send) and a catch-all "treat as
+   call" branch. matches the minimal subset (self-host design §4).
 
    note: the seed does NOT consult any user-macro table. compiler.moof
    uses zero macros; bootstrap.moof (which has macros) loads through
@@ -338,7 +337,6 @@ and compile_list (b : chunk_builder) (f : form) ~(tail : bool) : unit =
   | (Sym "def") :: rest -> compile_def b rest
   | (Sym "if") :: rest -> compile_if b rest ~tail
   | (Sym "fn") :: rest -> compile_fn b rest
-  | (Sym "defmacro") :: rest -> compile_defmacro b rest
   | (Sym "do") :: rest -> compile_do b rest ~tail
   | (Sym "let") :: rest -> compile_let b rest ~tail
   | _ -> compile_call b elems ~tail
@@ -622,49 +620,6 @@ and compile_do (b : chunk_builder) (rest : form list) ~(tail : bool) : unit =
           compile_form b expr ~tail:(tail && last);
           if not last then ignore (emit b Pop))
         body
-
-(* ─────────────────────────────────────────────────────────────────
-   compile_defmacro — (defmacro name (args…) body)
-
-   per lib/compiler/03-control.moof's compileDefmacro:chunk: — the
-   moof Compiler builds a method-Form at compile time, registers it
-   in the Macros table eagerly (so subsequent forms see it), and
-   emits Send-based bytecode equivalent to
-     (do [$here bind: 'name to: method] nil)
-
-   for the seed compiler in isolation, we can't construct a runtime
-   method-Form (we have no World — that's a runtime concept). instead,
-   the seed emits the placeholder shape: bind the symbol to its own
-   name as a marker, leave nil on the stack. compiler.moof DOES NOT
-   USE defmacro; this handler is here for completeness so that
-   bootstrap.moof can be compiled through the seed if needed.
-
-   emission (placeholder):
-     LoadConst 'name
-     LoadConst <name>      ; placeholder for method-Form
-     SendHere :bind:to: argc=2
-     Pop
-     PushNil
-
-   the integration phase (Track C) will replace this with proper
-   method-Form construction once the image format includes Method
-   serialization. ─ flagged below.
-   ───────────────────────────────────────────────────────────────── *)
-
-and compile_defmacro (b : chunk_builder) (rest : form list) : unit =
-  match rest with
-  | name_form :: _params_form :: _body :: _ ->
-      let name = sym_of name_form in
-      let name_sym_val = Sym name in
-      (* FIXME(track-C): build a real method-Form sub-chunk + register in
-         Macros table. for now the seed emits a placeholder bind. *)
-      ignore (emit b (LoadConst (add_const b name_sym_val)));
-      ignore (emit b (LoadConst (add_const b name_sym_val)));
-      let ic = next_ic b in
-      ignore (emit b (SendHere { selector = intern "bind:to:"; argc = 2; ic_idx = ic }));
-      ignore (emit b Pop);
-      ignore (emit b PushNil)
-  | _ -> err "defmacro requires name, params, body"
 
 (* ─────────────────────────────────────────────────────────────────
    compile_call — (callable arg…)
