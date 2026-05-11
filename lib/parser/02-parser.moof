@@ -1,0 +1,471 @@
+;; lib/parser/02-parser.moof — token-stream → Form tree.
+;;
+;; depends on: 00-lexer.moof (Lexer singleton — β1),
+;;             01-tokens.moof (Tokens singleton — β2).
+;;
+;; recursive-descent. one method per syntactic category.
+;; mirrors `crates/substrate/src/reader.rs` end-to-end.
+;;
+;; written in the minimal-subset moof: raw setHandler!, no macros,
+;; no quasiquote, no defmethod sugar, no pattern-match params.
+;; see docs/superpowers/specs/2026-05-10-self-host-and-rust-deletion-design.md §4.
+;;
+;; ─────────────────────────────────────────────────────────────────
+;; Calling conventions
+;;
+;; every internal parser method takes `tokens` (a list-Form) and
+;; returns `(form . remaining-tokens)` — a 2-cons-cell pair where
+;; car is the parsed Form and cdr is the unconsumed tail.
+;; the caller threads remaining-tokens forward.
+;;
+;; this matches the rust reader's stream-cursor discipline minus
+;; the mutable cursor: we pass the list along instead.
+;;
+;; ─────────────────────────────────────────────────────────────────
+;; Output shape — must match reader.rs exactly:
+;;
+;; (foo a b c)         → cons-list of forms
+;; 'expr               → (quote expr)
+;; `expr               → (quasiquote expr)
+;; ,expr               → (unquote expr)
+;; ,@expr              → (unquote-splicing expr)
+;; [recv sel]          → (__send__ recv 'sel)
+;; [recv OP arg]       → (__send__ recv 'OP arg)
+;; [recv kw: a kw2: b] → (__send__ recv 'kw:kw2: a b)
+;; [recv a ; b]        → (__cascade__ recv ('a) ('b))
+;; #[ a b c ]          → (__table__ a b c)
+;;
+;; FormLoc:  every cons-cell carries a :source-loc meta whose value
+;; is the FormLoc record from Tokens. taken from the first token of
+;; the form.
+
+(def ParserCore [Object new])
+
+;; ─────────────────────────────────────────────────────────────────
+;; public entry — [ParserCore parseAll: tokens] → list of top-level
+;; Forms. drives the loop calling parseOne: until tokens exhausted.
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! ParserCore 'parseAll:
+  (fn (tokens)
+    [self parseAllLoop: tokens acc: '()]))
+
+(setHandler! ParserCore 'parseAllLoop:acc:
+  (fn (tokens acc)
+    (if [tokens is nil]
+        ;; done — reverse acc so first form comes first.
+        [self reverse: acc]
+        (let ((pair [self parseOne: tokens]))
+          (let ((form [Heap slotOf: pair at: 'car])
+                (rest [Heap slotOf: pair at: 'cdr]))
+            [self parseAllLoop: rest acc: (cons form acc)])))))
+
+;; in-tree list reverse — can't depend on Cons:reverse which lives
+;; in stdlib/cons.moof and loads after the parser. raw setHandler!
+;; style with a tail-recursive helper.
+(setHandler! ParserCore 'reverse:
+  (fn (xs)
+    [self reverseLoop: xs acc: '()]))
+
+(setHandler! ParserCore 'reverseLoop:acc:
+  (fn (xs acc)
+    (if [xs is nil]
+        acc
+        [self reverseLoop:
+          [Heap slotOf: xs at: 'cdr]
+          acc: (cons [Heap slotOf: xs at: 'car] acc)])))
+
+;; argc-equivalent for the parser's own internal list-length needs.
+(setHandler! ParserCore 'lengthOf:
+  (fn (xs)
+    (if [xs is nil]
+        0
+        [1 + [self lengthOf: [Heap slotOf: xs at: 'cdr]]])))
+
+;; ─────────────────────────────────────────────────────────────────
+;; parseOne: tokens → (form . remaining-tokens)
+;;
+;; dispatches on the head token's type. nested `if` because no
+;; `cond` / `match` in the minimal subset.
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! ParserCore 'parseOne:
+  (fn (tokens)
+    (if [tokens is nil]
+        [self panic: "unexpected end of input" at: 0]
+        (let ((t [Heap slotOf: tokens at: 'car]))
+          (if [Tokens isLparen: t]    [self parseList: tokens]
+          (if [Tokens isLbracket: t]  [self parseSend: tokens]
+          (if [Tokens isHashVec: t]   [self parseTable: tokens]
+          (if [Tokens isQuoteSigil: t] [self parseQuoted: tokens]
+          (if [Tokens isAtom: t]      [self parseAtom: tokens]
+          (if [Tokens isRparen: t]    [self panic: "unexpected `)`" at: [Tokens posOf: t]]
+          (if [Tokens isRbracket: t]  [self panic: "unexpected `]`" at: [Tokens posOf: t]]
+          (if [Tokens isRbrace: t]    [self panic: "unexpected `}`" at: [Tokens posOf: t]]
+          (if [Tokens isCascade: t]   [self panic: "unexpected `;` outside send" at: [Tokens posOf: t]]
+              [self panic: "unrecognized token" at: [Tokens posOf: t]])))))))))))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; atom — int / float / char / string / sym / true / false / nil /
+;; colon-sym. emits a bare Form value (or substrate atom). attaches
+;; :source-loc when value is a heap-allocated Form (atoms like Int
+;; are scalar so meta attachment is a no-op anyway).
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! ParserCore 'parseAtom:
+  (fn (tokens)
+    (let ((t [Heap slotOf: tokens at: 'car])
+          (rest [Heap slotOf: tokens at: 'cdr]))
+      (let ((form [self atomValue: t]))
+        (cons form rest)))))
+
+;; convert a single atom token to its Form value. type-by-type
+;; mapping mirrors reader.rs's `read_atom` / `read_string` /
+;; `read_char_literal` / `read_hash` output values.
+(setHandler! ParserCore 'atomValue:
+  (fn (t)
+    (let ((type [Tokens typeOf: t])
+          (v [Tokens valueOf: t]))
+      (if [type is 'true]      #true
+      (if [type is 'false]     #false
+      (if [type is 'nil]       nil
+      ;; the rest carry their value field directly. lexer is
+      ;; responsible for producing the right Form/scalar; the
+      ;; parser just passes it through.
+      (if [type is 'int]       v
+      (if [type is 'float]     v
+      (if [type is 'char]      v
+      (if [type is 'string]    v
+      (if [type is 'sym]       v
+      (if [type is 'colon-sym] v
+          [self panic: "atomValue: unknown atom type" at: [Tokens posOf: t]])))))))))) ))
+
+;; ─────────────────────────────────────────────────────────────────
+;; quoted forms — ' ` , ,@
+;; consume the sigil token, recurse to parse the wrapped form,
+;; emit (wrapper-sym form).
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! ParserCore 'parseQuoted:
+  (fn (tokens)
+    (let ((sigil [Heap slotOf: tokens at: 'car])
+          (after [Heap slotOf: tokens at: 'cdr]))
+      (let ((wrapper [Tokens wrapperFor: [Tokens typeOf: sigil]]))
+        (if [after is nil]
+            [self panic: "quote sigil at end of input" at: [Tokens posOf: sigil]]
+            (let ((inner [self parseOne: after]))
+              (let ((innerForm [Heap slotOf: inner at: 'car])
+                    (rest [Heap slotOf: inner at: 'cdr]))
+                ;; (wrapper innerForm) — 2-element list.
+                (let ((built [self
+                                buildList: (cons wrapper (cons innerForm '()))
+                                loc: [Tokens locFromToken: sigil]]))
+                  (cons built rest)))))))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; list — `(` ... `)`. recursively read forms until `)`.
+;; emits a cons-list. :source-loc taken from the opening `(`.
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! ParserCore 'parseList:
+  (fn (tokens)
+    (let ((open [Heap slotOf: tokens at: 'car])
+          (after [Heap slotOf: tokens at: 'cdr]))
+      [self parseListLoop:
+        after
+        acc: '()
+        openLoc: [Tokens locFromToken: open]])))
+
+(setHandler! ParserCore 'parseListLoop:acc:openLoc:
+  (fn (tokens acc openLoc)
+    (if [tokens is nil]
+        [self panic: "unterminated list" at: [Tokens locOffset: openLoc]]
+        (let ((t [Heap slotOf: tokens at: 'car]))
+          (if [Tokens isRparen: t]
+              ;; close — reverse acc, build list with :source-loc.
+              (let ((elems [self reverse: acc])
+                    (rest [Heap slotOf: tokens at: 'cdr]))
+                (cons [self buildList: elems loc: openLoc] rest))
+              ;; not close — parse one element, accumulate, recurse.
+              (let ((pair [self parseOne: tokens]))
+                (let ((form [Heap slotOf: pair at: 'car])
+                      (rest [Heap slotOf: pair at: 'cdr]))
+                  [self parseListLoop: rest acc: (cons form acc) openLoc: openLoc])))))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; send-bracket — `[` recv ... `]` with optional `;` cascade.
+;;
+;; algorithm (mirrors reader.rs `read_send_bracket`):
+;;   1. consume `[`. parse receiver.
+;;   2. loop reading segments. each segment = forms until next `;`
+;;      or `]`.
+;;   3. for each segment, decode (selector, args) per shape rules:
+;;        - first token is colon-sym → keyword: concat colons, even
+;;          positions are kws, odd are args.
+;;        - else: first is selector, rest are positional args.
+;;   4. one segment → (__send__ recv 'sel arg...).
+;;      2+ segments → (__cascade__ recv (sel arg...) (sel2 arg2...)).
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! ParserCore 'parseSend:
+  (fn (tokens)
+    (let ((open [Heap slotOf: tokens at: 'car])
+          (afterOpen [Heap slotOf: tokens at: 'cdr]))
+      (let ((openLoc [Tokens locFromToken: open]))
+        (if [afterOpen is nil]
+            [self panic: "unterminated send bracket" at: [Tokens locOffset: openLoc]]
+            (let ((first [Heap slotOf: afterOpen at: 'car]))
+              (if [Tokens isRbracket: first]
+                  [self panic: "empty send bracket `[]`" at: [Tokens locOffset: openLoc]]
+                  ;; parse receiver. cascade/`]` not allowed here —
+                  ;; parseOne handles the dispatch; if receiver is
+                  ;; `;` parseOne panics with "unexpected `;`".
+                  (let ((recvPair [self parseOne: afterOpen]))
+                    (let ((recv [Heap slotOf: recvPair at: 'car])
+                          (afterRecv [Heap slotOf: recvPair at: 'cdr]))
+                      [self parseSendSegments:
+                        afterRecv
+                        recv: recv
+                        segments: '()
+                        openLoc: openLoc])))))))))
+
+;; collect segments separated by `;`. each segment is the (sel,args)
+;; pair from one chunk of tokens between `;` markers.
+(setHandler! ParserCore 'parseSendSegments:recv:segments:openLoc:
+  (fn (tokens recv segments openLoc)
+    (let ((segPair [self parseSendSegment: tokens openLoc: openLoc]))
+      (let ((segment [Heap slotOf: segPair at: 'car])
+            (afterSeg [Heap slotOf: segPair at: 'cdr]))
+        ;; afterSeg's head is either `;` (more segments) or `]` (end).
+        (if [afterSeg is nil]
+            [self panic: "unterminated send bracket" at: [Tokens locOffset: openLoc]]
+            (let ((sep [Heap slotOf: afterSeg at: 'car])
+                  (afterSep [Heap slotOf: afterSeg at: 'cdr]))
+              (if [Tokens isRbracket: sep]
+                  ;; end — assemble result.
+                  [self finalizeSend: afterSep
+                        recv: recv
+                        segments: (cons segment segments)
+                        openLoc: openLoc]
+                  (if [Tokens isCascade: sep]
+                      ;; another segment incoming.
+                      [self parseSendSegments:
+                        afterSep
+                        recv: recv
+                        segments: (cons segment segments)
+                        openLoc: openLoc]
+                      [self panic: "send: expected `]` or `;`" at: [Tokens posOf: sep]]))))))))
+
+;; parse one segment — read forms until `;` or `]` (without
+;; consuming the terminator). returns (segment . tokens-incl-terminator)
+;; where segment is the cons-pair (sel . args).
+(setHandler! ParserCore 'parseSendSegment:openLoc:
+  (fn (tokens openLoc)
+    [self parseSegmentLoop: tokens acc: '() openLoc: openLoc]))
+
+(setHandler! ParserCore 'parseSegmentLoop:acc:openLoc:
+  (fn (tokens acc openLoc)
+    (if [tokens is nil]
+        [self panic: "unterminated send bracket" at: [Tokens locOffset: openLoc]]
+        (let ((t [Heap slotOf: tokens at: 'car]))
+          (if [Tokens isRbracket: t]
+              ;; end of segment (terminator unconsumed).
+              (let ((elems [self reverse: acc]))
+                (if [elems is nil]
+                    [self panic: "send needs at least a selector" at: [Tokens locOffset: openLoc]]
+                    (cons [self decodeSegment: elems openLoc: openLoc] tokens)))
+              (if [Tokens isCascade: t]
+                  ;; end of segment via `;` (unconsumed).
+                  (let ((elems [self reverse: acc]))
+                    (if [elems is nil]
+                        [self panic: "empty cascade segment" at: [Tokens locOffset: openLoc]]
+                        (cons [self decodeSegment: elems openLoc: openLoc] tokens)))
+                  ;; regular element — parse and accumulate.
+                  (let ((pair [self parseOne: tokens]))
+                    (let ((form [Heap slotOf: pair at: 'car])
+                          (rest [Heap slotOf: pair at: 'cdr]))
+                      [self parseSegmentLoop: rest acc: (cons form acc) openLoc: openLoc]))))))))
+
+;; decode a flat element list into (selector . args).
+;; rules — match reader.rs `decode_send_segment`:
+;;   - first elem is a `:` keyword sym (colon-sym from β1's lexer
+;;     produces a Sym whose printed form ends with `:`): keyword path.
+;;     concatenate keywords; alternating positions are kws / args.
+;;   - else: first is selector, remainder are positional args.
+;;
+;; (the rust reader has a separate "binary op" arm — but its
+;;  behavior at len==2 is identical to the unary/positional arm with
+;;  one positional, so we skip the explicit check; output bytes match.)
+(setHandler! ParserCore 'decodeSegment:openLoc:
+  (fn (elems openLoc)
+    (let ((first [Heap slotOf: elems at: 'car])
+          (rest [Heap slotOf: elems at: 'cdr]))
+      (if [self isKeywordSym: first]
+          [self decodeKeyword: elems openLoc: openLoc]
+          ;; unary / positional. first must be a Sym.
+          (if [[first proto] is Symbol]
+              (cons first rest)
+              [self panic: "send: selector must be a symbol" at: [Tokens locOffset: openLoc]])))))
+
+;; a Sym is a "keyword" if its printed form ends with `:`. β1's
+;; lexer emits colon-tagged identifiers as Sym values whose name
+;; literally includes the trailing `:` (mirrors rust intern path).
+(setHandler! ParserCore 'isKeywordSym:
+  (fn (v)
+    (if [[v proto] is Symbol]
+        [self endsWithColon: [v toString]]
+        #false)))
+
+;; helper — does the String text end with `:`?
+;; uses [s at: i] (String:at: returns a Char); compares to #\:.
+(setHandler! ParserCore 'endsWithColon:
+  (fn (s)
+    (let ((n [s length]))
+      (if [n is 0]
+          #false
+          [[s at: [n - 1]] is #\:]))))
+
+;; decode keyword segment. elems is e.g. (kw1: a kw2: b) where each
+;; kw is a Sym ending in `:`. concat names → "kw1:kw2:" → intern as
+;; selector. args are the values at odd positions.
+(setHandler! ParserCore 'decodeKeyword:openLoc:
+  (fn (elems openLoc)
+    [self decodeKeywordLoop: elems
+      selText: ""
+      args: '()
+      openLoc: openLoc]))
+
+(setHandler! ParserCore 'decodeKeywordLoop:selText:args:openLoc:
+  (fn (elems selText args openLoc)
+    (if [elems is nil]
+        ;; done — intern combined selector, args are already
+        ;; collected in correct order (reverse).
+        (cons (intern selText) [self reverse: args])
+        (let ((kw [Heap slotOf: elems at: 'car])
+              (after [Heap slotOf: elems at: 'cdr]))
+          (if [self isKeywordSym: kw]
+              (if [after is nil]
+                  [self panic: "keyword needs an argument" at: [Tokens locOffset: openLoc]]
+                  (let ((arg [Heap slotOf: after at: 'car])
+                        (rest [Heap slotOf: after at: 'cdr]))
+                    [self decodeKeywordLoop:
+                      rest
+                      selText: [selText + [kw toString]]
+                      args: (cons arg args)
+                      openLoc: openLoc]))
+              [self panic: "keyword send: expected `kw:` symbol" at: [Tokens locOffset: openLoc]])))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; finalize the send. 1 segment → __send__; 2+ → __cascade__.
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! ParserCore 'finalizeSend:recv:segments:openLoc:
+  (fn (afterTokens recv segments openLoc)
+    ;; segments are in reverse order (newest first); flip them.
+    (let ((segs [self reverse: segments]))
+      (let ((count [self lengthOf: segs]))
+        (if [count is 1]
+            ;; single send: (__send__ recv 'sel arg...).
+            (let ((seg [Heap slotOf: segs at: 'car]))
+              (let ((sel [Heap slotOf: seg at: 'car])
+                    (args [Heap slotOf: seg at: 'cdr]))
+                (let ((built [self buildList:
+                                (cons '__send__ (cons recv (cons sel args)))
+                                loc: openLoc]))
+                  (cons built afterTokens))))
+            ;; cascade: (__cascade__ recv (sel args...) (sel2 args2...)).
+            (let ((segLists [self segmentsToLists: segs]))
+              (let ((built [self buildList:
+                              (cons '__cascade__ (cons recv segLists))
+                              loc: openLoc]))
+                (cons built afterTokens))))))))
+
+;; transform each (sel . args) cons-pair into a (sel arg...) list.
+(setHandler! ParserCore 'segmentsToLists:
+  (fn (segs)
+    (if [segs is nil]
+        '()
+        (let ((seg [Heap slotOf: segs at: 'car])
+              (rest [Heap slotOf: segs at: 'cdr]))
+          (let ((sel [Heap slotOf: seg at: 'car])
+                (args [Heap slotOf: seg at: 'cdr]))
+            (cons (cons sel args) [self segmentsToLists: rest]))))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; table literal — `#[ ... ]`. emits `(__table__ entry...)`.
+;;
+;; reader.rs additionally promotes `expr => val` to
+;; `(__entry__ expr val)` keyed entries. for the bootstrap parser
+;; we keep the structure flat — the reader-driven `=>` promotion
+;; can be added later (no `lib/*` file uses it; only doc snippets).
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! ParserCore 'parseTable:
+  (fn (tokens)
+    (let ((open [Heap slotOf: tokens at: 'car])
+          (after [Heap slotOf: tokens at: 'cdr]))
+      [self parseTableLoop:
+        after
+        acc: '()
+        openLoc: [Tokens locFromToken: open]])))
+
+(setHandler! ParserCore 'parseTableLoop:acc:openLoc:
+  (fn (tokens acc openLoc)
+    (if [tokens is nil]
+        [self panic: "unterminated table literal `#[…]`" at: [Tokens locOffset: openLoc]]
+        (let ((t [Heap slotOf: tokens at: 'car]))
+          (if [Tokens isRbracket: t]
+              (let ((entries [self reverse: acc])
+                    (rest [Heap slotOf: tokens at: 'cdr]))
+                (let ((built [self buildList:
+                                (cons '__table__ entries)
+                                loc: openLoc]))
+                  (cons built rest)))
+              (let ((pair [self parseOne: tokens]))
+                (let ((form [Heap slotOf: pair at: 'car])
+                      (rest [Heap slotOf: pair at: 'cdr]))
+                  [self parseTableLoop:
+                    rest
+                    acc: (cons form acc)
+                    openLoc: openLoc])))))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; buildList:loc: — assemble a cons-list and attach :source-loc
+;; meta to the head cell. mirrors reader.rs `build_list` + the
+;; not-yet-present meta-attachment that this self-host pass adds.
+;;
+;; the cons-cell head carries the meta; downstream tooling looks
+;; up `:source-loc` on the head. atoms and nil-lists carry no meta
+;; (scalars can't, and an empty () has no allocation).
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! ParserCore 'buildList:loc:
+  (fn (elems loc)
+    (if [elems is nil]
+        ;; empty list — no allocation, no meta. matches rust which
+        ;; returns Value::Nil for `()`.
+        '()
+        (let ((built [self consList: elems]))
+          (metaSet! built 'source-loc loc)
+          built))))
+
+;; build a cons-list from a moof list of elements. trivial recursion.
+(setHandler! ParserCore 'consList:
+  (fn (elems)
+    (if [elems is nil]
+        '()
+        (cons [Heap slotOf: elems at: 'car]
+              [self consList: [Heap slotOf: elems at: 'cdr]]))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; error helper — uses the (raise: kind msg) primitive. position is
+;; injected into the message text since the moof RaiseError doesn't
+;; carry a structured location yet.
+;;
+;; tag is `'parse-error` — matches the convention used by the
+;; compiler's `'compile-error` raises elsewhere in lib/.
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! ParserCore 'panic:at:
+  (fn (reason pos)
+    (raise: 'parse-error [["parse error at " + [pos toString]] + [": " + reason]])))
