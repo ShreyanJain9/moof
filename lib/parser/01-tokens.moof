@@ -64,12 +64,18 @@
   (fn (file offset line col)
     (cons file (cons offset (cons line (cons col '()))))))
 
-;; convenience — build a FormLoc from a token alone, defaulting
-;; file to '?file (runtime rebinds) and line/col to 0 (lexer
-;; tracks byte offset only).
+;; convenience — produce a "FormLoc-shaped" value from a token. for
+;; the polyglot build we return the bare byte-offset Int (not a
+;; 4-cons record) so that transient parse-time allocations don't
+;; accumulate in the no-GC heap. callers that need to display the
+;; offset on panic still read it via `locOffset:`, which is now an
+;; identity shim. when richer source attribution is wired up, this
+;; can grow back to a 4-cons record (with attention to GC of the
+;; transient records) or — better — a packed Int with line/col bit-
+;; fields. see `02-parser.moof::buildList:loc:` HISTORY for context.
 (setHandler! Tokens 'locFromToken:
   (fn (t)
-    [self formLoc: '?file offset: [self posOf: t] line: 0 col: 0]))
+    [self posOf: t]))
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; FormLoc accessors. all four fields, walked through Heap so we
@@ -79,8 +85,14 @@
 (setHandler! Tokens 'locFile:
   (fn (loc) [Heap slotOf: loc at: 'car]))
 
+;; identity shim. `locFromToken:` now returns a bare byte-offset
+;; Int rather than a 4-cons FormLoc record (heap-size reasons; see
+;; that method for context). panic paths that ask for `locOffset:`
+;; therefore already have the offset in hand. method kept named so
+;; call-sites don't need to know whether a record or a raw Int is
+;; in play.
 (setHandler! Tokens 'locOffset:
-  (fn (loc) [Heap slotOf: [Heap slotOf: loc at: 'cdr] at: 'car]))
+  (fn (loc) loc))
 
 (setHandler! Tokens 'locLine:
   (fn (loc)

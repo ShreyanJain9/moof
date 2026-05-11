@@ -39,4 +39,29 @@
 ;; flip — every subsequent parse routes through Parser.
 ;; no inverse by design: once the moof reader is canonical, the
 ;; rust seed reader is dead code. see design doc §10 Q2.
-[$reader useMoof]
+;;
+;; DEFERRED: the flip is currently a no-op. measurement under the
+;; no-GC substrate showed that activating the moof reader (every
+;; subsequent parse routes through this file's `[Parser parse:]`
+;; method, itself defined in moof) inflates the serialized
+;; vat-image from ~22 MB to ~360 MB — a 16× heap blow-up driven
+;; not by `:source-loc` meta (the parser no longer attaches that,
+;; see `02-parser.moof::buildList:loc:`) but by the sheer volume
+;; of Env-Forms and closure-Forms allocated by recursive moof
+;; sends in the parser. each closure carries a `:source` meta
+;; pointing at its source tree; both accumulate forever since
+;; the substrate has no GC. counts measured at this commit:
+;;   without flip: 603k heap forms, 22 MB image
+;;   with flip:    9.4M heap forms, 360 MB image
+;;     of which 5.4M `:parent` (Env) + 3.8M `:source` (closures).
+;;
+;; the flip is restored once either (a) the substrate gets a GC
+;; pass, or (b) the parser is rewritten to be flatter (fewer
+;; recursive sends, fewer Env allocations). until then, parsing
+;; continues to route through the rust seed reader — which
+;; matches every other parser-in-development project's reality
+;; (you can't self-host a parser if every parse permanently
+;; leaks a stack frame). see the agent handoff brief for the
+;; full investigation.
+;;
+;; [$reader useMoof]

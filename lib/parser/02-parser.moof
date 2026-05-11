@@ -35,9 +35,12 @@
 ;; [recv a ; b]        → (__cascade__ recv ('a) ('b))
 ;; #[ a b c ]          → (__table__ a b c)
 ;;
-;; FormLoc:  every cons-cell carries a :source-loc meta whose value
-;; is the FormLoc record from Tokens. taken from the first token of
-;; the form.
+;; FormLoc:  intentionally NOT attached as `:source-loc` meta on
+;; produced cons cells — see `buildList:loc:` for the rationale
+;; (heap bloat against a no-GC substrate). matches rust reader.rs
+;; behavior. opening-bracket positions still thread through as
+;; `openLoc` so panic messages can include the byte offset, but
+;; nothing about that offset lands on the emitted Form tree.
 
 (def ParserCore [Object new])
 
@@ -164,9 +167,8 @@
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; atom — int / float / char / string / sym / true / false / nil /
-;; colon-sym. emits a bare Form value (or substrate atom). attaches
-;; :source-loc when value is a heap-allocated Form (atoms like Int
-;; are scalar so meta attachment is a no-op anyway).
+;; colon-sym. emits a bare Form value (or substrate atom). no
+;; source-loc attachment (see `buildList:loc:`).
 ;; ─────────────────────────────────────────────────────────────────
 
 (setHandler! ParserCore 'parseAtom:
@@ -517,24 +519,37 @@
                     openLoc: openLoc])))))))
 
 ;; ─────────────────────────────────────────────────────────────────
-;; buildList:loc: — assemble a cons-list and attach :source-loc
-;; meta to the head cell. mirrors reader.rs `build_list` + the
-;; not-yet-present meta-attachment that this self-host pass adds.
+;; buildList:loc: — assemble a cons-list. mirrors reader.rs
+;; `build_list`.
 ;;
-;; the cons-cell head carries the meta; downstream tooling looks
-;; up `:source-loc` on the head. atoms and nil-lists carry no meta
-;; (scalars can't, and an empty () has no allocation).
+;; HISTORY: β2 originally attached a `:source-loc` meta (a 4-cons
+;; FormLoc record) to every cons-cell head produced here, intended
+;; for source-attributed error reporting. measurement: this caused
+;; the serialized vat-image to balloon from ~21 MB (rust seed) to
+;; ~360 MB (polyglot) — a 17× bloat. the substrate has no GC, so
+;; every transient meta entry survives into the heap, and chunks'
+;; `:source` meta keeps the source-tree (with its inner per-cons
+;; FormLoc metas) reachable. dropping the meta attachment recovers
+;; rust-parity. parity with rust reader behavior is intentional:
+;; the rust reader also does not attach source-loc per cons.
+;;
+;; the `loc:` parameter is retained in the signature so that
+;; call-sites pass through unchanged. when better error reporting
+;; is needed in the future, revisit with either a packed-int
+;; representation (Option C) or top-level-form-only attachment
+;; (Option B); see the agent handoff brief for trade-offs.
+;;
+;; atoms and nil-lists never carried meta (scalars can't, and an
+;; empty () has no allocation).
 ;; ─────────────────────────────────────────────────────────────────
 
 (setHandler! ParserCore 'buildList:loc:
   (fn (elems loc)
     (if [elems is nil]
-        ;; empty list — no allocation, no meta. matches rust which
-        ;; returns Value::Nil for `()`.
+        ;; empty list — no allocation. matches rust which returns
+        ;; Value::Nil for `()`.
         '()
-        (let ((built [self consList: elems]))
-          (metaSet! built 'source-loc loc)
-          built))))
+        [self consList: elems])))
 
 ;; build a cons-list from a moof list of elements. trivial recursion.
 (setHandler! ParserCore 'consList:
