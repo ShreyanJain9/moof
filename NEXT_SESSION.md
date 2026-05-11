@@ -1,453 +1,240 @@
-# next session — polyglot maturity
+# next session — V4 polyglot, getting toward rust deletion
 
-## status: track 1 wave landed
+## what just shipped (HEAD `380203b`)
 
-> **track-1-mcos branch merged after ~26 commits.** mcos are no
-> longer proof-of-life curiosities — they're cap-mediated, content-
-> hash-verified, polyglot artifacts baked into the std lib.
+**V4 polyglot substrate. the stdlib boots end-to-end through zig + ocaml.**
 
-**what shipped:**
+over the last two sessions we went from "rust substrate only, V3 done"
+to a working polyglot stack where:
 
-- mcos: Random, Clock, Base64, Utf8, Hash — 5 total
-- languages: zig (Random, Clock, Base64, Hash) + c (Utf8) — 2 total
-- substrate self-hosts blake3 via embedded Hash mco bytes;
-  rust blake3 dep removed
-- `$mco` cap with content-hash-verified loading;
-  `lib/mcos/index.moof` resolves symbolic names → hashes
-- DataSource infinite-source subclass shipped (polled + generator
-  flavors); `lib/stdlib/data-source.moof` has default methods
-- `lib/repl-init.moof` eager-binds caps for interactive sessions
-- `__loadWasmMco` fully retired
-- 368 tests passing at every commit boundary
-
-**key learnings:**
-
-- 6 substrate bugs surfaced during implementation: Table
-  string-key equality, manifest meta parsing, DataSource
-  proto-inheritance, trampoline arg marshaling, cache path
-  resolution, build.rs env var wiring — all fixed
-- critical bug caught in trampoline raise encoding: kind symbols
-  containing colons (keyword selectors like `parse-error:at:`)
-  were corrupted when passed as strings through the wasmtime trap
-  message; fixed by passing SymId as an integer wire token
-- wasm_of_ocaml uses GC-wasm (the js_of_ocaml lineage);
-  incompatible with linear-memory ABI — OCaml deferred until a
-  linear-memory target path is confirmed (wasm32-wasi with GC
-  disabled, or a GC-aware import surface)
-- Haskell similarly deferred — ghc-wasm-meta flake path needs
-  deliberate toolchain session of its own
-
-**deferred to N+2:**
-
-- manifest `tier` field reservation + loader `moof.native`
-  section rejection (format guards; harmless to skip for now)
-- OCaml mco (Url parser)
-- Haskell mco (Date)
-
-**next session candidates:**
-
-- track 2: ed25519 signing + `moof.deps` + peer-fetch
-  (`moof mco install <hash>`)
-- revisit OCaml / Haskell with the right toolchain (linear-memory
-  wasm or a GC-import surface decision)
-- parser.moof — port reader.rs to moof
-
----
-
-> **status: pre-MCO cleanup landed, with the radical²² wave (round 5)
-> now in.** `$transporter` cap, `$compiler` cap, `lib/main.moof` as
-> single rust entry. `bootstrap.moof` and `compiler.moof` split into
-> 27 thematic files under `lib/{compiler,early,stdlib}/`.
-> **`intrinsics.rs`: 3836 → 3266 (-570 LoC).** REPL prints `nil`.
-> 351 tests green at every commit boundary. ~80 commits.
->
-> the `__`-prefix free function primitives are GONE. the moof
-> compiler walks lists via `[Heap slotOf: x at: 'cdr]` (a method on
-> the Heap singleton) and `[v is nil]` (Object identity); for length
-> it uses `[self argc: x]` — a self-recursive Compiler method that
-> walks via Heap. zero `__`-prefix free fns in rust. eight `__`-prefix
-> toplevel defs in moof, all bootstrap fundamentals (quasiquote
-> internals + defmethod's `__decode-header` / `__decode-keyword`)
-> defined before defmethod is available — those are the only
-> remaining ones, down from ~25 mid-session.
->
-> the architectural rule we landed on:
->
-> - **module-singleton caps** own all primitive heap / chunk / etc.
->   operations as methods. they're rust install_natives, but bound
->   on coherent capability protos rather than scattered across
->   user-type protos. namespaces:
->     - `Heap` — :protoOf:, :heapIdOf:, :allocFormWithProto:,
->       :slotOf:at:, :handlerOf:at:, :metaOf:at:, :slotKeysOf:,
->       :handlerKeysOf:, :metaKeysOf:
->     - `Chunks` — :isChunk?:, :bodyOf:, :paramsListOf:,
->       :constsListOf:, :opsListOf:, :icsListOf:
->     - `Compiler` (existing) — :compileTop:, :compileForm:…
->     - `$transporter`, `$compiler`, `$out`, `$err` (caps with $)
->
-> - **moof defmethod** for everything user-facing. Object:proto,
->   Object:slots/handlers/meta/identity/source, Cons:length,
->   String:trim, Method:body/params/consts/bytecodes/ics, Char:inspect,
->   all renderers, all Char predicates, all Integer/Float derivations.
->   user-type methods are moof one-liners delegating to caps OR real
->   algorithms.
->
-> - **rust install_native on user-type protos** is reduced to the
->   irreducible identity / dispatch primitives: Object:is, :=,
->   :toString, :new, :initialize, :doesNotUnderstand:with:; Cons/nil
->   :car, :cdr, :cons:, :empty?, :reverse (early bootstrap needs);
->   String byte-access; Integer/Float arithmetic; Method:call (VM
->   dispatch); Chunk side-table mutators; Console :emit:.
->
-> - **free-fn primitives** ONLY for the compiler's circular-dep
->   escape: `__list-length / car / cdr / empty? / reverse`. exclusively
->   used by `lib/compiler/*.moof`.
->
-> the substrate is now a small set of singleton capabilities + the
-> irreducible per-type primitives. user-facing methods are moof.
->
-> the radical migration shape we landed on — rust exposes minimal
-> heap / byte / codepoint / chunk access; moof writes the algorithms.
-> what moved (in moof now, not rust):
->
-> - Object reflection (`:proto, :slots, :handlers, :meta,
->   :handlerAt:, :source, :identity, :is/=/!=/inspect, :initialize`)
->   — `__form-{slot,handler,meta}-keys` give iteration; `slot /
->   __form-handler-at / __form-meta-at` give lookup; moof builds
->   Tables and walks chains.
-> - All Cons methods (length, reverse, map, filter, reduce, take,
->   drop, =, !=, toString, inspect, etc) — `__list-{car,cdr,length,
->   empty?,reverse}` + `__alloc-cons` are the primitives; spine
->   recursion is moof.
-> - Char:inspect — dispatch (32→space, …) + hex conversion are moof,
->   using `[self codepoint]` + `__char-from-codepoint` for digits.
-> - Method:toString/:inspect — read :source meta, dispatch on its
->   shape (Symbol vs Form vs nil), render in moof.
-> - String:toString/:inspect — `[self toList]` + Cons:reduce: + per-
->   Char escape table, all moof.
-> - Table:toString/:inspect — `[t length]` + `[t at: i]` + `[keys
->   drop: length]`, with a closure-passed renderer.
-> - 5 dead rust helpers removed (render_table_with, render_list_with,
->   render_string_literal, render_char_literal, proto_name_for).
->
-> the bigger shrink the spec estimated (~2500) is reachable but
-> requires more primitive-first migrations: chunk side-tables for
-> Method reflection, byte primitives for String text manipulation.
-> deferred — diminishing returns + risk for now.
->
-> ready for: parser-in-moof, real MCO arg marshaling, the polyglot
-> tracks below.
-
-> **mission: take wasm-mco from "proof of life" to "production-
-> shaped." richer signatures, real moof imports, signed mcos,
-> deps resolution, and the first non-zig polyglot module. by
-> session-end, multiple-language mcos coexist in the std lib and
-> the `.mco` format is rigorous enough to ship.**
-
----
-
-## what stands today (commit `3ad5405`)
-
-334 tests passing. last session crossed a milestone: zig→wasm→moof
-end-to-end with a real `core/clock` mco, the .mco custom-section
-format with manifest cross-validation, WASI integration so mcos
-get standard system services without rust-shim middlemen, and a
-14-commit cosmetic ladder that took moof from "list/head/tail"
-to "Cons/car/cdr-with-modules" to "nil is a true singleton."
+- **rust at build time** produces `system.vat` (21.6 MB) — a V4 vat-image
+  capturing the fully-bootstrapped moof World (596K forms, 685 syms,
+  1153 chunks, 50+ native methods).
+- **zig at runtime** loads `system.vat` and reconstructs the World in
+  memory. heap populated, native methods re-bound by name, here_form
+  + macros_form resolved.
 
 ```
-$ git log --oneline -16
-3ad5405 nil is now a TRUE singleton — no Nil in the global env
-9b5a01f :inspect distributes through Tables (and through everything below)
-f61129d .mco custom-section format — manifest is moof source-text
-eca0eb7 WASI for system services — drop fake-time imports from substrate
-006549e core/clock — first real wasm mco with substrate imports
-5f74acc 🎉 polyglot end-to-end: zig → wasm → moof
-272401c mco-format spec — wasm + custom sections, load-time anonymity
-9a98447 modules — multi-arg helpers also moved (Match/Defn/DefProto)
-bd0570f Compiler module — compiler.moof internals as methods on a singleton
-a6a66a5 modules — Match / Defn / DefProto host arity-≤1 helpers
-7d2760b List → Cons — proto rename, full sweep
-c7ed192 head→car, tail→cdr — full sweep
-865fac8 defmethod sweep — bootstrap.moof now defmethod-first
-bcab6b5 nil-as-singleton — Nil-proto global gone, [nil proto] is nil
-a1c8742 display fixes — toString vs inspect split
-5f74acc 🎉 polyglot end-to-end: zig → wasm → moof
+$ cargo run -p moof --bin moof -- export-v4 --output /tmp/system.vat
+  wrote /tmp/system.vat (21,645,729 bytes)
+
+$ ./crates/zig-substrate/zig-out/bin/moof-zig load /tmp/system.vat
+  loaded /tmp/system.vat (21,645,729 bytes)
+    heap.len    = 596,905
+    syms.len    = 685
+    chunks      = 1,153
+    natives     = 21 (29 in registry; rest are stdlib-internal)
+    here_form   = FormId(scope=vat_local, payload=18)
+    macros_form = FormId(scope=vat_local, payload=19)
+  V4 vat-image alive ٩(◕‿◕｡)۶
 ```
 
-what works:
+### what exists
 
-```moof
-(def Clock (__loadWasmMco "examples/wasm-mcos/clock.mco"))
-[Clock now]         ;; → real ns timestamp from WASI in zig
-[Clock monotonic]   ;; → process-relative ns
-```
+| crate | LoC | role | status |
+|---|---|---|---|
+| `crates/zig-substrate/` | ~3500 zig | the runtime (heap, vm, intrinsics, image-load) | builds clean; loads stdlib; runs hand-constructed bytecode |
+| `crates/substrate/` | ~8000 rust | the build-time oracle (runs `new_world()` + serializes) | builds clean; existing runtime CLI still works (REPL, `moof '<expr>'`); deletion target after polyglot proves itself |
+| `crates/ocaml-seed/` | ~2500 ocaml | future compiler (will replace rust when parser.moof self-hosts) | builds clean; parses + compiles simple programs; produces V4-spec bytes; cross-stack verified at the byte boundary |
+| `lib/` | ~5000 moof | the stdlib — Compiler.moof + early/* + stdlib/* + mcos | unchanged; compiled by rust runtime, serialized into system.vat |
 
-with `clock.mco` = wasm bytes + `moof.manifest` custom section
-(parsed by moof's reader, cross-validates exports).
+### V4 ops set (24 total)
 
-**state of the rust line:**
-- compiler.rs: 720 LoC seed (compiles compiler.moof, then steps
-  aside via the `use_moof_compiler` flag).
-- wasm.rs: ~280 LoC. includes loader, manifest parser, dispatch
-  trampoline, custom-section walker, WASI integration.
-- crates/abi/, crates/abi-rust/, crates/mco-pack/ all real.
+19 op-tag bytes used; 5 reserved for phase D (Suspend/Resume) and future
+fusions. byte-tagged, big-endian, fixed-width operands. content-hashable
+chunk bytecode. spec at `docs/superpowers/specs/2026-05-10-vm-V4-opcodes-design.md`.
 
-**state of the polyglot story:**
-- one zig mco (clock) shipped end-to-end.
-- WASI is the standard system-services interface. moof namespace
-  reserved for moof-specific imports (currently empty).
-- `.mco` format: wasm + custom sections, content-addressable but
-  no signing yet.
+### key strategic move from session N
 
----
+option D — use rust at BUILD time as a compiler+serializer, not RUNTIME.
+this skipped the bootstrap chicken-and-egg entirely (parser.moof doesn't
+exist yet; macro expansion in OCaml would be huge). rust runtime keeps
+working as the safety net; rust deletion happens LATER once polyglot
+fully self-hosts.
 
-## three tracks, in dependency order
+dual-brainstorm contributed two gold nuggets:
+- gemini caught: sym-table hydration semantics (image replaces world.syms,
+  doesn't append)
+- gemini caught: `std.StaticStringMap` for comptime native registry
 
-### track 1 — richer signatures + real moof imports
-
-**why first.** the current loader only handles `() -> i64`
-exports. that's enough for clocks and constant-returning fns
-but not for actually doing work. before we can write meaningful
-mcos, the trampoline needs to handle args, and mcos need to be
-able to call back into moof.
-
-**deliverables.**
-
-- **support `(i64) -> i64`, `(i32, i32) -> i64`, etc.** —
-  trampoline introspects the wasm function type and marshals
-  moof Values to wasm args / wasm results to moof Values.
-  starts with int args; extends to handles for Forms.
-- **first real moof-namespace import: `raise(kind, msg)`.** lets
-  mcos raise moof-shaped errors instead of trapping. example:
-  a parser mco that says `'parse-error` on malformed input.
-- **`make_string(ptr, len)` import.** lets wasm write a buffer
-  to its linear memory and hand it to moof as a String. the
-  trampoline copies bytes, allocates a String-Form, returns the
-  handle.
-- **`intern(ptr, len)` import.** wasm side passes a name; gets a
-  Symbol back.
-- **handle-based Form access:** `slot(handle, sym)`,
-  `slot_set(handle, sym, value)`, `proto_of(handle)`. enables
-  mcos that read or write moof state.
-
-**rust delta.** ~+200 LoC in `wasm.rs`. mostly the trampoline's
-arg-marshalling switch + the new import functions.
-
-**moof-abi-zig delta.** the `examples/wasm-mcos/lib/moof.zig`
-file grows to expose the new imports as ergonomic zig functions.
-
-**forcing function.** an mco that takes args and returns a
-String:
-
-```moof
-(def Greeter [$mco load: "core/greeter.mco"])
-[Greeter greet: "shreyan"]   ;; → "hello, shreyan"
-```
-
-written in zig as roughly:
-
-```zig
-const moof = @import("lib/moof.zig");
-
-export fn greet(name_handle: u32) u32 {
-    var buf: [256]u8 = undefined;
-    const len = moof.string_text(name_handle, &buf);
-    var out: [256]u8 = undefined;
-    const written = std.fmt.bufPrint(&out, "hello, {s}", .{buf[0..len]}) catch unreachable;
-    return moof.make_string(written.ptr, written.len);
-}
-```
+both folded in. resulting load is robust.
 
 ---
 
-### track 2 — signed mcos + deps resolution
+## what's next (this session)
 
-**why now.** with richer signatures landed, mcos start composing.
-that means deps. that means content-addressing, signature
-verification, the full nix-store-grade artifact discipline the
-spec describes.
+three tracks, roughly in dependency order. each is ~half a session.
 
-**deliverables.**
+### track A — execute moof code against the loaded image
 
-- **content-hash addressing.** `core/clock@<blake3>.mco` is the
-  canonical filename. the loader verifies the hash matches.
-- **`moof.signature` custom section.** ed25519 over the rest of
-  the file. the substrate keeps a list of trusted public keys;
-  refuses unsigned mcos unless `--allow-unsigned` is set.
-- **`moof.deps` custom section.** lists `(local-name . hash)`
-  pairs. the loader recursively resolves deps, instantiates
-  them, installs into the loading mco's private env.
-- **dep resolution.** an mco store directory (`.moof/mcos/<hash>.mco`)
-  caches loaded modules. the loader hits the cache before the
-  filesystem.
-- **`moof mco install <hash>`** subcommand on the moof binary —
-  fetch + verify + cache.
-- **the `[$mco load:]` cap proper.** retire `__loadWasmMco`.
-  `$mco` becomes a primordial; only the supervisor hands it out.
+**right now:** moof-zig LOADS the vat-image but doesn't RUN moof code
+against it. the world is "alive" but inert.
 
-**doc gates.** `docs/reference/mco-format.md` already specs all
-this; track 2 makes it real. update the spec as edge cases
-emerge.
+**what we want:** `moof-zig run /tmp/system.vat <chunk-id>` or similar —
+invoke a specific chunk, observe the result. or: `moof-zig exec /tmp/system.vat
+<bytecode-file>` — load image, then run a hand-constructed bytecode against
+its world.
 
-**forcing function.** load a multi-mco bundle:
+**why it matters:** proves end-to-end. proves IC dispatch works against
+re-bound native methods. proves chunk_consts / chunk_ics / heap references
+all align across the rust-emit / zig-load boundary.
 
-```moof
-(def Hasher [$mco load: "core/blake3@7f3a2c.mco"])
-;; ↑ this mco depends on core/buffer@1234ab.mco
-;; loader fetches, verifies, links automatically.
-[Hasher hash: "hello"]   ;; → 32-byte digest as a Cons of Ints
-```
+**concrete plan:**
+1. add `moof-zig exec <vat> <bytecode-file>` — instantiate a top-level
+   chunk from raw V4 bytes, run via `vm.runTop` against the loaded world.
+2. smoke: `moof-seed bytes /tmp/test.moof | moof-zig exec /tmp/system.vat -`
+   for `[1 + 2]` → `Int 3` via real IC dispatch through stdlib's protos.
+3. probable bug-hunt: chunk side-tables, IC slot initialization, dispatch
+   against re-bound natives.
 
----
+**risk:** the stdlib's chunks reference SymIds that may not match what
+fresh bytecode (compiled at runtime by moof-seed) uses. solution: have
+moof-seed READ the loaded image's sym table first, intern symbols against
+that canonical numbering. or: post-process moof-seed's output to remap
+SymIds.
 
-### track 3 — polyglot dogfood + moof bytecode mcos
+### track B — grow zig's intrinsic registry
 
-**why last.** with rigorous mcos working, the question becomes:
-do you actually have polyglot creds? answer: write the SAME
-clock in three more languages. and ship a pure-moof library as
-an mco too.
+**right now:** zig REGISTRY has 29 natives. rust v4_export emits ~50.
+20+ are warned-and-skipped at load time. these are mostly:
+- `Opcode:loadSelf`, `Opcode:return`, `Opcode:loadConst:`, etc. — chunk-
+  reflection methods used by the moof Compiler when introspecting its
+  own output.
+- `Chunks:bodyOf:`, `Chunks:opsListOf:`, `Chunks:icsListOf:`, etc. —
+  same family.
+- `Compiler.useMoof` / `Compiler.useSeed` — the flag-flip methods.
+- `$transporter.of:` — the file-load cap.
+- ~6 anonymous singleton methods (the `<anon-N>:foo` warnings).
 
-**deliverables.**
+**what to do:** port each missing native from rust intrinsics.rs to zig
+intrinsics.zig + add to the comptime REGISTRY. mostly mechanical. some
+will need wasm runtime support (for `$mco`).
 
-- **rust mco.** `crates/mco-rust-clock/` — same clock, written
-  in rust, compiled to wasm. proves the `moof-abi-rust` crate is
-  real for mco authoring.
-- **c mco.** `examples/wasm-mcos/clock.c` + a build.sh that runs
-  clang. proves the C ABI is genuinely usable.
-- **a non-systems language**: ocaml or haskell mco. the
-  `wasm_of_ocaml` path or asterius for haskell. the goal is a
-  beautiful moment where moof's std lib has a method written in
-  haskell.
-- **moof bytecode in `.mco`.** `core/cons-utils.mco` ships pure-
-  moof methods (no wasm code) — the manifest's `moof.bytecode`
-  custom section holds serialized chunks. universal artifact:
-  ANY moof-side library is now a content-addressable `.mco`
-  shippable across federation boundaries.
-- **`moof zig <name>`** subcommand promoting `build.sh` to the
-  moof binary's repertoire.
+**scope:** ~3-6 hours of porting. completes before track A's smokes
+have any chance of running stdlib code that needs these natives.
 
-**forcing function.** a moof world's std lib bundles, say, 6
-mcos in 4 languages, all loadable and dispatchable:
+### track C — runtime source parsing (the parser problem)
 
-```moof
-$clock      ;; zig → core/clock.mco
-$blake3     ;; rust → core/blake3.mco
-$json       ;; c → core/json.mco
-$parser     ;; haskell → core/parser-helpers.mco
-$cons-extras ;; pure moof → core/cons-extras.mco
-$lmdb       ;; rust → store/lmdb.mco
-```
+**right now:** moof-zig consumes bytecode but can't parse source. once
+track A works, the natural ask is `moof-zig "(+ 1 2)"` — eval a source
+string. needs a reader at runtime.
 
-each is a `[$mco load:]` away. each is content-addressed. each
-is signed. each has the same dispatch shape from moof's view.
+**three approaches:**
+1. **port `reader.rs` → `reader.zig`.** ~1000 LoC of zig. self-contained;
+   no dependencies. preferred long-term.
+2. **call ocaml-seed as a subprocess.** `moof-zig` shells out to
+   `moof-seed bytes -` to compile. simple; introduces a subprocess
+   dependency at runtime.
+3. **embed ocaml-seed in moof-zig via wasm.** compile ocaml-seed to wasm
+   (with wasm_of_ocaml if it works), call it via the wasm runtime that's
+   already in zig substrate. fits the philosophy ("OCaml as mco"); requires
+   solving the OCaml→wasm story.
+
+**recommend:** option 1 for V4 maturity, option 2 for tonight if we want
+to ship something running. option 3 is the elegant end state.
+
+once any of these works, plus track A + B, we have **moof-zig replacing
+moof entirely** for ordinary use. rust deletion is one step away.
 
 ---
 
-## what is NOT in scope this session
+## the bigger arc (post this session)
 
-| deferred | why |
-|---|---|
-| moof VM as an mco | the wild-aspiration version. needs its own session, deep refactor of substrate. phase G+. |
-| hot-swap while running | requires checkpoint+resume protocol. phase H. |
-| WASI sandboxing modes | wasmtime supports configurable wasi (no fs, no net). phase G. |
-| parser.moof | still on the original NEXT_SESSION ladder. interesting but orthogonal to polyglot push. |
-| reader.rs port | same. |
-| dylib mcos (tier 3 escape hatch) | the spec mentions it; we'll only implement when a perf-cliff genuinely demands it. wasm is the canonical model. |
-
----
-
-## the ladder of acceptable session-end states
-
-if this session goes ideally, all three tracks land. if not:
-
-1. **tracks 1–3 done.** polyglot std lib with 4+ language mcos.
-2. **tracks 1–2 done; track 3 deferred.** richer mcos work,
-   signed/dep-resolved, but only one language so far.
-3. **track 1 done; tracks 2–3 deferred.** richer signatures
-   work; the args-and-strings story is complete.
-4. **track 1 partial.** at minimum, richer arg marshaling
-   (i64-takers) lands. real-shipping caps still need it.
-
-below rung 4 the session is "we learned but didn't ship."
-that's also fine — designs improve when we're honest about where
-they break.
-
----
-
-## the inputs to the session
-
-before this session starts:
-
-- `git pull` to current state. confirm `cargo test --workspace`
-  shows 334 / 334 passing. (it does as of `3ad5405`.)
-- re-read `docs/reference/mco-format.md` end-to-end. that's the
-  spec we're making real.
-- skim `examples/wasm-mcos/lib/moof.zig` — the shape of imports
-  it'll grow to host.
-- skim `crates/substrate/src/wasm.rs` — that's where the
-  trampoline + import surface lives.
-
----
-
-## risk register
-
-ranked by likelihood × impact:
-
-1. **wasm linear-memory marshaling complexity.** every Form
-   passed to wasm needs to either be marshalled into bytes (if
-   pure data) or addressed via a handle table (if it's a heap
-   reference). picking the wrong split costs perf or
-   correctness. mitigation: handle table for everything that
-   isn't a tagged immediate; bytes for atomic strings.
-   *probability: high. impact: medium.*
-
-2. **dependency cycles.** mco A depends on B which depends on A.
-   the loader needs to detect and refuse. mitigation:
-   topological sort during deps walk; raise `'dep-cycle` on
-   detection.
-   *probability: low. impact: low (clean error).*
-
-3. **wasi feature creep.** wasmtime-wasi's full surface is
-   large. exposing all of it is dangerous (mcos shouldn't write
-   files unless authorized). mitigation: configurable wasi ctx
-   per mco, defaults to minimal (clock + maybe random).
-   *probability: medium. impact: medium (security).*
-
-4. **mco-pack as a one-tool path.** if mco-pack proves limiting,
-   we'll want a richer build pipeline (proper zig build.zig,
-   eventually a `moof mco build` subcommand that knows about all
-   languages).
-   *probability: high. impact: low (incremental fix).*
-
----
-
-## post-session: what comes after
-
-| session | scope | end-state |
+| step | what | unlocks |
 |---|---|---|
-| **session N+1 (this one)** | tracks 1–3: richer sigs, signed mcos, polyglot dogfood | std lib has multi-language mcos; .mco format is rigorous |
-| **session N+2** | parser.moof — port `reader.rs` to moof. the rust shim reads only enough to load parser.moof itself. | parser is moof; phase A-self-host complete |
-| **session N+3** | phase B foundations — vats, mailbox, scheduler, lmdb persistence | `moof world ./worlds/test/` runs; state survives reboot |
-| **session N+4** | phase D foundations — canonical encoding, replicated-vat mode | the 2-replica convergence test passes |
-| **session N+5** | phase E — terminal renderer, `$canvas` / `$pointer`, single-user world | `moof world ./worlds/test/` shows a navigable 3D space |
-| **session N+6** | phase F — websocket transport, `moof world join wss://…` | the manifesto's demo is real |
+| this session | tracks A + B + C | moof-zig is feature-complete |
+| next session | rust deletion | only crates/zig-substrate + crates/ocaml-seed remain |
+| then | parser.moof + compiler.moof self-host | phase A-self-host complete; ocaml seed deletion follows |
+| then | phase B (persistence) | save vat per turn; restore from disk; live image is real |
+| then | phase D (replication) | multi-vat in-process; canonical-hash convergence |
+| then | phase E (3D world demo) | the moofpaint forcing function |
+| then | phase F (federation) | multi-user 3D world via websocket |
 
-six sessions to the demo. *this* session expands the polyglot
-foundation enough that the rest of phase A becomes a question of
-"which language do you want to write that bit in" rather than
-"can we even write that bit."
+the V4 image format ALREADY IS the phase-B persistence format. designing
+it well now (per-vat structure, content-addressable, deterministic) pays
+back across B/D/F all at once.
 
 ---
 
-## final note
+## known gotchas + TODOs
 
-the docs are the source of truth. when implementation diverges
-from a doc, the doc is the bug to fix first — *unless* the doc
-is the bug, in which case the doc is the bug to fix first.
-either way the doc moves before the code.
+these are flagged-but-not-blocking. fix when they become hot:
 
-`docs/reference/mco-format.md` is the spec for tracks 2 and 3.
-re-read it before writing code that touches the .mco pipeline.
+### from track 1 (rust v4_export)
 
-`>.<` softly. let's make polyglot real beyond proof-of-life. ૮ ◞ ﻌ ◟ ა
+1. **non-scalar Value serialization.** rust may have inline `Value::Str` /
+   `Value::Bytes` somewhere; current export treats only the 7 scalar
+   variants (Nil/Bool/Int/Sym/Char/Float/Form). If a non-scalar Value
+   shows up in a chunk's const-pool or a Form's slot, it's emitted as
+   Nil with a panic-on-encounter. **investigate:** does `lib/` ever hit
+   this? unclear. mitigation: scan for inline String values during
+   export; allocate them as Forms first if found.
+2. **Source form linking.** every chunk has a `:source` slot referencing
+   the source-Form it was compiled from. currently the export writes
+   `chunk_id` as `source_form_id` (placeholder). L5 (source is canonical,
+   bytecode derived) is violated until this is fixed. **fix:** look up
+   chunk's `:source` meta slot, find that Form's FormId, emit.
+3. **Footer hash is zeros.** zig stubs verification. real blake3 footer
+   needed when content-addressing actually matters. phase 9 work.
+4. **Proto count mismatch.** spec §10.3 wants 18 protos; rust has 17 +
+   `macros_form` slotted in. `Opcode` proto FormId is emitted as NONE.
+   moof-zig handles NONE gracefully; long-term, add Opcode proto on rust
+   side OR shrink spec to 17.
+
+### from track 2 (zig image-load)
+
+5. **sym-table cached symbol IDs in `World.initBare`.** zig caches hot
+   syms (parent, view-target, etc.) at init; after image-load's
+   `clearAndKeepCapacity`, those SymIds are stale. fine for load-and-
+   inspect, broken for active env walks. **fix:** re-intern after load,
+   or read SymIds from the loaded image's table.
+6. **wasm mco loading is stubbed.** moof-zig logs "would load mco" and
+   continues. for stdlib methods that genuinely need mcos (Hash, Utf8,
+   Clock, etc.), they'll fail at dispatch. acceptable for boot-and-inspect;
+   blocks "run stdlib code that hashes things."
+7. **20+ unknown natives skipped at load.** see track B above.
+
+### across both
+
+8. **OCaml seed didn't ship a working build-image command.** the
+   image+CLI agent in session N stubbed it; it produces a SKELETON .vat
+   but not a full bootstrap image. rust's v4_export is the canonical
+   path until ocaml-seed catches up.
+9. **stale worktree branches in `git branch`.** 9+ zombie branches from
+   parallel-subagent work. `git branch -D worktree-agent-*` cleanup is
+   safe; not urgent.
+10. **OCaml lives in `opam switch wasm-mco`.** undocumented for CI.
+    `eval $(opam env --switch=wasm-mco)` before any `dune` command.
+
+---
+
+## starting the next session
+
+1. `git pull` — confirm at `380203b` or later.
+2. `cargo build -p moof --release` — produces `target/release/moof`.
+3. `cd crates/zig-substrate && zig build && cd ..` — produces
+   `crates/zig-substrate/zig-out/bin/moof-zig`.
+4. `cargo run -p moof --bin moof -- export-v4 --output /tmp/system.vat`
+   — 21 MB image.
+5. `./crates/zig-substrate/zig-out/bin/moof-zig load /tmp/system.vat`
+   — should print `V4 vat-image alive`.
+6. read `docs/superpowers/plans/2026-05-10-vm-V4-C3-stdlib-bootstrap.md`
+   if you need plan context.
+7. read `docs/superpowers/specs/2026-05-10-vm-V4-opcodes-design.md` for
+   the byte format / image format contract.
+
+if all 6 pass, pick a track (A/B/C above) and dispatch parallel agents.
+
+---
+
+## the moof philosophy hasn't changed
+
+still:
+- environment, not language
+- the maru posture (tiny substrate seed)
+- the four faces of Form
+- moldable, reflective, expressive, pure
+
+we've just made the substrate **smaller** and **polyglot**. zig owns the
+runtime; ocaml will own the compiler; rust is the build-tool that goes
+away. moof code keeps doing what it does. ٩(◕‿◕｡)۶
