@@ -97,6 +97,7 @@ pub fn install(w: &mut World) {
     install_chunks_singleton(w);
     install_console_proto_and_caps(w);
     install_compiler_cap(w);
+    install_reader_cap(w);
     install_globals(w);
     install_compiler_primitives(w);
     install_proto_globals(w);
@@ -2231,6 +2232,36 @@ fn install_compiler_cap(w: &mut World) {
 
     let global = w.here_form;
     let dollar = w.intern("$compiler");
+    w.env_bind(global, dollar, Value::Form(proto))
+        .expect("env_bind at boot — substrate bug");
+}
+
+fn install_reader_cap(w: &mut World) {
+    // `$reader` — primordial cap that controls which reader is
+    // canonical. mirrors `$compiler` in shape. flipping useMoof
+    // routes every subsequent parse through the Parser singleton
+    // defined in lib/parser/. useSeed flips back (diagnostics).
+    //
+    // bootstrap: rust reader handles lib/parser/*.moof (the
+    // minimal-subset bootstrap files). lib/parser/03-bootstrap.moof
+    // sends `[$reader useMoof]` at its tail; every subsequent parse
+    // (including all of compiler/*, early/*, stdlib/*, mcos/*,
+    // and REPL input) routes through `[Parser parse: src]`.
+    //
+    // see `2026-05-10-self-host-and-rust-deletion-design.md` §3.1.
+    let proto = w.alloc(Form::with_proto(Value::Form(w.protos.object)));
+
+    w.install_native(proto, "useMoof", |w, _self, _args| {
+        w.use_moof_reader = true;
+        Ok(Value::Nil)
+    }).expect("install_native at boot — substrate bug");
+    w.install_native(proto, "useSeed", |w, _self, _args| {
+        w.use_moof_reader = false;
+        Ok(Value::Nil)
+    }).expect("install_native at boot — substrate bug");
+
+    let global = w.here_form;
+    let dollar = w.intern("$reader");
     w.env_bind(global, dollar, Value::Form(proto))
         .expect("env_bind at boot — substrate bug");
 }

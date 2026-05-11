@@ -41,6 +41,17 @@ impl ReadError {
             col: c.col,
         }
     }
+
+    /// position-free error — used when the reader path is the moof-
+    /// side `[Parser parse: src]` and the underlying raise has no
+    /// cursor (line/col live inside the moof error then).
+    pub fn msg(message: impl Into<String>) -> Self {
+        ReadError {
+            message: message.into(),
+            line: 0,
+            col: 0,
+        }
+    }
 }
 
 impl std::fmt::Display for ReadError {

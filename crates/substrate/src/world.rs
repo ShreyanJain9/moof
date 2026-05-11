@@ -231,6 +231,22 @@ pub struct World {
     /// quote, __send__) — minimal seed.
     pub use_moof_compiler: bool,
 
+    /// when `true`, [`World::read`] / [`World::read_all`] delegate
+    /// to the moof-side `[Parser parse: src]` (defined in
+    /// `lib/parser/`). when `false`, the rust reader runs.
+    ///
+    /// mirrors `use_moof_compiler` in shape and lifecycle. flips
+    /// inside `lib/parser/03-bootstrap.moof` via `[$reader useMoof]`,
+    /// after `parser/00-lexer.moof`, `01-tokens.moof`, and
+    /// `02-parser.moof` have defined the Parser singleton + deps.
+    /// once flipped, every subsequent parse in this world routes
+    /// through moof — the rust reader becomes dead code (preserved
+    /// only as the seed that got us here).
+    ///
+    /// see `docs/superpowers/specs/2026-05-10-self-host-and-rust-deletion-design.md`
+    /// §3.1.
+    pub use_moof_reader: bool,
+
     /// Resolved root for [$transporter load: ...] calls. Populated at
     /// `new_world()` via `transporter::resolve_lib_root`. None means
     /// the transporter cap will raise 'tx-no-root on every call —
@@ -353,6 +369,7 @@ impl World {
             here_form,
             transporter_root: None,
             use_moof_compiler: false,
+            use_moof_reader: false,
             vm: Vm::default(),
             nursery_deltas: IndexMap::new(),
             turn_watermark: 0,
@@ -768,7 +785,14 @@ impl World {
     }
 
     /// reader entry — uses the canonical List + String protos.
+    ///
+    /// when `use_moof_reader` is `true`, delegates to the moof-side
+    /// `[Parser parseOne: src]`. otherwise runs the rust reader.
+    /// see `2026-05-10-self-host-and-rust-deletion-design.md` §3.1.
     pub fn read(&mut self, text: &str) -> Result<Value, ReadError> {
+        if self.use_moof_reader {
+            return self.read_via_moof_one(text);
+        }
         let list_proto = Value::Form(self.protos.cons);
         let string_proto = Value::Form(self.protos.string);
         let mut ctx = ReadCtx::new(
@@ -782,7 +806,14 @@ impl World {
     }
 
     /// reader-all entry.
+    ///
+    /// when `use_moof_reader` is `true`, delegates to the moof-side
+    /// `[Parser parse: src]` (returns the full list of top-level
+    /// Forms).
     pub fn read_all(&mut self, text: &str) -> Result<Vec<Value>, ReadError> {
+        if self.use_moof_reader {
+            return self.read_via_moof_all(text);
+        }
         let list_proto = Value::Form(self.protos.cons);
         let string_proto = Value::Form(self.protos.string);
         let mut ctx = ReadCtx::new(
@@ -793,6 +824,45 @@ impl World {
             string_proto,
         );
         reader::read_all(text, &mut ctx)
+    }
+
+    /// route a single-form parse through the moof Parser. assumes
+    /// `lib/parser/` is loaded and `Parser` is bound in the
+    /// canonical env. only reachable after
+    /// `[$reader useMoof]` has flipped `use_moof_reader`.
+    fn read_via_moof_one(&mut self, text: &str) -> Result<Value, ReadError> {
+        let src_val = self.make_string(text);
+        let parser_sym = self.intern("Parser");
+        let here = self.here_form;
+        let parser = self
+            .env_lookup(here, parser_sym)
+            .ok_or_else(|| ReadError::msg(
+                "use_moof_reader is on but `Parser` is unbound — \
+                 lib/parser/ not loaded?",
+            ))?;
+        let parse_one_sym = self.intern("parseOne:");
+        self.send(parser, parse_one_sym, &[src_val])
+            .map_err(|e| ReadError::msg(format!("[Parser parseOne:] raised: {e}")))
+    }
+
+    /// route a multi-form parse through the moof Parser. mirrors
+    /// `read_via_moof_one` but expects a list back.
+    fn read_via_moof_all(&mut self, text: &str) -> Result<Vec<Value>, ReadError> {
+        let src_val = self.make_string(text);
+        let parser_sym = self.intern("Parser");
+        let here = self.here_form;
+        let parser = self
+            .env_lookup(here, parser_sym)
+            .ok_or_else(|| ReadError::msg(
+                "use_moof_reader is on but `Parser` is unbound — \
+                 lib/parser/ not loaded?",
+            ))?;
+        let parse_sym = self.intern("parse:");
+        let list_v = self
+            .send(parser, parse_sym, &[src_val])
+            .map_err(|e| ReadError::msg(format!("[Parser parse:] raised: {e}")))?;
+        self.list_to_vec(list_v)
+            .map_err(|_| ReadError::msg("[Parser parse:] did not return a list"))
     }
 
     /// materialize the rust `Vm::Frame` at index `idx` as a Form
