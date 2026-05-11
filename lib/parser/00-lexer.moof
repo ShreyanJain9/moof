@@ -215,13 +215,15 @@
 ;; contain `.`, `e`, or `E`? if so, treat as float.
 (setHandler! Lexer 'textHasDot?:from:to:
   (fn (src a b)
-    (if [a >= b]
-        #false
+    ;; NOTE: `>=` is a stdlib-derived Integer method (loads AFTER
+    ;; parser). use `<` (rust primitive) and flip branches instead.
+    (if [a < b]
         (let ((cp [self charAtCp: src index: a]))
           (if [cp = 46] #true              ;; `.`
           (if [cp = 101] #true             ;; `e`
           (if [cp = 69] #true              ;; `E`
-              [self textHasDot?: src from: [a + 1] to: b])))))))
+              [self textHasDot?: src from: [a + 1] to: b]))))
+        #false)))
 
 ;; [Lexer parseIntInRange: src from: a to: b sign: s acc: n]
 ;; walk [a,b) of src as decimal digits, accumulate. assumes [a,b)
@@ -229,15 +231,18 @@
 ;; consumed into `sign`). returns Integer.
 (setHandler! Lexer 'parseIntInRange:from:to:sign:acc:
   (fn (src a b sign n)
-    (if [a >= b]
-        [sign * n]
+    ;; NOTE: `>=` is a stdlib-derived Integer method (loads AFTER
+    ;; parser). use `<` (rust primitive) and flip branches instead.
+    (if [a < b]
         (let ((cp [self charAtCp: src index: a]))
           (if [self isDigit: cp]
               [self parseIntInRange: src from: [a + 1] to: b
                     sign: sign acc: [[n * 10] + [cp - 48]]]
               ;; non-digit inside what should be all-digits — bail;
               ;; treat what we have. (shouldn't happen on well-formed input.)
-              [sign * n])))))
+              [sign * n]))
+        ;; a >= b — exhausted the range, return accumulated value.
+        [sign * n])))
 
 ;; [Lexer readNumberOrSign: src from: i] — main number-or-`-sym`
 ;; dispatcher. caller has already determined isDelim/whitespace
@@ -522,11 +527,22 @@
 ;; tokens in reverse, then reverses at the end.
 ;; ───────────────────────────────────────────────────────────────
 
+;; in-tree list reverse — Cons:reverse is stdlib (loads after parser).
+(setHandler! Lexer 'reverseList:
+  (fn (xs) [self reverseLoop: xs acc: '()]))
+
+(setHandler! Lexer 'reverseLoop:acc:
+  (fn (xs acc)
+    (if [xs is nil]
+        acc
+        [self reverseLoop: [Heap slotOf: xs at: 'cdr]
+              acc: (cons [Heap slotOf: xs at: 'car] acc)])))
+
 (setHandler! Lexer 'tokenLoop:from:acc:
   (fn (src i acc)
     (let ((step [self nextToken: src from: i]))
       (if [step is nil]
-          [acc reverse]
+          [self reverseList: acc]
           (let ((tok [step car])
                 (newi [[step cdr] car]))
             [self tokenLoop: src from: newi acc: (cons tok acc)])))))

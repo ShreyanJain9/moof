@@ -98,12 +98,69 @@
           (if [Tokens isLbracket: t]  [self parseSend: tokens]
           (if [Tokens isHashVec: t]   [self parseTable: tokens]
           (if [Tokens isQuoteSigil: t] [self parseQuoted: tokens]
+          (if [self isPipeOpener?: t] [self parseBlock: tokens]
           (if [Tokens isAtom: t]      [self parseAtom: tokens]
           (if [Tokens isRparen: t]    [self panic: "unexpected `)`" at: [Tokens posOf: t]]
           (if [Tokens isRbracket: t]  [self panic: "unexpected `]`" at: [Tokens posOf: t]]
           (if [Tokens isRbrace: t]    [self panic: "unexpected `}`" at: [Tokens posOf: t]]
           (if [Tokens isCascade: t]   [self panic: "unexpected `;` outside send" at: [Tokens posOf: t]]
-              [self panic: "unrecognized token" at: [Tokens posOf: t]])))))))))))))
+              [self panic: "unrecognized token" at: [Tokens posOf: t]]))))))))))))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; block sugar — `|args| body` → `(fn (args...) body)`.
+;;
+;; β1's lexer emits a run-of-pipes as a single 'sym whose text is
+;; `|`, `||`, or `|||`-etc. for the bootstrap, lib/ never uses `|`
+;; as a binary operator (only inside zig mcos), so any leading
+;; pipe-sym is a block opener:
+;;   `|`      → open params; closing `|` ends them, body follows.
+;;   `||`     → nullary block; body follows directly.
+;; mirrors rust reader.rs::read_block (`docs/concepts/blocks-and-patterns.md`).
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! ParserCore 'isPipeOpener?:
+  (fn (t)
+    (if [[Tokens typeOf: t] is 'sym]
+        (let ((s [[Tokens valueOf: t] toString]))
+          (if [[s length] is 0]
+              #false
+              [[s at: 0] is #\|]))
+        #false)))
+
+(setHandler! ParserCore 'parseBlock:
+  (fn (tokens)
+    (let ((opener [Heap slotOf: tokens at: 'car])
+          (after [Heap slotOf: tokens at: 'cdr]))
+      (let ((text [[Tokens valueOf: opener] toString]))
+        (if [[text length] is 1]
+            ;; single `|` — read params until matching `|`
+            [self parseBlockParams: after acc: '()]
+            ;; `||` (or more) — nullary block, body next.
+            (let ((body-pair [self parseOne: after]))
+              (let ((body [Heap slotOf: body-pair at: 'car])
+                    (rest [Heap slotOf: body-pair at: 'cdr]))
+                (cons (cons 'fn (cons '() (cons body '()))) rest))))))))
+
+(setHandler! ParserCore 'parseBlockParams:acc:
+  (fn (tokens acc)
+    (if [tokens is nil]
+        [self panic: "unterminated |args| block" at: 0]
+        (let ((t [Heap slotOf: tokens at: 'car])
+              (rest [Heap slotOf: tokens at: 'cdr]))
+          (if [self isPipeOpener?: t]
+              ;; closing `|` — read body next
+              (let ((body-pair [self parseOne: rest]))
+                (let ((body [Heap slotOf: body-pair at: 'car])
+                      (remaining [Heap slotOf: body-pair at: 'cdr]))
+                  (cons (cons 'fn
+                              (cons [self reverse: acc]
+                                    (cons body '())))
+                        remaining)))
+              ;; param — read one form, continue
+              (let ((pair [self parseOne: tokens]))
+                (let ((p [Heap slotOf: pair at: 'car])
+                      (more [Heap slotOf: pair at: 'cdr]))
+                  [self parseBlockParams: more acc: (cons p acc)])))))))
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; atom — int / float / char / string / sym / true / false / nil /
@@ -117,7 +174,35 @@
     (let ((t [Heap slotOf: tokens at: 'car])
           (rest [Heap slotOf: tokens at: 'cdr]))
       (let ((form [self atomValue: t]))
-        (cons form rest)))))
+        ;; `.foo` shorthand: a sym whose printed form starts with `.`
+        ;; lowers to (__send__ self 'foo) — matches rust reader.rs
+        ;; emit_send for the dot-prefix branch.
+        (if [self isDotSym?: t form: form]
+            (cons [self expandDotSym: form atToken: t] rest)
+            (cons form rest))))))
+
+;; predicate: is this an atom token that's a sym whose name starts
+;; with `.` (and isn't just `.`)?
+(setHandler! ParserCore 'isDotSym?:form:
+  (fn (t form)
+    (if [[Tokens typeOf: t] is 'sym]
+        (let ((s [form toString]))
+          (let ((n [s length]))
+            (if [n is 0]
+                #false
+                (if [[s at: 0] is #\.]
+                    (if [n is 1] #false #true)
+                    #false))))
+        #false)))
+
+;; rewrite a dot-prefixed sym into (__send__ self 'rest).
+(setHandler! ParserCore 'expandDotSym:atToken:
+  (fn (form t)
+    (let ((s [form toString]))
+      ;; substring from index 1 to end via [s slice: 1 length: (n-1)].
+      (let ((rest-str [s slice: 1 length: [[s length] - 1]]))
+        (let ((rest-sym (intern rest-str)))
+          (cons '__send__ (cons 'self (cons rest-sym '()))))))))
 
 ;; convert a single atom token to its Form value. type-by-type
 ;; mapping mirrors reader.rs's `read_atom` / `read_string` /
@@ -303,7 +388,8 @@
       (if [self isKeywordSym: first]
           [self decodeKeyword: elems openLoc: openLoc]
           ;; unary / positional. first must be a Sym.
-          (if [[first proto] is Symbol]
+          ;; NOTE: `:proto` is Heap-side, not a per-value method.
+          (if [[Heap protoOf: first] is Symbol]
               (cons first rest)
               [self panic: "send: selector must be a symbol" at: [Tokens locOffset: openLoc]])))))
 
@@ -312,7 +398,8 @@
 ;; literally includes the trailing `:` (mirrors rust intern path).
 (setHandler! ParserCore 'isKeywordSym:
   (fn (v)
-    (if [[v proto] is Symbol]
+    ;; NOTE: `:proto` is Heap-side, not a per-value method.
+    (if [[Heap protoOf: v] is Symbol]
         [self endsWithColon: [v toString]]
         #false)))
 

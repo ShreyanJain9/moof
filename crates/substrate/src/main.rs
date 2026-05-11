@@ -13,6 +13,25 @@ use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    // run the real main on a worker thread with a 128 MB stack.
+    // background: the rust VM dispatches Op::Send via real rust
+    // recursion (run_method → step → send_via_ic → invoke →
+    // run_method). every non-tail moof send adds ~5 rust frames.
+    // moof code with deep nesting (esp. recursive parsers,
+    // compilers, transducers) trivially exceeds the default 8 MB
+    // main-thread stack. proper fix: refactor the VM to a single
+    // dispatch loop that pushes/pops frames in a Vec without
+    // rust-stack recursion. interim fix: give the worker plenty
+    // of stack and move on.
+    let handle = std::thread::Builder::new()
+        .name("moof-main".into())
+        .stack_size(128 * 1024 * 1024)
+        .spawn(real_main)
+        .expect("spawn moof-main worker");
+    handle.join().expect("moof-main panicked")
+}
+
+fn real_main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     // V4 build-time oracle export — walks the rust World and emits a
     // V4 vat-image consumable by moof-zig. See `v4_export.rs` and the
