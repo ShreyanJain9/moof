@@ -679,10 +679,20 @@ pub const World = struct {
         return null;
     }
 
-    /// resolve `selector` for `receiver`: walks from the receiver's
-    /// proto down. returns the matched handler + defining proto, or
-    /// null on miss (caller dispatches dnu).
+    /// resolve `selector` for `receiver`: checks the receiver's OWN
+    /// handler table first (so proto-as-receiver and singleton-method
+    /// sends dispatch correctly), then walks the proto chain. returns
+    /// the matched handler + defining proto, or null on miss.
+    /// mirrors rust crates/substrate/src/world.rs::lookup_handler.
     pub fn lookupHandler(self: *const World, receiver: Value, selector: SymId) ?HandlerHit {
+        // 1. receiver's own handlers (singleton / proto-as-receiver).
+        if (self.effectiveFormId(receiver)) |id| {
+            const f = self.heap.get(id);
+            if (f.handler(selector)) |h| {
+                return .{ .handler = h, .defining = id };
+            }
+        }
+        // 2. walk the proto chain.
         const proto_v = self.protoOf(receiver);
         return switch (proto_v) {
             .form => |id| self.walkChain(id, selector),
