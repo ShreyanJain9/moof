@@ -1,628 +1,610 @@
-# VM V4 — polyglot substrate (zig core + OCaml seed) implementation plan
+# VM V4 — polyglot substrate (parallel) implementation plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to dispatch parallel workers across the four tracks. Steps use checkbox (`- [ ]`) syntax for tracking. Multiple tracks proceed simultaneously; integration milestones gate the merges.
 
-**Goal:** the full V4 migration — moof's substrate gets a new opcode set, a byte-tagged encoding, a zig host for the VM hot loop, and an OCaml seed reader+compiler. by the end, the rust substrate crate is **deleted**; moof boots from a tiny zig core + ocaml seed; the moof Compiler self-hosts; the substrate is ≤2k LoC zig + ≤1k LoC OCaml; every other byte is moof or wasm mco. content-addressable, deterministic, fast.
+**Goal:** ship V4 in ONE session by going polyglot from day 1. NO rust intermediate work. Build the zig substrate + OCaml seed compiler in parallel against the V4 spec; meet at the byte-encoded bytecode boundary. Rust substrate stays running as the safety net until zig+OCaml prove themselves; then it's deleted.
 
-**Architecture (the end state):**
+**Why no rust intermediate:** every line of rust opcode work or byte-encoding work is throwaway code that delays the actual migration. Skip it. The current rust substrate already works for testing-the-stdlib's-correctness; it doesn't need V4 features to do that job. We build V4 in zig + OCaml directly, validate it parallel against rust's known-good, then flip the canonical CLI from rust → zig.
+
+**Architecture (target end state):**
 
 ```
-[ user moof code ]
-       ↓ (parser.moof + compiler.moof)
-[ V4 bytecode ]
-       ↓ byte-tagged stream
-[ zig VM hot loop ]  ←→  [ wasm mcos (polyglot leaves) ]
+[ moof source ]
+       ↓ (parser.moof + compiler.moof — self-hosted, post-bootstrap)
+[ V4 bytecode bytes ]
        ↓
-[ zig heap + GC ]
+[ zig VM ] ← consumes V4 byte format directly
+       ↓
+[ zig Heap + GC ] ← per-vat, content-addressable
 
-[ OCaml seed ]                  // only used to bootstrap moof's own
-  ├─ reader (parser combinators)  // parser.moof + compiler.moof; deletable
-  └─ compiler (ML pattern match)  // post-self-host.
+[ OCaml seed ]                       // bootstrap-only; compiles lib/
+  ├─ reader.ml (parser combinators)  // once self-host completes, just
+  └─ compiler.ml (form → V4 bytes)   //   regenerates the system image
 ```
 
-four phases. each is independently shippable; later phases depend on earlier ones. each phase has its own forcing function and can be in-progress / done / not-started independently of the others (subject to dependency order).
+**Tech stack:** Zig 0.16.0+ (substrate host), OCaml 5.x + dune + menhir (seed compiler), moof (everything else). Rust stays as the safety-net runtime until V4 ships; then deleted.
 
-**Tech Stack:** Rust 2021 (existing seed, deleted by phase 4), Zig 0.14+ (new substrate host, phase 3+), OCaml 5.x with menhir + opam (seed compiler, phase 4), wasm (mcos, unchanged), moof (everything else).
-
-**Project state (HEAD):** `660f855` — V4 spec drafted, no impl. V3 features all landed. const-fold, become:, perform:withArgs:, IC invalidation, doesNotUnderstand:, cycle-safe inspect all live.
+**Project state (HEAD):** `5be40a3` — V4 spec complete (including §10 per-vat image format), zig skeleton (`crates/zig-substrate/`) with FormId + Value + smoke test working on zig 0.16.0.
 
 ---
 
-## phase overview
+## strategy: four parallel tracks
 
-| phase | output | duration estimate (real days, not robot estimates) | risk |
-|---|---|---|---|
-| **α** opcodes | 9 new opcodes wired in rust substrate; compilers emit them | 1-2 days | low — purely additive |
-| **β** byte encoding | `Vec<u8>` chunk bodies; deterministic compile; content-hashable | 2-3 days | medium — touches dispatch + reflection + compiler |
-| **γ** zig substrate | zig host for VM + heap + ICs; bytecode shared with rust seed via byte format | 1-2 weeks | high — first polyglot host swap |
-| **δ** OCaml seed | reader.ml + compiler.ml; emit V4 bytecode; delete rust seed reader+compiler | 1-2 weeks | high — bootstrap-image required |
+```
+                              ┌────────────────────┐
+                              │  V4 SPEC (CONTRACT)│
+                              └─────────┬──────────┘
+              ┌─────────────────────────┼─────────────────────────┐
+              ▼                         ▼                         ▼
+       ╔══════════════╗          ╔═══════════════╗         ╔═══════════════╗
+       ║  TRACK A     ║          ║  TRACK B      ║         ║  TRACK D      ║
+       ║  zig         ║          ║  ocaml        ║         ║  image format ║
+       ║  substrate   ║          ║  seed         ║         ║  (shared)     ║
+       ╚══════╤═══════╝          ╚═══════╤═══════╝         ╚═══════╤═══════╝
+              └─────────────┐            │           ┌─────────────┘
+                            ▼            ▼           ▼
+                          ╔═══════════════════════════╗
+                          ║  TRACK C                  ║
+                          ║  integration + smoke      ║
+                          ╚═══════════════════════════╝
+                                       │
+                                       ▼
+                          ╔═══════════════════════════╗
+                          ║  RUST DEPRECATION (final) ║
+                          ╚═══════════════════════════╝
+```
 
-phases α and β can be done by any agent. phase γ requires zig fluency. phase δ requires OCaml fluency.
+**Track A (zig substrate):** the runtime. heap, value, form, sym, intrinsics, vm dispatch, world bootstrap, image deserializer. ~1500 LoC zig target.
+
+**Track B (OCaml seed):** the compiler. reader, AST, V4 bytecode emit, image serializer, CLI. ~1500 LoC OCaml target.
+
+**Track C (integration):** byte-format roundtrip tests, smoke tests, end-to-end pipeline (`moof-zig <(moof-seed compile foo.moof)`).
+
+**Track D (image format):** the canonical shared format both tracks read/write. spec'd in V4 §10; both Track A's deserializer and Track B's serializer implement it.
+
+**Rust deprecation:** ONLY happens after smoke passes end-to-end. Switch default `moof` CLI to invoke zig binary; delete `crates/substrate/src/{reader,compiler,vm}.rs` and related rust runtime code.
+
+**Parallelism:** Tracks A, B, D can run **completely independently**. Each is several small tasks parallelizable via subagents. Track C synchronizes; integration tests reveal contract violations between tracks.
+
+**Risk mitigation:** rust substrate keeps working throughout. If zig+OCaml stack hits a wall, we still have a functional moof. Rust deletion is the LAST step, not a prerequisite.
 
 ---
 
-## File Structure (full V4 — across all phases)
+## File Structure
 
-| file | phase | role |
-|---|---|---|
-| `crates/substrate/src/opcodes.rs` | α | add 9 new enum variants |
-| `crates/substrate/src/vm.rs` | α | dispatch arms for 9 new ops |
-| `crates/substrate/src/intrinsics.rs` | α | reflection encode/decode for new ops + moof Opcode helpers |
-| `crates/substrate/src/compiler.rs` | α, β | emit new ops; emit byte-tagged chunks |
-| `lib/compiler/01-dispatch.moof` | α | moof Compiler emits LoadHere |
-| `lib/compiler/02-special.moof` | α | moof Compiler emits SendSelf/SendHere/JumpIfTrue |
-| `crates/substrate/src/chunk.rs` | β (new) | byte-tagged chunk encoding helpers |
-| `crates/substrate/src/canonical.rs` | β (new) | canonical-encoder for chunks (content-hash input) |
-| `crates/substrate/src/chunkstream.rs` | β (new) | streaming byte decoder for VM dispatch |
-| `crates/zig-substrate/build.zig` | γ (new) | zig build script |
-| `crates/zig-substrate/src/main.zig` | γ (new) | entrypoint + CLI |
-| `crates/zig-substrate/src/heap.zig` | γ | port of heap.rs |
-| `crates/zig-substrate/src/form.zig` | γ | Form struct |
-| `crates/zig-substrate/src/value.zig` | γ | tagged-immediate Value |
-| `crates/zig-substrate/src/sym.zig` | γ | symbol interning |
-| `crates/zig-substrate/src/vm.zig` | γ | the tail-call-threaded interpreter |
-| `crates/zig-substrate/src/world.zig` | γ | World struct + dispatch |
-| `crates/zig-substrate/src/intrinsics.zig` | γ | native ops |
-| `crates/zig-substrate/src/abi.zig` | γ | mco loader (wasm) interface |
-| `crates/ocaml-seed/dune-project` | δ (new) | OCaml project setup |
-| `crates/ocaml-seed/src/reader.ml` | δ | port of reader.rs |
-| `crates/ocaml-seed/src/compiler.ml` | δ | port of compiler.rs (the seed) |
-| `crates/ocaml-seed/src/bytecode.ml` | δ | byte-tagged bytecode emit |
-| `crates/ocaml-seed/src/bin/seed.ml` | δ | CLI entry: source → V4 bytecode bytes |
-| `crates/substrate/src/{reader,compiler}.rs` | δ | **DELETE** at end of phase δ |
+### Track A — Zig substrate
 
----
+| file | role |
+|---|---|
+| `crates/zig-substrate/build.zig` | (exists) build script |
+| `crates/zig-substrate/src/main.zig` | (exists, will grow) CLI entrypoint |
+| `crates/zig-substrate/src/sym.zig` | symbol interning |
+| `crates/zig-substrate/src/form.zig` | Form struct |
+| `crates/zig-substrate/src/value.zig` | tagged-immediate Value (already in main.zig — extract) |
+| `crates/zig-substrate/src/heap.zig` | Heap (`std.ArrayList(Form)` + redirects) |
+| `crates/zig-substrate/src/opcodes.zig` | the 24 opcode tags + decode helpers |
+| `crates/zig-substrate/src/bytecode.zig` | V4 byte-tagged encoder/decoder |
+| `crates/zig-substrate/src/protos.zig` | Protos struct + bootstrap |
+| `crates/zig-substrate/src/world.zig` | World struct + boot |
+| `crates/zig-substrate/src/vm.zig` | dispatch loop + send |
+| `crates/zig-substrate/src/intrinsics.zig` | native methods |
+| `crates/zig-substrate/src/image.zig` | per-vat image deserializer |
 
-# Phase α — new opcodes (enum-based)
+### Track B — OCaml seed
 
-**forcing function:** `cargo run -- '$here'` emits `LoadHere` instead of `LoadName('$here')`; `cargo run -- '[self foo]'` (in a method) emits `SendSelf` instead of `LoadSelf;Send`. reflection round-trips through new op-names.
+| file | role |
+|---|---|
+| `crates/ocaml-seed/dune-project` | project setup |
+| `crates/ocaml-seed/src/dune` | library config |
+| `crates/ocaml-seed/src/ast.ml` | source-Form ADT (Symbol, Int, Cons, etc.) |
+| `crates/ocaml-seed/src/reader.ml` | S-expr + bracket-send parser |
+| `crates/ocaml-seed/src/opcodes.ml` | the 24 opcodes as ADT |
+| `crates/ocaml-seed/src/bytecode.ml` | V4 byte-encoded emit |
+| `crates/ocaml-seed/src/compiler.ml` | form → bytecode (with V4 emission rules) |
+| `crates/ocaml-seed/src/image.ml` | per-vat image serializer |
+| `crates/ocaml-seed/bin/seed.ml` | CLI: source → image bytes |
+| `crates/ocaml-seed/bin/dune` | binary build config |
 
-## Task 1: add 9 enum variants + `pushes()` updates
+### Track D — Shared format docs
 
-**Files:** `crates/substrate/src/opcodes.rs`
+| file | role |
+|---|---|
+| `docs/superpowers/specs/2026-05-10-vm-V4-opcodes-design.md` | (exists) authoritative spec |
 
-- [ ] **Step 1:** add 9 variants to `Op` enum (LoadHere, JumpIfTrue, SendDynamic, SendSelf, SendHere, TailSendSelf, TailSendHere, Suspend, Resume). doc-comment each per spec §3. include `selector: SymId, argc: u8, ic_idx: u16` for the Send-family variants.
+### Track C — Integration
 
-- [ ] **Step 2:** add `Op::LoadHere` to `pushes()`'s match list.
+| file | role |
+|---|---|
+| `fixtures/v4-bytecode/` | canonical moof programs + their expected V4 bytes |
+| `scripts/v4-smoke.sh` | end-to-end pipeline tester |
 
-- [ ] **Step 3:** `cargo build -p moof 2>&1 | tail -3` — clean build with unused-variant warnings (expected).
+### Final — Rust deprecation
 
-- [ ] **Step 4:** commit:
-```
-opcodes: declare V4 opcodes (LoadHere, JumpIfTrue, SendDynamic, fused sends, Suspend/Resume)
-
-V4 phase α task 1. Pure declaration of 9 new variants. No VM
-dispatch arms yet (task 2). No compiler emission yet (tasks 3-7).
-Build warns about unused variants until task 2 lands.
-
-Spec: docs/superpowers/specs/2026-05-10-vm-V4-opcodes-design.md
-```
-
-## Task 2: VM dispatch arms for the 9 new opcodes
-
-**Files:** `crates/substrate/src/vm.rs`
-
-- [ ] **Step 1:** locate `step()`'s match block on `Op`.
-
-- [ ] **Step 2:** add 9 match arms. For each:
-  - `LoadHere` → `world.vm.stack.push(Value::Form(world.here_form))`.
-  - `JumpIfTrue(offset)` → mirror `JumpIfFalse` exactly, inverting the truthiness check.
-  - `SendDynamic { argc, ic_idx }` → pop selector from stack as Symbol; pop receiver + args; `send_via_ic`.
-  - `SendSelf { selector, argc, ic_idx }` → receiver = `frame.self_`; pop args only; `send_via_ic`.
-  - `SendHere { selector, argc, ic_idx }` → receiver = `Value::Form(world.here_form)`; pop args; `send_via_ic`.
-  - `TailSendSelf { selector, argc }` → receiver = `frame.self_`; pop args; replace current frame (use existing TailSend logic).
-  - `TailSendHere { selector, argc }` → receiver = `world.here_form`; pop args; replace current frame.
-  - `Suspend { promise_ic: _ }` → `Err(RaiseError::new(world.intern("unimplemented"), "Suspend: phase D"))`.
-  - `Resume { frame_ic: _ }` → same `'unimplemented`.
-
-- [ ] **Step 3:** if helper extraction simplifies things, extract a `tail_send_dispatch(world, receiver, selector, args)` from the existing `Op::TailSend` arm. Have TailSendSelf/Here call it.
-
-- [ ] **Step 4:** build clean. unused-variant warnings should be gone.
-
-- [ ] **Step 5:** regression smokes:
-  - `[1 + 2]` → `3`
-  - `(if #true 1 2)` → `1`
-  - `$here` → renders full env
-  - `(do (def x 42) x)` → `42`
-
-- [ ] **Step 6:** commit:
-```
-vm: dispatch arms for V4 opcodes
-
-V4 phase α task 2. Adds match arms in vm.rs::step() for all 9 new
-opcodes. Suspend/Resume raise 'unimplemented (phase D fills in).
-Regression smokes confirm existing ops unchanged.
-```
-
-## Task 3: rust seed `compile_load_name` emits LoadHere
-
-**Files:** `crates/substrate/src/compiler.rs`
-
-- [ ] **Step 1:** find where the rust seed emits `Op::LoadName(sym)`.
-
-- [ ] **Step 2:** add `if self.world.resolve(sym) == "$here" { emit(LoadHere) }`.
-
-- [ ] **Step 3:** smoke: `cargo run -- '(do (def f (fn () $here)) [[f bytecodes] inspect])'` — should show `LoadHere` in bytecodes.
-
-- [ ] **Step 4:** commit.
-
-## Task 4: reflection — encode/decode for the 9 new opcodes
-
-**Files:** `crates/substrate/src/intrinsics.rs`, moof Opcode-helper file
-
-- [ ] **Step 1:** find the encode (Op → Form) and decode (Form → Op) tables in `intrinsics.rs`.
-
-- [ ] **Step 2:** add 9 encode entries. Per spec §7.1 — each op decodes as `{ Opcode op: <Symbol> operands: <list> }`.
-
-- [ ] **Step 3:** add 9 decode entries. Each parses operands from the Form's slots back into typed fields.
-
-- [ ] **Step 4:** find the moof Opcode helpers (`grep -rn "Opcode loadName" lib/`). add new constructors: `loadHere`, `jumpIfTrue:`, `sendDynamic:ic:`, `sendSelf:argc:ic:`, `sendHere:argc:ic:`, `tailSendSelf:argc:`, `tailSendHere:argc:`, `suspend:`, `resume:`.
-
-- [ ] **Step 5:** smoke: `cargo run -- '(do (def f (fn () $here)) [[f bytecodes] inspect])'` — output should include `{ Opcode op: 'LoadHere operands: #[] }`.
-
-- [ ] **Step 6:** commit.
-
-## Task 5: moof Compiler `compileLoadName:` emits LoadHere
-
-**Files:** `lib/compiler/01-dispatch.moof`
-
-- [ ] **Step 1:** find `compileLoadName:chunk:`. Currently:
-```moof
-(if [sym is 'self] [chunk emit: [Opcode loadSelf]]
-                   [chunk emit: [Opcode loadName: sym]])
-```
-
-- [ ] **Step 2:** rewrite:
-```moof
-(if [sym is 'self] [chunk emit: [Opcode loadSelf]]
-(if [sym is '$here] [chunk emit: [Opcode loadHere]]
-                    [chunk emit: [Opcode loadName: sym]]))
-```
-
-- [ ] **Step 3:** smoke + commit.
-
-## Task 6: rust seed + moof Compiler emit SendSelf/SendHere/TailSendSelf/TailSendHere
-
-**Files:** `crates/substrate/src/compiler.rs`, `lib/compiler/02-special.moof`
-
-- [ ] **Step 1 (rust):** at the head of `compile_send`, check if receiver is the symbol `self` or `$here`:
-```rust
-let recv_kind = match elems[1] {
-    Value::Sym(s) if self.world.resolve(s) == "self" => Some("self"),
-    Value::Sym(s) if self.world.resolve(s) == "$here" => Some("here"),
-    _ => None,
-};
-if let Some(kind) = recv_kind {
-    // compile args only (no receiver)
-    for &arg in &elems[3..] { self.compile_expr(arg, false)?; }
-    let argc_u8 = (elems.len() - 3) as u8;
-    let op = match (kind, tail) {
-        ("self", false) => Op::SendSelf { selector: sel_sym, argc: argc_u8, ic_idx: self.next_ic() },
-        ("self", true)  => Op::TailSendSelf { selector: sel_sym, argc: argc_u8 },
-        ("here", false) => Op::SendHere { selector: sel_sym, argc: argc_u8, ic_idx: self.next_ic() },
-        ("here", true)  => Op::TailSendHere { selector: sel_sym, argc: argc_u8 },
-        _ => unreachable!(),
-    };
-    self.emit(op); return Ok(());
-}
-```
-
-- [ ] **Step 2 (moof):** mirror in `compileSend:chunk:tail:`. before the existing const-fold/if-peephole/standard flow, check recv kind and emit the fused op directly. Use `Opcode sendSelf:argc:ic:` etc.
-
-- [ ] **Step 3:** smoke:
-  - `(do (defmethod (Object foo) [self proto]) [[[Object handlerAt: 'foo] body] bytecodes])` — should show `SendSelf` or `TailSendSelf`.
-  - `(do (def f (fn () [$here parent])) [[f bytecodes] inspect])` — should show `SendHere`.
-
-- [ ] **Step 4:** commit (one commit covering both rust and moof changes).
-
-## Task 7: SendDynamic — replace `:perform:withArgs:` overhead (limited fuse)
-
-**Files:** `crates/substrate/src/intrinsics.rs`
-
-**SCOPE NOTE:** the encoding mismatch (SendDynamic expects args on stack individually; `:perform:withArgs:` takes a list) means we can't trivially fuse at compile time. SendDynamic is reachable from the VM but not emitted by the canonical compiler in V4-α.
-
-- [ ] **Step 1:** leave the `:perform:withArgs:` native in place (it works).
-
-- [ ] **Step 2:** add a note in the spec / native body explaining that future work will emit `SendDynamic` after a list-spread or after wave C's vau makes dynamic selectors natural.
-
-- [ ] **Step 3:** no commit needed for this task — it's a documentation acknowledgment.
-
-## Task 8: JumpIfTrue available; no canonical emission yet
-
-- [ ] **Step 1:** wired via task 1-2-4. no compiler emission yet.
-
-- [ ] **Step 2:** future work: const-fold or if-peephole could emit JumpIfTrue for `(if (not c) ...)` shapes. acknowledged in plan, no commit.
-
-## Task 9: phase-α final smoke + commit
-
-- [ ] **Step 1:** full smoke battery:
-```bash
-cargo build -p moof 2>&1 | tail -3                            # clean
-cargo run --quiet -p moof -- '[1 + 2]'                        # 3
-cargo run --quiet -p moof -- '(if #true 1 2)'                 # 1
-cargo run --quiet -p moof -- '(if #false 1 2)'                # 2
-cargo run --quiet -p moof -- '(do (def x 1) (set! x 99) x)'   # 99
-cargo run --quiet -p moof -- '[$here parent]'                 # nil
-cargo run --quiet -p moof -- '(do (def a [Object new]) (def b [Object new]) (setHandler! a (quote m) (fn () "a")) (setHandler! b (quote m) (fn () "b")) [a become: b] [a m])'  # "b"
-cargo run --quiet -p moof -- '$here'                          # renders, no overflow
-```
-
-- [ ] **Step 2:** verify new ops fire:
-```bash
-cargo run --quiet -p moof -- '(do (def f (fn () $here)) [[f bytecodes] inspect])'
-# contains LoadHere
-cargo run --quiet -p moof -- '(do (defmethod (Object zo) [self proto]) [[[Object handlerAt: (quote zo)] body] bytecodes])'
-# contains SendSelf or TailSendSelf
-```
-
-- [ ] **Step 3:** benchmark:
-```bash
-time cargo run --quiet --release -p moof -- '(do (def x 42) x)'
-# baseline pre-V4-α: ~1.3s. expect ~1.15-1.2s.
-```
-
-- [ ] **Step 4:** push.
-
-**Exit criterion for Phase α:** all 9 opcodes exist, dispatch correctly, decode through reflection. LoadHere + SendSelf + SendHere emitted by both compilers. CLI smokes green. Suspend/Resume placeholder-raise. SendDynamic + JumpIfTrue wired but not emitted by canonical paths (future use).
+| change | what |
+|---|---|
+| `Cargo.toml` workspace | remove `crates/substrate` member (or reduce to mco-pack + abi) |
+| `crates/substrate/src/{reader,compiler,vm,intrinsics,opcodes,...}.rs` | DELETED |
 
 ---
 
-# Phase β — byte-tagged chunk encoding
+## the parallel execution model
 
-**forcing function:** chunks store bytecode as `Vec<u8>` (byte-tagged stream per spec §4) instead of `Vec<Op>`. compile twice → byte-identical output. content-hashable. reflection still works.
+**stage 1 (everyone goes at once):** kick off ~12 subagents simultaneously across Tracks A, B, D. Each works in isolation against the V4 spec. None depend on each other's WIP.
 
-## Task 10: design + add the byte format
+**stage 2 (integration):** Track C subagent runs roundtrip + smoke tests. Failures point at which track diverged from the spec.
 
-**Files:** `crates/substrate/src/chunk.rs` (new), `crates/substrate/src/canonical.rs` (new)
+**stage 3 (fix loop):** dispatch targeted fix subagents. iterate until smoke passes.
 
-- [ ] **Step 1:** create `chunk.rs`. add encoder + decoder functions:
-```rust
-pub fn encode_op(op: Op, buf: &mut Vec<u8>) { /* big-endian; per spec §4 */ }
-pub fn decode_op(buf: &[u8], pc: usize) -> (Op, usize) { /* returns (op, bytes_consumed) */ }
-```
-match spec §4 exactly: 1-byte tag + big-endian operands.
+**stage 4 (rust deprecation):** flip default CLI; delete rust substrate.
 
-- [ ] **Step 2:** create `canonical.rs`. add `pub fn canonical_chunk_bytes(chunk: &Chunk) -> Vec<u8>` that produces the bytes used for content-hashing. includes: body bytes + const-pool serialized + ic-count + params.
-
-- [ ] **Step 3:** test encoder/decoder round-trip via a small main() smoke or just careful code review.
-
-- [ ] **Step 4:** commit.
-
-## Task 11: dual storage — keep Vec<Op>, ADD Vec<u8>
-
-**Files:** `crates/substrate/src/world.rs` (the chunk-side-tables)
-
-- [ ] **Step 1:** add `chunk_bytecode: IndexMap<FormId, Vec<u8>>` alongside the existing `chunk_ops: IndexMap<FormId, Vec<Op>>`.
-
-- [ ] **Step 2:** at chunk-creation time (compiler.rs), encode `Vec<Op>` to bytes via `chunk::encode_op` and store both. (For now, only chunk_ops is read by the VM; chunk_bytecode is just for hash verification + future use.)
-
-- [ ] **Step 3:** add `[chunk bytes]` reflection (new) that returns the Bytes form of the canonical bytecode. lets us call `[chunk bytes]` → `$hash` and verify content-hash determinism.
-
-- [ ] **Step 4:** smoke: compile same source twice; both chunks' `[chunk bytes]` should produce identical bytes. (`[(c1 bytes) = (c2 bytes)]` → `#true`.)
-
-- [ ] **Step 5:** commit.
-
-## Task 12: switch VM dispatch to read from Vec<u8>
-
-**Files:** `crates/substrate/src/vm.rs`
-
-This is the actual encoding switchover. The VM `step()` becomes:
-```rust
-let chunk_bytes = world.chunk_bytecode.get(&chunk).unwrap();
-let (op, advance) = chunk::decode_op(chunk_bytes, pc);
-match op { /* same arms as before */ }
-let new_pc = pc + advance;
-```
-
-- [ ] **Step 1:** rewrite step() to dispatch via byte decoding.
-
-- [ ] **Step 2:** Jump/JumpIfFalse/JumpIfTrue offsets are now byte-offsets (i16). Make sure compiler emits them correctly (jump targets in bytes, not op-indices).
-
-- [ ] **Step 3:** keep `chunk_ops` as a fallback / reflection-only side table for now. Delete it in task 14 once we're confident.
-
-- [ ] **Step 4:** smoke battery: every CLI smoke from phase α should still work.
-
-- [ ] **Step 5:** commit.
-
-## Task 13: jump-offset rewrites in compiler
-
-**Files:** `crates/substrate/src/compiler.rs`, `lib/compiler/`
-
-- [ ] **Step 1:** the rust seed compiler currently uses `emit_placeholder_jump` + `patch_jump_to_here` with **op-index** offsets. Rewrite to use byte offsets.
-
-- [ ] **Step 2:** moof Compiler `[chunk emit: [Opcode jumpIfFalse: 0]]` etc. — same byte-offset convention.
-
-- [ ] **Step 3:** smoke: if-statements + macros that use jumps must still work.
-
-- [ ] **Step 4:** commit.
-
-## Task 14: drop Vec<Op> side table
-
-**Files:** `crates/substrate/src/world.rs`, `crates/substrate/src/vm.rs`, others
-
-- [ ] **Step 1:** remove `chunk_ops: IndexMap<FormId, Vec<Op>>` from World.
-
-- [ ] **Step 2:** all callers either use `chunk_bytecode` directly (VM) or use the decoder to lazily produce a Vec<Op> for reflection (`intrinsics.rs::chunk_to_op_forms`).
-
-- [ ] **Step 3:** reflection still works: `[chunk bytecodes]` decodes bytes on demand.
-
-- [ ] **Step 4:** smoke battery.
-
-- [ ] **Step 5:** commit.
-
-## Task 15: content-hash + determinism verification
-
-**Files:** `crates/substrate/src/chunk.rs`, smoke script
-
-- [ ] **Step 1:** moof helper `[chunk hash]` returns `[$hash of: [chunk bytes]]`.
-
-- [ ] **Step 2:** smoke: compile a method twice; `[h1 = h2]` should be `#true`.
-
-- [ ] **Step 3:** smoke: modify source; recompile; hash differs.
-
-- [ ] **Step 4:** commit.
-
-**Exit criterion for Phase β:** chunks are byte-tagged. VM dispatch reads bytes directly. compiler emits canonical bytes. content-hash is stable across recompiles. reflection unchanged. CLI smokes green.
+If we move fast and subagents return promptly, this fits in a session. If not, we ship through stage 2 (smoke passes for trivial programs); stages 3-4 spill over.
 
 ---
 
-# Phase γ — zig substrate host
+# Track A — Zig Substrate
 
-**forcing function:** `cargo build` of moof now builds a **zig substrate** crate that hosts the VM + heap. the rust substrate keeps its reader+compiler (for now); zig hosts the runtime. moof code runs through the zig VM consuming V4 bytecode produced by the rust seed compiler.
+Five-ish parallel sub-tracks. Each is a single .zig file with one focused job. The V4 spec is the contract; no inter-module coordination needed during stage 1.
 
-**dependency:** phase β must land first (zig consumes byte-tagged bytecode, not enum-Op).
+## Task A.1: extract Value + add basic types (sym, form)
 
-## Task 16: zig project skeleton
+**Files:** `crates/zig-substrate/src/{value,sym,form}.zig`
 
-**Files:** `crates/zig-substrate/` (new)
+extract Value from main.zig into its own file. add SymTable + Form structures.
 
-- [ ] **Step 1:** create `crates/zig-substrate/build.zig` with a buildable hello-world. produce a binary at `zig-out/bin/moof-zig`.
+- [ ] **Step 1:** create `src/value.zig` containing the `Value` union from main.zig. add helper methods: `isTruthy`, `isNil`, `asFormId`, `asSym`, `asInt`, `equals` (by-value equality).
 
-- [ ] **Step 2:** add to workspace via cargo build script that invokes `zig build` for this crate. (or keep them parallel — moof-rs for the seed compiler, moof-zig for runtime.)
+- [ ] **Step 2:** create `src/sym.zig` with `SymTable`: `intern(name: []const u8) !SymId`, `resolve(SymId) []const u8`. backing: `std.StringHashMap(u32)` for interning + `std.ArrayList([]const u8)` for resolution.
 
-- [ ] **Step 3:** stub `moof-zig <bytecode-file>` that reads a bytes file and prints "got N bytes".
+- [ ] **Step 3:** create `src/form.zig` with `Form`: proto: Value, slots: ArrayHashMap, handlers: ArrayHashMap, meta: ArrayHashMap, frozen: bool. ArrayHashMap because insertion-order matters (determinism law D5).
 
-- [ ] **Step 4:** commit.
+- [ ] **Step 4:** update main.zig to import these.
 
-## Task 17: port `form.zig`, `value.zig`, `sym.zig`, `heap.zig`
+- [ ] **Step 5:** smoke: `zig build run` should still print the FormId/Value smoke.
 
-**Files:** `crates/zig-substrate/src/{form,value,sym,heap}.zig`
+## Task A.2: heap.zig
 
-These are the leaf data types. No dependencies on the VM.
+**Files:** `crates/zig-substrate/src/heap.zig`
 
-- [ ] **Step 1:** port `form.rs::FormId` to zig: a packed struct with 2-bit scope + 30-bit payload. derive Hash/Eq.
+- [ ] **Step 1:** `Heap` struct: forms: `std.ArrayList(Form)`, redirects: `std.AutoArrayHashMap(FormId, FormId)`.
 
-- [ ] **Step 2:** port `value.rs::Value` to zig: tagged union (`Nil | Bool | Int | Sym | Char | Float | Form`).
+- [ ] **Step 2:** methods: `init(allocator)`, `alloc(form) !FormId`, `get(id) *const Form`, `getMut(id) *Form`, `resolveId(id) FormId` (chase redirects, bounded loop), `become_(a, b) void`.
 
-- [ ] **Step 3:** port `sym.rs` to zig: a SymTable with `intern(&[]const u8) → SymId` and `resolve(SymId) → []const u8`. use `std.StringHashMap`.
+- [ ] **Step 3:** unit smoke in main.zig: alloc 3 Forms, become a→b, verify dereference chases.
 
-- [ ] **Step 4:** port `heap.rs::Heap`: `Vec<Form>`-equivalent (`std.ArrayList(Form)`), `redirects` for become:, `alloc(form) → FormId`, `get(id) → *Form`.
+## Task A.3: opcodes.zig + bytecode.zig
 
-- [ ] **Step 5:** unit-smoke each module via a small main() that allocs forms, interns symbols, etc.
+**Files:** `crates/zig-substrate/src/{opcodes,bytecode}.zig`
 
-- [ ] **Step 6:** commit.
+- [ ] **Step 1:** `opcodes.zig`: define `Op` as a tagged union matching V4 spec §2 (LoadConst, LoadHere, Send, SendSelf, …, Resume — all 24). define `Tag` enum with the byte values from §2.
 
-## Task 18: port `world.zig` + `intrinsics.zig` (the native primitives)
+- [ ] **Step 2:** `bytecode.zig`: `encodeOp(op: Op, writer: anytype) !void` and `decodeOp(reader: anytype) !Op`. big-endian operand encoding per V4 spec §4. exact byte layout from §3.
 
-**Files:** `crates/zig-substrate/src/{world,intrinsics}.zig`
+- [ ] **Step 3:** unit smoke: encode every opcode, decode back, verify roundtrip operand equality. (~24 tiny tests in main.zig as inline `if (op != decoded) @panic("roundtrip failed for X")`.)
 
-- [ ] **Step 1:** port `World` struct: heap, syms, protos, here_form, chunk-tables (chunk_bytecode, chunk_consts, chunk_ics, native_fns).
+## Task A.4: protos.zig + world.zig
 
-- [ ] **Step 2:** port the intrinsic ops one by one: arithmetic, slot access, env_bind, env_lookup, env_set (with view-target), become_, freeze, perform:withArgs:. each takes `*World, Value, []const Value` and returns `Value | Error`.
+**Files:** `crates/zig-substrate/src/{protos,world}.zig`
 
-- [ ] **Step 3:** mco loader / wasm runtime — use wasmtime's C api (zig has bindings) or a smaller wasm runtime like wasm3 zig.
+- [ ] **Step 1:** `Protos` struct: a flat record of FormIds for the standard protos (object, nil, bool, integer, char, sym, cons, string, bytes, method, chunk, closure, env, foreign_handle, table, frame, macros, opcode).
 
-- [ ] **Step 4:** smoke: instantiate a World via zig, install protos, call `[1 + 2]` via direct send dispatch (no VM yet — just method invocation).
+- [ ] **Step 2:** `bootstrap(heap)` allocates each proto as a fresh Form with `proto: Value::Form(parent)` chain. matches `crates/substrate/src/protos.rs::Protos::bootstrap`.
 
-- [ ] **Step 5:** commit.
+- [ ] **Step 3:** `World` struct: heap, syms, protos, chunk side-tables (chunk_bytecode: AutoArrayHashMap<FormId, []u8>, chunk_consts, chunk_ics), here_form: FormId, macros_form: FormId, vm: Vm.
 
-## Task 19: port `vm.zig` (the dispatch loop)
+- [ ] **Step 4:** `World.init(allocator)`: heap.init, syms.init, protos.bootstrap, alloc here_form + macros_form, bind `$here` self-referentially.
+
+## Task A.5: vm.zig (the dispatch loop)
 
 **Files:** `crates/zig-substrate/src/vm.zig`
 
-This is the heart. Tail-call-threaded dispatch.
+- [ ] **Step 1:** `Frame` struct: chunk: FormId, pc: u32 (byte offset into chunk_bytecode), env: FormId, self_: Value, stack_base: u32, defining_proto: FormId.
 
-- [ ] **Step 1:** define `Op` as an enum(u8) matching the V4 byte tags.
+- [ ] **Step 2:** `Vm` struct: stack: `std.ArrayList(Value)`, frames: `std.ArrayList(Frame)`, last_send_sel: ?SymId.
 
-- [ ] **Step 2:** for each opcode, write a handler function `fn op_<name>(vm: *VM) ResumePoint`. each handler reads operands from `vm.pc`, advances pc, executes semantics, tail-calls into the next op's handler via `@call(.always_tail, dispatch_table[next_op], .{vm})`.
+- [ ] **Step 3:** `step(world: *World) !void`: read op at frame.pc via bytecode.decodeOp, dispatch on op tag, execute. one handler per op. ~24 handlers; each ~5-15 lines.
 
-- [ ] **Step 3:** the dispatch table is a `[256]fn(*VM) ResumePoint` populated at comptime.
+- [ ] **Step 4:** `runTop(world: *World, chunk: FormId) !Value`: push frame, loop `step` until frame stack empty, return result.
 
-- [ ] **Step 4:** smoke: load a bytecode file produced by rust seed; run it; verify result. start with the simplest chunk (a single `LoadConst 0; Return`).
+- [ ] **Step 5:** **tail-call dispatch optimization** (optional in stage 1): replace the switch with separate handler functions chained via `@call(.always_tail, dispatch_table[next_op], .{vm, world})`. 2-3x faster but ~50% more code. **Skip in stage 1; add post-smoke.**
 
-- [ ] **Step 5:** scale up to full programs.
+- [ ] **Step 6:** smoke: hand-construct a chunk that does `PushConst Int(3); Return`. Run via runTop. Verify result == Int(3).
 
-- [ ] **Step 6:** commit.
+## Task A.6: intrinsics.zig (native methods)
 
-## Task 20: bridge — rust seed produces V4 bytes, zig VM consumes
+**Files:** `crates/zig-substrate/src/intrinsics.zig`
 
-**Files:** `crates/substrate/src/main.rs` (rust) or new bridge tool
+- [ ] **Step 1:** identify minimum-viable intrinsic set for the smoke programs:
+  - arithmetic: `:+:`, `:-:`, `:*:`, `:/:` on Integer
+  - comparison: `:=`, `:<`, `:>` on Integer + Bool
+  - `:!!` on Object/Nil/Bool (truthiness)
+  - `:proto`, `:is`, `:identity` on Object (reflection)
+  - `:slot:`, `:slotSet!:` on Object (slot access)
+  - `:car`, `:cdr` on Cons
+  - `:bind:to:`, `:set:to:`, `:lookup:` on Env
+  - `:current` (push frame env)
+  - `:say:` on $out (terminal print — for hello world)
 
-- [ ] **Step 1:** add a flag `moof --emit-bytecode <source>` that compiles source and writes V4 bytecode (+ const-pool + chunk-metadata) to a file.
+  ~30 natives, smallest viable surface.
 
-- [ ] **Step 2:** `moof-zig <file>` reads it, instantiates the World, runs.
+- [ ] **Step 2:** install each as a `NativeFn` (`fn(world: *World, self_: Value, args: []const Value) anyerror!Value`) bound to the appropriate proto's handlers table.
 
-- [ ] **Step 3:** smoke: end-to-end `moof --emit-bytecode '[1 + 2]' > /tmp/p.bc; moof-zig /tmp/p.bc` → `3`.
+- [ ] **Step 3:** smoke: with a chunk that does `LoadConst Int(1); LoadConst Int(2); Send :+: argc=1 ic=0; Return`, verify dispatch finds Integer:+:, calls the native, returns Int(3).
 
-- [ ] **Step 4:** commit.
+## Task A.7: image.zig (deserializer)
 
-## Task 21: stdlib bootstrap on zig
+**Files:** `crates/zig-substrate/src/image.zig`
 
-**Files:** zig substrate
+per V4 spec §10. read a .vat file into a fresh World.
 
-- [ ] **Step 1:** the lib/main.moof bootstrap dance: read main.moof, compile (still via rust seed), produce bytecode file, hand to zig. or: have the rust seed produce a single "bootstrap image" file containing all of lib/'s compiled state.
+- [ ] **Step 1:** `parseManifest(json: []const u8) Manifest` — parse the manifest.json wrapper. (could use `std.json` in zig 0.16.)
 
-- [ ] **Step 2:** zig substrate loads the bootstrap image at startup and serves moof code from there.
+- [ ] **Step 2:** `loadVatImage(world: *World, bytes: []const u8) !void`:
+  - verify magic "MVAT" + version 4
+  - read header
+  - read SymTableSection — intern each in order
+  - read FormSection — alloc each in order; FormId payload = position
+  - read ChunkSection — populate chunk_bytecode/consts/params
+  - read NativeRefsSection — re-bind native methods by name (look up in process-wide intrinsics table)
+  - read McoBindingsSection — load wasm bytes from mcos/ cache; instantiate
+  - read FarRefsSection — populate far_ref_table (defer resolution to first use)
+  - verify ImageHash footer
 
-- [ ] **Step 3:** smoke: full stdlib works on zig host.
-
-- [ ] **Step 4:** commit.
-
-## Task 22: phase-γ exit + benchmark
-
-- [ ] **Step 1:** full smoke battery on zig host. all V3 + V4-α features.
-
-- [ ] **Step 2:** benchmark: `time moof-zig <bootstrap-image>` for cold boot + a representative program.
-
-- [ ] **Step 3:** expect: zig host is ~3x faster than rust match-dispatch on typical programs (per spec rationale). bootstrap time should be sub-second.
-
-- [ ] **Step 4:** push.
-
-**Exit criterion for Phase γ:** zig substrate compiles and runs moof code. all features from phases α + β + V3 work. rust substrate's VM + heap + intrinsics are formally deprecated (still exist, but the zig binary is the canonical runtime). benchmark beats rust dispatch.
+- [ ] **Step 3:** smoke: serialize a tiny World by hand (in code), write to bytes, deserialize, verify the deserialized World has the same heap+syms+chunks.
 
 ---
 
-# Phase δ — OCaml seed reader + compiler
+# Track B — OCaml Seed
 
-**forcing function:** the rust seed reader (`reader.rs`) and seed compiler (`compiler.rs`) are deleted. moof source → V4 bytecode goes through an OCaml binary. zig substrate consumes the bytecode unchanged. once parser.moof + compiler.moof self-host, OCaml is throw-away scaffolding.
+Five parallel sub-tracks. Each subagent works from the V4 spec + a tight prompt.
 
-**dependency:** phase γ should land first (zig host stable). phase δ can be parallel after that.
+## Task B.1: project skeleton + AST
 
-## Task 23: OCaml project skeleton + reader
+**Files:** `crates/ocaml-seed/{dune-project,src/dune,src/ast.ml}`
 
-**Files:** `crates/ocaml-seed/{dune-project,src/reader.ml}`
+- [ ] **Step 1:** `dune-project`:
+```
+(lang dune 3.0)
+(name moof_seed)
+```
 
-- [ ] **Step 1:** `dune-project` for OCaml 5.x with menhir + alcotest.
+- [ ] **Step 2:** `src/dune`:
+```
+(library
+ (name moof_seed)
+ (libraries))
+```
 
-- [ ] **Step 2:** port `reader.rs`'s s-expression parser to OCaml. use menhir or hand-written parser combinators. produce an AST that mirrors moof's source-form structure.
+- [ ] **Step 3:** `bin/dune`:
+```
+(executable
+ (name seed)
+ (public_name moof-seed)
+ (libraries moof_seed))
+```
 
-- [ ] **Step 3:** smoke: read `[1 + 2]` → AST equivalent to `(__send__ 1 + 2)`.
+- [ ] **Step 4:** `src/ast.ml`: the source-Form ADT. matches moof's reader output.
+```ocaml
+type form =
+  | Nil
+  | Bool of bool
+  | Int of int  (* int63 — moof uses i48 *)
+  | Char of int
+  | Sym of string
+  | Str of string
+  | Cons of form * form
+  | Vec of form list  (* for #[...] table literals *)
+  (* ... *)
 
-- [ ] **Step 4:** commit.
+let car = function
+  | Cons (h, _) -> h
+  | _ -> failwith "car: not a cons"
+;;
+```
 
-## Task 24: OCaml seed compiler
+## Task B.2: reader.ml (S-expr + bracket parser)
 
-**Files:** `crates/ocaml-seed/src/{compiler,bytecode}.ml`
+**Files:** `crates/ocaml-seed/src/reader.ml`
 
-- [ ] **Step 1:** define ADT for `Op` matching the V4 spec.
+mirrors `crates/substrate/src/reader.rs`. ~1300 lines of rust → expect ~600-800 LoC of OCaml.
 
-- [ ] **Step 2:** port `compiler.rs`'s logic to OCaml: `compile_form`, `compile_send`, `compile_if`, etc. emit ops with byte-offset jumps.
+- [ ] **Step 1:** lexer that handles:
+  - whitespace + comments (`;` to EOL)
+  - identifiers (symbols)
+  - integers, floats, characters (`#\a`), strings (`"..."`)
+  - parens `()`, brackets `[]` (send syntax), curlies `{}` (object literals)
+  - special chars: `'` (quote), `` ` `` (quasiquote), `,` (unquote), `,@` (unquote-splice), `#[`, `#\`, `#true`, `#false`
 
-- [ ] **Step 3:** include all V4 emission rules: LoadHere for $here, SendSelf/SendHere fusions, JumpIfTrue (when applicable).
+- [ ] **Step 2:** parser that produces `ast.form` values.
 
-- [ ] **Step 4:** include the V3 const-fold peephole (or skip — it's a moof-Compiler optimization, not strictly needed at seed level).
+- [ ] **Step 3:** smoke: read `[1 + 2]` → `Cons(Sym "__send__", Cons(Int 1, Cons(Sym "+", Cons(Int 2, Nil))))` or equivalent.
 
-- [ ] **Step 5:** smoke: compile `[1 + 2]` to bytes matching what rust seed produced.
+## Task B.3: opcodes.ml + bytecode.ml
 
-- [ ] **Step 6:** commit.
+**Files:** `crates/ocaml-seed/src/{opcodes,bytecode}.ml`
 
-## Task 25: OCaml-seed CLI
+mirrors zig's opcodes.zig + bytecode.zig — same V4 spec contract.
 
-**Files:** `crates/ocaml-seed/src/bin/seed.ml`
+- [ ] **Step 1:** `opcodes.ml`:
+```ocaml
+type op =
+  | PushNil
+  | PushTrue
+  | PushFalse
+  | LoadConst of int  (* u16 idx *)
+  | LoadSelf
+  | LoadHere
+  | LoadName of int  (* SymId u32 *)
+  | Pop
+  | Dup
+  | Send of { selector: int; argc: int; ic_idx: int }
+  | TailSend of { selector: int; argc: int }
+  | SuperSend of { selector: int; argc: int; ic_idx: int }
+  | SendDynamic of { argc: int; ic_idx: int }
+  | SendSelf of { selector: int; argc: int; ic_idx: int }
+  | SendHere of { selector: int; argc: int; ic_idx: int }
+  | TailSendSelf of { selector: int; argc: int }
+  | TailSendHere of { selector: int; argc: int }
+  | Jump of int  (* i16 offset *)
+  | JumpIfFalse of int
+  | JumpIfTrue of int
+  | Return
+  | PushClosure of { chunk: int }  (* u32 FormId *)
+  | Suspend of { promise_ic: int }
+  | Resume of { frame_ic: int }
+```
 
-- [ ] **Step 1:** `seed <source-file> --emit-bytecode <output-file>` mirrors rust's emit-bytecode flag.
+- [ ] **Step 2:** `bytecode.ml`: `encode_op : op -> bytes` and `decode_op : bytes -> int -> op * int`. big-endian; tags per V4 spec §3.
 
-- [ ] **Step 2:** smoke: `seed /tmp/test.moof --emit-bytecode /tmp/p.bc; moof-zig /tmp/p.bc` end-to-end works.
+- [ ] **Step 3:** smoke: same as Track A's bytecode roundtrip, but in OCaml.
 
-- [ ] **Step 3:** commit.
+## Task B.4: compiler.ml
 
-## Task 26: switch the bootstrap to use OCaml-seed
+**Files:** `crates/ocaml-seed/src/compiler.ml`
 
-**Files:** the moof boot dance
+the core — port `crates/substrate/src/compiler.rs` to OCaml. ~700 LoC rust → ~500-600 LoC OCaml.
 
-- [ ] **Step 1:** change `moof-zig`'s startup to invoke OCaml-seed to compile lib/main.moof (and friends) into a bootstrap image.
+- [ ] **Step 1:** chunk-building state:
+```ocaml
+type chunk_builder = {
+  mutable ops: op list;  (* reversed during build *)
+  mutable consts: value list;
+  mutable ic_count: int;
+  params: int list;  (* SymId list *)
+  source: form;
+}
+```
 
-- [ ] **Step 2:** or: have a separate `moof-build` tool that orchestrates the seed-compile + image-bundle, producing a single binary embedding the bootstrap image. zig substrate loads it at startup.
+- [ ] **Step 2:** `compile_form : form -> chunk_builder -> bool -> unit` (form + chunk + tail). dispatch on form's shape:
+  - Nil/Bool/Int/Char/Str → LoadConst
+  - Sym "self" → LoadSelf
+  - Sym "$here" → LoadHere
+  - Sym _ → LoadName
+  - Cons → `compile_list`
 
-- [ ] **Step 3:** smoke: full stdlib bootstrap, all features.
+- [ ] **Step 3:** `compile_list`: detect head:
+  - `__send__` → compile_send
+  - `quote` → compile_quote (LoadConst with the form)
+  - `set!` → compile_set
+  - `def` → compile_def
+  - `if` → compile_if
+  - `fn` → compile_fn
+  - `defmacro` → compile_defmacro
+  - `do` → compile_do
+  - `let` → compile_let
+  - else → compile_call (treat as `[head args...]`)
 
-- [ ] **Step 4:** commit.
+- [ ] **Step 4:** each compile_X follows V4 emission rules from spec §5:
+  - compile_def emits SendHere :bind:to: (since def is the V3 macro expansion)
+  - compile_set emits Send :current then SendDynamic :set:to: (or compile to the [[Env current] set: 'name to: value] shape)
+  - compile_if emits the V3 Send-based shape with the Task 13 peephole
+  - compile_send detects self / $here receivers and emits SendSelf / SendHere
 
-## Task 27: delete rust seed reader + compiler
+- [ ] **Step 5:** include the V3 const-fold peephole (`[1 + 2] → LoadConst 3`).
 
-**Files:** `crates/substrate/src/{reader,compiler}.rs` (and many call sites)
+- [ ] **Step 6:** smoke: compile `[1 + 2]` → emit `LoadConst 3; Return`.
 
-- [ ] **Step 1:** delete `reader.rs` and `compiler.rs`.
+## Task B.5: image.ml (serializer)
 
-- [ ] **Step 2:** delete `lib.rs::eval`, `lib.rs::eval_program` (or move to a different layer if still needed).
+**Files:** `crates/ocaml-seed/src/image.ml`
 
-- [ ] **Step 3:** delete the now-orphaned helpers in `intrinsics.rs` (`compileTop:`, `compileForm:`, etc — wait, those are the moof Compiler's. those stay.) actually only delete rust-side seed compilers.
+per V4 spec §10 — write a per-vat .vat file.
 
-- [ ] **Step 4:** the `crates/substrate` crate is now... what? a leaf crate with only the rust-side native primitives? or fully obsolete?
+- [ ] **Step 1:** `vat_image`: record holding all the sections we need to write (heap forms, sym table, chunks, native refs, mco bindings, far-refs).
 
-- [ ] **Step 5:** if obsolete, delete the entire `crates/substrate` crate. update workspace `Cargo.toml`. remove rust dependencies.
+- [ ] **Step 2:** `serialize_vat (vat: vat_image) : bytes` — produce the full file matching V4 spec §10.3 byte layout. include the magic "MVAT", version 0x0004, header, sections, footer hash.
 
-- [ ] **Step 6:** smoke: full moof stack runs via `moof-zig` + OCaml-seed.
+- [ ] **Step 3:** smoke: serialize a tiny World by hand, write bytes, hash matches expected blake3.
 
-- [ ] **Step 7:** commit.
+## Task B.6: seed CLI
 
-## Task 28: phase-δ exit + integration
+**Files:** `crates/ocaml-seed/bin/seed.ml`
 
-- [ ] **Step 1:** the moof workspace now has three (or four) crates:
-  - `crates/zig-substrate` — the runtime
-  - `crates/ocaml-seed` — the seed compiler
-  - `crates/mco-pack` — utility
-  - `crates/abi` + `crates/abi-rust` — the mco ABI (may consolidate)
+- [ ] **Step 1:** parse argv:
+  - `seed compile <file.moof>` — print the V4 bytecode for the file
+  - `seed build-image --root lib/ --entry main.moof --output system.vat` — full bootstrap-image build
 
-- [ ] **Step 2:** the rust substrate is **GONE**.
+- [ ] **Step 2:** `compile <file>` reads the file, parses, compiles each top-level form, prints disassembly + hex dump of bytecode.
 
-- [ ] **Step 3:** count LoC: target zig ≤2k + ocaml ≤1.5k. rust ≤500 (just mco-pack + abi).
+- [ ] **Step 3:** `build-image` (more elaborate — multi-task subagent):
+  - read main.moof + transitively load all referenced files via `[$transporter load: ...]` (just trace the load chain statically)
+  - compile each form in order; populate a virtual World
+  - serialize the World as a .vat file via image.ml
 
-- [ ] **Step 4:** push the world-changing moment.
-
-**Exit criterion for Phase δ:** rust substrate is deleted. moof boots via zig + OCaml. all V3 + V4 features work. moof is a polyglot project — zig for substrate, OCaml for compiler, moof for everything else.
+- [ ] **Step 4:** smoke: `seed compile /tmp/test.moof` shows V4 bytes for `[1 + 2]`.
 
 ---
 
-# Phase ε (post-V4) — what comes next
+# Track D — Image Format (shared)
 
-once V4 lands, the path to phase B (single-vat persistence) is clear:
+The image format is fully specified in V4 §10. This track has minimal NEW work:
 
-- canonical bytecode + content-addressed chunks (already done in V4-β!) → cross-vat code sharing
-- byte-tagged Form serialization → heap snapshot to LMDB
-- the zig substrate already has the GC discipline (turn-boundary; no mid-step alloc; etc.)
-- intent/receipt model → cap calls are journaled separately
+## Task D.1: confirm spec is implementable
 
-phase B becomes "wire LMDB + add journal-tail bootloader + write the canonical encoder for Forms." most of the substrate work is done.
+- [ ] read V4 §10 carefully. flag any ambiguity:
+  - byte layout for Value union (per V4 §4)
+  - exact ordering rules for slots/handlers/meta (insertion order per D5)
+  - blake3 hashing scope (footer excluded? yes, per §10.3)
+  - native-ref re-binding rules (look up by name in process-wide intrinsics table)
+  - mco-binding hash format (32-byte blake3)
+
+if anything is unclear: pause, write a one-paragraph clarification, push to the spec. don't start coding around an ambiguity.
+
+## Task D.2: produce a reference fixture
+
+- [ ] hand-craft a tiny vat-image (smallest non-trivial: a vat with one Form, one chunk, one sym). encode the bytes by hand following V4 §10.3.
+
+- [ ] commit to `fixtures/v4-bytecode/tiny.vat` + `tiny.vat.json` (the manifest) + `tiny.expected.txt` (a human-readable description of what's in it).
+
+- [ ] both Track A's deserializer and Track B's serializer will validate against this fixture as their first integration test.
 
 ---
 
-## Final exit criteria for V4 (the whole thing)
+# Track C — Integration & Smoke
 
-- [ ] all 24 opcodes work in the zig substrate.
-- [ ] byte-tagged chunk encoding; deterministic compile; content-hashable.
-- [ ] zig substrate host: heap, GC, VM, mcos, intrinsics. ≤2k LoC.
-- [ ] OCaml seed compiler: reader + compiler emitting V4 bytecode. ≤1.5k LoC.
-- [ ] rust substrate crate **deleted** (`crates/substrate` no longer exists, or is reduced to mco utilities only).
-- [ ] all V3 features work end-to-end on the new stack.
-- [ ] CLI smokes pass: arithmetic, control flow, def/set!, live edit, become:, `$here`, reflection.
-- [ ] benchmark: cold-boot moof from scratch ≤ 0.8s (vs current ~1.3s).
-- [ ] benchmark: hot loop dispatch ~3x faster than rust match.
-- [ ] documentation: spec doc updated; this plan marked complete.
+C tasks BLOCK on A + B having shipped their minimum viable.
+
+## Task C.1: bytecode roundtrip (A.3 ↔ B.3)
+
+- [ ] **Step 1:** OCaml seed emits the bytecode for `LoadConst 0; Send :+: argc=1 ic=0; Return` (with a const-pool entry of `Int 2`). hex-dump to a file.
+
+- [ ] **Step 2:** Zig substrate reads the same bytes, decodes via bytecode.zig, verifies each op matches.
+
+- [ ] **Step 3:** Reverse: Zig encodes the same op stream, OCaml decodes, matches.
+
+- [ ] **Step 4:** smoke roundtrip for every opcode. fail-fast on any mismatch.
+
+## Task C.2: tiny-program smoke (A + B end-to-end)
+
+- [ ] **Step 1:** `echo '[1 + 2]' | moof-seed compile - > /tmp/p.bc`
+
+- [ ] **Step 2:** `moof-zig /tmp/p.bc` → output: `3`
+
+- [ ] **Step 3:** repeat for: `(do (def x 42) x)`, `(if #true 1 2)`, `[$here parent]`, `[Object new]`. each must produce the expected result.
+
+## Task C.3: stdlib bootstrap smoke
+
+- [ ] **Step 1:** `moof-seed build-image --root lib/ --entry main.moof --output /tmp/system.vat`
+
+- [ ] **Step 2:** `moof-zig /tmp/system.vat` boots successfully (no panics; system vat loaded).
+
+- [ ] **Step 3:** `echo '(do (def x [Object new]) [x foo])' | MOOF_VAT=/tmp/system.vat moof-zig` runs against the loaded stdlib.
+
+**This is the BIG integration moment. Expect bugs.** Iterate.
+
+---
+
+# Final — Rust Deprecation
+
+ONLY after Track C smoke passes:
+
+## Task Final.1: switch default CLI
+
+- [ ] **Step 1:** add a top-level `moof` wrapper script (or alias) that invokes `moof-zig` with the bundled `system.vat`.
+
+- [ ] **Step 2:** old `moof` (rust) becomes `moof-rs` for transition period.
+
+- [ ] **Step 3:** smoke: `moof '[1 + 2]' → 3` via zig.
+
+## Task Final.2: delete the rust substrate runtime
+
+- [ ] **Step 1:** delete `crates/substrate/src/{reader,compiler,vm,opcodes,nursery,world,intrinsics,table,wasm,transporter}.rs`. that's the runtime; the data types (form, value, sym, foreign, heap) might also go.
+
+- [ ] **Step 2:** keep `crates/mco-pack/` and `crates/abi/` + `crates/abi-rust/` — those are mco utilities, not runtime.
+
+- [ ] **Step 3:** update `crates/Cargo.toml` workspace to remove `substrate` member.
+
+- [ ] **Step 4:** smoke: all CLI tests still pass via moof-zig.
+
+- [ ] **Step 5:** commit + push:
+```
+moof: delete rust substrate; moof-zig + ocaml-seed are canonical
+```
+
+---
+
+## execution plan: parallelization map
+
+**stage 1 — kick off ~10-12 parallel subagents simultaneously:**
+
+| agent | track | task | scope |
+|---|---|---|---|
+| α1 | A | A.1 | value+sym+form extracted; main.zig updated |
+| α2 | A | A.2 | heap.zig + become roundtrip |
+| α3 | A | A.3 | opcodes.zig + bytecode.zig + roundtrip smoke |
+| α4 | A | A.4 | protos + world init |
+| α5 | A | A.5 | vm + dispatch + smoke `LoadConst Int(3); Return` |
+| α6 | A | A.6 | intrinsics (~30 natives) |
+| α7 | A | A.7 | image.zig deserializer |
+| β1 | B | B.1+B.2 | project skeleton + reader |
+| β2 | B | B.3 | opcodes.ml + bytecode.ml + roundtrip |
+| β3 | B | B.4 | compiler.ml |
+| β4 | B | B.5+B.6 | image.ml + seed CLI |
+| δ1 | D | D.2 | reference fixture (tiny.vat) |
+
+**stage 2 — sequential integration after stage 1:**
+
+| step | task |
+|---|---|
+| C.1 | bytecode roundtrip A.3 ↔ B.3 |
+| C.2 | tiny-program smoke A + B |
+| C.3 | stdlib bootstrap (the big one) |
+
+**stage 3 — fix loop (parallel as needed):**
+
+dispatch fix subagents for any integration failures.
+
+**stage 4 — sequential final:**
+
+| step | task |
+|---|---|
+| Final.1 | switch default CLI to zig |
+| Final.2 | delete rust substrate |
+
+---
+
+## risks + mitigations
+
+1. **zig 0.16 stdlib churn.** every API used in Track A could break in a point release. *mitigation:* pin to 0.16.0 in `build.zig`. document the version. don't update zig casually.
+
+2. **OCaml seed scope creep.** moof has a lot of macros and sugar. seed might not handle every edge case. *mitigation:* seed compiles ENOUGH for `lib/main.moof` to bootstrap. once the stdlib loads, `parser.moof` and `compiler.moof` take over for everything else. seed never sees user code post-bootstrap.
+
+3. **bytecode contract drift.** A and B independently implement V4 §3. they might disagree on edge cases (jump offset signedness, big-endian-ness, etc.). *mitigation:* Track C.1 catches this immediately. fix and rerun.
+
+4. **stdlib bootstrap is the long pole.** the moof stdlib has 23 files with 1000+ forms, macros that emit complex bytecode, and proto-chain setup. *mitigation:* tackle simplest files first (early/00-cons, early/01-nil); ship those green; iterate.
+
+5. **wasm mco instantiation in zig.** wasmtime has a C api; zig has bindings. *mitigation:* use wasm3 or wasmer instead if wasmtime is hard. lazy-instantiate (V4 §10 open question 4).
+
+6. **the rust substrate stops working mid-session.** *mitigation:* DON'T touch rust until Track C.3 smoke passes. it's the safety net. delete it LAST.
+
+7. **session timeout.** *mitigation:* aim for end-of-stage-2 (smoke for tiny programs) as the session goal. stages 3-4 spill to next session.
+
+---
+
+## exit criteria for this session
+
+minimum viable session goal:
+
+- [ ] zig substrate: heap + vm + intrinsics + image deserializer working
+- [ ] OCaml seed: reader + compiler + image serializer working
+- [ ] roundtrip smoke: encode in OCaml, decode in zig, match (all 24 opcodes)
+- [ ] tiny-program smoke: `moof-zig <(moof-seed compile '[1 + 2]')` → 3
+- [ ] CLI verification: `[1 + 2]`, `(if #true 1 2)`, `(do (def x 1) x)` all work end-to-end
+
+stretch session goals (if time):
+
+- [ ] stdlib bootstrap smoke (Track C.3 passes)
+- [ ] rust deprecation initiated (Final.1)
+
+absolute session goals (probably next session):
+
+- [ ] full rust deletion
+- [ ] tail-call-threaded dispatch
+- [ ] performance benchmark
 
 ---
 
 ## see also
 
-- spec: `docs/superpowers/specs/2026-05-10-vm-V4-opcodes-design.md`
-- V3 spec + plan (the predecessor wave; reference patterns)
-- substrate-laws.md (L3, L5, L10, L11)
-- determinism-laws.md (D1-D6)
-- reflection-contract.md (R2)
-- the 2026-05-10 polyglot conversation (the "why" for the language choices)
-
----
-
-## a note on phase ordering + parallelization
-
-phases α and β must land in rust before γ starts (γ depends on the new opcodes + byte encoding being in rust, even if just to validate the encoding before re-implementing in zig).
-
-phase γ should land before δ STARTS, BUT δ can be developed in parallel after γ has a stable bytecode-consumer story. an experienced agent could start δ once phase β is committed — but the integration moment (δ's "delete rust substrate") requires γ to be functional.
-
-if working in a multi-agent setting, phases γ and δ can split between two agents after β lands. they meet at task 26-27.
-
----
-
-## known risks + mitigations
-
-1. **bootstrap dance breakage in phase β.** the moof Compiler self-compiles its own code via byte-emit. if the byte format is wrong, the bootstrap fails opaquely. *mitigation:* keep `Vec<Op>` alongside `Vec<u8>` (task 11) until everything works on bytes; flip the dispatch only after bytes are verified. delete `Vec<Op>` last.
-
-2. **zig compile errors.** zig is a moving target. *mitigation:* pin to a specific zig version in `build.zig`'s `.minimum_zig_version`. document the version in the README.
-
-3. **OCaml seed bootstrap.** OCaml has its own toolchain. *mitigation:* dune + opam are stable; pin to OCaml 5.x. produce a static binary so users don't need OCaml installed.
-
-4. **mco loader portability.** wasmtime in zig vs wasmtime in rust. *mitigation:* use a stable wasm runtime that has zig bindings (wasm3, wasmer-c). or: port the wasm loader carefully, validating with existing mco binaries.
-
-5. **deletion of rust substrate is irreversible.** once gone, recovering it from git history is doable but painful. *mitigation:* the rust substrate is a separate crate; we can leave it in the workspace as "legacy/" until phase δ + 30 days confirms the zig host is robust.
-
-6. **performance regression in zig.** zig MIGHT not actually beat rust on dispatch — depends on inlining + tail-call success. *mitigation:* benchmark early (after task 19) before committing fully to the migration.
+- spec: `docs/superpowers/specs/2026-05-10-vm-V4-opcodes-design.md` (the contract for all tracks)
+- V3 plan: `docs/superpowers/plans/2026-05-09-vat-V3-here-form.md` (predecessor wave)
+- the 2026-05-10 conversation: polyglot language choices, opcode fusion design, image format brainstorm
