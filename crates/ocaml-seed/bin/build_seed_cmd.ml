@@ -620,6 +620,18 @@ let zig_registry_keys : string list = [
   (* Transporter / Compiler / Reader are SKIPPED — host installCaps
      wires those AFTER image-load (anonymous-proto names + $-env
      binding diverge from canonical NativeRefs path). *)
+
+  (* Free-function globals — bound on here_form by NAME (not on any
+     proto's handler table). port of rust install_global. moof code
+     calls these as `(name arg…)` which lowers to LoadName + Send :call,
+     so the method-Form must:
+       - have proto = Method (so Send :call finds Method:call handler)
+       - sit in here_form's slots under the unprefixed name
+       - have its FormId recorded in NativeRefsSection so zig binds
+         the NativeFn at load time
+     wire_natives recognizes the `Global:` prefix and routes through a
+     different allocation path — see wire_global_native there. *)
+  "Global:setHandler!";
 ]
 
 (* Split "ProtoName:rest" into (proto, selector). Selector keeps any
@@ -696,28 +708,44 @@ let wire_natives (bp : boot_protos) (here_form_id : int)
     (Compiler.intern "Heap", Ast.FormRef heap_id);
   patch_form_slots here_form_id
     (Compiler.intern "Chunks", Ast.FormRef chunks_id);
-  (* For each REGISTRY key: alloc method-Form, patch proto handlers,
-     accrue the NativeRefs entry. *)
+  (* For each REGISTRY key: alloc method-Form, patch proto handlers (or
+     bind on here_form for `Global:` keys), accrue the NativeRefs entry. *)
   List.fold_left (fun acc key ->
     let (proto_name, selector) = split_native_key key in
-    match Hashtbl.find_opt proto_ids proto_name with
-    | None ->
-        Printf.eprintf
-          "build-seed: warning: REGISTRY key %S has no proto target; skipping\n"
-          key;
-        acc
-    | Some proto_id ->
-        let sel_sym = Compiler.intern selector in
-        (* alloc method-Form: proto = Method, otherwise empty. *)
-        let method_id = alloc_form_raw Image.{
-          proto = Ast.FormRef bp.method_id;
-          slots = [];
-          handlers = [];
-          meta = [];
-          frozen = false;
-        } in
-        patch_form_handlers proto_id (sel_sym, Ast.FormRef method_id);
-        Image.{ method_form_id = method_id; native_name = key } :: acc
+    if proto_name = "Global" then begin
+      (* Free-function global. Bind on here_form's slots under the
+         unprefixed name. The method-Form has proto=Method so a
+         Send :call from `(name arg…)` walks to Method:call's handler,
+         which checks native_fns and dispatches. *)
+      let name_sym = Compiler.intern selector in
+      let method_id = alloc_form_raw Image.{
+        proto = Ast.FormRef bp.method_id;
+        slots = [];
+        handlers = [];
+        meta = [];
+        frozen = false;
+      } in
+      patch_form_slots here_form_id (name_sym, Ast.FormRef method_id);
+      Image.{ method_form_id = method_id; native_name = key } :: acc
+    end else
+      match Hashtbl.find_opt proto_ids proto_name with
+      | None ->
+          Printf.eprintf
+            "build-seed: warning: REGISTRY key %S has no proto target; skipping\n"
+            key;
+          acc
+      | Some proto_id ->
+          let sel_sym = Compiler.intern selector in
+          (* alloc method-Form: proto = Method, otherwise empty. *)
+          let method_id = alloc_form_raw Image.{
+            proto = Ast.FormRef bp.method_id;
+            slots = [];
+            handlers = [];
+            meta = [];
+            frozen = false;
+          } in
+          patch_form_handlers proto_id (sel_sym, Ast.FormRef method_id);
+          Image.{ method_form_id = method_id; native_name = key } :: acc
   ) [] zig_registry_keys
   |> List.rev
 

@@ -967,6 +967,15 @@ fn heapMetaOfAt(world: *World, _: Value, args: []const Value) anyerror!Value {
 
 fn methodCall(world: *World, self_: Value, args: []const Value) anyerror!Value {
     const id = self_.asFormId() orelse return raise(world, "dispatch", "receiver of :call is not a Form");
+    // native? free-function globals bound on here_form (e.g.
+    // `setHandler!`, `cons`, `list`) are method-Forms with a registered
+    // native_fn but NO body chunk. dispatch them directly — mirrors
+    // rust World::invoke (vm.rs:250) which checks native_fns first.
+    if (world.nativeFn(id)) |native| {
+        const captured_sym = try world.syms.intern("captured-self");
+        const captured = world.formSlot(id, captured_sym);
+        return native(world, captured, args);
+    }
     // captured-self for closures created by PushClosure.
     const captured_sym = try world.syms.intern("captured-self");
     const captured = world.formSlot(id, captured_sym);
@@ -1364,6 +1373,39 @@ fn transporterLoadAll(world: *World, self_: Value, args: []const Value) anyerror
 }
 
 // ─────────────────────────────────────────────────────────────────
+// Free-function globals — bound on here_form's slots by NAME.
+//
+// the rust seed installs these via install_global (intrinsics.rs:2938):
+// allocates a method-Form with proto=Method, registers a NativeFn,
+// binds the form on here_form under the global's name. moof code
+// calls them as `(name arg…)` — the parser produces a plain cons,
+// the compiler lowers to `LoadName name` + `Send :call argc`.
+//
+// for the zig substrate, ocaml-seed's `build_seed_cmd.ml::wire_natives`
+// pre-allocates one method-Form per `Global:name` REGISTRY entry,
+// binds the form on here_form, and emits a matching NativeRefsSection
+// entry. image-load rebinds the NativeFn via lookupNativeByName.
+//
+// dispatch path: send :call lands on the receiver method-Form;
+// lookup walks proto chain to Method, finds methodCall handler;
+// methodCall checks native_fns first (free-fn case) and delegates
+// to the NativeFn directly with the call args.
+// ─────────────────────────────────────────────────────────────────
+
+// port of crates/substrate/src/intrinsics.rs::install_globals `setHandler!`.
+// (setHandler! Proto 'sel fn) — install `fn` as handler for `sel` on
+// `Proto`. bumps proto's generation so existing ICs invalidate (L10).
+fn globalSetHandler(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 3) return raise(world, "arity", "(setHandler! Proto 'sel fn)");
+    const proto_id = args[0].asFormId() orelse return typeError(world, "setHandler!: receiver must be a Form");
+    const sel = args[1].asSym() orelse return typeError(world, "setHandler!: selector must be a Symbol");
+    const proto_form = world.heap.getMut(proto_id);
+    try proto_form.handlers.put(world.allocator, sel, args[2]);
+    try world.bumpGeneration(proto_id);
+    return args[2];
+}
+
+// ─────────────────────────────────────────────────────────────────
 // REGISTRY — comptime name → NativeFn map (V4 Track C.3 Task 2.1).
 //
 // keyed by canonical "ProtoName:selector" strings. image-load
@@ -1485,4 +1527,10 @@ pub const REGISTRY = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "Compiler:useSeed", compilerUseSeed },
     .{ "Reader:useMoof", readerUseMoof },
     .{ "Reader:useSeed", readerUseSeed },
+
+    // Free-function globals — bound on here_form by name (no proto).
+    // ocaml-seed allocates one method-Form per entry and emits a
+    // NativeRefs binding under the `Global:NAME` key. moof code calls
+    // these as `(name arg…)` which lowers to LoadName + Send :call.
+    .{ "Global:setHandler!", globalSetHandler },
 });
