@@ -347,6 +347,113 @@ let bootstrap_protos () : boot_protos =
     foreign_id; table_id; frame_id; macros_id; opcode_id;
   }
 
+(* ----------------------------------------------------------------
+   here_form / macros_form allocation
+
+   Mirror crates/substrate/src/world.rs::World::new (lines ~330-340)
+   and crates/zig-substrate/src/world.zig::init (lines ~311-328). The
+   image carries the canonical FormIds for both; zig's image-load reads
+   them from the header and populates world.here_form / world.macros_form.
+
+   here_form is the env-Form serving as the vat's globals. Its proto
+   is Env, its :meta.parent is Nil (root of env chain), and one of its
+   slots binds `$here` to itself (so [Env current] / `$here`-lookup
+   resolves). We also seed bindings for the 18 proto names so user
+   code can reach `Object`, `Cons`, etc. by name.
+
+   macros_form is the canonical macro registry — a plain Object-proto
+   Form whose slots will hold macro-name → method-Form once macros
+   load. Empty here; the runtime populates as user code defines.
+   ---------------------------------------------------------------- *)
+
+(* Allocate here_form + macros_form, returning their FormIds. Must be
+   called after bootstrap_protos so we know Env / Object FormIds. *)
+let alloc_here_and_macros (bp : boot_protos) : int * int =
+  let parent_sym = Compiler.intern "parent" in
+  let name_meta = Compiler.intern "name" in
+  let macros_name = Compiler.intern "Macros" in
+  (* macros_form: proto=Object, :meta name=Macros, no slots. *)
+  let macros_id = alloc_form_raw Image.{
+    proto = Ast.FormRef bp.object_id;
+    slots = [];
+    handlers = [];
+    meta = [(name_meta, Ast.Sym "Macros")];
+    frozen = false;
+  } in
+  let _ = macros_name in
+  (* here_form: proto=Env, :meta parent=Nil. Slots populated below. *)
+  let here_id = alloc_form_raw Image.{
+    proto = Ast.FormRef bp.env_id;
+    slots = [];          (* filled in by patch_here_form below *)
+    handlers = [];
+    meta = [(parent_sym, Ast.Nil)];
+    frozen = false;
+  } in
+  (macros_id, here_id)
+
+(* After here_form is allocated, build its slot list (binding `$here`
+   to itself + each proto name to its Form). Since lifted_forms is
+   built by prepending, we splice the patched here_form record back
+   into its original position.
+
+   We don't have a "mutate-by-id" API; instead we filter+replace.
+   Allocation order is preserved because we don't change FormIds. *)
+let patch_here_form (here_id : int) (bp : boot_protos) : unit =
+  let here_sym = Compiler.intern "$here" in
+  let object_s = Compiler.intern "Object" in
+  let nil_s = Compiler.intern "Nil" in
+  let bool_s = Compiler.intern "Bool" in
+  let integer_s = Compiler.intern "Integer" in
+  let char_s = Compiler.intern "Char" in
+  let sym_s = Compiler.intern "Sym" in
+  let cons_s = Compiler.intern "Cons" in
+  let string_s = Compiler.intern "String" in
+  let bytes_s = Compiler.intern "Bytes" in
+  let method_s = Compiler.intern "Method" in
+  let chunk_s = Compiler.intern "Chunk" in
+  let closure_s = Compiler.intern "Closure" in
+  let env_s = Compiler.intern "Env" in
+  let foreign_s = Compiler.intern "ForeignHandle" in
+  let table_s = Compiler.intern "Table" in
+  let frame_s = Compiler.intern "Frame" in
+  let macros_s = Compiler.intern "Macros" in
+  let opcode_s = Compiler.intern "Opcode" in
+  let here_slots = [
+    (here_sym,    Ast.FormRef here_id);
+    (object_s,    Ast.FormRef bp.object_id);
+    (nil_s,       Ast.FormRef bp.nil_id);
+    (bool_s,      Ast.FormRef bp.bool_id);
+    (integer_s,   Ast.FormRef bp.integer_id);
+    (char_s,      Ast.FormRef bp.char_id);
+    (sym_s,       Ast.FormRef bp.sym_id);
+    (cons_s,      Ast.FormRef bp.cons_id);
+    (string_s,    Ast.FormRef bp.string_id);
+    (bytes_s,     Ast.FormRef bp.bytes_id);
+    (method_s,    Ast.FormRef bp.method_id);
+    (chunk_s,     Ast.FormRef bp.chunk_id);
+    (closure_s,   Ast.FormRef bp.closure_id);
+    (env_s,       Ast.FormRef bp.env_id);
+    (foreign_s,   Ast.FormRef bp.foreign_id);
+    (table_s,     Ast.FormRef bp.table_id);
+    (frame_s,     Ast.FormRef bp.frame_id);
+    (macros_s,    Ast.FormRef bp.macros_id);
+    (opcode_s,    Ast.FormRef bp.opcode_id);
+  ] in
+  (* Walk lifted_forms (stored reverse-allocation-order) and rewrite
+     the entry whose FormId == here_id. lifted_forms is a list whose
+     head is the LAST allocated form; position from the head is
+     (next_form_id - 1 - here_id). *)
+  let cur_top = !next_form_id - 1 in
+  let target_offset = cur_top - here_id in
+  let rec patch_at i acc = function
+    | [] -> List.rev acc
+    | f :: rest when i = target_offset ->
+        let patched = Image.{ f with slots = here_slots } in
+        List.rev_append acc (patched :: rest)
+    | f :: rest -> patch_at (i + 1) (f :: acc) rest
+  in
+  lifted_forms := patch_at 0 [] !lifted_forms
+
 (* Convert boot_protos -> Image.proto_table for the image header. *)
 let protos_table (bp : boot_protos) : Image.proto_table =
   Image.{
@@ -475,6 +582,10 @@ let run (args : string array) : unit =
      lifting so the protos sit at the low FormIds the header expects.
      See bootstrap_protos doc. *)
   let bp = bootstrap_protos () in
+  (* Allocate here_form + macros_form. patch_here_form populates the
+     here_form's slots once we know its FormId. *)
+  let (macros_form_id, here_form_id) = alloc_here_and_macros bp in
+  patch_here_form here_form_id bp;
   (* Compile every form. Each compile_top registers its chunk + nested
      closures into the global chunk registry. *)
   List.iter (fun step ->
@@ -513,8 +624,8 @@ let run (args : string array) : unit =
     mcos = [];
     far_refs = [];
     external_vat_refs = [];
-    here_form_id = 0;                    (* runtime alloc *)
-    macros_form_id = 0;
+    here_form_id;
+    macros_form_id;
     protos = protos_table bp;
   } in
   let bytes = Image.serialize vat in
