@@ -477,6 +477,21 @@ let protos_table (bp : boot_protos) : Image.proto_table =
     opcode_id = bp.opcode_id;
   }
 
+(* The active proto table for lifting. Set by run() once
+   bootstrap_protos completes; consulted by build_form_for to assign
+   the right :proto for String / Bytes / Cons Forms.
+
+   This is a ref rather than a parameter because lift_value /
+   build_form_for are mutually recursive and called from inside
+   List.map / List.iter contexts that we don't thread an explicit
+   `bp` through. *)
+let active_protos : boot_protos option ref = ref None
+
+let get_protos () : boot_protos =
+  match !active_protos with
+  | Some p -> p
+  | None -> failwith "build-seed: active_protos unset (bootstrap_protos must run first)"
+
 (* Lift a single Ast.form into the FormSection, returning a scalar
    replacement (FormRef for non-scalars, or the value itself for
    scalars). Recursive: nested compounds inside a Cons are lifted
@@ -501,20 +516,86 @@ let rec lift_value (v : Ast.form) : Ast.form =
            lifted_forms := form :: !lifted_forms;
            Ast.FormRef id)
 
+(* Build a Cons-chain Form representing a list of Char codepoints.
+   This is the canonical String-payload representation zig's
+   transporter expects (see intrinsics.zig::extractPath): a sequence
+   of FormRef-linked Cons cells whose :car is a Char value and :cdr
+   is the next cell (or Nil at the tail).
+
+   Each cons cell is allocated as a fresh Form here (NOT memoized via
+   form_table — two strings with overlapping suffixes still get
+   distinct cells because identity matters for cons chains we build
+   by hand). Returns the FormRef of the head cell, or Nil for empty. *)
+and build_char_chain (codepoints : int list) : Ast.form =
+  let bp = get_protos () in
+  let car_sym = Compiler.intern "car" in
+  let cdr_sym = Compiler.intern "cdr" in
+  let rec go = function
+    | [] -> Ast.Nil
+    | cp :: rest ->
+        let tail = go rest in
+        let cell = Image.{
+          proto = Ast.FormRef bp.cons_id;
+          slots = [(car_sym, Ast.Char cp); (cdr_sym, tail)];
+          handlers = [];
+          meta = [];
+          frozen = true;
+        } in
+        let id = alloc_form_raw cell in
+        Ast.FormRef id
+  in
+  go codepoints
+
 (* Build a vat_form record for a non-scalar Ast.form. For Cons cells
    we emit :car and :cdr slots (which means 'car / 'cdr must be in
    the sym table - we call Compiler.intern to ensure that). *)
 and build_form_for (v : Ast.form) : Image.vat_form =
+  let bp = get_protos () in
   match v with
-  | Ast.Str _ | Ast.Bytes _ ->
-      (* W4/W5: store the actual bytes via a :raw slot. For seed.vat
-         the moof runtime treats String / Bytes Forms as opaque -
-         their identity matters more than payload at this stage
-         (since these are mostly error-message strings inside
-         compiler chunks). *)
+  | Ast.Str s ->
+      (* moof String layout: proto=String, :bytes slot = cons-chain
+         of Char codepoints. This is what zig's transporter expects;
+         see crates/zig-substrate/src/intrinsics.zig::extractPath
+         (it walks :bytes cell-by-cell, expecting .char car values).
+
+         We use UTF-8 codepoints: decode each byte sequence to a
+         single codepoint per char. OCaml's String is byte-indexed;
+         use Uutf-style manual decoding to avoid external deps. *)
+      let bytes_sym = Compiler.intern "bytes" in
+      let codepoints = utf8_codepoints s in
+      let chain = build_char_chain codepoints in
       Image.{
-        proto = Ast.Nil;
-        slots = [];
+        proto = Ast.FormRef bp.string_id;
+        slots = [(bytes_sym, chain)];
+        handlers = [];
+        meta = [];
+        frozen = true;
+      }
+  | Ast.Bytes b ->
+      (* Bytes follow the same shape — :bytes slot is a cons-chain
+         of Int values (raw byte values, 0..255), proto=Bytes. *)
+      let bytes_sym = Compiler.intern "bytes" in
+      let car_sym = Compiler.intern "car" in
+      let cdr_sym = Compiler.intern "cdr" in
+      let rec build_int_chain pos =
+        if pos >= Bytes.length b then Ast.Nil
+        else
+          let byte_v = Char.code (Bytes.get b pos) in
+          let tail = build_int_chain (pos + 1) in
+          let cell = Image.{
+            proto = Ast.FormRef bp.cons_id;
+            slots = [(car_sym, Ast.Int byte_v); (cdr_sym, tail)];
+            handlers = [];
+            meta = [];
+            frozen = true;
+          } in
+          let id = alloc_form_raw cell in
+          Ast.FormRef id
+      in
+      let chain = build_int_chain 0 in
+      Image.{
+        proto = Ast.FormRef bp.bytes_id;
+        slots = [(bytes_sym, chain)];
         handlers = [];
         meta = [];
         frozen = true;
@@ -525,7 +606,7 @@ and build_form_for (v : Ast.form) : Image.vat_form =
       let head' = lift_value head in
       let tail' = lift_value tail in
       Image.{
-        proto = Ast.Nil;
+        proto = Ast.FormRef bp.cons_id;
         slots = [(car_sym, head'); (cdr_sym, tail')];
         handlers = [];
         meta = [];
@@ -543,13 +624,57 @@ and build_form_for (v : Ast.form) : Image.vat_form =
       in
       let items_form = lift_value (to_list_form items') in
       Image.{
-        proto = Ast.Nil;
+        proto = Ast.FormRef bp.object_id;
         slots = [(items_sym, items_form)];
         handlers = [];
         meta = [];
         frozen = true;
       }
   | _ -> failwith "build_form_for: unexpected scalar"
+
+(* Decode a UTF-8 string into a list of Unicode codepoints. Used by
+   build_form_for to lift String payloads into cons-chains of Char.
+
+   Hand-rolled decoder: each leading byte determines the sequence
+   length (1-4 bytes). Trailing bytes are masked + shifted. Invalid
+   sequences fall back to byte-for-byte (treats invalid as Latin-1) —
+   this is permissive enough for the minimum-viable boot; lossless
+   round-trip will need a proper validator. *)
+and utf8_codepoints (s : string) : int list =
+  let len = String.length s in
+  let rec go i acc =
+    if i >= len then List.rev acc
+    else
+      let b0 = Char.code s.[i] in
+      let (cp, next) =
+        if b0 < 0x80 then
+          (b0, i + 1)
+        else if b0 < 0xC0 then
+          (* stray continuation byte — treat as Latin-1 *)
+          (b0, i + 1)
+        else if b0 < 0xE0 && i + 1 < len then
+          let b1 = Char.code s.[i + 1] in
+          (((b0 land 0x1F) lsl 6) lor (b1 land 0x3F), i + 2)
+        else if b0 < 0xF0 && i + 2 < len then
+          let b1 = Char.code s.[i + 1] in
+          let b2 = Char.code s.[i + 2] in
+          (((b0 land 0x0F) lsl 12) lor
+           ((b1 land 0x3F) lsl 6) lor
+           (b2 land 0x3F), i + 3)
+        else if b0 < 0xF8 && i + 3 < len then
+          let b1 = Char.code s.[i + 1] in
+          let b2 = Char.code s.[i + 2] in
+          let b3 = Char.code s.[i + 3] in
+          (((b0 land 0x07) lsl 18) lor
+           ((b1 land 0x3F) lsl 12) lor
+           ((b2 land 0x3F) lsl 6) lor
+           (b3 land 0x3F), i + 4)
+        else
+          (b0, i + 1)
+      in
+      go next (cp :: acc)
+  in
+  go 0 []
 
 (* ----------------------------------------------------------------
    compile + serialize
@@ -582,6 +707,7 @@ let run (args : string array) : unit =
      lifting so the protos sit at the low FormIds the header expects.
      See bootstrap_protos doc. *)
   let bp = bootstrap_protos () in
+  active_protos := Some bp;
   (* Allocate here_form + macros_form. patch_here_form populates the
      here_form's slots once we know its FormId. *)
   let (macros_form_id, here_form_id) = alloc_here_and_macros bp in
