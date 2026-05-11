@@ -1,0 +1,167 @@
+;; lib/parser/01-tokens.moof — token-stream utilities + FormLoc.
+;;
+;; depends on: 00-lexer.moof (β1's char-stream → token-stream).
+;;
+;; tokens are 3-element cons lists: (type value position).
+;;   type     — Symbol naming the token category (see list below)
+;;   value    — payload (Int/Float/Char/String/Sym) or nil for punct
+;;   position — Int byte offset into the source string
+;;
+;; FormLoc is a 4-element cons record: (file byte-offset line col).
+;;   file       — Sym naming the source file (or '?file when unset)
+;;   byte-offset — Int absolute byte position
+;;   line        — Int 1-based line number (0 when unknown)
+;;   col         — Int 1-based column number (0 when unknown)
+;; this matches rust's `FormLoc { file, byte_offset, line, col }`.
+;; runtime can later rebind :file from a higher context.
+;;
+;; written in the minimal-subset moof: raw setHandler!, no macros,
+;; no quasiquote, no defmethod sugar, no pattern-match params.
+;; see docs/superpowers/specs/2026-05-10-self-host-and-rust-deletion-design.md §4.
+;;
+;; token types β1 produces:
+;;   punctuation: 'lparen 'rparen 'lbracket 'rbracket 'lbrace 'rbrace
+;;   quoting:     'quote 'quasiquote 'unquote 'unquote-splice
+;;   atoms:       'int 'float 'char 'string 'sym 'true 'false 'nil
+;;   special:     'colon-sym 'cascade 'hash-vec
+
+(def Tokens [Object new])
+
+;; ─────────────────────────────────────────────────────────────────
+;; field accessors over (type value position).
+;; written via Heap-direct slot access for the same reason the
+;; compiler does: this file loads before Cons:car etc. method
+;; bindings, so we route through the substrate primitive.
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! Tokens 'typeOf:
+  (fn (t) [Heap slotOf: t at: 'car]))
+
+(setHandler! Tokens 'valueOf:
+  (fn (t) [Heap slotOf: [Heap slotOf: t at: 'cdr] at: 'car]))
+
+(setHandler! Tokens 'posOf:
+  (fn (t) [Heap slotOf: [Heap slotOf: [Heap slotOf: t at: 'cdr] at: 'cdr] at: 'car]))
+
+;; ─────────────────────────────────────────────────────────────────
+;; constructor — useful for parser-internal synthetic tokens and
+;; for β1's lexer (kept here so both share one schema).
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! Tokens 'make:value:pos:
+  (fn (type value pos)
+    (cons type (cons value (cons pos '())))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; FormLoc construction.
+;;
+;; cons-based record: (file byte-offset line col). matches rust's
+;; FormLoc layout field-for-field, so the moof Form-tree differ can
+;; structural-compare without translating shapes.
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! Tokens 'formLoc:offset:line:col:
+  (fn (file offset line col)
+    (cons file (cons offset (cons line (cons col '()))))))
+
+;; convenience — build a FormLoc from a token alone, defaulting
+;; file to '?file (runtime rebinds) and line/col to 0 (lexer
+;; tracks byte offset only).
+(setHandler! Tokens 'locFromToken:
+  (fn (t)
+    [self formLoc: '?file offset: [self posOf: t] line: 0 col: 0]))
+
+;; ─────────────────────────────────────────────────────────────────
+;; FormLoc accessors. all four fields, walked through Heap so we
+;; avoid relying on Cons protocol methods that load later.
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! Tokens 'locFile:
+  (fn (loc) [Heap slotOf: loc at: 'car]))
+
+(setHandler! Tokens 'locOffset:
+  (fn (loc) [Heap slotOf: [Heap slotOf: loc at: 'cdr] at: 'car]))
+
+(setHandler! Tokens 'locLine:
+  (fn (loc)
+    [Heap slotOf: [Heap slotOf: [Heap slotOf: loc at: 'cdr] at: 'cdr] at: 'car]))
+
+(setHandler! Tokens 'locCol:
+  (fn (loc)
+    [Heap slotOf:
+      [Heap slotOf: [Heap slotOf: [Heap slotOf: loc at: 'cdr] at: 'cdr] at: 'cdr]
+      at: 'car]))
+
+;; ─────────────────────────────────────────────────────────────────
+;; type predicates. one per token category. parser dispatches via
+;; these so that the type-symbol set is centralized — if β1 renames
+;; a tag, only this file needs to change.
+;; ─────────────────────────────────────────────────────────────────
+
+;; punctuation
+(setHandler! Tokens 'isLparen:    (fn (t) [[self typeOf: t] is 'lparen]))
+(setHandler! Tokens 'isRparen:    (fn (t) [[self typeOf: t] is 'rparen]))
+(setHandler! Tokens 'isLbracket:  (fn (t) [[self typeOf: t] is 'lbracket]))
+(setHandler! Tokens 'isRbracket:  (fn (t) [[self typeOf: t] is 'rbracket]))
+(setHandler! Tokens 'isLbrace:    (fn (t) [[self typeOf: t] is 'lbrace]))
+(setHandler! Tokens 'isRbrace:    (fn (t) [[self typeOf: t] is 'rbrace]))
+
+;; quoting sigils
+(setHandler! Tokens 'isQuote:          (fn (t) [[self typeOf: t] is 'quote]))
+(setHandler! Tokens 'isQuasiquote:     (fn (t) [[self typeOf: t] is 'quasiquote]))
+(setHandler! Tokens 'isUnquote:        (fn (t) [[self typeOf: t] is 'unquote]))
+(setHandler! Tokens 'isUnquoteSplice:  (fn (t) [[self typeOf: t] is 'unquote-splice]))
+
+;; atoms
+(setHandler! Tokens 'isInt:    (fn (t) [[self typeOf: t] is 'int]))
+(setHandler! Tokens 'isFloat:  (fn (t) [[self typeOf: t] is 'float]))
+(setHandler! Tokens 'isChar:   (fn (t) [[self typeOf: t] is 'char]))
+(setHandler! Tokens 'isString: (fn (t) [[self typeOf: t] is 'string]))
+(setHandler! Tokens 'isSym:    (fn (t) [[self typeOf: t] is 'sym]))
+(setHandler! Tokens 'isTrue:   (fn (t) [[self typeOf: t] is 'true]))
+(setHandler! Tokens 'isFalse:  (fn (t) [[self typeOf: t] is 'false]))
+(setHandler! Tokens 'isNil:    (fn (t) [[self typeOf: t] is 'nil]))
+
+;; special
+(setHandler! Tokens 'isColonSym: (fn (t) [[self typeOf: t] is 'colon-sym]))
+(setHandler! Tokens 'isCascade:  (fn (t) [[self typeOf: t] is 'cascade]))
+(setHandler! Tokens 'isHashVec:  (fn (t) [[self typeOf: t] is 'hash-vec]))
+
+;; grouped predicates — useful for parser dispatch.
+
+;; any literal atom that parses to a Form value directly (no
+;; recursion). int/float/char/string/sym/true/false/nil.
+(setHandler! Tokens 'isAtom:
+  (fn (t)
+    (if [self isInt: t]      #true
+    (if [self isFloat: t]    #true
+    (if [self isChar: t]     #true
+    (if [self isString: t]   #true
+    (if [self isSym: t]      #true
+    (if [self isTrue: t]     #true
+    (if [self isFalse: t]    #true
+    (if [self isNil: t]      #true
+    (if [self isColonSym: t] #true
+        #false)))))))))))
+
+;; any sigil that wraps the next form: ' ` , ,@
+(setHandler! Tokens 'isQuoteSigil:
+  (fn (t)
+    (if [self isQuote: t]         #true
+    (if [self isQuasiquote: t]    #true
+    (if [self isUnquote: t]       #true
+    (if [self isUnquoteSplice: t] #true
+        #false))))))
+
+;; ─────────────────────────────────────────────────────────────────
+;; sigil-type → wrapper-head selector. used by parseQuoted: so the
+;; four sigil arms share one handler.
+;; ─────────────────────────────────────────────────────────────────
+
+(setHandler! Tokens 'wrapperFor:
+  (fn (type)
+    (if [type is 'quote]          'quote
+    (if [type is 'quasiquote]     'quasiquote
+    (if [type is 'unquote]        'unquote
+    (if [type is 'unquote-splice] 'unquote-splicing
+        nil))))))
