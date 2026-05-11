@@ -160,6 +160,9 @@ let encode_value (buf : Buffer.t) (lookup : sym_lookup) (v : Ast.form) : unit =
   | Ast.Float f ->
       put_u8 buf 0xC6;
       put_f64 buf f
+  | Ast.FormRef id ->
+      put_u8 buf 0xC7;
+      put_u32 buf id
   | Ast.Str _ | Ast.Bytes _ | Ast.Cons _ | Ast.Vec _ ->
       failwith "Image.encode_value: non-scalar Value must be allocated as Form first"
 

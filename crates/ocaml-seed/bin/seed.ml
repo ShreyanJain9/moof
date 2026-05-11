@@ -195,15 +195,28 @@ let usage () =
   prerr_endline "  moof-seed compile <file.moof>";
   prerr_endline "  moof-seed bytes <file.moof>";
   prerr_endline "  moof-seed build-image <file.moof> <output.vat>";
+  prerr_endline "  moof-seed build-seed --root <lib-dir> --output <seed.vat>";
   exit 1
 
 let () =
   try
-    match Array.to_list Sys.argv with
-    | [_; "parse";       file]        -> cmd_parse       file
-    | [_; "compile";     file]        -> cmd_compile     file
-    | [_; "bytes";       file]        -> cmd_bytes       file
-    | [_; "build-image"; file; out_]  -> cmd_build_image file out_
+    let argv = Sys.argv in
+    if Array.length argv < 2 then usage ();
+    match argv.(1) with
+    | "parse" ->
+        if Array.length argv <> 3 then usage ();
+        cmd_parse argv.(2)
+    | "compile" ->
+        if Array.length argv <> 3 then usage ();
+        cmd_compile argv.(2)
+    | "bytes" ->
+        if Array.length argv <> 3 then usage ();
+        cmd_bytes argv.(2)
+    | "build-image" ->
+        if Array.length argv <> 4 then usage ();
+        cmd_build_image argv.(2) argv.(3)
+    | "build-seed" ->
+        Build_seed_cmd.run (Array.sub argv 2 (Array.length argv - 2))
     | _ -> usage ()
   with
   | Reader.ReadError msg ->

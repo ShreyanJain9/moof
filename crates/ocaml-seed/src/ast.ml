@@ -19,6 +19,11 @@ type form =
   | Bytes of bytes
   | Cons of form * form
   | Vec of form list  (* reserved for #[...] table-literal staging if needed *)
+  | FormRef of int
+      (* transient: a reference to a FormId that has been pre-allocated
+         in the image's FormSection. produced by build_seed_cmd.ml's
+         pre-pass when it lifts non-scalar consts (Str/Bytes/Cons) into
+         the FormSection. the reader / compiler never emit this. *)
 
 (* construct a proper cons-list from an OCaml list. terminator is Nil. *)
 let rec forms_to_list (xs : form list) : form =
@@ -65,6 +70,7 @@ let rec to_string (f : form) : string =
   | Str s -> Printf.sprintf "%S" s
   | Bytes b -> Printf.sprintf "#bytes(%d)" (Bytes.length b)
   | Vec xs -> "#[" ^ String.concat " " (List.map to_string xs) ^ "]"
+  | FormRef id -> Printf.sprintf "#form(%d)" id
   | Cons _ as c ->
       (* render as list if proper; else dotted pair. *)
       let rec collect acc = function

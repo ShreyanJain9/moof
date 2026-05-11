@@ -1,4 +1,5 @@
 (executable
  (name seed)
  (public_name moof-seed)
+ (modules seed build_seed_cmd)
  (libraries moof_seed))

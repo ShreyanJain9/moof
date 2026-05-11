@@ -194,10 +194,30 @@ let emit (b : chunk_builder) (o : op) : int =
   b.next_pc <- pos + byte_size_of_op o;
   pos
 
+(** ensure every Sym contained in this form has been interned into the
+    global sym table. constants reach the image-write step as Ast.form
+    values; any Sym name they reference must be in the sym table so the
+    image serializer can resolve it via build_sym_lookup.
+
+    walks Cons trees structurally. Other compound forms (Vec) shouldn't
+    appear in the minimal subset but are walked defensively. *)
+let rec intern_syms_in_form (v : form) : unit =
+  match v with
+  | Sym s -> let _ = intern s in ()
+  | Cons (h, t) -> intern_syms_in_form h; intern_syms_in_form t
+  | Vec xs -> List.iter intern_syms_in_form xs
+  | _ -> ()
+
 (** add a Form to the constant pool, returning its u16 index.
     constants are deduplicated by structural equality so the pool
-    stays small (V4 spec §9: same source → same chunk bytes). *)
+    stays small (V4 spec §9: same source → same chunk bytes).
+
+    Every Sym leaf inside the constant is also interned into the
+    global sym table - constants travel through the image as Ast.form
+    values, and the image serializer must be able to resolve their
+    Sym names via the SymTableSection. *)
 let add_const (b : chunk_builder) (v : form) : int =
+  intern_syms_in_form v;
   let n = Dynarray.length b.consts in
   let rec find i =
     if i >= n then None
@@ -313,6 +333,11 @@ let rec compile_form (b : chunk_builder) (f : form) ~(tail : bool) : unit =
       (* table-literal staging — moof Compiler handles this. seed
          shouldn't see it in compiler.moof; if it does, treat as
          a quoted constant. *)
+      ignore (emit b (LoadConst (add_const b f)))
+  | FormRef _ ->
+      (* FormRef is a transient produced by the image builder's
+         non-scalar const lifter; the compiler should never see it
+         in source. defensively, treat it as a constant. *)
       ignore (emit b (LoadConst (add_const b f)))
 
 (* ─────────────────────────────────────────────────────────────────
