@@ -7,7 +7,16 @@
 ;; bootstrap files. Phase 2-3 split them into compiler/, early/, and
 ;; stdlib/ subtrees and grow the load list accordingly.
 
-;; phase 1: the moof compiler — compiled by the rust seed.
+;; phase 0: the moof parser — compiled by the rust seed (minimal subset).
+;; once loaded + flip fires inside 03-bootstrap.moof, every subsequent
+;; parse (compiler/*, early/*, stdlib/*, mcos, REPL) routes through
+;; [Parser parse: src].
+[$transporter load: "parser/00-lexer.moof"]
+[$transporter load: "parser/01-tokens.moof"]
+[$transporter load: "parser/02-parser.moof"]
+[$transporter load: "parser/03-bootstrap.moof"]
+
+;; phase 1: the moof compiler — compiled by the moof parser now.
 [$transporter load: "compiler/00-helpers.moof"]
 [$transporter load: "compiler/01-dispatch.moof"]
 [$transporter load: "compiler/02-special.moof"]
