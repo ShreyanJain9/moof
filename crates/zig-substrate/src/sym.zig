@@ -111,4 +111,24 @@ pub const SymTable = struct {
     pub fn len(self: *const SymTable) usize {
         return self.entries.items.len - 1;
     }
+
+    /// drop every interned symbol except the NONE sentinel at
+    /// index 0. used by image-load (V4 §10) — the image's sym
+    /// table is canonical: SymIds in the image's chunks index
+    /// into it, so we must REPLACE the World's table, not append.
+    ///
+    /// frees the duped name bytes for each non-sentinel entry,
+    /// then truncates entries + clears the index hashmap. retains
+    /// allocator capacity for the about-to-arrive image syms.
+    pub fn clearAndKeepCapacity(self: *SymTable) void {
+        // free the duped name bytes for every non-sentinel entry.
+        var i: usize = 1;
+        while (i < self.entries.items.len) : (i += 1) {
+            self.allocator.free(self.entries.items[i]);
+        }
+        // drop entries down to just the sentinel at index 0.
+        self.entries.shrinkRetainingCapacity(1);
+        // clear the text → id map (sentinel was never inserted).
+        self.index.clearRetainingCapacity();
+    }
 };

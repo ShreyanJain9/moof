@@ -331,6 +331,96 @@ pub const World = struct {
         };
     }
 
+    /// initialize a "bare" World — no protos, no `$here`, no `Macros`.
+    ///
+    /// used by image-load (V4 §10). the image carries the canonical
+    /// FormIds for here_form / macros_form / all 18 protos in its
+    /// Header; `image.loadVatImage` fills them in after deserializing
+    /// the FormSection. allocating them here would conflict with the
+    /// FormIds the image expects.
+    ///
+    /// the hot-path SymIds (parent, view-target, etc.) are still
+    /// interned — the env-walker assumes they exist. image hydration
+    /// overwrites them via `clearAndKeepCapacity` + intern-loop, so
+    /// the syms re-intern in image order. **after load** the cached
+    /// SymId fields on World may be stale; callers that exercise V3
+    /// env semantics on an image-loaded World should re-cache them.
+    /// for V4 phase α (just load + inspect) this is fine.
+    pub fn initBare(allocator: std.mem.Allocator) !World {
+        var heap = try Heap.init(allocator);
+        errdefer heap.deinit();
+
+        var syms = try SymTable.init(allocator);
+        errdefer syms.deinit();
+
+        // intern the hot-path syms so env-walker / intrinsics that
+        // touch them on a bare-but-not-yet-loaded world don't NPE.
+        // image-load will clearAndKeepCapacity these and re-intern
+        // from its own table; the cached SymIds below become stale
+        // at that point — see doc note above.
+        const view_target_sym = try syms.intern("view-target");
+        const parent_sym = try syms.intern("parent");
+        const dnu_sym = try syms.intern("does-not-understand:with:");
+        const body_sym = try syms.intern("body");
+        const env_sym = try syms.intern("env");
+        const params_sym = try syms.intern("params");
+        const car_sym = try syms.intern("car");
+        const cdr_sym = try syms.intern("cdr");
+        const self_sym = try syms.intern("self");
+        const name_sym = try syms.intern("name");
+
+        // every proto FormId starts at NONE; image's header populates.
+        const none_protos: Protos = .{
+            .object = FormId.NONE,
+            .nil = FormId.NONE,
+            .bool_ = FormId.NONE,
+            .integer = FormId.NONE,
+            .char = FormId.NONE,
+            .sym = FormId.NONE,
+            .cons = FormId.NONE,
+            .string = FormId.NONE,
+            .bytes = FormId.NONE,
+            .method = FormId.NONE,
+            .chunk = FormId.NONE,
+            .closure = FormId.NONE,
+            .env = FormId.NONE,
+            .foreign_handle = FormId.NONE,
+            .table = FormId.NONE,
+            .frame = FormId.NONE,
+            .macros = FormId.NONE,
+            .opcode = FormId.NONE,
+        };
+
+        return World{
+            .heap = heap,
+            .syms = syms,
+            .protos = none_protos,
+            .allocator = allocator,
+            .chunk_bytecode = .empty,
+            .chunk_consts = .empty,
+            .chunk_ics = .empty,
+            .chunk_params = .empty,
+            .native_fns = .empty,
+            .far_ref_table = .empty,
+            .proto_generation = .empty,
+            .here_form = FormId.NONE,
+            .macros_form = FormId.NONE,
+            .vm = Vm.init(),
+            .view_target_sym = view_target_sym,
+            .parent_sym = parent_sym,
+            .dnu_sym = dnu_sym,
+            .body_sym = body_sym,
+            .env_sym = env_sym,
+            .params_sym = params_sym,
+            .symCar = car_sym,
+            .symCdr = cdr_sym,
+            .symBody = body_sym,
+            .symParent = parent_sym,
+            .symName = name_sym,
+            .self_sym = self_sym,
+        };
+    }
+
     /// free everything owned by this World.
     ///
     /// `chunk_bytecode` values are slices owned by World; free those
@@ -725,13 +815,17 @@ pub const World = struct {
         return .{ .form = id };
     }
 
-    /// stub: look up a named native in the process intrinsics table.
-    /// image-load uses this to rebind natives on freshly-deserialized
-    /// methods. for V4 phase α we don't have a name→fn map (intrinsics
-    /// install by-proto-and-selector instead). returns null.
+    /// look up a named native in the process intrinsics table.
+    /// image-load (image.zig::readNativeRefs) uses this to rebind
+    /// natives on freshly-deserialized methods. backed by the
+    /// comptime REGISTRY in intrinsics.zig — names match the rust
+    /// v4_export's NativeRefsSection format ("ProtoName:selector").
     pub fn lookupNativeByName(self: *const World, name: []const u8) ?NativeFn {
         _ = self;
-        _ = name;
-        return null; // TODO: integration agent — wire up when image-load runs
+        // late import to avoid a top-level cycle (intrinsics imports
+        // world). zig comptime @import returns a struct; this works
+        // because we only access REGISTRY at call time.
+        const intrinsics = @import("intrinsics.zig");
+        return intrinsics.REGISTRY.get(name);
     }
 };

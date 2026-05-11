@@ -491,3 +491,50 @@ fn objToString(world: *World, self_: Value, _: []const Value) anyerror!Value {
     };
     return world.makeString(text);
 }
+
+// ─────────────────────────────────────────────────────────────────
+// REGISTRY — comptime name → NativeFn map (V4 Track C.3 Task 2.1).
+//
+// keyed by canonical "ProtoName:selector" strings. image-load
+// (image.zig::readNativeRefs) queries this via
+// World.lookupNativeByName to re-bind native methods after
+// deserialization. names must agree with what the rust v4_export
+// emits in its NativeRefsSection — cross-stack contract.
+//
+// std.StaticStringMap is comptime-built: a typo in any key or fn
+// reference is a build-time error. zero runtime registration code.
+//
+// 29 entries — matches the surface installed by `install` above.
+// ─────────────────────────────────────────────────────────────────
+
+pub const REGISTRY = std.StaticStringMap(NativeFn).initComptime(.{
+    .{ "Integer:+", intPlus },
+    .{ "Integer:-", intMinus },
+    .{ "Integer:*", intMultiply },
+    .{ "Integer:/", intDivide },
+    .{ "Integer:=", intEq },
+    .{ "Integer:<", intLt },
+    .{ "Integer:>", intGt },
+    .{ "Integer:toString", intToString },
+    .{ "Object:!!", objBangBang },
+    .{ "Nil:!!", nilBangBang },
+    .{ "Bool:!!", boolBangBang },
+    .{ "Object:is", objIs },
+    .{ "Object:proto", objProto },
+    .{ "Object:identity", objIdentity },
+    .{ "Object:slot:", objSlot },
+    .{ "Object:slotSet!:", objSlotSet },
+    .{ "Cons:car", consCar },
+    .{ "Cons:cdr", consCdr },
+    .{ "Env:bind:to:", envBindTo },
+    .{ "Env:set:to:", envSetTo },
+    .{ "Env:lookup:", envLookupTo },
+    .{ "Env:parent", envParent },
+    .{ "Env:current", envCurrent },
+    .{ "Closure:callIn:withSelf:", closureCallInWithSelf },
+    .{ "Object:become:", objBecome },
+    .{ "Object:doesNotUnderstand:with:", objDoesNotUnderstand },
+    .{ "Object:perform:withArgs:", objPerformWithArgs },
+    .{ "Bool:ifTrue:ifFalse:", boolIfTrueIfFalse },
+    .{ "Object:toString", objToString },
+});

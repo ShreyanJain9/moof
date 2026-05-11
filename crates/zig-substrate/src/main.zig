@@ -14,6 +14,12 @@
 //!                                that verifies OCaml's `moof-seed bytes`
 //!                                output decodes byte-for-byte under the
 //!                                zig substrate's `bytecode.decodeOp`.
+//!   moof-zig load <path>      — load a V4 vat-image from <path> into a
+//!                                fresh bare World, then print world
+//!                                state (heap.len, syms.len, chunks,
+//!                                natives, here_form). V4 Track C.3
+//!                                Task 2.5 — pairs with the rust
+//!                                v4_export build-time oracle.
 
 const std = @import("std");
 const value_mod = @import("value.zig");
@@ -59,6 +65,12 @@ pub fn main(init: std.process.Init) !void {
         const path_copy = try allocator.dupe(u8, path_raw.?);
         defer allocator.free(path_copy);
         return runDecode(allocator, init.io, path_copy);
+    }
+
+    if (sub_raw != null and path_raw != null and std.mem.eql(u8, sub_raw.?, "load")) {
+        const path_copy = try allocator.dupe(u8, path_raw.?);
+        defer allocator.free(path_copy);
+        return runLoad(allocator, init.io, path_copy);
     }
 
     return runSmoke(allocator);
@@ -161,6 +173,55 @@ fn printOp(offset: usize, op: opcodes.Op) void {
         .resume_op => |s| p(" frame_ic={d}", .{s.frame_ic}),
     }
     p("\n", .{});
+}
+
+// ============================================================
+// load subcommand (V4 Track C.3 Task 2.5)
+// ============================================================
+
+/// load a V4 vat-image from `path` into a fresh bare World and print
+/// world state. used to verify the rust v4_export → zig image-load
+/// pipeline end-to-end.
+///
+/// pairs with Track 1 (the rust `moof export-v4` subcommand). a
+/// successful run means: bytes parse, sym table is populated from
+/// the image (replace semantics per V4 §10), every Form alloc lands
+/// in the heap with its proto/slots/handlers/meta, chunk side-tables
+/// are filled with byte-encoded bodies + const-pool + zero-initialized
+/// ICs + param-sym lists, and every "ProtoName:selector" native ref
+/// resolves to a fn pointer via the comptime REGISTRY.
+fn runLoad(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !void {
+    const p = std.debug.print;
+
+    p("loading {s}...\n", .{path});
+
+    // bare world — no protos, no $here, no Macros. the image carries
+    // the canonical FormIds for those; image.loadVatImage installs
+    // them after the heap is populated.
+    var world = try World.initBare(allocator);
+    defer world.deinit();
+
+    // 64 MiB cap is plenty for a stdlib vat-image (rust's bootstrap
+    // serialization is ~1-5 MB per estimates in the C.3 plan).
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024 * 1024));
+    defer allocator.free(bytes);
+
+    try image.loadVatImage(&world, bytes, allocator);
+
+    p("loaded {s} ({d} bytes)\n", .{ path, bytes.len });
+    p("  heap.len = {d}\n", .{world.heap.len()});
+    p("  syms.len = {d}\n", .{world.syms.len()});
+    p("  chunks   = {d}\n", .{world.chunk_bytecode.count()});
+    p("  natives  = {d}\n", .{world.native_fns.count()});
+    p("  here_form  = scope={s} payload={d}\n", .{
+        @tagName(world.here_form.scope),
+        @as(u32, world.here_form.payload),
+    });
+    p("  macros_form = scope={s} payload={d}\n", .{
+        @tagName(world.macros_form.scope),
+        @as(u32, world.macros_form.payload),
+    });
+    p("V4 vat-image alive ٩(◕‿◕｡)۶\n", .{});
 }
 
 // ============================================================

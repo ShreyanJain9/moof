@@ -280,10 +280,19 @@ fn readHeader(bytes: []const u8, pos: *usize) !Header {
 
 /// SymTableSection — `count:u32 [for each: len:u16 bytes:[len]]`.
 /// per spec §10.3. interns each name in order; the resulting SymId
-/// equals the index (0-based) into the section.
+/// equals 1 + the index into the section (the NONE=0 sentinel always
+/// occupies slot 0 in the World's sym table; rust's serializer writes
+/// only the non-sentinel symbols).
+///
+/// V4 §10 hydration: REPLACE the World's sym table with the image's.
+/// SymIds inside the image's chunks/forms/handlers are indices into
+/// THIS table; appending to a pre-populated World would shift them.
+/// per Gemini's brainstorm finding.
 fn readSymTable(world: *World, bytes: []const u8, pos: *usize, expected_count: u32) !void {
     const count = try readU32(bytes, pos);
     if (count != expected_count) return ImageError.TruncatedImage;
+    // clear the World's syms (keeps the NONE sentinel at index 0).
+    world.syms.clearAndKeepCapacity();
     var i: u32 = 0;
     while (i < count) : (i += 1) {
         const len = try readU16(bytes, pos);
@@ -307,7 +316,7 @@ fn readForms(world: *World, bytes: []const u8, pos: *usize, expected_count: u32)
         // allocate a fresh form with the parsed proto. the heap's
         // alloc() returns the next FormId (payload monotonically
         // increases from 1; #0 is the sentinel per spec §10.5).
-        const fid = try world.heap.alloc(Form{ .proto = proto_val });
+        const fid = try world.heap.alloc(Form.withProto(proto_val));
         const form_ptr = world.heap.getMut(fid);
 
         // slots: count:u16 [name_sym:u32 val:Value]
@@ -316,7 +325,7 @@ fn readForms(world: *World, bytes: []const u8, pos: *usize, expected_count: u32)
         while (s < slots_count) : (s += 1) {
             const name_sym = try readU32(bytes, pos);
             const val = try readValue(bytes, pos);
-            try form_ptr.slots.put(name_sym, val);
+            try form_ptr.slots.put(world.allocator, name_sym, val);
         }
 
         // handlers: count:u16 [sel_sym:u32 method:Value]
@@ -325,7 +334,7 @@ fn readForms(world: *World, bytes: []const u8, pos: *usize, expected_count: u32)
         while (h < handlers_count) : (h += 1) {
             const sel_sym = try readU32(bytes, pos);
             const method = try readValue(bytes, pos);
-            try form_ptr.handlers.put(sel_sym, method);
+            try form_ptr.handlers.put(world.allocator, sel_sym, method);
         }
 
         // meta: count:u16 [key_sym:u32 val:Value]
@@ -334,7 +343,7 @@ fn readForms(world: *World, bytes: []const u8, pos: *usize, expected_count: u32)
         while (m < meta_count) : (m += 1) {
             const key_sym = try readU32(bytes, pos);
             const val = try readValue(bytes, pos);
-            try form_ptr.meta.put(key_sym, val);
+            try form_ptr.meta.put(world.allocator, key_sym, val);
         }
 
         // frozen: u8 (0 or 1)
@@ -346,12 +355,16 @@ fn readForms(world: *World, bytes: []const u8, pos: *usize, expected_count: u32)
 
 /// ChunkSection — populate world.chunk_bytecode / chunk_consts /
 /// chunk_ics / chunk_params keyed by source-FormId per spec §10.3.
+///
+/// `allocator` is the World's allocator (also the heap's). all owned
+/// slices freed by `World.deinit` come from this allocator.
 fn readChunks(world: *World, bytes: []const u8, pos: *usize, expected_count: u32, allocator: std.mem.Allocator) !void {
     const count = try readU32(bytes, pos);
     if (count != expected_count) return ImageError.TruncatedImage;
     var i: u32 = 0;
     while (i < count) : (i += 1) {
         const source_form = try readU32(bytes, pos);
+        const chunk_id = vatLocalId(source_form);
 
         // body_len:u32 body:[body_len]
         const body_len = try readU32(bytes, pos);
@@ -360,33 +373,33 @@ fn readChunks(world: *World, bytes: []const u8, pos: *usize, expected_count: u32
         // may be a mmap and the World may outlive it; safer to copy).
         const body = try allocator.dupe(u8, bytes[pos.*..][0..body_len]);
         pos.* += body_len;
-        try world.chunk_bytecode.put(vatLocalId(source_form), body);
+        try world.chunk_bytecode.put(allocator, chunk_id, body);
 
         // consts_count:u16 [Value × n]
         const consts_count = try readU16(bytes, pos);
-        var consts: std.ArrayList(Value) = .empty;
-        try consts.ensureTotalCapacity(allocator, consts_count);
+        const consts = try allocator.alloc(Value, consts_count);
         var c: u16 = 0;
         while (c < consts_count) : (c += 1) {
-            const val = try readValue(bytes, pos);
-            try consts.append(allocator, val);
+            consts[c] = try readValue(bytes, pos);
         }
-        try world.chunk_consts.put(vatLocalId(source_form), consts);
+        try world.chunk_consts.put(allocator, chunk_id, consts);
 
-        // ic_count:u16 — ICs are zero-initialized at load (spec §10.3 step 6)
+        // ic_count:u16 — ICs are zero-initialized at load (spec §10.3 step 6).
+        // we allocate the slice now so vm.zig's fast-path can index in.
         const ic_count = try readU16(bytes, pos);
-        try world.chunk_ics.put(vatLocalId(source_form), ic_count);
+        const ics = try allocator.alloc(world_mod.ICache, ic_count);
+        var ic_i: u16 = 0;
+        while (ic_i < ic_count) : (ic_i += 1) ics[ic_i] = world_mod.ICache.empty;
+        try world.chunk_ics.put(allocator, chunk_id, ics);
 
         // params_count:u16 [u32 sym × n]
         const params_count = try readU16(bytes, pos);
-        var params: std.ArrayList(u32) = .empty;
-        try params.ensureTotalCapacity(allocator, params_count);
+        const params = try allocator.alloc(u32, params_count);
         var p: u16 = 0;
         while (p < params_count) : (p += 1) {
-            const sym = try readU32(bytes, pos);
-            try params.append(allocator, sym);
+            params[p] = try readU32(bytes, pos);
         }
-        try world.chunk_params.put(vatLocalId(source_form), params);
+        try world.chunk_params.put(allocator, chunk_id, params);
     }
 }
 
@@ -407,8 +420,14 @@ fn readNativeRefs(world: *World, bytes: []const u8, pos: *usize) !void {
 
         // look up the named native in the process-wide intrinsics
         // table and install it on world.native_fns[method_form_id].
-        const native_fn = world.lookupNativeByName(name) orelse return ImageError.UnknownNative;
-        try world.native_fns.put(vatLocalId(method_form_id), native_fn);
+        // log the offending name so cross-stack drift is visible (zig
+        // ships a 29-native MVS REGISTRY; the rust v4_export's World
+        // may include more — that gap is resolved at integration time).
+        const native_fn = world.lookupNativeByName(name) orelse {
+            std.log.warn("image-load: unknown native '{s}' for form_id={d}", .{ name, method_form_id });
+            return ImageError.UnknownNative;
+        };
+        try world.native_fns.put(world.allocator, vatLocalId(method_form_id), native_fn);
     }
 }
 
@@ -427,11 +446,10 @@ fn readMcoBindings(world: *World, bytes: []const u8, pos: *usize) !void {
 
         // TODO(wasm): read mcos/<hex(mco_hash)> from the bundle's
         // mco cache, instantiate via wasmtime/wasmer, bind to the
-        // proto FormId. for V4 MVP: noop log.
-        std.log.info("would load mco hash={x} for proto form_id={}", .{
-            std.fmt.fmtSliceHexLower(mco_hash),
-            proto_form_id,
-        });
+        // proto FormId. for V4 MVP: noop log (don't try to render
+        // the hash — zig 0.16 dropped std.fmt.fmtSliceHexLower).
+        _ = mco_hash;
+        std.log.info("would load mco for proto form_id={}", .{proto_form_id});
     }
 }
 
@@ -454,7 +472,7 @@ fn readFarRefs(world: *World, bytes: []const u8, pos: *usize) !void {
         // far-ref table on first dereference (handled by the heap;
         // we just populate the entry).
         const local: FormId = .{ .payload = @intCast(local_form_id), .scope = .far_ref };
-        try world.far_ref_table.put(local, .{
+        try world.far_ref_table.put(world.allocator, local, .{
             .target_vat_id = target_vat_id,
             .target_form_id = target_form_id,
         });
