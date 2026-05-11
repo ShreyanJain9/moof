@@ -184,6 +184,13 @@ pub const World = struct {
     protos: Protos,
     allocator: std.mem.Allocator,
 
+    /// optional std.Io handle for natives that need filesystem access
+    /// (e.g. `:serializeTo:`). zig 0.16 routes all fs through std.Io.Dir;
+    /// natives running deep in the dispatch tree don't have it in scope
+    /// unless we stash it here. nullable so default-constructed Worlds
+    /// (tests) still work — natives that need io must check.
+    io: ?std.Io = null,
+
     /// chunk-FormId → byte-encoded bytecode (owned). V4 spec §4.3:
     /// chunks are serializable as `:body` Bytes.
     chunk_bytecode: std.AutoArrayHashMapUnmanaged(FormId, []u8),

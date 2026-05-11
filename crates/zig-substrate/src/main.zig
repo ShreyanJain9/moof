@@ -73,6 +73,56 @@ pub fn main(init: std.process.Init) !void {
         return runLoad(allocator, init.io, path_copy);
     }
 
+    if (sub_raw != null and path_raw != null and std.mem.eql(u8, sub_raw.?, "exec")) {
+        // moof-zig exec <vat> <chunk-id>
+        const chunk_id_raw = it.next() orelse {
+            std.debug.print("usage: moof-zig exec <vat> <chunk-id>\n", .{});
+            return;
+        };
+        const vat_copy = try allocator.dupe(u8, path_raw.?);
+        defer allocator.free(vat_copy);
+        const chunk_id = try std.fmt.parseInt(u32, chunk_id_raw, 10);
+        return runExec(allocator, init.io, vat_copy, chunk_id);
+    }
+
+    if (sub_raw != null and path_raw != null and std.mem.eql(u8, sub_raw.?, "serialize")) {
+        // moof-zig serialize <in.vat> <out.vat>
+        const out_raw = it.next() orelse {
+            std.debug.print("usage: moof-zig serialize <in.vat> <out.vat>\n", .{});
+            return;
+        };
+        const in_copy = try allocator.dupe(u8, path_raw.?);
+        defer allocator.free(in_copy);
+        const out_copy = try allocator.dupe(u8, out_raw);
+        defer allocator.free(out_copy);
+        return runSerialize(allocator, init.io, in_copy, out_copy);
+    }
+
+    if (sub_raw != null and path_raw != null and std.mem.eql(u8, sub_raw.?, "build-trivial-vat")) {
+        // moof-zig build-trivial-vat <out.vat>
+        // emits a minimal V4 vat-image whose top-level chunk evaluates
+        // [1 + 2] via real native dispatch — used by the W4 smoke.
+        const out_copy = try allocator.dupe(u8, path_raw.?);
+        defer allocator.free(out_copy);
+        return runBuildTrivialVat(allocator, init.io, out_copy);
+    }
+
+    if (sub_raw != null and path_raw != null and std.mem.eql(u8, sub_raw.?, "run")) {
+        // moof-zig run <vat> [--serialize-to <out>]
+        const vat_copy = try allocator.dupe(u8, path_raw.?);
+        defer allocator.free(vat_copy);
+        var serialize_to: ?[]u8 = null;
+        while (it.next()) |a| {
+            if (std.mem.eql(u8, a, "--serialize-to")) {
+                if (it.next()) |out| {
+                    serialize_to = try allocator.dupe(u8, out);
+                }
+            }
+        }
+        defer if (serialize_to) |s| allocator.free(s);
+        return runRun(allocator, init.io, vat_copy, serialize_to);
+    }
+
     return runSmoke(allocator);
 }
 
@@ -318,4 +368,278 @@ fn runSmoke(allocator: std.mem.Allocator) !void {
     _ = image.VERSION;
 
     p("  V4 polyglot substrate alive ٩(◕‿◕｡)۶\n", .{});
+}
+
+// ============================================================
+// build-trivial-vat subcommand (W4 smoke helper)
+// ============================================================
+
+/// build a tiny World with one chunk that evaluates `[1 + 2]` and
+/// serialize it as a V4 vat-image. used by the W4 round-trip smoke:
+///
+///   moof-zig build-trivial-vat /tmp/trivial.vat
+///   moof-zig exec /tmp/trivial.vat <chunk-id>   # → Int(3)
+///
+/// the chunk_id of the trivial chunk is printed to stderr.
+fn runBuildTrivialVat(allocator: std.mem.Allocator, io: std.Io, out_path: []const u8) !void {
+    const p = std.debug.print;
+
+    var world = try World.init(allocator);
+    defer world.deinit();
+    world.io = io;
+    try intrinsics.install(&world);
+
+    // first chunk: PushConst 0; Return — const-only "Int(3)".
+    {
+        const trivial_form = form_mod.Form.withProto(.{ .form = world.protos.chunk });
+        const trivial_id = try world.heap.alloc(trivial_form);
+        var tbuf: std.ArrayList(u8) = .empty;
+        defer tbuf.deinit(allocator);
+        try bytecode.encodeOp(.{ .load_const = .{ .idx = 0 } }, &tbuf, allocator);
+        try bytecode.encodeOp(.return_op, &tbuf, allocator);
+        const tbody = try allocator.dupe(u8, tbuf.items);
+        try world.chunk_bytecode.put(allocator, trivial_id, tbody);
+        const tconsts = try allocator.alloc(Value, 1);
+        tconsts[0] = .{ .int = 3 };
+        try world.chunk_consts.put(allocator, trivial_id, tconsts);
+        try world.chunk_ics.put(allocator, trivial_id, try allocator.alloc(ICache, 0));
+        try world.chunk_params.put(allocator, trivial_id, try allocator.alloc(u32, 0));
+        p("  loadconst-only chunk id = {d}  (=> Int(3))\n", .{trivial_id.payload});
+    }
+
+    // hand-construct [1 + 2]: LoadConst 0; LoadConst 1; Send :+ argc=1 ic=0; Return.
+    const plus_sym = try world.syms.intern("+");
+
+    const chunk_form = form_mod.Form.withProto(.{ .form = world.protos.chunk });
+    const chunk_id = try world.heap.alloc(chunk_form);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try bytecode.encodeOp(.{ .load_const = .{ .idx = 0 } }, &buf, allocator);
+    try bytecode.encodeOp(.{ .load_const = .{ .idx = 1 } }, &buf, allocator);
+    try bytecode.encodeOp(
+        .{ .send = .{ .selector = plus_sym, .argc = 1, .ic_idx = 0 } },
+        &buf,
+        allocator,
+    );
+    try bytecode.encodeOp(.return_op, &buf, allocator);
+
+    const body_bytes = try allocator.dupe(u8, buf.items);
+    try world.chunk_bytecode.put(allocator, chunk_id, body_bytes);
+
+    const consts = try allocator.alloc(Value, 2);
+    consts[0] = .{ .int = 1 };
+    consts[1] = .{ .int = 2 };
+    try world.chunk_consts.put(allocator, chunk_id, consts);
+
+    const ics = try allocator.alloc(ICache, 1);
+    ics[0] = ICache.empty;
+    try world.chunk_ics.put(allocator, chunk_id, ics);
+
+    const params = try allocator.alloc(u32, 0);
+    try world.chunk_params.put(allocator, chunk_id, params);
+
+    // serialize it.
+    var out_buf: std.ArrayList(u8) = .empty;
+    defer out_buf.deinit(allocator);
+    try image.serializeVat(&world, &out_buf, allocator);
+
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = out_path,
+        .data = out_buf.items,
+        .flags = .{ .truncate = true },
+    });
+
+    p("wrote {s} ({d} bytes)\n", .{ out_path, out_buf.items.len });
+    p("  trivial chunk id = {d}\n", .{chunk_id.payload});
+    p("  exec smoke:\n", .{});
+    p("    moof-zig exec {s} {d}   # → Int(3)\n", .{ out_path, chunk_id.payload });
+}
+
+// ============================================================
+// exec subcommand (W4 Piece 1)
+// ============================================================
+
+/// load a vat-image, find the chunk by id, run it via vm.runTop, print
+/// the result. used to prove end-to-end dispatch through re-bound
+/// natives on a hydrated World.
+///
+/// the chunk-id arg is the raw FormId payload (u32). e.g. for a
+/// system.vat where the chunk for `[1 + 2]` lives at FormId(42), say
+/// `moof-zig exec /tmp/system.vat 42`.
+fn runExec(allocator: std.mem.Allocator, io: std.Io, vat_path: []const u8, chunk_id: u32) !void {
+    const p = std.debug.print;
+
+    var world = try World.initBare(allocator);
+    defer world.deinit();
+    world.io = io;
+
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, vat_path, allocator, .limited(64 * 1024 * 1024));
+    defer allocator.free(bytes);
+
+    try image.loadVatImage(&world, bytes, allocator);
+    p("loaded {s} ({d} bytes)\n", .{ vat_path, bytes.len });
+    p("  heap.len = {d}, syms.len = {d}, chunks = {d}, natives = {d}\n", .{
+        world.heap.len(),
+        world.syms.len(),
+        world.chunk_bytecode.count(),
+        world.native_fns.count(),
+    });
+
+    // look up the chunk Form by id. the side-tables are keyed by
+    // chunk_id; if it's not there, give a hint at the available range.
+    const chunk_fid = FormId.vatLocal(@intCast(chunk_id));
+    if (!world.chunk_bytecode.contains(chunk_fid)) {
+        p("error: no chunk with id={d} in this vat\n", .{chunk_id});
+        // list a few valid ones so the user has somewhere to go.
+        var it = world.chunk_bytecode.iterator();
+        var shown: usize = 0;
+        p("  valid chunk ids (first ~10): ", .{});
+        while (it.next()) |entry| {
+            if (shown >= 10) break;
+            p("{d} ", .{entry.key_ptr.*.payload});
+            shown += 1;
+        }
+        p("...\n", .{});
+        return;
+    }
+
+    p("running chunk {d}...\n", .{chunk_id});
+    const result = vm.runTop(&world, chunk_fid) catch |err| {
+        p("vm error: {s}\n", .{@errorName(err)});
+        return;
+    };
+
+    printResult(result, &world);
+}
+
+/// print a Value in a human-readable form. used by exec / run.
+fn printResult(v: Value, world: *const World) void {
+    const p = std.debug.print;
+    switch (v) {
+        .nil => p("=> nil\n", .{}),
+        .bool_ => |b| p("=> {s}\n", .{if (b) "#true" else "#false"}),
+        .int => |n| p("=> Int({d})\n", .{n}),
+        .sym => |s| p("=> Sym('{s})\n", .{world.syms.resolve(s)}),
+        .char => |cp| p("=> Char(U+{x:0>4})\n", .{cp}),
+        .float => |f| p("=> Float({d})\n", .{f}),
+        .form => |id| p("=> Form#{d} (scope={s})\n", .{ @as(u32, id.payload), @tagName(id.scope) }),
+    }
+}
+
+// ============================================================
+// serialize subcommand (W4 Piece 2 — load + write roundtrip)
+// ============================================================
+
+/// load a vat-image and immediately re-serialize it. used to verify
+/// byte-equivalence with rust's v4_export — `diff in.vat out.vat`
+/// after roundtrip should match (modulo footer hash which both stub).
+fn runSerialize(allocator: std.mem.Allocator, io: std.Io, in_path: []const u8, out_path: []const u8) !void {
+    const p = std.debug.print;
+
+    var world = try World.initBare(allocator);
+    defer world.deinit();
+    world.io = io;
+
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, in_path, allocator, .limited(64 * 1024 * 1024));
+    defer allocator.free(bytes);
+
+    try image.loadVatImage(&world, bytes, allocator);
+    p("loaded {s} ({d} bytes)\n", .{ in_path, bytes.len });
+
+    // serialize into a buffer, then dump it.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try image.serializeVat(&world, &buf, allocator);
+
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = out_path,
+        .data = buf.items,
+        .flags = .{ .truncate = true },
+    });
+
+    p("wrote {s} ({d} bytes)\n", .{ out_path, buf.items.len });
+}
+
+// ============================================================
+// run subcommand (W4 Piece 3 — boot + run main + optional serialize)
+// ============================================================
+
+/// load a vat-image, look up its `main` chunk on `$here` (if any), run
+/// it to completion. if `--serialize-to <out>` was given, write the
+/// final world as a V4 vat-image at `out`.
+///
+/// the main-chunk convention isn't yet canonicalized by rust's
+/// v4_export (which doesn't emit any specific "main" pointer); we
+/// look for a `'main` slot on `here_form` and run its chunk if
+/// present, otherwise treat the vat as already-bootstrapped and
+/// skip directly to the optional serialize step.
+fn runRun(allocator: std.mem.Allocator, io: std.Io, vat_path: []const u8, serialize_to: ?[]const u8) !void {
+    const p = std.debug.print;
+
+    var world = try World.initBare(allocator);
+    defer world.deinit();
+    world.io = io;
+
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, vat_path, allocator, .limited(64 * 1024 * 1024));
+    defer allocator.free(bytes);
+
+    try image.loadVatImage(&world, bytes, allocator);
+    p("loaded {s} ({d} bytes)\n", .{ vat_path, bytes.len });
+    p("  heap.len = {d}, syms.len = {d}, chunks = {d}, natives = {d}\n", .{
+        world.heap.len(),
+        world.syms.len(),
+        world.chunk_bytecode.count(),
+        world.native_fns.count(),
+    });
+
+    // is there a `main` slot on $here? if so, it should hold either
+    // a chunk FormId directly OR a method-Form whose :body is a chunk.
+    const main_sym_id = blk: {
+        const total = world.syms.len();
+        var i: u32 = 1;
+        while (i <= total) : (i += 1) {
+            if (std.mem.eql(u8, world.syms.resolve(i), "main")) break :blk i;
+        }
+        break :blk @as(u32, 0);
+    };
+
+    if (main_sym_id != 0 and !world.here_form.isNone()) {
+        const here = world.heap.get(world.here_form);
+        if (here.slot(main_sym_id).asFormId()) |maybe_chunk| {
+            // could be a chunk directly, or a method whose body is a chunk
+            const chunk_to_run = if (world.chunk_bytecode.contains(maybe_chunk))
+                maybe_chunk
+            else
+                world.formSlot(maybe_chunk, world.body_sym).asFormId() orelse maybe_chunk;
+
+            if (world.chunk_bytecode.contains(chunk_to_run)) {
+                p("running main chunk #{d}...\n", .{chunk_to_run.payload});
+                const result = vm.runTop(&world, chunk_to_run) catch |err| {
+                    p("vm error in main: {s}\n", .{@errorName(err)});
+                    return;
+                };
+                printResult(result, &world);
+            } else {
+                p("no main chunk found (`main` slot doesn't point at a chunk); skipping run\n", .{});
+            }
+        } else {
+            p("no main slot on $here; treating vat as already-bootstrapped\n", .{});
+        }
+    } else {
+        p("no `main` symbol or no here_form; treating vat as already-bootstrapped\n", .{});
+    }
+
+    if (serialize_to) |out_path| {
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(allocator);
+        try image.serializeVat(&world, &buf, allocator);
+
+        try std.Io.Dir.cwd().writeFile(io, .{
+            .sub_path = out_path,
+            .data = buf.items,
+            .flags = .{ .truncate = true },
+        });
+        p("wrote {s} ({d} bytes)\n", .{ out_path, buf.items.len });
+    }
 }

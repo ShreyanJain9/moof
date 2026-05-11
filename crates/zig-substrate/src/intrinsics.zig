@@ -34,6 +34,7 @@ const Form = form.Form;
 const world_mod = @import("world.zig");
 const World = world_mod.World;
 const NativeFn = world_mod.NativeFn;
+const image_mod = @import("image.zig");
 
 // ─────────────────────────────────────────────────────────────────
 // install — top-level entry. idempotent: safe to call once at world
@@ -95,6 +96,12 @@ pub fn install(world: *World) !void {
     // toString minimal — Integer + Object fallback.
     try installNative(world, world.protos.integer, "toString", intToString);
     try installNative(world, world.protos.object, "toString", objToString);
+
+    // :serializeTo: — write current World as a V4 vat-image to a path.
+    // installed on Object so [$here serializeTo: "/tmp/out.vat"] works
+    // (here_form's proto chain bottoms out at Object). image-load
+    // re-binds this by name via NativeRefsSection: "Object:serializeTo:".
+    try installNative(world, world.protos.object, "serializeTo:", objSerializeTo);
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -493,6 +500,103 @@ fn objToString(world: *World, self_: Value, _: []const Value) anyerror!Value {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// :serializeTo: — serialize the current World as a V4 vat-image to a
+// path. used by moof code that wants to write its current state out
+// for later loading: `[$here serializeTo: "/tmp/out.vat"]`.
+//
+// arg[0] must be a String-Form whose :bytes slot is a moof string-of-
+// chars (cons-chain of Char values) — the moof convention until a
+// real String storage lands. for now we ALSO accept a path encoded as
+// a single Sym value, which avoids the cons-chain construction during
+// boot-time tests.
+//
+// note that calling :serializeTo: on a half-bootstrapped world will
+// write a half-bootstrapped image; the caller chooses the moment.
+// ─────────────────────────────────────────────────────────────────
+
+fn objSerializeTo(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len < 1) return raise(world, "arity", ":serializeTo: expects 1 arg (path)");
+    // path extraction: prefer Sym (boot-time convenience), fall back to
+    // a String-Form whose :bytes is a cons-chain of chars.
+    var path_buf: [4096]u8 = undefined;
+    const path: []const u8 = switch (args[0]) {
+        .sym => |s| world.syms.resolve(s),
+        .form => |id| blk: {
+            // String-Form heuristic: walk the cons-chain in slots,
+            // collecting char codepoints into path_buf as UTF-8.
+            const f = world.heap.get(id);
+            const bytes_sym_id = lookupSymByName(world, "bytes") orelse {
+                // no :bytes slot — assume the slot itself IS the chain
+                // by using car/cdr directly. fall through with empty.
+                break :blk @as([]const u8, "");
+            };
+            const chain_v = f.slot(bytes_sym_id);
+            break :blk valueCharsToBuffer(world, chain_v, &path_buf) catch "";
+        },
+        else => return typeError(world, ":serializeTo: path must be a Sym or String"),
+    };
+    if (path.len == 0) return typeError(world, ":serializeTo: path is empty");
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(world.allocator);
+    try image_mod.serializeVat(world, &buf, world.allocator);
+
+    // need a std.Io handle to open the file in zig 0.16. natives that
+    // run from inside dispatch don't carry one unless the host stashed
+    // it on the World at boot (see World.io). raise a clear error
+    // rather than crashing when it's null.
+    const io = world.io orelse return raise(world, "no-io", ":serializeTo: requires world.io to be set by host");
+
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = path,
+        .data = buf.items,
+        .flags = .{ .truncate = true },
+    });
+    return .nil;
+}
+
+/// linear-scan helper used by serializeTo to find a SymId by name.
+/// avoids the implicit intern that `world.syms.intern` would do
+/// (which would mutate the world during a serialize call).
+fn lookupSymByName(world: *World, name: []const u8) ?u32 {
+    const total = world.syms.len();
+    var i: u32 = 1;
+    while (i <= total) : (i += 1) {
+        if (std.mem.eql(u8, world.syms.resolve(i), name)) return i;
+    }
+    return null;
+}
+
+/// walk a String-form's cons-chain of Char values into a utf-8 buffer.
+/// fails silently on malformed inputs (returns whatever was decoded so
+/// far). limit is the buffer's len.
+fn valueCharsToBuffer(world: *World, chain: Value, buf: []u8) ![]const u8 {
+    var len: usize = 0;
+    var cur = chain;
+    while (true) {
+        switch (cur) {
+            .nil => break,
+            .form => |id| {
+                const f = world.heap.get(id);
+                const car_v = f.slot(world.symCar);
+                const cdr_v = f.slot(world.symCdr);
+                switch (car_v) {
+                    .char => |cp| {
+                        const cp_u21 = std.math.cast(u21, cp) orelse return error.BadChar;
+                        const encoded = std.unicode.utf8Encode(cp_u21, buf[len..]) catch return error.BadChar;
+                        len += encoded;
+                    },
+                    else => break,
+                }
+                cur = cdr_v;
+            },
+            else => break,
+        }
+    }
+    return buf[0..len];
+}
+
+// ─────────────────────────────────────────────────────────────────
 // REGISTRY — comptime name → NativeFn map (V4 Track C.3 Task 2.1).
 //
 // keyed by canonical "ProtoName:selector" strings. image-load
@@ -537,4 +641,5 @@ pub const REGISTRY = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "Object:perform:withArgs:", objPerformWithArgs },
     .{ "Bool:ifTrue:ifFalse:", boolIfTrueIfFalse },
     .{ "Object:toString", objToString },
+    .{ "Object:serializeTo:", objSerializeTo },
 });

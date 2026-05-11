@@ -209,6 +209,316 @@ pub fn loadVatImage(world: *World, bytes: []const u8, allocator: std.mem.Allocat
     world.protos.frame = vatLocalId(header.protos.frame);
     world.protos.macros = vatLocalId(header.protos.macros);
     world.protos.opcode = vatLocalId(header.protos.opcode);
+
+    // 12. re-cache the hot-path SymIds (gotcha #5 from NEXT_SESSION.md).
+    //
+    // initBare interned `parent`, `view-target`, etc. into the world's
+    // sym table, then readSymTable's clearAndKeepCapacity wiped them and
+    // re-interned the image's symbols. the SymIds we cached on the
+    // World struct at init time are now stale — re-resolve each by
+    // looking up its name in the freshly-loaded sym table.
+    //
+    // any name missing from the image is fine for V4 phase α (this only
+    // happens when the rust v4_export never interned that symbol); we
+    // leave the cached SymId at 0 (NONE), which env-walker treats as
+    // "no parent slot", "no view-target slot" — i.e. the meta-key path
+    // is effectively disabled rather than corrupted.
+    world.parent_sym = lookupSym(world, "parent");
+    world.view_target_sym = lookupSym(world, "view-target");
+    world.dnu_sym = lookupSym(world, "does-not-understand:with:");
+    world.body_sym = lookupSym(world, "body");
+    world.env_sym = lookupSym(world, "env");
+    world.params_sym = lookupSym(world, "params");
+    world.symCar = lookupSym(world, "car");
+    world.symCdr = lookupSym(world, "cdr");
+    world.symBody = world.body_sym;
+    world.symParent = world.parent_sym;
+    world.symName = lookupSym(world, "name");
+    world.self_sym = lookupSym(world, "self");
+}
+
+/// linear-scan the sym table for `name`. zero (NONE) if not present.
+/// used at the tail of `loadVatImage` to re-cache the hot-path SymIds
+/// after `clearAndKeepCapacity` invalidated the ones cached at init.
+fn lookupSym(world: *World, name: []const u8) u32 {
+    const total = world.syms.len();
+    var i: u32 = 1;
+    while (i <= total) : (i += 1) {
+        const text = world.syms.resolve(i);
+        if (std.mem.eql(u8, text, name)) return i;
+    }
+    return 0; // NONE — name not interned in this image.
+}
+
+// ---------------------------------------------------------------------------
+// Public serializer (W4 Piece 2)
+// ---------------------------------------------------------------------------
+
+/// serialize the given `world` as a V4 vat-image, appending bytes to
+/// `out` (an ArrayList(u8)) using `allocator` for growth.
+///
+/// mirrors the byte layout produced by `crates/substrate/src/v4_export.rs`
+/// exactly so a round-trip (rust→zig→rust→…) yields bit-identical bytes
+/// modulo: insertion order of native methods (we walk proto handler
+/// tables in heap order, matching rust's `collect_native_methods`), and
+/// the footer hash is zeros in both implementations until phase 9.
+///
+/// the ArrayList+allocator interface mirrors `bytecode.encodeOp` —
+/// zig 0.16's std.ArrayList lost its Managed `.writer()` shim, and the
+/// project's convention is to thread the allocator through explicitly.
+pub fn serializeVat(world: *const World, out: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+    // ── Magic + Version ────────────────────────────────────────
+    try out.appendSlice(allocator, &MAGIC);
+    try appendU16(out, allocator, VERSION);
+
+    // ── Header ─────────────────────────────────────────────────
+    // vat_id: 16 zero bytes (TODO: real ULID, matches rust stub).
+    const vat_id: [16]u8 = .{0} ** 16;
+    try out.appendSlice(allocator, &vat_id);
+
+    // num_forms excludes the FormId(0) sentinel.
+    const num_forms: u32 = @intCast(world.heap.len() - 1);
+    const num_syms: u32 = @intCast(world.syms.len());
+    const num_chunks: u32 = @intCast(world.chunk_bytecode.count());
+    try appendU32(out, allocator, num_forms);
+    try appendU32(out, allocator, num_syms);
+    try appendU32(out, allocator, num_chunks);
+
+    // here_form, macros_form
+    try appendU32(out, allocator, @bitCast(world.here_form));
+    try appendU32(out, allocator, @bitCast(world.macros_form));
+
+    // 18 protos in canonical order — matches rust v4_export and
+    // image.readHeader's ProtoTable layout.
+    try appendU32(out, allocator, @bitCast(world.protos.object));
+    try appendU32(out, allocator, @bitCast(world.protos.nil));
+    try appendU32(out, allocator, @bitCast(world.protos.bool_));
+    try appendU32(out, allocator, @bitCast(world.protos.integer));
+    try appendU32(out, allocator, @bitCast(world.protos.char));
+    try appendU32(out, allocator, @bitCast(world.protos.sym));
+    try appendU32(out, allocator, @bitCast(world.protos.cons));
+    try appendU32(out, allocator, @bitCast(world.protos.string));
+    try appendU32(out, allocator, @bitCast(world.protos.bytes));
+    try appendU32(out, allocator, @bitCast(world.protos.method));
+    try appendU32(out, allocator, @bitCast(world.protos.chunk));
+    try appendU32(out, allocator, @bitCast(world.protos.closure));
+    try appendU32(out, allocator, @bitCast(world.protos.env));
+    try appendU32(out, allocator, @bitCast(world.protos.foreign_handle));
+    try appendU32(out, allocator, @bitCast(world.protos.table));
+    try appendU32(out, allocator, @bitCast(world.protos.frame));
+    try appendU32(out, allocator, @bitCast(world.protos.macros));
+    try appendU32(out, allocator, @bitCast(world.protos.opcode));
+
+    // external_vat_refs count = 0 (single-vat).
+    try appendU16(out, allocator, 0);
+
+    // ── SymTableSection ────────────────────────────────────────
+    try appendU32(out, allocator, num_syms);
+    var sym_i: u32 = 1;
+    while (sym_i <= num_syms) : (sym_i += 1) {
+        const text = world.syms.resolve(sym_i);
+        try appendU16(out, allocator, @intCast(text.len));
+        try out.appendSlice(allocator, text);
+    }
+
+    // ── FormSection ────────────────────────────────────────────
+    try appendU32(out, allocator, num_forms);
+    var i: usize = 1;
+    while (i < world.heap.len()) : (i += 1) {
+        const fid = FormId.vatLocal(@intCast(i));
+        const f = world.heap.get(fid);
+        // proto
+        try appendValue(out, allocator, f.proto);
+        // slots
+        try appendU16(out, allocator, @intCast(f.slots.count()));
+        var slot_it = f.slots.iterator();
+        while (slot_it.next()) |entry| {
+            try appendU32(out, allocator, entry.key_ptr.*);
+            try appendValue(out, allocator, entry.value_ptr.*);
+        }
+        // handlers
+        try appendU16(out, allocator, @intCast(f.handlers.count()));
+        var h_it = f.handlers.iterator();
+        while (h_it.next()) |entry| {
+            try appendU32(out, allocator, entry.key_ptr.*);
+            try appendValue(out, allocator, entry.value_ptr.*);
+        }
+        // meta
+        try appendU16(out, allocator, @intCast(f.meta.count()));
+        var m_it = f.meta.iterator();
+        while (m_it.next()) |entry| {
+            try appendU32(out, allocator, entry.key_ptr.*);
+            try appendValue(out, allocator, entry.value_ptr.*);
+        }
+        // frozen
+        try out.append(allocator, if (f.frozen) @as(u8, 1) else @as(u8, 0));
+    }
+
+    // ── ChunkSection ───────────────────────────────────────────
+    try appendU32(out, allocator, num_chunks);
+    var ch_it = world.chunk_bytecode.iterator();
+    while (ch_it.next()) |entry| {
+        const chunk_id = entry.key_ptr.*;
+        const body = entry.value_ptr.*;
+        try appendU32(out, allocator, @bitCast(chunk_id));
+        try appendU32(out, allocator, @intCast(body.len));
+        try out.appendSlice(allocator, body);
+
+        // consts
+        const consts = world.chunk_consts.get(chunk_id) orelse &[_]value.Value{};
+        try appendU16(out, allocator, @intCast(consts.len));
+        for (consts) |c| {
+            try appendValue(out, allocator, c);
+        }
+
+        // ic_count
+        const ics_len: u16 = if (world.chunk_ics.get(chunk_id)) |ics| @intCast(ics.len) else 0;
+        try appendU16(out, allocator, ics_len);
+
+        // params
+        const params = world.chunk_params.get(chunk_id) orelse &[_]u32{};
+        try appendU16(out, allocator, @intCast(params.len));
+        for (params) |p| {
+            try appendU32(out, allocator, p);
+        }
+    }
+
+    // ── NativeRefsSection ──────────────────────────────────────
+    //
+    // matches rust's `collect_native_methods` shape: walk every proto
+    // Form's handlers table; emit one (method_form_id, "ProtoName:selector")
+    // entry per method-FormId that lives in native_fns.
+    //
+    // first pass: count. second pass: emit (ArrayList is forward-only).
+    var native_count: u32 = 0;
+    {
+        var hi: usize = 1;
+        while (hi < world.heap.len()) : (hi += 1) {
+            const proto_id = FormId.vatLocal(@intCast(hi));
+            const proto_form = world.heap.get(proto_id);
+            if (proto_form.handlers.count() == 0) continue;
+            var hit = proto_form.handlers.iterator();
+            while (hit.next()) |entry| {
+                const method_v = entry.value_ptr.*;
+                if (method_v.asFormId()) |mid| {
+                    if (world.native_fns.contains(mid)) native_count += 1;
+                }
+            }
+        }
+    }
+    try appendU32(out, allocator, native_count);
+    {
+        var hi: usize = 1;
+        while (hi < world.heap.len()) : (hi += 1) {
+            const proto_id = FormId.vatLocal(@intCast(hi));
+            const proto_form = world.heap.get(proto_id);
+            if (proto_form.handlers.count() == 0) continue;
+            // best-effort proto name from :name meta sym; fall back to
+            // "<anon-N>" mirroring rust's collect_native_methods.
+            const name_sym = world.symName;
+            const proto_name_v = proto_form.metaAt(name_sym);
+            var proto_name_buf: [64]u8 = undefined;
+            const proto_name: []const u8 = if (proto_name_v.asSym()) |s| world.syms.resolve(s) else blk: {
+                break :blk std.fmt.bufPrint(&proto_name_buf, "<anon-{d}>", .{hi}) catch unreachable;
+            };
+            var h_it2 = proto_form.handlers.iterator();
+            while (h_it2.next()) |entry| {
+                const sel_sym = entry.key_ptr.*;
+                const method_v = entry.value_ptr.*;
+                const mid = method_v.asFormId() orelse continue;
+                if (!world.native_fns.contains(mid)) continue;
+                const sel_text = world.syms.resolve(sel_sym);
+
+                // "ProtoName:selector" — same shape rust emits.
+                var name_buf: [256]u8 = undefined;
+                const full_name = try std.fmt.bufPrint(&name_buf, "{s}:{s}", .{ proto_name, sel_text });
+                const trunc_len = @min(full_name.len, 255);
+                const truncated = full_name[0..trunc_len];
+
+                try appendU32(out, allocator, @bitCast(mid));
+                try out.append(allocator, @intCast(trunc_len));
+                try out.appendSlice(allocator, truncated);
+            }
+        }
+    }
+
+    // ── McoBindingsSection ─────────────────────────────────────
+    // empty stub (TODO phase D — wasm wiring).
+    try appendU32(out, allocator, 0);
+
+    // ── FarRefsSection ─────────────────────────────────────────
+    // empty stub (single-vat for now).
+    try appendU32(out, allocator, 0);
+
+    // ── Footer ─────────────────────────────────────────────────
+    // 32-byte image hash. TODO: real blake3; zeros for now (matches
+    // rust v4_export — both stubs in sync until phase 9).
+    const zeros: [32]u8 = .{0} ** 32;
+    try out.appendSlice(allocator, &zeros);
+}
+
+// ---------------------------------------------------------------------------
+// Value byte encoder (used by serializeVat)
+// ---------------------------------------------------------------------------
+
+/// encode a Value into `out` using the same VTAG_* scheme as the
+/// loader's `readValue`. tags 0xC0–0xC7 per spec ambiguity flagged at
+/// top of file.
+fn appendValue(out: *std.ArrayList(u8), allocator: std.mem.Allocator, v: value.Value) !void {
+    switch (v) {
+        .nil => try out.append(allocator, VTAG_NIL),
+        .bool_ => |b| try out.append(allocator, if (b) VTAG_BOOL_TRUE else VTAG_BOOL_FALSE),
+        .int => |n| {
+            try out.append(allocator, VTAG_INT);
+            // wire is i64 BE per V4 §10.3; cast from i48.
+            try appendI64(out, allocator, @as(i64, n));
+        },
+        .sym => |s| {
+            try out.append(allocator, VTAG_SYM);
+            try appendU32(out, allocator, s);
+        },
+        .char => |cp| {
+            try out.append(allocator, VTAG_CHAR);
+            try appendU32(out, allocator, cp);
+        },
+        .float => |f| {
+            try out.append(allocator, VTAG_FLOAT);
+            const raw: u64 = @bitCast(f);
+            try appendU64(out, allocator, raw);
+        },
+        .form => |id| {
+            try out.append(allocator, VTAG_FORM);
+            try appendU32(out, allocator, @bitCast(id));
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// big-endian append helpers
+// ---------------------------------------------------------------------------
+
+fn appendU16(out: *std.ArrayList(u8), allocator: std.mem.Allocator, v: u16) !void {
+    var buf: [2]u8 = undefined;
+    std.mem.writeInt(u16, &buf, v, .big);
+    try out.appendSlice(allocator, &buf);
+}
+
+fn appendU32(out: *std.ArrayList(u8), allocator: std.mem.Allocator, v: u32) !void {
+    var buf: [4]u8 = undefined;
+    std.mem.writeInt(u32, &buf, v, .big);
+    try out.appendSlice(allocator, &buf);
+}
+
+fn appendU64(out: *std.ArrayList(u8), allocator: std.mem.Allocator, v: u64) !void {
+    var buf: [8]u8 = undefined;
+    std.mem.writeInt(u64, &buf, v, .big);
+    try out.appendSlice(allocator, &buf);
+}
+
+fn appendI64(out: *std.ArrayList(u8), allocator: std.mem.Allocator, v: i64) !void {
+    var buf: [8]u8 = undefined;
+    std.mem.writeInt(i64, &buf, v, .big);
+    try out.appendSlice(allocator, &buf);
 }
 
 // ---------------------------------------------------------------------------
