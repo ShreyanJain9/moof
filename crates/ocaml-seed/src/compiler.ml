@@ -53,19 +53,26 @@ open Opcodes
 let sym_table : (string, int) Hashtbl.t = Hashtbl.create 256
 let sym_names : string Dynarray.t = Dynarray.create ()
 
-(** intern a string into the symbol table, returning its SymId. *)
+(** intern a string into the symbol table, returning its SymId.
+
+    SymIds are 1-based to match the zig substrate's convention
+    (crates/zig-substrate/src/sym.zig — entries[0] = NONE sentinel,
+    first user-interned sym lands at SymId 1). The image's
+    SymTableSection serializes the entries in encounter order, so
+    OCaml's `intern("foo") = N` lines up with zig's
+    `intern("foo") = N` after image-load. *)
 let intern (name : string) : int =
   match Hashtbl.find_opt sym_table name with
   | Some id -> id
   | None ->
-      let id = Dynarray.length sym_names in
+      let id = Dynarray.length sym_names + 1 in
       Hashtbl.add sym_table name id;
       Dynarray.add_last sym_names name;
       id
 
 (** resolve a SymId back to its name. raises if unknown. *)
 let sym_name (id : int) : string =
-  Dynarray.get sym_names id
+  Dynarray.get sym_names (id - 1)
 
 (** all interned symbols, in interning order (canonical for the
     SymTableSection of the image). *)

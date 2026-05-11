@@ -147,12 +147,18 @@ let put_f64 (b : Buffer.t) (v : float) : unit =
    build-image pass didn't allocate it as a Form first. *)
 
 (* SymId resolver: indexed by sym-table position (caller built it
-   from `image.syms`). We use a hashtable for O(1) lookup. *)
+   from `image.syms`). We use a hashtable for O(1) lookup.
+
+   IMPORTANT: zig's sym table reserves SymId 0 as the NONE sentinel
+   (see crates/zig-substrate/src/sym.zig — entries[0] = ""). After
+   image-load, the first user-interned sym lands at SymId 1, the
+   second at SymId 2, etc. So a sym at OCaml position `i` (0-based
+   in `image.syms`) becomes SymId `i + 1` on the wire. *)
 type sym_lookup = (string, int) Hashtbl.t
 
 let build_sym_lookup (syms : string list) : sym_lookup =
   let h = Hashtbl.create (max 16 (List.length syms)) in
-  List.iteri (fun i s -> Hashtbl.replace h s i) syms;
+  List.iteri (fun i s -> Hashtbl.replace h s (i + 1)) syms;
   h
 
 let resolve_sym (lookup : sym_lookup) (name : string) : int =
