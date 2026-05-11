@@ -98,6 +98,16 @@ pub fn main(init: std.process.Init) !void {
         return runSerialize(allocator, init.io, in_copy, out_copy);
     }
 
+    if (sub_raw != null and path_raw != null and std.mem.eql(u8, sub_raw.?, "smoke-serialize-to")) {
+        // moof-zig smoke-serialize-to <out.vat>
+        // boots a fresh World with intrinsics, runs a chunk that does
+        // `[$here serializeTo: 'out.vat]` from inside the VM, then prints
+        // the result. proves the intrinsic is reachable from moof code.
+        const out_copy = try allocator.dupe(u8, path_raw.?);
+        defer allocator.free(out_copy);
+        return runSmokeSerializeTo(allocator, init.io, out_copy);
+    }
+
     if (sub_raw != null and path_raw != null and std.mem.eql(u8, sub_raw.?, "build-trivial-vat")) {
         // moof-zig build-trivial-vat <out.vat>
         // emits a minimal V4 vat-image whose top-level chunk evaluates
@@ -368,6 +378,68 @@ fn runSmoke(allocator: std.mem.Allocator) !void {
     _ = image.VERSION;
 
     p("  V4 polyglot substrate alive ٩(◕‿◕｡)۶\n", .{});
+}
+
+// ============================================================
+// smoke-serialize-to subcommand (W4 :serializeTo: round-trip)
+// ============================================================
+
+/// boot a fresh World, install intrinsics, run a chunk that calls
+/// `[$here serializeTo: 'out_sym]` from bytecode. proves the
+/// in-moof primitive works end-to-end and that the written file
+/// loads correctly.
+///
+/// path_sym is interned as a literal symbol so we don't need
+/// String-Form storage at the boot smoke layer.
+fn runSmokeSerializeTo(allocator: std.mem.Allocator, io: std.Io, out_path: []const u8) !void {
+    const p = std.debug.print;
+
+    var world = try World.init(allocator);
+    defer world.deinit();
+    world.io = io;
+    try intrinsics.install(&world);
+
+    // intern path as a symbol so :serializeTo: pulls it through the
+    // sym variant of valueToString (avoids cons-of-Char-Forms).
+    const path_sym = try world.syms.intern(out_path);
+    const serialize_sel = try world.syms.intern("serializeTo:");
+
+    const chunk_form = form_mod.Form.withProto(.{ .form = world.protos.chunk });
+    const chunk_id = try world.heap.alloc(chunk_form);
+
+    // bytecode: LoadHere; LoadConst 0; Send :serializeTo: argc=1 ic=0; Return
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try bytecode.encodeOp(.load_here, &buf, allocator);
+    try bytecode.encodeOp(.{ .load_const = .{ .idx = 0 } }, &buf, allocator);
+    try bytecode.encodeOp(
+        .{ .send = .{ .selector = serialize_sel, .argc = 1, .ic_idx = 0 } },
+        &buf,
+        allocator,
+    );
+    try bytecode.encodeOp(.return_op, &buf, allocator);
+
+    const body_bytes = try allocator.dupe(u8, buf.items);
+    try world.chunk_bytecode.put(allocator, chunk_id, body_bytes);
+
+    const consts = try allocator.alloc(Value, 1);
+    consts[0] = .{ .sym = path_sym };
+    try world.chunk_consts.put(allocator, chunk_id, consts);
+
+    const ics = try allocator.alloc(ICache, 1);
+    ics[0] = ICache.empty;
+    try world.chunk_ics.put(allocator, chunk_id, ics);
+
+    const params = try allocator.alloc(u32, 0);
+    try world.chunk_params.put(allocator, chunk_id, params);
+
+    p("running [$here serializeTo: '{s}]...\n", .{out_path});
+    const result = vm.runTop(&world, chunk_id) catch |err| {
+        p("vm error: {s}\n", .{@errorName(err)});
+        return;
+    };
+    printResult(result, &world);
+    p("if the smoke succeeded, {s} now exists.\n", .{out_path});
 }
 
 // ============================================================
