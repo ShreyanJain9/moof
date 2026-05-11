@@ -533,6 +533,8 @@ specifying it now in V4 means phase B's persistence work, phase D's replication 
 
 ### 10.1 the network structure
 
+**design principle:** the manifest is a moof Form, serialized via the same per-vat image format as everything else. no JSON, no special-case parser, no second format. one schema rules.
+
 a moof "world" is a **collection of vats**, each with its own:
 - canonical heap (`Vec<Form>`, deterministic alloc order)
 - own symbol table
@@ -551,7 +553,7 @@ a "world" on disk is a directory:
 
 ```
 my-world.moof/
-├── manifest.json           # top-level world descriptor
+├── manifest.vat            # a tiny vat-image containing the manifest Form
 ├── vats/
 │   ├── system.vat          # the boot vat (stdlib + protos + compilers)
 │   ├── user-abc123.vat     # a user-spawned vat
@@ -566,40 +568,39 @@ my-world.moof/
     └── ...
 ```
 
-**manifest.json** declares:
+**`manifest.vat`** is itself a per-vat image (per §10.3) with a one-Form heap (excluding sentinel #0). That one Form IS the manifest:
 
-```json
-{
-  "magic": "MOOF",
-  "version": 4,
-  "world_id": "blake3-of-manifest-contents-pinned-after-write",
-  "root_vat": "system",
-  "vats": [
-    {
-      "id": "system",
-      "image": "vats/system.vat",
-      "hash": "6f3a8b...",
-      "role": "system",
-      "live": true
-    },
-    {
-      "id": "user-abc123",
-      "image": "vats/user-abc123.vat",
-      "hash": "a14739...",
-      "role": "user",
-      "parent": "system",
-      "spawned_at_turn": 47
-    }
-  ],
-  "schema": {
-    "version": 4,
-    "sym_table_canonical": "blake3-of-sym-table",
-    "mco_index": {"core/hash": "66f3a1...", "core/utf8": "f6b8ac..."}
-  }
-}
+```moof
+{ Manifest
+  :magic 'MOOF
+  :version 4
+  :world-id <Bytes — blake3 of canonical state>
+  :root-vat 'system
+  :vats (list
+    { VatEntry
+      :id 'system
+      :image "vats/system.vat"
+      :hash <Bytes — blake3 of the .vat file>
+      :role 'system
+      :live #true }
+    { VatEntry
+      :id 'user-abc123
+      :image "vats/user-abc123.vat"
+      :hash <Bytes>
+      :role 'user
+      :parent 'system
+      :spawned-at-turn 47 })
+  :schema { Schema
+    :version 4
+    :sym-table-canonical <Bytes>
+    :mco-index (list
+      (cons "core/hash"  <Bytes — blake3 of mco>)
+      (cons "core/utf8"  <Bytes>)) } }
 ```
 
-(json is a transitional choice — once moof has its own canonical-encoder for Forms, the manifest itself becomes a moof Form. but for V4 phase β, json is pragmatic.)
+**why this is the right design:** the loader for any vat-image works for the manifest too. one parser, one canonical-encoder, one hashing path. when moof code wants to read `manifest.vat`, it just loads it as a vat and reads the resulting Form's slots — same as any other Form.
+
+the `Manifest`, `VatEntry`, and `Schema` protos are defined at boot in the system vat. moof-zig knows just enough about them to find the `:root-vat` slot in the manifest Form and proceed to load it. all richer manipulation happens via moof code after the system vat is up.
 
 ### 10.3 per-vat image format
 
@@ -718,19 +719,30 @@ phase D (in-process multi-vat) wires the local case. phase F (websocket federati
 
 ```
 fn moof_boot(world_dir: &Path) -> Vat:
-    manifest = parse_json(world_dir / "manifest.json")
-    verify(manifest.version == 4)
+    # load the manifest vat first — it's a tiny vat-image with one Form
+    manifest_vat = load_vat_image(world_dir / "manifest.vat")
+    manifest_form = manifest_vat.heap[1]  # FormId(1) — sole non-sentinel
     
-    # load the root (system) vat
-    root_vat_entry = manifest.vats.find(v => v.id == manifest.root_vat)
-    root_vat = load_vat_image(world_dir / root_vat_entry.image)
+    # read the manifest's slots (substrate-level access; no method dispatch
+    # needed because we don't have the system vat's protos yet)
+    verify(manifest_form.slots[':magic] == Sym("MOOF"))
+    verify(manifest_form.slots[':version].as_int() == 4)
     
-    # register the root vat in the global registry
-    register_vat(root_vat.id, root_vat)
+    # find the root-vat entry
+    root_vat_id = manifest_form.slots[':root-vat].as_sym()
+    vats_list = manifest_form.slots[':vats]
+    root_entry = first_in_list(vats_list, |v| v.slots[':id] == root_vat_id)
+    root_image_path = world_dir / root_entry.slots[':image].as_string()
     
-    # other vats are NOT loaded eagerly — they resolve on first far-ref access
-    for vat_entry in manifest.vats.where(v => v.id != root_vat.id):
-        register_vat_lazy(vat_entry.id, world_dir / vat_entry.image)
+    # load the system vat
+    root_vat = load_vat_image(root_image_path)
+    
+    # register all vats; only root is loaded eagerly; others lazy
+    register_vat(root_vat_id, root_vat)
+    for vat_entry in iter_list(vats_list).skip_id(root_vat_id):
+        register_vat_lazy(
+          vat_entry.slots[':id].as_sym(),
+          world_dir / vat_entry.slots[':image].as_string())
     
     return root_vat
 ```
