@@ -9,3 +9,4 @@ examples/*/Cargo.lock
 .DS_Store
 scheduled_tasks.lock
 .claude/scheduled_tasks.lock
+.claude/worktrees/
