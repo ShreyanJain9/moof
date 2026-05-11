@@ -45,9 +45,13 @@
       (let ((eThunk [self compileThunk: elseForm]))
         [chunk emit: [Opcode pushClosure: eThunk]])
       ;; Send :ifTrue:ifFalse: argc=2 — tail iff if was tail.
-      (let ((icDispatch [chunk addIc]))
-        (if tail
-            [chunk emit: [Opcode tailSend: 'ifTrue:ifFalse: argc: 2]]
+      ;; IC is allocated ONLY in non-tail position (matches rust's
+      ;; compile_if discipline — tail branch elides next_ic()).
+      ;; This keeps chunk.ics counts byte-identical between rust and
+      ;; moof compilers.
+      (if tail
+          [chunk emit: [Opcode tailSend: 'ifTrue:ifFalse: argc: 2]]
+          (let ((icDispatch [chunk addIc]))
             [chunk emit: [Opcode send: 'ifTrue:ifFalse: argc: 2 ic: icDispatch]])))))
 
 ;; ─────────────────────────────────────────────────────────────────
