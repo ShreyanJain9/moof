@@ -454,6 +454,24 @@ let patch_here_form (here_id : int) (bp : boot_protos) : unit =
   in
   lifted_forms := patch_at 0 [] !lifted_forms
 
+(* Append a single (sym, value) pair to an already-allocated Form's
+   slots list. Like patch_here_form but additive — preserves existing
+   slots and appends a new one. Used to bind `main` on here_form once
+   we know the boot chunk's FormId. *)
+let patch_form_slots (target_id : int) (slot : int * Ast.form) : unit =
+  let cur_top = !next_form_id - 1 in
+  let target_offset = cur_top - target_id in
+  let rec patch_at i acc = function
+    | [] ->
+        failwith (Printf.sprintf
+          "patch_form_slots: FormId %d not in lifted_forms" target_id)
+    | f :: rest when i = target_offset ->
+        let patched = Image.{ f with slots = f.slots @ [slot] } in
+        List.rev_append acc (patched :: rest)
+    | f :: rest -> patch_at (i + 1) (f :: acc) rest
+  in
+  lifted_forms := patch_at 0 [] !lifted_forms
+
 (* Convert boot_protos -> Image.proto_table for the image header. *)
 let protos_table (bp : boot_protos) : Image.proto_table =
   Image.{
@@ -712,18 +730,30 @@ let run (args : string array) : unit =
      here_form's slots once we know its FormId. *)
   let (macros_form_id, here_form_id) = alloc_here_and_macros bp in
   patch_here_form here_form_id bp;
-  (* Compile every form. Each compile_top registers its chunk + nested
-     closures into the global chunk registry. *)
-  List.iter (fun step ->
-    try
-      let cb = Compiler.compile_top step.form in
-      let _ = Compiler.finalize cb in
-      ()
-    with
-    | Compiler.Compile_error msg ->
-        Printf.eprintf "compile error in %s: %s\n" step.source_path msg;
-        exit 1
-  ) steps;
+  (* Compile a single synthetic "main" top-level chunk wrapping every
+     gathered step in `(do step1 step2 ...)`. zig's runRun expects one
+     entry-point chunk reachable via the `main` slot on here_form; we
+     bind it below.
+
+     Why one chunk rather than N: each step is one top-level form like
+     [$transporter load: "..."] that, when run, performs a side effect
+     (load file, define proto, etc.). We need them all to run in order
+     when the vat boots. compile_top on a single (do ...) form produces
+     a chunk that executes them sequentially.
+
+     Sub-chunks (closures, fn bodies) registered during compilation
+     still land in the chunk registry normally. *)
+  let main_form =
+    let steps_forms = List.map (fun s -> s.form) steps in
+    Ast.Cons (Ast.Sym "do", Ast.forms_to_list steps_forms)
+  in
+  let main_cb =
+    try Compiler.compile_top main_form
+    with Compiler.Compile_error msg ->
+      Printf.eprintf "compile error in synthetic main: %s\n" msg;
+      exit 1
+  in
+  let _ = Compiler.finalize main_cb in
   (* Allocate a fresh source-form Form per compiled chunk. zig's
      image-loader keys world.chunk_bytecode by source_form_id, so each
      chunk needs a distinct FormId or all chunks collapse into one
@@ -788,6 +818,11 @@ let run (args : string array) : unit =
       }
     ) all_cbs chunk_form_ids
   in
+  (* Bind `main` on here_form to the synthetic main chunk's FormId.
+     zig's runRun looks here for the boot entry point. *)
+  let main_fid = map_chunk_id main_cb.id in
+  patch_form_slots here_form_id
+    (Compiler.intern "main", Ast.FormRef main_fid);
   let forms = List.rev !lifted_forms in
   let vat = Image.{
     vat_id = Bytes.make 16 '\x00';       (* deterministic placeholder *)
