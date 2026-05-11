@@ -597,6 +597,467 @@ fn valueCharsToBuffer(world: *World, chain: Value, buf: []u8) ![]const u8 {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// Opcode constructors — class-side on the `Opcode` singleton.
+//
+// the rust intrinsics.rs install_compiler_primitives builds 15 of
+// these as `[Opcode foo:]` constructors. each returns a fresh Form
+// with proto = `Opcode`, slot `:op` = a Symbol naming the variant,
+// slot `:operands` = a moof-cons list of operand values.
+//
+// **shape note:** the rust impl uses a `Table` for `:operands`. zig
+// substrate doesn't have first-class Table storage at the substrate
+// layer yet, so we use a cons-chain instead. positional access
+// (`[ops at: 0]`) is replaced by `car` / `cdr` walks. the moof
+// Compiler may need a small adapter if/when it reaches this path —
+// but for the bootstrap, these constructors are mostly invoked then
+// re-decoded via `[chunk emit:]`, which we mirror in `chunkEmit`
+// below using the same cons-shape contract.
+//
+// port of crates/substrate/src/intrinsics.rs::install_compiler_primitives.
+// ─────────────────────────────────────────────────────────────────
+
+/// build an opcode-Form `{Opcode :op 'name :operands (cons-list operands...)}`.
+/// shared by every Opcode:foo constructor below. operands list is
+/// already in dispatch order — head = first operand.
+fn mkOpForm(world: *World, name: []const u8, operands: []const Value) !Value {
+    const op_sym = try world.syms.intern("op");
+    const operands_sym = try world.syms.intern("operands");
+    var op_form = Form.withProto(.{ .form = world.protos.opcode });
+    const name_sym = try world.syms.intern(name);
+    try op_form.slots.put(world.allocator, op_sym, .{ .sym = name_sym });
+    // operands as a cons-chain. note: rust uses a Table; zig uses
+    // a moof list. callers iterate via car/cdr.
+    const operands_list = try world.makeList(operands);
+    try op_form.slots.put(world.allocator, operands_sym, operands_list);
+    const id = try world.heap.alloc(op_form);
+    return .{ .form = id };
+}
+
+fn opcodePushNil(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 0) return raise(world, "arity", "[Opcode pushNil] takes no args");
+    return mkOpForm(world, "PushNil", &.{});
+}
+
+fn opcodePushTrue(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 0) return raise(world, "arity", "[Opcode pushTrue] takes no args");
+    return mkOpForm(world, "PushTrue", &.{});
+}
+
+fn opcodePushFalse(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 0) return raise(world, "arity", "[Opcode pushFalse] takes no args");
+    return mkOpForm(world, "PushFalse", &.{});
+}
+
+fn opcodePop(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 0) return raise(world, "arity", "[Opcode pop] takes no args");
+    return mkOpForm(world, "Pop", &.{});
+}
+
+fn opcodeDup(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 0) return raise(world, "arity", "[Opcode dup] takes no args");
+    return mkOpForm(world, "Dup", &.{});
+}
+
+fn opcodeLoadSelf(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 0) return raise(world, "arity", "[Opcode loadSelf] takes no args");
+    return mkOpForm(world, "LoadSelf", &.{});
+}
+
+fn opcodeReturn(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 0) return raise(world, "arity", "[Opcode return] takes no args");
+    return mkOpForm(world, "Return", &.{});
+}
+
+fn opcodeLoadConst(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 1) return raise(world, "arity", "[Opcode loadConst: x] takes 1 arg");
+    return mkOpForm(world, "LoadConst", args);
+}
+
+fn opcodeLoadName(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 1) return raise(world, "arity", "[Opcode loadName: n] takes 1 arg");
+    return mkOpForm(world, "LoadName", args);
+}
+
+fn opcodePushClosure(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 1) return raise(world, "arity", "[Opcode pushClosure: c] takes 1 arg");
+    return mkOpForm(world, "PushClosure", args);
+}
+
+fn opcodeJump(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 1) return raise(world, "arity", "[Opcode jump: o] takes 1 arg");
+    return mkOpForm(world, "Jump", args);
+}
+
+fn opcodeJumpIfFalse(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 1) return raise(world, "arity", "[Opcode jumpIfFalse: o] takes 1 arg");
+    return mkOpForm(world, "JumpIfFalse", args);
+}
+
+fn opcodeSendArgcIc(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 3) return raise(world, "arity", "[Opcode send: argc: ic:] takes 3 args");
+    return mkOpForm(world, "Send", args);
+}
+
+fn opcodeTailSendArgc(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 2) return raise(world, "arity", "[Opcode tailSend: argc:] takes 2 args");
+    return mkOpForm(world, "TailSend", args);
+}
+
+fn opcodeSuperSendArgcIc(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 3) return raise(world, "arity", "[Opcode superSend: argc: ic:] takes 3 args");
+    return mkOpForm(world, "SuperSend", args);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Opcode instance methods — `:op`, `:operands`, `:toString`.
+//
+// the rust ensure_opcode_proto installs these as instance-side
+// slot-getters so opcode-Forms can be introspected. port: identical
+// shape, returning the corresponding slot.
+// ─────────────────────────────────────────────────────────────────
+
+fn opcodeOp(world: *World, self_: Value, _: []const Value) anyerror!Value {
+    const id = self_.asFormId() orelse return typeError(world, "op: receiver not a Form");
+    const op_sym = try world.syms.intern("op");
+    return world.formSlot(id, op_sym);
+}
+
+fn opcodeOperands(world: *World, self_: Value, _: []const Value) anyerror!Value {
+    const id = self_.asFormId() orelse return typeError(world, "operands: receiver not a Form");
+    const operands_sym = try world.syms.intern("operands");
+    return world.formSlot(id, operands_sym);
+}
+
+fn opcodeToString(world: *World, self_: Value, _: []const Value) anyerror!Value {
+    const id = self_.asFormId() orelse return typeError(world, "toString: receiver not a Form");
+    const op_sym = try world.syms.intern("op");
+    const name_v = world.formSlot(id, op_sym);
+    var buf: [128]u8 = undefined;
+    const text = switch (name_v) {
+        .sym => |s| try std.fmt.bufPrint(&buf, "<{s}>", .{world.syms.resolve(s)}),
+        else => try std.fmt.bufPrint(&buf, "<?>", .{}),
+    };
+    return world.makeString(text);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Chunks singleton reflection methods.
+//
+// the rust install_chunks_singleton exposes the chunk side-tables
+// (chunk_ops, chunk_consts, chunk_ics, chunk_params, chunk_bytecode)
+// to moof code. each method takes a chunk-or-closure and returns
+// a Cons of the relevant entries.
+//
+// **bytecode-vs-ops asymmetry:** rust stores per-chunk `chunk_ops`
+// (Vec<Op> structured), while zig stores `chunk_bytecode` (raw
+// V4-encoded bytes). `opsListOf:` would need to decode ops on the
+// fly. for now we return nil with a TODO — the moof Method's
+// `:bytecodes` reflection method can fall back to nil.
+//
+// port of crates/substrate/src/intrinsics.rs::install_chunks_singleton.
+// ─────────────────────────────────────────────────────────────────
+
+/// helper: extract a chunk-FormId from a value that might be a chunk,
+/// a method (with `:body` slot), or a closure. nil otherwise.
+fn chunkIdOf(world: *World, v: Value) ?FormId {
+    const id = v.asFormId() orelse return null;
+    if (world.chunk_bytecode.contains(id)) return id;
+    const body_v = world.formSlot(id, world.body_sym);
+    if (body_v.asFormId()) |bid| {
+        if (world.chunk_bytecode.contains(bid)) return bid;
+    }
+    return null;
+}
+
+fn chunksIsChunk(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len < 1) return .{ .bool_ = false };
+    if (args[0].asFormId()) |id| {
+        return .{ .bool_ = world.chunk_bytecode.contains(id) };
+    }
+    return .{ .bool_ = false };
+}
+
+fn chunksParamsListOf(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len < 1) return .nil;
+    const id = args[0].asFormId() orelse return .nil;
+    const p = world.formSlot(id, world.params_sym);
+    if (p != .nil) return p;
+    const cid = chunkIdOf(world, args[0]) orelse return .nil;
+    // chunk_params is a slice of SymIds — rebuild as a Sym cons-list.
+    const params = world.chunk_params.get(cid) orelse return .nil;
+    var vals: std.ArrayList(Value) = .empty;
+    defer vals.deinit(world.allocator);
+    for (params) |sid| {
+        try vals.append(world.allocator, .{ .sym = sid });
+    }
+    return world.makeList(vals.items);
+}
+
+fn chunksConstsListOf(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len < 1) return .nil;
+    const cid = chunkIdOf(world, args[0]) orelse return .nil;
+    const consts = world.chunk_consts.get(cid) orelse return .nil;
+    return world.makeList(consts);
+}
+
+/// **stub** — zig stores chunk bodies as raw V4-encoded bytes
+/// (`chunk_bytecode`), not decoded `Op` structs. a proper port
+/// would decode each op via `bytecode.decodeOp` and rebuild an
+/// opcode-Form via `mkOpForm`. for the bootstrap path that doesn't
+/// introspect bytecodes, returning nil is acceptable; the moof
+/// Method:bytecodes reflection method will fall back.
+fn chunksOpsListOf(_: *World, _: Value, _: []const Value) anyerror!Value {
+    return .nil;
+}
+
+fn chunksIcsListOf(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len < 1) return .nil;
+    const cid = chunkIdOf(world, args[0]) orelse return .nil;
+    const ics = world.chunk_ics.get(cid) orelse return .nil;
+    // each IC becomes a small Form with slots :cached-proto,
+    // :cached-method, :cached-defining, :cached-generation.
+    const cached_proto_sym = try world.syms.intern("cached-proto");
+    const cached_method_sym = try world.syms.intern("cached-method");
+    const cached_defining_sym = try world.syms.intern("cached-defining");
+    const cached_generation_sym = try world.syms.intern("cached-generation");
+    var entries: std.ArrayList(Value) = .empty;
+    defer entries.deinit(world.allocator);
+    for (ics) |ic| {
+        var entry = Form.withProto(.{ .form = world.protos.object });
+        const proto_v: Value = if (ic.cached_proto.isNone()) .nil else .{ .form = ic.cached_proto };
+        const method_v: Value = if (ic.cached_method.isNone()) .nil else .{ .form = ic.cached_method };
+        const defining_v: Value = if (ic.cached_defining.isNone()) .nil else .{ .form = ic.cached_defining };
+        try entry.slots.put(world.allocator, cached_proto_sym, proto_v);
+        try entry.slots.put(world.allocator, cached_method_sym, method_v);
+        try entry.slots.put(world.allocator, cached_defining_sym, defining_v);
+        try entry.slots.put(world.allocator, cached_generation_sym, .{ .int = @as(i48, @intCast(ic.cached_generation)) });
+        const eid = try world.heap.alloc(entry);
+        try entries.append(world.allocator, .{ .form = eid });
+    }
+    return world.makeList(entries.items);
+}
+
+fn chunksBodyOf(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len < 1) return .nil;
+    const id = args[0].asFormId() orelse return .nil;
+    const body_v = world.formSlot(id, world.body_sym);
+    if (body_v.asFormId()) |bid| {
+        if (world.chunk_bytecode.contains(bid)) return .{ .form = bid };
+    }
+    if (world.chunk_bytecode.contains(id)) return .{ .form = id };
+    return .nil;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Heap singleton — six reflection primitives moof code uses to
+// introspect Forms (slots / handlers / meta / heap-id / proto).
+//
+// the rust install_heap_singleton wires these as `[Heap protoOf: v]`
+// style class-method sends; image-rebind matches them by canonical
+// "Heap:selector" name.
+// ─────────────────────────────────────────────────────────────────
+
+fn heapProtoOf(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len < 1) return .nil;
+    return world.protoOf(args[0]);
+}
+
+fn heapHeapIdOf(_: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len < 1) return .{ .int = 0 };
+    return switch (args[0]) {
+        .form => |fid| .{ .int = @as(i48, @intCast(@as(u32, @bitCast(fid)))) },
+        else => .{ .int = 0 },
+    };
+}
+
+fn heapAllocFormWithProto(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len < 1) return typeError(world, "allocFormWithProto: needs 1 arg");
+    const proto_v = args[0];
+    if (proto_v != .form) return typeError(world, "allocFormWithProto: proto must be a Form");
+    var f = Form.withProto(proto_v);
+    const id = try world.heap.alloc(f);
+    _ = &f;
+    return .{ .form = id };
+}
+
+fn heapSlotOfAt(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len < 2) return typeError(world, "slotOf:at: needs 2 args");
+    const id = args[0].asFormId() orelse return .nil;
+    const sym = args[1].asSym() orelse return typeError(world, "slotOf:at: key must be a Symbol");
+    return world.formSlot(id, sym);
+}
+
+fn heapHandlerOfAt(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len < 2) return typeError(world, "handlerOf:at: needs 2 args");
+    const id = args[0].asFormId() orelse return .nil;
+    const sym = args[1].asSym() orelse return typeError(world, "handlerOf:at: key must be a Symbol");
+    const f = world.heap.get(id);
+    return f.handler(sym) orelse .nil;
+}
+
+fn heapMetaOfAt(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len < 2) return typeError(world, "metaOf:at: needs 2 args");
+    const id = args[0].asFormId() orelse return .nil;
+    const sym = args[1].asSym() orelse return typeError(world, "metaOf:at: key must be a Symbol");
+    return world.formMeta(id, sym);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Method:call — invoke a method/closure Form with args. wraps the
+// substrate's send-path so the closure's captured-self is honored.
+//
+// port of crates/substrate/src/intrinsics.rs::install_call_on_method.
+// ─────────────────────────────────────────────────────────────────
+
+fn methodCall(world: *World, self_: Value, args: []const Value) anyerror!Value {
+    const id = self_.asFormId() orelse return raise(world, "dispatch", "receiver of :call is not a Form");
+    // captured-self for closures created by PushClosure.
+    const captured_sym = try world.syms.intern("captured-self");
+    const captured = world.formSlot(id, captured_sym);
+    // dispatch via the body chunk. mirror the inline-arg-binding done
+    // by World.send for a method-Form, but with an arbitrary receiver
+    // (the captured-self) and no super-context.
+    const body_v = world.formSlot(id, world.body_sym);
+    const chunk_id = body_v.asFormId() orelse return raise(world, "dispatch", ":call: method has no :body chunk");
+    const captured_env_v = world.formSlot(id, world.env_sym);
+    const captured_env = captured_env_v.asFormId() orelse world.here_form;
+    const params_v = world.formSlot(id, world.params_sym);
+    const params = try world.listToSlice(params_v);
+    defer world.freeSlice(params);
+    if (params.len != args.len) return raise(world, "arity", ":call: argc mismatch");
+    const call_env = try world.allocEnv(captured_env);
+    for (params, args) |p, a| {
+        const ps = p.asSym() orelse return raise(world, "type-error", ":call: bad param");
+        try world.envBind(call_env, ps, a);
+    }
+    return world.vm.runMethod(world, chunk_id, call_env, captured, FormId.NONE);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Object basics — port of intrinsics.rs::install_object_reflection.
+//
+// `:=` is identity equality (Object default; protos like Integer
+// override). `:new` allocates a fresh form with this proto.
+// `:initialize` is a hook returning self. `:freeze` flips the
+// `frozen` bit; `:frozen?` / `:freezable?` query it.
+// ─────────────────────────────────────────────────────────────────
+
+fn objEq(_: *World, self_: Value, args: []const Value) anyerror!Value {
+    if (args.len < 1) return .{ .bool_ = false };
+    return .{ .bool_ = self_.equals(args[0]) };
+}
+
+fn objNew(world: *World, self_: Value, _: []const Value) anyerror!Value {
+    // [Proto new] — allocate a fresh form whose proto is the receiver.
+    var f = Form.withProto(self_);
+    const id = try world.heap.alloc(f);
+    _ = &f;
+    return .{ .form = id };
+}
+
+fn objInitialize(_: *World, self_: Value, _: []const Value) anyerror!Value {
+    return self_;
+}
+
+fn objFreeze(world: *World, self_: Value, _: []const Value) anyerror!Value {
+    const id = self_.asFormId() orelse return self_;
+    const fm = world.heap.getMut(id);
+    fm.frozen = true;
+    return self_;
+}
+
+fn objFrozen(world: *World, self_: Value, _: []const Value) anyerror!Value {
+    const id = self_.asFormId() orelse return .{ .bool_ = false };
+    return .{ .bool_ = world.heap.get(id).frozen };
+}
+
+fn objFreezable(_: *World, self_: Value, _: []const Value) anyerror!Value {
+    // every Form is freezable; tagged immediates are conceptually
+    // already-frozen. report true uniformly (matches rust default).
+    _ = self_;
+    return .{ .bool_ = true };
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Cons basics — port of intrinsics.rs::install_cons_and_nil_primitives.
+//
+// `:cons:` builds `(cdr cons: car)` — i.e. self IS the tail, arg is
+// the new head. `:empty?` / `:null?` / `:nonEmpty?` are obvious.
+// ─────────────────────────────────────────────────────────────────
+
+fn consConsInto(world: *World, self_: Value, args: []const Value) anyerror!Value {
+    if (args.len != 1) return raise(world, "arity", "cons: takes 1 arg");
+    var f = Form.withProto(.{ .form = world.protos.cons });
+    try f.slots.put(world.allocator, world.symCar, args[0]);
+    try f.slots.put(world.allocator, world.symCdr, self_);
+    const id = try world.heap.alloc(f);
+    return .{ .form = id };
+}
+
+fn consEmptyFalse(_: *World, _: Value, _: []const Value) anyerror!Value {
+    return .{ .bool_ = false };
+}
+
+fn consEmptyTrue(_: *World, _: Value, _: []const Value) anyerror!Value {
+    return .{ .bool_ = true };
+}
+
+fn nilProto(_: *World, _: Value, _: []const Value) anyerror!Value {
+    return .nil;
+}
+
+fn consReverse(world: *World, self_: Value, _: []const Value) anyerror!Value {
+    var acc: Value = .nil;
+    var cur = self_;
+    while (true) {
+        switch (cur) {
+            .nil => break,
+            .form => |id| {
+                const f = world.heap.get(id);
+                if (!f.slotPresent(world.symCar)) break;
+                const car = f.slot(world.symCar);
+                const cdr = f.slot(world.symCdr);
+                var node = Form.withProto(.{ .form = world.protos.cons });
+                try node.slots.put(world.allocator, world.symCar, car);
+                try node.slots.put(world.allocator, world.symCdr, acc);
+                const nid = try world.heap.alloc(node);
+                acc = .{ .form = nid };
+                cur = cdr;
+            },
+            else => break,
+        }
+    }
+    return acc;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Compiler / Reader cap flag toggles.
+//
+// the rust install_compiler_cap / install_reader_cap allocate
+// **anonymous** proto-Forms (no `:name` meta) and bind them under
+// `$compiler` / `$reader` globally. when v4_export collects native
+// methods it labels them `<anon-N>:useMoof` / `<anon-N>:useSeed`
+// where N is the heap index — and N varies across boots.
+//
+// because the canonical name in the image's NativeRefsSection
+// changes per-image, a static REGISTRY entry cannot reliably
+// re-bind these. we keep the zig-side functions here so the rust
+// runtime can install them at world-init via `install`, but they
+// are **NOT** added to the REGISTRY. when track-A self-host moves
+// these flags into in-image state (post wave-W3), the issue goes
+// away.
+//
+// (the no-op stub matches rust shape: world.use_moof_compiler /
+// world.use_moof_reader don't exist in zig — there's no
+// rust-versus-moof compiler split here. natives are still defined
+// to keep the surface complete.)
+// ─────────────────────────────────────────────────────────────────
+
+fn capNoOp(_: *World, _: Value, _: []const Value) anyerror!Value {
+    return .nil;
+}
+
+// ─────────────────────────────────────────────────────────────────
 // REGISTRY — comptime name → NativeFn map (V4 Track C.3 Task 2.1).
 //
 // keyed by canonical "ProtoName:selector" strings. image-load
@@ -607,8 +1068,6 @@ fn valueCharsToBuffer(world: *World, chain: Value, buf: []u8) ![]const u8 {
 //
 // std.StaticStringMap is comptime-built: a typo in any key or fn
 // reference is a build-time error. zero runtime registration code.
-//
-// 29 entries — matches the surface installed by `install` above.
 // ─────────────────────────────────────────────────────────────────
 
 pub const REGISTRY = std.StaticStringMap(NativeFn).initComptime(.{
@@ -642,4 +1101,63 @@ pub const REGISTRY = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "Bool:ifTrue:ifFalse:", boolIfTrueIfFalse },
     .{ "Object:toString", objToString },
     .{ "Object:serializeTo:", objSerializeTo },
+
+    // W10 (track B) additions — Opcode constructors, ~15 entries.
+    .{ "Opcode:pushNil", opcodePushNil },
+    .{ "Opcode:pushTrue", opcodePushTrue },
+    .{ "Opcode:pushFalse", opcodePushFalse },
+    .{ "Opcode:pop", opcodePop },
+    .{ "Opcode:dup", opcodeDup },
+    .{ "Opcode:loadSelf", opcodeLoadSelf },
+    .{ "Opcode:return", opcodeReturn },
+    .{ "Opcode:loadConst:", opcodeLoadConst },
+    .{ "Opcode:loadName:", opcodeLoadName },
+    .{ "Opcode:pushClosure:", opcodePushClosure },
+    .{ "Opcode:jump:", opcodeJump },
+    .{ "Opcode:jumpIfFalse:", opcodeJumpIfFalse },
+    .{ "Opcode:send:argc:ic:", opcodeSendArgcIc },
+    .{ "Opcode:tailSend:argc:", opcodeTailSendArgc },
+    .{ "Opcode:superSend:argc:ic:", opcodeSuperSendArgcIc },
+
+    // Opcode instance methods — opcode-Form reflection.
+    .{ "Opcode:op", opcodeOp },
+    .{ "Opcode:operands", opcodeOperands },
+    .{ "Opcode:toString", opcodeToString },
+
+    // Chunks singleton reflection methods.
+    .{ "Chunks:isChunk?:", chunksIsChunk },
+    .{ "Chunks:paramsListOf:", chunksParamsListOf },
+    .{ "Chunks:constsListOf:", chunksConstsListOf },
+    .{ "Chunks:opsListOf:", chunksOpsListOf },
+    .{ "Chunks:icsListOf:", chunksIcsListOf },
+    .{ "Chunks:bodyOf:", chunksBodyOf },
+
+    // Heap singleton.
+    .{ "Heap:protoOf:", heapProtoOf },
+    .{ "Heap:heapIdOf:", heapHeapIdOf },
+    .{ "Heap:allocFormWithProto:", heapAllocFormWithProto },
+    .{ "Heap:slotOf:at:", heapSlotOfAt },
+    .{ "Heap:handlerOf:at:", heapHandlerOfAt },
+    .{ "Heap:metaOf:at:", heapMetaOfAt },
+
+    // Method:call — invoke a method/closure form.
+    .{ "Method:call", methodCall },
+
+    // Object basics.
+    .{ "Object:=", objEq },
+    .{ "Object:new", objNew },
+    .{ "Object:initialize", objInitialize },
+    .{ "Object:freeze", objFreeze },
+    .{ "Object:frozen?", objFrozen },
+    .{ "Object:freezable?", objFreezable },
+
+    // Cons / Nil basics.
+    .{ "Cons:cons:", consConsInto },
+    .{ "Nil:cons:", consConsInto },
+    .{ "Cons:empty?", consEmptyFalse },
+    .{ "Cons:null?", consEmptyFalse },
+    .{ "Cons:nonEmpty?", consEmptyTrue }, // and conversely Nil:empty? is true
+    .{ "Nil:empty?", consEmptyTrue },
+    .{ "Nil:proto", nilProto },
+    .{ "Cons:reverse", consReverse },
 });
