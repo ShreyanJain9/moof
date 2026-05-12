@@ -133,6 +133,16 @@ pub fn main(init: std.process.Init) !void {
         return runRun(allocator, init.io, init.minimal.environ, vat_copy, serialize_to);
     }
 
+    if (sub_raw != null and std.mem.eql(u8, sub_raw.?, "stress-recursion")) {
+        // moof stress-recursion [<depth>]
+        // build a non-tail-recursive moof method by hand, install it
+        // on a custom proto, and invoke it with `depth`. exercises
+        // the §4 single-loop dispatch refactor: ~N moof frames live
+        // simultaneously without overflowing the host stack.
+        const depth: u32 = if (path_raw) |s| std.fmt.parseInt(u32, s, 10) catch 10000 else 10000;
+        return runStressRecursion(allocator, depth);
+    }
+
     return runSmoke(allocator);
 }
 
@@ -773,4 +783,143 @@ fn runRun(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ
         });
         p("wrote {s} ({d} bytes)\n", .{ out_path, buf.items.len });
     }
+}
+
+// ============================================================
+// stress-recursion subcommand (phase 1 §4 verification)
+// ============================================================
+
+/// build a non-tail-recursive moof method by hand, install it on a
+/// fresh proto, and invoke it with depth. each non-tail Send in the
+/// old recursive-dispatch design added ~5 host-stack frames; with
+/// the §4 single-loop refactor, depth is bounded by the heap
+/// (frames ArrayList) rather than the host stack.
+///
+/// the synthesized method `:rec:` does:
+///   def rec(n) = if n > 0 then (self.rec(n - 1)) + 0 else 0
+///
+/// the `(... + 0)` after the recursive send keeps the recursive
+/// Send in non-tail position (else the compiler would otherwise
+/// emit TailSend, which is already frame-replacing). result is
+/// always 0; we're testing depth, not arithmetic.
+fn runStressRecursion(allocator: std.mem.Allocator, depth: u32) !void {
+    const p = std.debug.print;
+
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    _ = allocator;
+    const world_alloc = gpa.allocator();
+
+    var world = try World.init(world_alloc);
+    defer world.deinit();
+    try intrinsics.install(&world);
+
+    p("stress-recursion: depth = {d}\n", .{depth});
+
+    // ------------------------------------------------------------
+    // build the bytecode for rec(n):
+    //
+    // offsets:                        size  cumulative
+    //   LoadName 'n                   5     5
+    //   LoadConst #0  (Int 0)         3     8
+    //   Send '>, argc=1, ic=0         8    16
+    //   JumpIfFalse to else (+34)     3    19
+    //   LoadSelf                      1    20
+    //   LoadName 'n                   5    25
+    //   LoadConst #1  (Int 1)         3    28
+    //   Send '-, argc=1, ic=1         8    36
+    //   Send 'rec, argc=1, ic=2       8    44   (NON-TAIL)
+    //   LoadConst #0  (Int 0)         3    47
+    //   Send '+, argc=1, ic=3         8    55
+    //   Return                        1    56
+    // else_branch (offset 56 from start):
+    //   LoadConst #0  (Int 0)         3    59
+    //   Return                        1    60
+    //
+    // JumpIfFalse offset is relative to the byte after the jump
+    // op (pc is already advanced past JumpIfFalse when we apply
+    // offset). pc after JumpIfFalse = 19; else_branch starts at
+    // 56; offset = 56 - 19 = +37.
+    // ------------------------------------------------------------
+
+    const n_sym = try world.syms.intern("n");
+    const rec_sym = try world.syms.intern("rec:");
+    const plus_sym = try world.syms.intern("+");
+    const minus_sym = try world.syms.intern("-");
+    const gt_sym = try world.syms.intern(">");
+
+    // const pool: [Int 0, Int 1]
+    const consts = try world_alloc.alloc(Value, 2);
+    consts[0] = .{ .int = 0 };
+    consts[1] = .{ .int = 1 };
+
+    // ics: 4 sites
+    const ics = try world_alloc.alloc(ICache, 4);
+    for (ics) |*ic| ic.* = ICache.empty;
+
+    // encode the bytecode
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(world_alloc);
+    try bytecode.encodeOp(.{ .load_name = .{ .name = n_sym } }, &buf, world_alloc);
+    try bytecode.encodeOp(.{ .load_const = .{ .idx = 0 } }, &buf, world_alloc);
+    try bytecode.encodeOp(.{ .send = .{ .selector = gt_sym, .argc = 1, .ic_idx = 0 } }, &buf, world_alloc);
+    try bytecode.encodeOp(.{ .jump_if_false = .{ .offset = 37 } }, &buf, world_alloc);
+    try bytecode.encodeOp(.load_self, &buf, world_alloc);
+    try bytecode.encodeOp(.{ .load_name = .{ .name = n_sym } }, &buf, world_alloc);
+    try bytecode.encodeOp(.{ .load_const = .{ .idx = 1 } }, &buf, world_alloc);
+    try bytecode.encodeOp(.{ .send = .{ .selector = minus_sym, .argc = 1, .ic_idx = 1 } }, &buf, world_alloc);
+    try bytecode.encodeOp(.{ .send = .{ .selector = rec_sym, .argc = 1, .ic_idx = 2 } }, &buf, world_alloc);
+    try bytecode.encodeOp(.{ .load_const = .{ .idx = 0 } }, &buf, world_alloc);
+    try bytecode.encodeOp(.{ .send = .{ .selector = plus_sym, .argc = 1, .ic_idx = 3 } }, &buf, world_alloc);
+    try bytecode.encodeOp(.return_op, &buf, world_alloc);
+    // else_branch — sanity-check we're at offset 56:
+    if (buf.items.len != 56) {
+        p("internal: expected jump target at offset 56, got {d}\n", .{buf.items.len});
+        return;
+    }
+    try bytecode.encodeOp(.{ .load_const = .{ .idx = 0 } }, &buf, world_alloc);
+    try bytecode.encodeOp(.return_op, &buf, world_alloc);
+
+    const body_bytes = try world_alloc.dupe(u8, buf.items);
+
+    // alloc chunk-Form
+    const chunk_form = Form.withProto(.{ .form = world.protos.chunk });
+    const chunk_id = try world.heap.alloc(chunk_form);
+    try world.chunk_bytecode.put(world_alloc, chunk_id, body_bytes);
+    try world.chunk_consts.put(world_alloc, chunk_id, consts);
+    try world.chunk_ics.put(world_alloc, chunk_id, ics);
+
+    // build a method-Form for `rec:` with body=chunk, env=here,
+    // params=(n) — cons-list of one symbol.
+    var method_form = Form.init();
+    method_form.proto = .{ .form = world.protos.method };
+    try method_form.slots.put(world_alloc, world.body_sym, .{ .form = chunk_id });
+    try method_form.slots.put(world_alloc, world.env_sym, .{ .form = world.here_form });
+    // params = (cons 'n nil) — build via world.makeList for proto-ness.
+    const params_list = try world.makeList(&[_]Value{.{ .sym = n_sym }});
+    try method_form.slots.put(world_alloc, world.params_sym, params_list);
+    const method_id = try world.heap.alloc(method_form);
+
+    // alloc a custom proto P that extends Object, install :rec: on it,
+    // alloc an instance of P, and dispatch.
+    var p_proto = Form.withProto(.{ .form = world.protos.object });
+    try p_proto.handlers.put(world_alloc, rec_sym, .{ .form = method_id });
+    const p_proto_id = try world.heap.alloc(p_proto);
+
+    const inst_form = Form.withProto(.{ .form = p_proto_id });
+    const inst_id = try world.heap.alloc(inst_form);
+
+    // also install '+ as a passthrough on Integer's existing handler
+    // (it's already there via intrinsics) — no action needed.
+
+    p("dispatching [inst rec: {d}]...\n", .{depth});
+    const result = world.send(.{ .form = inst_id }, rec_sym, &[_]Value{.{ .int = @intCast(depth) }}) catch |err| {
+        p("vm error: {s}\n", .{@errorName(err)});
+        return;
+    };
+    switch (result) {
+        .int => |n| p("=> Int({d}) (depth survived; result expected 0)\n", .{n}),
+        else => p("=> unexpected: {s}\n", .{@tagName(result)}),
+    }
+    p("frames at end: {d}, stack at end: {d}\n", .{ world.vm.frames.items.len, world.vm.stack.items.len });
 }

@@ -741,30 +741,40 @@ pub const World = struct {
 
     /// send `selector` to `receiver` with `args`. wraps the slow
     /// dispatch path; mostly called by intrinsics that need to
-    /// re-enter the VM.
+    /// re-enter the VM ("option α" per spec §4.5).
+    ///
+    /// for bytecode methods this pushes a new frame and drives the
+    /// dispatch loop until that frame returns — one level of
+    /// host-stack recursion per nested native→moof call, bounded
+    /// by native count, not moof depth.
+    ///
+    /// for native methods (or no-handler fall-through to dnu) this
+    /// returns the result directly.
     pub fn send(self: *World, receiver: Value, selector: SymId, args: []const Value) !Value {
-        const hit = self.lookupHandler(receiver, selector) orelse {
-            return self.raise("doesNotUnderstand", "no handler");
-        };
-        const method = hit.handler.asFormId() orelse return error.HandlerNotAMethod;
-        if (self.nativeFn(method)) |native| {
-            return native(self, receiver, args);
+        // resolve dispatch via the shared slow-send machinery. since
+        // there's no current bytecode frame to anchor on (this is
+        // called from outside the dispatch loop, or from a native),
+        // we pass `shrink_to` = current stack length so prepareInvoke
+        // won't touch existing operand stack contents.
+        //
+        // note: there's no IC for `World.send` — no chunk context to
+        // key against. always slow path.
+        const start_stack = self.vm.stack.items.len;
+        const start_depth = self.vm.frames.items.len;
+        const action = try vm_mod.prepareSlowSend(self, receiver, selector, args, start_stack);
+        switch (action) {
+            .native_done => |result| return result,
+            .bytecode_pushed => {
+                // sub-loop: drive the outer dispatch until our pushed
+                // frame's Return brings frames.len back to start_depth.
+                // the new frame's stack_base = start_stack; Return
+                // truncates the stack to start_stack and pushes the
+                // result. we pop it.
+                try vm_mod.runUntilFrameReturns(self, start_depth);
+                if (self.vm.stack.items.len <= start_stack) return .nil;
+                return self.vm.stack.pop().?;
+            },
         }
-        // bytecode dispatch — re-enter VM via runMethod.
-        const body_v = self.formSlot(method, self.body_sym);
-        const chunk_id = body_v.asFormId() orelse return error.MethodBodyNotAChunk;
-        const captured_env_v = self.formSlot(method, self.env_sym);
-        const captured_env = captured_env_v.asFormId() orelse self.here_form;
-        const params_v = self.formSlot(method, self.params_sym);
-        const params = try self.listToSlice(params_v);
-        defer self.freeSlice(params);
-        if (params.len != args.len) return error.Arity;
-        const call_env = try self.allocEnv(captured_env);
-        for (params, args) |p, a| {
-            const ps = p.asSym() orelse return error.BadParam;
-            try self.envBind(call_env, ps, a);
-        }
-        return vm_mod.runMethod(self, chunk_id, call_env, receiver, hit.defining);
     }
 
     /// canonical "raise" — for V4 phase α we just return an error.
