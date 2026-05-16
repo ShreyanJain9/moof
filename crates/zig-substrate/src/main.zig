@@ -18,8 +18,9 @@
 //!                             — execute a chunk from a vat, or a raw
 //!                                bytecode file against a loaded world.
 //!   moof eval <vat> "<expr>"
-//!                             — parse expr with native reader, compile
-//!                                via ocaml-seed subprocess, run.
+//!                             — load vat, parse + compile + run expr
+//!                                entirely in-image via `[Parser parse:]`
+//!                                and `[Compiler compileTop:]`.
 
 const std = @import("std");
 const value_mod = @import("value.zig");
@@ -35,7 +36,6 @@ const ICache = world_mod.ICache;
 const intrinsics = @import("intrinsics.zig");
 const vm = @import("vm.zig");
 const image = @import("image.zig");
-const reader = @import("reader.zig");
 
 /// process-wide GC options, parsed once in main() from env vars and
 /// CLI flags. each World built by the various subcommands consults
@@ -288,6 +288,13 @@ fn runInspectSyms(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !v
     }
 }
 
+/// `moof eval <vat> "<expr>"` — load the vat, run its `main` (which is
+/// expected to wire up `Parser` / `Compiler` and flip `[$reader useMoof]`
+/// + `[$compiler useMoof]`), then parse + compile + run `<expr>` entirely
+/// via the in-image moof Parser and Compiler. no host parser, no
+/// subprocess to ocaml-seed.
+///
+/// design ref: `docs/superpowers/specs/2026-05-10-self-host-and-rust-deletion-design.md` §3.1.
 fn runEval(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, vat_path: []const u8, expr_src: []const u8) !void {
     var world = try World.initBare(allocator);
     defer world.deinit();
@@ -301,30 +308,24 @@ fn runEval(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Enviro
         defer allocator.free(root);
         try world.setTransporterRoot(root);
     }
+    // run vat's `main` (mirrors runRun) — this is where the vat is
+    // expected to install Parser/Compiler bindings into $here and
+    // flip the in-image-reader / in-image-compiler flags.
     const main_sym_id = lookupSymId(&world, "main");
     if (main_sym_id != 0 and !world.here_form.isNone()) {
-        const here = world.heap.get(world.here_form);
-        if (here.slot(main_sym_id).asFormId()) |main_id| {
-            _ = try vm.runTop(&world, main_id);
+        const hf = world.heap.get(world.here_form);
+        if (hf.slot(main_sym_id).asFormId()) |maybe_chunk| {
+            const chunk_to_run = if (world.chunk_bytecode.contains(maybe_chunk)) maybe_chunk else world.formSlot(maybe_chunk, world.body_sym).asFormId() orelse maybe_chunk;
+            if (world.chunk_bytecode.contains(chunk_to_run)) {
+                _ = try vm.runTop(&world, chunk_to_run);
+            }
         }
     }
-    _ = try reader.readOne(&world, expr_src);
-    const seed_exe = "../ocaml-seed/_build/default/bin/seed.exe";
-    const vat_abs = try std.fs.path.resolve(allocator, &.{vat_path});
-    defer allocator.free(vat_abs);
-    const temp_path = "/tmp/moof_eval.moof";
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = temp_path, .data = expr_src, .flags = .{ .truncate = true } });
-    const argv = [_][]const u8{ seed_exe, "bytes", "--syms", vat_abs, temp_path };
-    const run_res = try std.process.run(allocator, io, .{ .argv = &argv });
-    defer allocator.free(run_res.stdout);
-    defer allocator.free(run_res.stderr);
-    if (run_res.term != .exited or run_res.term.exited != 0) {
-        std.debug.print("error: moof-seed failed\n{s}\n", .{run_res.stderr});
-        return;
-    }
-    var pos: usize = 0;
-    const chunk_fid = try image.loadChunk(&world, run_res.stdout, &pos, allocator);
-    const result = try vm.runTop(&world, chunk_fid);
+    // wrap expr as a moof String and hand it to the in-image parser +
+    // compiler. evalStringInWorld iterates the parsed form-list,
+    // compiling and running each in turn; returns the last result.
+    const src_str = try world.makeString(expr_src);
+    const result = try intrinsics.evalStringInWorld(&world, src_str);
     printResult(result, &world);
 }
 

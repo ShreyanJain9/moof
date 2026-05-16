@@ -1317,7 +1317,7 @@ fn isUnsafePath(rel: []const u8) bool {
 /// looks up `Parser` and `Compiler` by name in `world.here_form`'s slots
 /// (the canonical bindings established by `lib/parser/03-bootstrap.moof`
 /// and `lib/compiler/00-helpers.moof`). returns the last form's result.
-fn evalStringInWorld(world: *World, source_val: Value) anyerror!Value {
+pub fn evalStringInWorld(world: *World, source_val: Value) anyerror!Value {
     if (!world.use_moof_reader) {
         std.debug.print("evalStringInWorld: no moof reader, skipping\n", .{});
         return raise(world, "no-reader", "zig has no native reader; flip [$reader useMoof] first");
