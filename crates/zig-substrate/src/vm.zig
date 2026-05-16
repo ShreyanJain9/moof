@@ -198,9 +198,10 @@ pub const DispatchAction = union(enum) {
 pub fn step(world: *World) !void {
     PROFILE.ops_executed += 1;
     const frame_idx = world.vm.frames.items.len - 1;
-    const chunk = world.vm.frames.items[frame_idx].chunk;
+    // bytecode + pc cached on the frame (per phase 2 §4.3) — no
+    // hashmap lookup on the hot path.
+    const bytes = world.vm.frames.items[frame_idx].bytecode;
     const pc = world.vm.frames.items[frame_idx].pc;
-    const bytes = world.chunk_bytecode.get(chunk) orelse return error.UnknownChunk;
     const decoded = try bytecode.decodeOp(bytes, pc);
     world.vm.frames.items[frame_idx].pc = pc + decoded.advance;
     try dispatchOp(world, decoded.op);
@@ -214,14 +215,16 @@ pub fn step(world: *World) !void {
 /// method dispatch led here.
 pub fn runTop(world: *World, chunk: FormId) !Value {
     const starting_depth = world.vm.frames.items.len;
-    try world.vm.frames.append(world.allocator, Frame{
-        .chunk = chunk,
-        .pc = 0,
-        .env = world.here_form,
-        .self_ = .nil,
-        .stack_base = @intCast(world.vm.stack.items.len),
-        .defining_proto = FormId.NONE,
-    });
+    const frame = try world_mod.makeFrame(
+        world,
+        chunk,
+        0,
+        world.here_form,
+        .nil,
+        @intCast(world.vm.stack.items.len),
+        FormId.NONE,
+    );
+    try world.vm.frames.append(world.allocator, frame);
     while (world.vm.frames.items.len > starting_depth) {
         try step(world);
     }
@@ -287,14 +290,16 @@ pub fn runMethod(
     defining_proto: FormId,
 ) anyerror!Value {
     const starting_depth = world.vm.frames.items.len;
-    try world.vm.frames.append(world.allocator, Frame{
-        .chunk = chunk,
-        .pc = 0,
-        .env = env,
-        .self_ = self_v,
-        .stack_base = @intCast(world.vm.stack.items.len),
-        .defining_proto = defining_proto,
-    });
+    const frame = try world_mod.makeFrame(
+        world,
+        chunk,
+        0,
+        env,
+        self_v,
+        @intCast(world.vm.stack.items.len),
+        defining_proto,
+    );
+    try world.vm.frames.append(world.allocator, frame);
     try runUntilFrameReturns(world, starting_depth);
     if (world.vm.stack.items.len == 0) return .nil;
     return world.vm.stack.pop().?;
@@ -316,8 +321,8 @@ pub fn dispatchOp(world: *World, op: opcodes.Op) !void {
 
         .load_const => |args| {
             const frame_idx = world.vm.frames.items.len - 1;
-            const chunk = world.vm.frames.items[frame_idx].chunk;
-            const consts = world.chunk_consts.get(chunk) orelse return error.NoChunkConsts;
+            // consts slice cached on the frame (per phase 2 §4.3).
+            const consts = world.vm.frames.items[frame_idx].consts;
             if (args.idx >= consts.len) return error.PcOutOfBounds;
             try world.vm.stack.append(world.allocator, consts[args.idx]);
         },
@@ -338,8 +343,13 @@ pub fn dispatchOp(world: *World, op: opcodes.Op) !void {
             const env = world.vm.frames.items[frame_idx].env;
             const v = world.envLookup(env, args.name) orelse {
                 // surface the missing binding name; helps pinpoint
-                // unbound globals during bootstrap.
-                std.debug.print("UnboundName: {s}\n", .{world.syms.resolve(args.name)});
+                // unbound globals during bootstrap. gated behind
+                // `world.trace_enabled` (MOOF_TRACE=1) per phase 2 §4.9
+                // — unbuffered stderr writes are slow even on the
+                // error path.
+                if (world.trace_enabled) {
+                    std.debug.print("UnboundName: {s}\n", .{world.syms.resolve(args.name)});
+                }
                 return error.UnboundName;
             };
             try world.vm.stack.append(world.allocator, v);
@@ -597,7 +607,6 @@ pub fn prepareSendDispatch(
     shrink_to: usize,
 ) anyerror!DispatchAction {
     const frame_idx = world.vm.frames.items.len - 1;
-    const chunk = world.vm.frames.items[frame_idx].chunk;
 
     // resolve the receiver's proto first. tagged-immediate values
     // (Nil, Bool, Int, …) have substrate-installed protos; Form
@@ -612,8 +621,10 @@ pub fn prepareSendDispatch(
         },
     };
 
-    // attempt IC fast-path. ics array per-chunk; bounds-check.
-    if (world.chunk_ics.get(chunk)) |ics| {
+    // attempt IC fast-path. ics slice cached on the frame
+    // (per phase 2 §4.3); bounds-check.
+    {
+        const ics = world.vm.frames.items[frame_idx].ics;
         if (ic_idx < ics.len) {
             const cached: ICache = ics[ic_idx];
             // when the cached handler came from a singleton (per-
@@ -663,9 +674,9 @@ pub fn prepareSendDispatch(
             if (eff.eql(defining)) break :blk eff;
             break :blk FormId.NONE;
         };
-        // populate the IC slot
-        if (world.chunk_ics.getPtr(chunk)) |ics_ptr| {
-            const ics = ics_ptr.*;
+        // populate the IC slot — ics slice cached on the frame.
+        {
+            const ics = world.vm.frames.items[frame_idx].ics;
             if (ic_idx < ics.len) {
                 ics[ic_idx] = .{
                     .cached_proto = receiver_proto,
@@ -720,17 +731,22 @@ fn prepareDispatchDnu(
         // we got here from a previous dnu fall-through — there's
         // no handler to escalate to. surface the missing selector to
         // stderr so callers can pinpoint which native is missing.
-        const proto_v = world.protoOf(receiver);
-        const proto_name: []const u8 = blk: {
-            if (proto_v.asFormId()) |pid| {
-                const meta = world.formMeta(pid, world.symName);
-                if (meta.asSym()) |s| break :blk world.syms.resolve(s);
-            }
-            break :blk "<?>";
-        };
-        if (call_args.len > 0) {
-            if (call_args[0].asSym()) |orig_sel| {
-                std.debug.print("UnhandledDnu: [{s} {s}]\n", .{ proto_name, world.syms.resolve(orig_sel) });
+        // gated behind `world.trace_enabled` (MOOF_TRACE=1) per phase
+        // 2 §4.9 — the proto-name resolution does heap reads, so the
+        // whole diagnostic only fires when trace is enabled.
+        if (world.trace_enabled) {
+            const proto_v = world.protoOf(receiver);
+            const proto_name: []const u8 = blk: {
+                if (proto_v.asFormId()) |pid| {
+                    const meta = world.formMeta(pid, world.symName);
+                    if (meta.asSym()) |s| break :blk world.syms.resolve(s);
+                }
+                break :blk "<?>";
+            };
+            if (call_args.len > 0) {
+                if (call_args[0].asSym()) |orig_sel| {
+                    std.debug.print("UnhandledDnu: [{s} {s}]\n", .{ proto_name, world.syms.resolve(orig_sel) });
+                }
             }
         }
         return error.UnhandledDnu;
@@ -796,19 +812,26 @@ pub fn prepareInvoke(
     const params_v = world.formSlot(method, world.params_sym);
 
     const params = world.listToSlice(params_v) catch |err| {
-        std.debug.print("prepareInvoke: listToSlice failed: {s}\n", .{@errorName(err)});
+        // gated behind MOOF_TRACE per phase 2 §4.9 — listToSlice
+        // failure is fatal, but the print itself is unbuffered.
+        if (world.trace_enabled) {
+            std.debug.print("prepareInvoke: listToSlice failed: {s}\n", .{@errorName(err)});
+        }
         return err;
     };
     defer world.freeSlice(params);
 
     if (params.len != call_args.len) {
-        std.debug.print("prepareInvoke: Arity mismatch: method has {d} params, called with {d} args\n", .{ params.len, call_args.len });
-        // debug: list slots of method
-        const mf = world.heap.get(method);
-        std.debug.print("method Form {d} slots:\n", .{method.payload});
-        var it = mf.slots.iterator();
-        while (it.next()) |entry| {
-            std.debug.print("  {s} -> \n", .{world.syms.resolve(entry.key_ptr.*)});
+        // diagnostic dump iterates method slots — O(slots) per arity
+        // mismatch. gated behind MOOF_TRACE per phase 2 §4.9.
+        if (world.trace_enabled) {
+            std.debug.print("prepareInvoke: Arity mismatch: method has {d} params, called with {d} args\n", .{ params.len, call_args.len });
+            const mf = world.heap.get(method);
+            std.debug.print("method Form {d} slots:\n", .{method.payload});
+            var it = mf.slots.iterator();
+            while (it.next()) |entry| {
+                std.debug.print("  {s} -> \n", .{world.syms.resolve(entry.key_ptr.*)});
+            }
         }
         return error.Arity;
     }
@@ -824,14 +847,16 @@ pub fn prepareInvoke(
 
     // params bound — now safe to shrink and push frame.
     world.vm.stack.shrinkRetainingCapacity(shrink_to);
-    try world.vm.frames.append(world.allocator, Frame{
-        .chunk = chunk_id,
-        .pc = 0,
-        .env = call_env,
-        .self_ = self_v,
-        .stack_base = @intCast(shrink_to),
-        .defining_proto = defining_proto,
-    });
+    const new_frame = try world_mod.makeFrame(
+        world,
+        chunk_id,
+        0,
+        call_env,
+        self_v,
+        @intCast(shrink_to),
+        defining_proto,
+    );
+    try world.vm.frames.append(world.allocator, new_frame);
     return .bytecode_pushed;
 }
 
@@ -923,14 +948,15 @@ fn replaceFrameWithTailCall(
     const frame_idx = world.vm.frames.items.len - 1;
     const base = world.vm.frames.items[frame_idx].stack_base;
     world.vm.stack.shrinkRetainingCapacity(base);
-    world.vm.frames.items[frame_idx] = Frame{
-        .chunk = chunk_id,
-        .pc = 0,
-        .env = call_env,
-        .self_ = receiver,
-        .stack_base = base,
-        .defining_proto = defining,
-    };
+    world.vm.frames.items[frame_idx] = try world_mod.makeFrame(
+        world,
+        chunk_id,
+        0,
+        call_env,
+        receiver,
+        base,
+        defining,
+    );
 }
 
 // =====================================================================

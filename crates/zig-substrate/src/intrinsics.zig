@@ -1357,7 +1357,8 @@ pub fn evalStringInWorld(world: *World, source_val: Value) anyerror!Value {
     const parse_sel = try world.syms.intern("parse:");
     const compile_top_sel = try world.syms.intern("compileTop:");
 
-    std.debug.print("evalStringInWorld: parsing...\n", .{});
+    // lukewarm: fires per eval. gated behind MOOF_TRACE per phase 2 §4.9.
+    if (world.trace_enabled) std.debug.print("evalStringInWorld: parsing...\n", .{});
     // [Parser parse: source] → cons-chain of Forms.
     const forms_v = try world.send(parser_v, parse_sel, &.{source_val});
 

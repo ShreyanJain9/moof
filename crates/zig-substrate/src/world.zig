@@ -100,6 +100,19 @@ pub const Vm = struct {
 /// V4 frames carry a byte-offset `pc` (chunks are byte-tagged streams
 /// per spec §4) and the defining_proto needed for `SuperSend`'s
 /// "lookup-starting-above" semantics (§3.3).
+///
+/// **chunk side-table slices are cached on the Frame** (per phase 2
+/// §4.3): when a frame is pushed, the relevant `chunk_bytecode`,
+/// `chunk_consts`, and `chunk_ics` slices are looked up once and
+/// stored here. each `step()` reads `frame.bytecode[pc]` directly —
+/// no per-op hashmap lookup. **safety:** the slices are owned by the
+/// side-table; live frames keep their chunk marked as a GC root (see
+/// `gc.zig` seedRoots), so the side-table entry (and thus the
+/// underlying allocation) stays alive for the lifetime of any frame
+/// holding the cached slice. side-tables are populated at compile /
+/// image-load time and value pointers don't change after insertion;
+/// `fetchSwapRemove` during sweep only fires on tombstoned (unreachable)
+/// chunks, which by definition no live frame can hold.
 pub const Frame = struct {
     /// chunk-FormId currently executing.
     chunk: FormId,
@@ -114,7 +127,48 @@ pub const Frame = struct {
     /// the proto on which this frame's method was defined. used by
     /// `SuperSend` to start the lookup ABOVE this proto in the chain.
     defining_proto: FormId,
+    /// **cached slice of `world.chunk_bytecode.get(chunk)`** — one
+    /// hashmap lookup amortized over every op this frame executes.
+    bytecode: []const u8,
+    /// **cached slice of `world.chunk_consts.get(chunk)`** — used by
+    /// LoadConst without a per-op hashmap lookup.
+    consts: []const Value,
+    /// **cached slice of `world.chunk_ics.get(chunk)`** — used by the
+    /// Send IC fast path without a per-op hashmap lookup. mutable —
+    /// IC slots are written in place on cache miss.
+    ics: []ICache,
 };
+
+/// build a Frame for `chunk`, looking up the chunk's side-table slices
+/// once and caching them on the frame (per phase 2 §4.3). returns
+/// `error.UnknownChunk` if `chunk_bytecode` has no entry (the chunk-
+/// Form exists but no bytecode is registered). `chunk_consts` /
+/// `chunk_ics` default to empty slices when absent — a chunk may
+/// legitimately have no consts / no ICs.
+pub fn makeFrame(
+    world: *World,
+    chunk: FormId,
+    pc: usize,
+    env: FormId,
+    self_v: Value,
+    stack_base: u32,
+    defining_proto: FormId,
+) !Frame {
+    const bytes = world.chunk_bytecode.get(chunk) orelse return error.UnknownChunk;
+    const consts: []const Value = if (world.chunk_consts.get(chunk)) |c| c else &.{};
+    const ics: []ICache = if (world.chunk_ics.get(chunk)) |i| i else &.{};
+    return Frame{
+        .chunk = chunk,
+        .pc = pc,
+        .env = env,
+        .self_ = self_v,
+        .stack_base = stack_base,
+        .defining_proto = defining_proto,
+        .bytecode = bytes,
+        .consts = consts,
+        .ics = ics,
+    };
+}
 
 /// inline-cache slot for one Send site. monomorphic.
 ///
@@ -224,7 +278,17 @@ pub const World = struct {
     chunk_params: std.AutoArrayHashMapUnmanaged(FormId, []u32),
 
     /// method-FormId → native function pointer.
-    native_fns: std.AutoArrayHashMapUnmanaged(FormId, NativeFn),
+    ///
+    /// `AutoHashMapUnmanaged` (not insertion-ordered) per phase 2 §4.7.
+    /// this table is never iterated for user-observable output:
+    ///   - `nativeFn(method)` point lookups (vm.zig dispatch fast path)
+    ///   - `contains(mid)` checks during image serialization (the
+    ///     iteration there walks `handlers`, not `native_fns`)
+    ///   - GC mark/sweep walks (internal; order doesn't leak)
+    /// safe to swap per D5 (no observable iteration → no order to
+    /// preserve). gains O(1) amortized lookup vs the insertion-order
+    /// table's two-step (hash → index → array load).
+    native_fns: std.AutoHashMapUnmanaged(FormId, NativeFn),
 
     /// FormId(.far_ref) → FarRef. populated by image-load (V4 §10.4).
     far_ref_table: std.AutoArrayHashMapUnmanaged(FormId, FarRef),
@@ -268,6 +332,14 @@ pub const World = struct {
     /// CLI flags.
     gc_enabled: bool = true,
     gc_stats_enabled: bool = false,
+
+    /// when true, vm.zig / intrinsics.zig surface diagnostic messages
+    /// (UnboundName, UnhandledDnu, prepareInvoke arity mismatch dumps,
+    /// evalStringInWorld parse-stage prints, etc.). default false —
+    /// these are slow unbuffered fprintln calls; spec 2026-05-16-phase2
+    /// §4.9 removed them from hot paths. flipped by `MOOF_TRACE=1` in
+    /// main.zig.
+    trace_enabled: bool = false,
 
     // ---- cached SymIds for hot paths (V3 env walker + boot) ----
 

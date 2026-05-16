@@ -47,6 +47,9 @@ const image = @import("image.zig");
 const GcOpts = struct {
     enabled: bool = true,
     stats: bool = false,
+    /// when true, surface diagnostic prints from vm.zig + intrinsics.zig.
+    /// gated behind `MOOF_TRACE=1` — see spec §4.9 (the "wart hunt").
+    trace: bool = false,
 };
 
 var g_gc_opts: GcOpts = .{};
@@ -61,6 +64,7 @@ fn monotonicNs() u64 {
 fn applyGcOpts(world: *World) void {
     world.gc_enabled = g_gc_opts.enabled;
     world.gc_stats_enabled = g_gc_opts.stats;
+    world.trace_enabled = g_gc_opts.trace;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -99,6 +103,14 @@ pub fn main(init: std.process.Init) !void {
     // collection cycle. silently no-op when unset.
     if (init.minimal.environ.getPosix("MOOF_GC_STATS")) |val| {
         if (val.len > 0 and !std.mem.eql(u8, val, "0")) g_gc_opts.stats = true;
+    }
+
+    // env var: `MOOF_TRACE=1` surfaces vm.zig / intrinsics.zig
+    // diagnostic prints (UnboundName, UnhandledDnu, prepareInvoke
+    // arity mismatch dumps, evalStringInWorld stage messages, etc.).
+    // off by default per phase 2 §4.9.
+    if (init.minimal.environ.getPosix("MOOF_TRACE")) |val| {
+        if (val.len > 0 and !std.mem.eql(u8, val, "0")) g_gc_opts.trace = true;
     }
 
     // pre-scan argv for global flags. these flags can appear in any
@@ -775,14 +787,16 @@ fn runBenchDeepEnv(allocator: std.mem.Allocator, depth: u32, lookups: u32) !void
 
     // override the frame so it runs in the deepest env.
     world.gc_enabled = false;
-    try world.vm.frames.append(allocator, world_mod.Frame{
-        .chunk = chunk_id,
-        .pc = 0,
-        .env = deepest,
-        .self_ = .nil,
-        .stack_base = @intCast(world.vm.stack.items.len),
-        .defining_proto = FormId.NONE,
-    });
+    const dframe = try world_mod.makeFrame(
+        &world,
+        chunk_id,
+        0,
+        deepest,
+        .nil,
+        @intCast(world.vm.stack.items.len),
+        FormId.NONE,
+    );
+    try world.vm.frames.append(allocator, dframe);
     const starting_depth = world.vm.frames.items.len - 1;
     const t0 = monotonicNs();
     while (world.vm.frames.items.len > starting_depth) {

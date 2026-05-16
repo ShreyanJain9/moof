@@ -340,7 +340,7 @@ fn sweepSideTables(world: *World, fid: FormId) !void {
     if (world.chunk_params.fetchSwapRemove(fid)) |kv| {
         world.allocator.free(kv.value);
     }
-    _ = world.native_fns.swapRemove(fid);
+    _ = world.native_fns.remove(fid);
     _ = world.proto_generation.swapRemove(fid);
 }
 
