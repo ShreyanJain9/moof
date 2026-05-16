@@ -83,15 +83,23 @@ let read_file (path : string) : string =
    We scan main.moof's top-level forms. Each form is one of:
      1. a transporter load whose path starts with "parser/" or
         "compiler/" - we follow it and recursively include its
-        contents.
+        contents (gather_from_file recurses). These chunks are
+        pre-compiled into seed.vat so the parser+compiler are
+        available the moment the image loads.
      2. a transporter load whose path is anything else (early/,
-        stdlib/, mcos.moof, etc.) - we SKIP it. The moof runtime
-        will execute these at boot time via its in-image transporter.
-     3. anything else (e.g. [$compiler useMoof]) - we SKIP at the seed
-        stage. The moof runtime executes these.
+        stdlib/, mcos.moof, etc.) - we DO NOT pre-compile, but we
+        INCLUDE the raw `[$transporter load: "X"]` form in main's
+        chunk. At runtime, moof parser+compiler (now loaded) drive
+        the load. This is the point: exercise the runtime path.
+     3. a `__cascade__` form - cascade segments are expanded into
+        individual sends, then each is processed by the rules above.
+        (Cascades in main.moof are exclusively load-cascades —
+        `[$transporter load: "a" ; load: "b" ; ...]`.)
+     4. anything else (e.g. `[$compiler useMoof]`) - include the
+        form in main's chunk. The moof runtime executes it.
 
-   Files reached via (1) are also scanned the same way - if a parser
-   file loads another parser file, we follow.
+   Files reached via (1) are scanned the same way - if a parser file
+   loads another parser file, we follow.
    ---------------------------------------------------------------- *)
 
 let str_starts_with (prefix : string) (s : string) : bool =
@@ -111,6 +119,38 @@ let match_transporter_load (form : Ast.form) : string option =
           Ast.Cons (Ast.Str path, Ast.Nil)))) ->
       Some path
   | _ -> None
+
+(* Match (__cascade__ recv (sel args...) (sel2 args2...) ...) — emitted
+   by the OCaml reader for any send-bracket containing `;`. We only
+   care about load-cascades on $transporter, where each segment is
+   (load: "path"). Returns Some [path1; path2; ...] on match, None
+   otherwise. *)
+let match_transporter_load_cascade (form : Ast.form) : string list option =
+  match form with
+  | Ast.Cons (Ast.Sym "__cascade__",
+      Ast.Cons (Ast.Sym "$transporter", segments)) ->
+      let rec each segs acc =
+        match segs with
+        | Ast.Nil -> Some (List.rev acc)
+        | Ast.Cons (seg, rest) ->
+            (match seg with
+             | Ast.Cons (Ast.Sym "load:",
+                 Ast.Cons (Ast.Str path, Ast.Nil)) ->
+                 each rest (path :: acc)
+             | _ -> None)
+        | _ -> None
+      in
+      each segments []
+  | _ -> None
+
+(* Re-emit a bare transporter load form: (__send__ $transporter load: path). *)
+let mk_transporter_load (path : string) : Ast.form =
+  Ast.forms_to_list [
+    Ast.Sym "__send__";
+    Ast.Sym "$transporter";
+    Ast.Sym "load:";
+    Ast.Str path;
+  ]
 
 (* A "load step" gathers the forms we actually compile, in order, and
    tracks (filename, form) for diagnostics. *)
@@ -171,37 +211,98 @@ let read_top_forms (full : string) (tolerant : bool) : Ast.form list =
     List.rev !acc
   end
 
+(* gather_from_file recurses into parser/* and compiler/* files,
+   appending their forms to `acc` as load_steps. For main.moof
+   specifically, we ALSO accumulate a "main forms" list:
+   forms-as-AST that go directly into the synthetic main chunk
+   for runtime execution (no pre-compilation). This list mixes
+   parser/+compiler/ forms (which get pre-compiled — represented
+   inside main as... well, currently they're emitted via the
+   pre-compile path; main re-references them only insofar as the
+   chunks land in the registry and the seed's main `(do ...)`
+   wrapper includes the pre-compiled load_steps).
+
+   The contract:
+     - `acc` accumulates forms to PRE-COMPILE (parser/+compiler/
+       internals). These chunks land in seed.vat as compiled
+       bytecode; main runs them via standard sequencing.
+     - `main_forms` accumulates forms in main.moof order to RUN
+       AT RUNTIME via the moof parser+compiler. This includes:
+         - non-load forms like [$compiler useMoof]
+         - transporter loads with non-minimal paths (early/, stdlib/)
+       Parser/+compiler/ loads in main.moof are RESOLVED at seed
+       build time — their internals get pre-compiled, so there's
+       no need to keep the [$transporter load: "parser/..."] in
+       main_forms.
+
+   The final synthetic main chunk wraps `(acc-as-do-sequence ++
+   main_forms)`. The pre-compiled parser/+compiler/ steps execute
+   first (no transporter calls — just their compiled bodies in
+   order), then [$compiler useMoof] flips, then the early/+stdlib/
+   loads each run through the moof parser+compiler at runtime. *)
 let rec gather_from_file (root : string) (rel_path : string)
-                         (acc : load_step list ref) : unit =
+                         (acc : load_step list ref)
+                         (main_forms : Ast.form list ref) : unit =
   let full = Filename.concat root rel_path in
   let tolerant = (rel_path = "main.moof") in
   let forms = read_top_forms full tolerant in
   List.iter (fun form ->
-    match match_transporter_load form with
-    | Some sub_path when is_minimal_bootstrap_path sub_path ->
-        (* recurse: follow parser/* and compiler/* transitively *)
-        gather_from_file root sub_path acc
-    | Some _ ->
-        (* transporter load of non-minimal path - skip; the moof runtime
-           handles these at boot via the in-image transporter. *)
-        ()
-    | None ->
-        (* not a transporter load - if this is main.moof, skip the form
-           (e.g. [$compiler useMoof]); the runtime handles it. Otherwise
-           it's a real compilable form from a parser/* or compiler/*
-           file - include it. *)
-        if rel_path <> "main.moof" then
+    let process_in_main path =
+      (* This branch only fires for main.moof's top-level forms. *)
+      if is_minimal_bootstrap_path path then
+        (* parser/+compiler/ load: recurse to pre-compile its
+           contents. Do NOT add to main_forms — the recursive
+           pre-compile + main's `(do ...)` over acc handles
+           sequencing. *)
+        gather_from_file root path acc main_forms
+      else
+        (* non-minimal load: keep as a bare load form in main
+           for the moof runtime to execute via parser+compiler. *)
+        main_forms := mk_transporter_load path :: !main_forms
+    in
+    if rel_path = "main.moof" then begin
+      match match_transporter_load form with
+      | Some path -> process_in_main path
+      | None ->
+          (match match_transporter_load_cascade form with
+           | Some paths ->
+               (* expand the cascade: each segment becomes its own
+                  load form, processed by the same rules. *)
+               List.iter process_in_main paths
+           | None ->
+               (* not a load — include in main_forms so the runtime
+                  executes it (e.g. [$compiler useMoof]). *)
+               main_forms := form :: !main_forms)
+    end else begin
+      (* parser/* or compiler/* file: every form is a real
+         compilable definition. Includes nested transporter loads,
+         which we follow. *)
+      match match_transporter_load form with
+      | Some sub_path when is_minimal_bootstrap_path sub_path ->
+          gather_from_file root sub_path acc main_forms
+      | Some _ ->
+          (* parser/+compiler/ shouldn't load early/+stdlib/, but
+             if they did, the moof runtime can't help (we're still
+             in the pre-flip world). Bail out with a clear error. *)
+          failwith (Printf.sprintf
+            "build-seed: %s loads non-minimal path; only parser/+compiler/ \
+             loads allowed inside the pre-compiled prefix" rel_path)
+      | None ->
           acc := { source_path = rel_path; form } :: !acc
-        else
-          ()
+    end
   ) forms
 
-(* Top-level entry: gather every form from parser/ + compiler/ files,
-   recursively, starting from main.moof's transporter chain. *)
-let gather_steps (root : string) : load_step list =
+(* Top-level entry: returns (precompile_steps, runtime_main_forms).
+   - precompile_steps: forms from parser/+compiler/, in load order,
+     to be compiled into seed.vat's chunk table.
+   - runtime_main_forms: forms left in main.moof (the [$compiler
+     useMoof] flip + the early/+stdlib/+mcos load chain) that the
+     moof runtime will execute via its in-image parser+compiler. *)
+let gather_steps (root : string) : load_step list * Ast.form list =
   let acc = ref [] in
-  gather_from_file root "main.moof" acc;
-  List.rev !acc
+  let main_forms = ref [] in
+  gather_from_file root "main.moof" acc main_forms;
+  (List.rev !acc, List.rev !main_forms)
 
 (* ----------------------------------------------------------------
    non-scalar const lifting
@@ -241,26 +342,55 @@ let form_table : (Ast.form, int) Hashtbl.t = Hashtbl.create 256
    image-format sentinel (per spec §10.3, "first non-sentinel is
    FormId(1)"). *)
 let next_form_id = ref 1
-(* The lifted forms, in allocation order. Position i in this list
-   corresponds to FormId (i+1). *)
-let lifted_forms : Image.vat_form list ref = ref []
+(* The lifted forms, indexed by FormId (1-based). We use a Dynarray
+   keyed by FormId so each form lands at the correct wire position
+   regardless of allocation interleaving. (List-based prepend caused
+   a wire-id mismatch when nested forms — e.g. char-cells inside a
+   String — got allocated AFTER their parent's id was reserved but
+   appended to the list before the parent.) *)
+let lifted_forms : Image.vat_form option Dynarray.t = Dynarray.create ()
 
 (* Reset the lifter's state. Call between independent build-seed runs
    to keep things deterministic. *)
 let reset_lifter () =
   Hashtbl.clear form_table;
   next_form_id := 1;
-  lifted_forms := []
+  Dynarray.clear lifted_forms
 
-(* Allocate a fresh Form at the next FormId, append to the FormSection
-   list, return the assigned FormId. NOT memoized — caller is responsible
-   for de-duplication when appropriate. Used by proto / here_form /
-   macros_form / per-chunk-source allocation. *)
-let alloc_form_raw (f : Image.vat_form) : int =
+(* Reserve a fresh FormId, ensuring the indexed array has a slot for
+   it (filled with None until the form is populated). Returns the
+   reserved id. *)
+let reserve_form_id () : int =
   let id = !next_form_id in
   incr next_form_id;
-  lifted_forms := f :: !lifted_forms;
+  (* slot index = id - 1 (1-based wire id). *)
+  Dynarray.add_last lifted_forms None;
   id
+
+(* Fill a previously-reserved slot with the actual form. *)
+let put_form (id : int) (f : Image.vat_form) : unit =
+  Dynarray.set lifted_forms (id - 1) (Some f)
+
+(* Allocate a fresh Form at the next FormId, append to the FormSection
+   in id-order, return the assigned FormId. NOT memoized — caller is
+   responsible for de-duplication when appropriate. Used by proto /
+   here_form / macros_form / per-chunk-source allocation. *)
+let alloc_form_raw (f : Image.vat_form) : int =
+  let id = reserve_form_id () in
+  put_form id f;
+  id
+
+(* Snapshot the final FormSection contents in id-order. Raises if any
+   reserved id was never filled (indicates a lift bug). *)
+let finalize_lifted_forms () : Image.vat_form list =
+  Dynarray.to_seq lifted_forms
+  |> Seq.mapi (fun i o ->
+       match o with
+       | Some f -> f
+       | None ->
+           failwith (Printf.sprintf
+             "build-seed: FormId %d was reserved but never populated" (i + 1)))
+  |> List.of_seq
 
 (* ----------------------------------------------------------------
    boot proto allocation
@@ -439,56 +569,41 @@ let patch_here_form (here_id : int) (bp : boot_protos) : unit =
     (macros_s,    Ast.FormRef bp.macros_id);
     (opcode_s,    Ast.FormRef bp.opcode_id);
   ] in
-  (* Walk lifted_forms (stored reverse-allocation-order) and rewrite
-     the entry whose FormId == here_id. lifted_forms is a list whose
-     head is the LAST allocated form; position from the head is
-     (next_form_id - 1 - here_id). *)
-  let cur_top = !next_form_id - 1 in
-  let target_offset = cur_top - here_id in
-  let rec patch_at i acc = function
-    | [] -> List.rev acc
-    | f :: rest when i = target_offset ->
-        let patched = Image.{ f with slots = here_slots } in
-        List.rev_append acc (patched :: rest)
-    | f :: rest -> patch_at (i + 1) (f :: acc) rest
-  in
-  lifted_forms := patch_at 0 [] !lifted_forms
+  (* lifted_forms is indexed by FormId-1; just overwrite the slot.
+     Raises if the id was never reserved (caller bug). *)
+  match Dynarray.get lifted_forms (here_id - 1) with
+  | None ->
+      failwith (Printf.sprintf
+        "patch_here_form: FormId %d never populated" here_id)
+  | Some f ->
+      Dynarray.set lifted_forms (here_id - 1)
+        (Some Image.{ f with slots = here_slots })
 
 (* Append a single (sym, value) pair to an already-allocated Form's
    slots list. Like patch_here_form but additive — preserves existing
    slots and appends a new one. Used to bind `main` on here_form once
    we know the boot chunk's FormId. *)
 let patch_form_slots (target_id : int) (slot : int * Ast.form) : unit =
-  let cur_top = !next_form_id - 1 in
-  let target_offset = cur_top - target_id in
-  let rec patch_at i acc = function
-    | [] ->
-        failwith (Printf.sprintf
-          "patch_form_slots: FormId %d not in lifted_forms" target_id)
-    | f :: rest when i = target_offset ->
-        let patched = Image.{ f with slots = f.slots @ [slot] } in
-        List.rev_append acc (patched :: rest)
-    | f :: rest -> patch_at (i + 1) (f :: acc) rest
-  in
-  lifted_forms := patch_at 0 [] !lifted_forms
+  match Dynarray.get lifted_forms (target_id - 1) with
+  | None ->
+      failwith (Printf.sprintf
+        "patch_form_slots: FormId %d not in lifted_forms" target_id)
+  | Some f ->
+      Dynarray.set lifted_forms (target_id - 1)
+        (Some Image.{ f with slots = f.slots @ [slot] })
 
 (* Append a single (sym, value) pair to an already-allocated Form's
    handlers list. Mirrors patch_form_slots but writes to .handlers.
    Used by wire_natives to install method-Forms on proto handler
    tables (same shape rust's `form_handler_set` produces). *)
 let patch_form_handlers (target_id : int) (handler : int * Ast.form) : unit =
-  let cur_top = !next_form_id - 1 in
-  let target_offset = cur_top - target_id in
-  let rec patch_at i acc = function
-    | [] ->
-        failwith (Printf.sprintf
-          "patch_form_handlers: FormId %d not in lifted_forms" target_id)
-    | f :: rest when i = target_offset ->
-        let patched = Image.{ f with handlers = f.handlers @ [handler] } in
-        List.rev_append acc (patched :: rest)
-    | f :: rest -> patch_at (i + 1) (f :: acc) rest
-  in
-  lifted_forms := patch_at 0 [] !lifted_forms
+  match Dynarray.get lifted_forms (target_id - 1) with
+  | None ->
+      failwith (Printf.sprintf
+        "patch_form_handlers: FormId %d not in lifted_forms" target_id)
+  | Some f ->
+      Dynarray.set lifted_forms (target_id - 1)
+        (Some Image.{ f with handlers = f.handlers @ [handler] })
 
 (* ----------------------------------------------------------------
    native handler wiring (NativeRefsSection)
@@ -800,16 +915,19 @@ let rec lift_value (v : Ast.form) : Ast.form =
   (* scalars pass through unchanged *)
   | Ast.Nil | Ast.Bool _ | Ast.Int _ | Ast.Float _
   | Ast.Char _ | Ast.Sym _ | Ast.FormRef _ -> v
-  (* compounds lift to FormRef *)
+  (* compounds lift to FormRef. We reserve the parent's id BEFORE
+     building its content so any child allocations (in build_form_for
+     → build_char_chain / build_int_chain / lift_value) end up with
+     wire ids AFTER the parent's. This keeps wire-position(form) ==
+     internal-id(form) across the recursive lift. *)
   | Ast.Str _ | Ast.Bytes _ | Ast.Cons _ | Ast.Vec _ ->
       (match Hashtbl.find_opt form_table v with
        | Some id -> Ast.FormRef id
        | None ->
-           let id = !next_form_id in
-           incr next_form_id;
+           let id = reserve_form_id () in
            Hashtbl.add form_table v id;
            let form = build_form_for v in
-           lifted_forms := form :: !lifted_forms;
+           put_form id form;
            Ast.FormRef id)
 
 (* Build a Cons-chain Form representing a list of Char codepoints.
@@ -826,9 +944,13 @@ and build_char_chain (codepoints : int list) : Ast.form =
   let bp = get_protos () in
   let car_sym = Compiler.intern "car" in
   let cdr_sym = Compiler.intern "cdr" in
+  (* Allocate cells in HEAD-FIRST order so wire-id(head) < wire-id(tail).
+     We reserve each cell's id before recursing so child allocations
+     pick up the next-larger id naturally. *)
   let rec go = function
     | [] -> Ast.Nil
     | cp :: rest ->
+        let id = reserve_form_id () in
         let tail = go rest in
         let cell = Image.{
           proto = Ast.FormRef bp.cons_id;
@@ -837,7 +959,7 @@ and build_char_chain (codepoints : int list) : Ast.form =
           meta = [];
           frozen = true;
         } in
-        let id = alloc_form_raw cell in
+        put_form id cell;
         Ast.FormRef id
   in
   go codepoints
@@ -869,7 +991,8 @@ and build_form_for (v : Ast.form) : Image.vat_form =
       }
   | Ast.Bytes b ->
       (* Bytes follow the same shape — :bytes slot is a cons-chain
-         of Int values (raw byte values, 0..255), proto=Bytes. *)
+         of Int values (raw byte values, 0..255), proto=Bytes.
+         Head-first id allocation, same reasoning as build_char_chain. *)
       let bytes_sym = Compiler.intern "bytes" in
       let car_sym = Compiler.intern "car" in
       let cdr_sym = Compiler.intern "cdr" in
@@ -877,6 +1000,7 @@ and build_form_for (v : Ast.form) : Image.vat_form =
         if pos >= Bytes.length b then Ast.Nil
         else
           let byte_v = Char.code (Bytes.get b pos) in
+          let id = reserve_form_id () in
           let tail = build_int_chain (pos + 1) in
           let cell = Image.{
             proto = Ast.FormRef bp.cons_id;
@@ -885,7 +1009,7 @@ and build_form_for (v : Ast.form) : Image.vat_form =
             meta = [];
             frozen = true;
           } in
-          let id = alloc_form_raw cell in
+          put_form id cell;
           Ast.FormRef id
       in
       let chain = build_int_chain 0 in
@@ -990,7 +1114,7 @@ let run (args : string array) : unit =
   let opts = parse_args args in
   Compiler.reset_globals ();
   reset_lifter ();
-  let steps = gather_steps opts.root in
+  let (steps, runtime_forms) = gather_steps opts.root in
   if steps = [] then begin
     Printf.eprintf "build-seed: no minimal-bootstrap forms found under %s\n"
       opts.root;
@@ -1029,9 +1153,15 @@ let run (args : string array) : unit =
 
      Sub-chunks (closures, fn bodies) registered during compilation
      still land in the chunk registry normally. *)
+  (* Synthetic main: precompiled steps (parser/+compiler/ forms) run
+     first; then the runtime_forms (the [$compiler useMoof] flip plus
+     the early/+stdlib/+mcos transporter-load chain). The runtime
+     forms execute via the moof parser+compiler that the precompiled
+     prefix just installed. *)
   let main_form =
     let steps_forms = List.map (fun s -> s.form) steps in
-    Ast.Cons (Ast.Sym "do", Ast.forms_to_list steps_forms)
+    Ast.Cons (Ast.Sym "do",
+              Ast.forms_to_list (steps_forms @ runtime_forms))
   in
   let main_cb =
     try Compiler.compile_top main_form
@@ -1109,7 +1239,7 @@ let run (args : string array) : unit =
   let main_fid = map_chunk_id main_cb.id in
   patch_form_slots here_form_id
     (Compiler.intern "main", Ast.FormRef main_fid);
-  let forms = List.rev !lifted_forms in
+  let forms = finalize_lifted_forms () in
   let vat = Image.{
     vat_id = Bytes.make 16 '\x00';       (* deterministic placeholder *)
     syms = Compiler.all_syms ();
@@ -1127,7 +1257,7 @@ let run (args : string array) : unit =
   let oc = open_out_bin opts.output in
   output_bytes oc bytes;
   close_out oc;
-  Printf.printf "wrote %s (%d bytes, %d chunks, %d syms, %d forms, %d natives, %d files)\n"
+  Printf.printf "wrote %s (%d bytes, %d chunks, %d syms, %d forms, %d natives, %d files, %d runtime-forms)\n"
     opts.output
     (Bytes.length bytes)
     (List.length chunks)
@@ -1136,3 +1266,4 @@ let run (args : string array) : unit =
     (List.length native_refs)
     (List.length (List.sort_uniq compare
                     (List.map (fun s -> s.source_path) steps)))
+    (List.length runtime_forms)

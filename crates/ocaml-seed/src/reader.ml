@@ -364,30 +364,57 @@ let read_send_bracket (c : cursor) : Ast.form =
     raise (ReadError (Printf.sprintf "read error at %d:%d: empty send bracket"
                         start_line start_col));
   let receiver = read_form c in
-  let elems = ref [] in
-  let rec eat_elems () =
+  (* Accumulate segments separated by `;`. Each segment is its own
+     list of elements that decode_send_segment turns into (sel, args).
+     - 1 segment: emit (__send__ recv 'sel args...) — single send.
+     - 2+ segments: emit (__cascade__ recv (sel1 args1...) (sel2 args2...) ...)
+       This matches lib/early/06-control-macros.moof::__cascade__ shape. *)
+  let segments = ref [] in
+  let current = ref [] in
+  let done_ = ref false in
+  while not !done_ do
     skip_trivia c;
     match cur_peek c with
     | None ->
         raise (ReadError
                  (Printf.sprintf "read error at %d:%d: unterminated send bracket"
                     start_line start_col))
-    | Some ']' -> let _ = cur_advance c in ()
+    | Some ']' ->
+        let _ = cur_advance c in
+        segments := List.rev !current :: !segments;
+        done_ := true
     | Some ';' ->
-        raise (ReadError
-                 (Printf.sprintf
-                    "read error at %d:%d: send-cascade is banned in minimal subset"
-                    c.line c.col))
-    | Some _ -> elems := read_form c :: !elems; eat_elems ()
-  in
-  eat_elems ();
-  let elem_list = List.rev !elems in
-  if elem_list = [] then
+        let _ = cur_advance c in
+        segments := List.rev !current :: !segments;
+        current := []
+    | Some _ ->
+        current := read_form c :: !current
+  done;
+  let seg_lists = List.rev !segments in
+  if List.length seg_lists = 0 then
     raise (ReadError
              (Printf.sprintf "read error at %d:%d: send needs at least a selector"
                 start_line start_col));
-  let sel, args = decode_send_segment elem_list start_line start_col in
-  emit_send receiver sel args
+  (match seg_lists with
+   | [elem_list] ->
+       if elem_list = [] then
+         raise (ReadError
+                  (Printf.sprintf "read error at %d:%d: send needs at least a selector"
+                     start_line start_col));
+       let sel, args = decode_send_segment elem_list start_line start_col in
+       emit_send receiver sel args
+   | _ ->
+       (* 2+ segments → cascade. Each segment becomes (sel args...). *)
+       let seg_forms = List.map (fun elem_list ->
+         if elem_list = [] then
+           raise (ReadError
+                    (Printf.sprintf
+                       "read error at %d:%d: empty cascade segment"
+                       start_line start_col));
+         let sel, args = decode_send_segment elem_list start_line start_col in
+         Ast.forms_to_list (Ast.Sym sel :: args)
+       ) seg_lists in
+       Ast.forms_to_list (Ast.Sym "__cascade__" :: receiver :: seg_forms))
 
 (* hash forms - minimal subset: #true, #false, #\... *)
 let read_hash (c : cursor) : Ast.form =
