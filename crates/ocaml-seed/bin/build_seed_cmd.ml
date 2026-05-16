@@ -496,21 +496,17 @@ let bootstrap_protos () : boot_protos =
    load. Empty here; the runtime populates as user code defines.
    ---------------------------------------------------------------- *)
 
-(* Allocate here_form + macros_form, returning their FormIds. Must be
-   called after bootstrap_protos so we know Env / Object FormIds. *)
+(* Allocate here_form, returning (macros_form_id, here_form_id). Must
+   be called after bootstrap_protos so we know Env / Object FormIds.
+
+   IMPORTANT: macros_form_id == bp.macros_id (single Form serves as
+   both the canonical macro registry — what `Macros` symbol resolves
+   to in here_form, what world.macros_form points to, what defmacro
+   slotSet!s into — AND the V4-image proto-table's "macros" entry).
+   rust's v4_export.rs emits world.macros_form as both
+   header.macros_form_id and protos[16]; we mirror that aliasing. *)
 let alloc_here_and_macros (bp : boot_protos) : int * int =
   let parent_sym = Compiler.intern "parent" in
-  let name_meta = Compiler.intern "name" in
-  let macros_name = Compiler.intern "Macros" in
-  (* macros_form: proto=Object, :meta name=Macros, no slots. *)
-  let macros_id = alloc_form_raw Image.{
-    proto = Ast.FormRef bp.object_id;
-    slots = [];
-    handlers = [];
-    meta = [(name_meta, Ast.Sym "Macros")];
-    frozen = false;
-  } in
-  let _ = macros_name in
   (* here_form: proto=Env, :meta parent=Nil. Slots populated below. *)
   let here_id = alloc_form_raw Image.{
     proto = Ast.FormRef bp.env_id;
@@ -519,7 +515,7 @@ let alloc_here_and_macros (bp : boot_protos) : int * int =
     meta = [(parent_sym, Ast.Nil)];
     frozen = false;
   } in
-  (macros_id, here_id)
+  (bp.macros_id, here_id)
 
 (* After here_form is allocated, build its slot list (binding `$here`
    to itself + each proto name to its Form). Since lifted_forms is
