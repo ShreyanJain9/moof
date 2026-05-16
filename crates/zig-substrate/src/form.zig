@@ -23,6 +23,30 @@
 //! v4-spec correspondence: the FormSection per V4 §10.3 walks the
 //! slots / handlers / meta in this same insertion order; the on-disk
 //! layout is the in-memory layout.
+//!
+//! ## phase 2 §4.7 — `handlers` audit (2026-05-16)
+//!
+//! the perf design considered swapping `handlers` to a non-ordered
+//! `AutoHashMapUnmanaged` for faster `.get(selector)`. D5 audit found
+//! handlers iteration is **user-observable** at three sites:
+//!
+//!   - `intrinsics.zig::heapHandlerKeysOf` — reflection method
+//!     `[obj :handlerKeysOf]` returns the keys as a list; the order
+//!     leaks straight to moof code.
+//!   - `image.zig::serializeImage` (FormSection) — writes
+//!     `count + (sym, value)` pairs in iteration order; the
+//!     resulting bytes feed D9's canonical-hash.
+//!   - `image.zig::serializeImage` (NativeRefsSection) — walks
+//!     every proto's handlers to emit native-method binding entries;
+//!     the on-disk order is observable.
+//!
+//! decision: **keep `handlers` as `AutoArrayHashMapUnmanaged`**.
+//! `.get(selector)` is already O(1) amortized on the ordered map (it's
+//! two cache-friendly reads: index → value array). the hot path for
+//! handlers is `.get`, not iteration. swapping would force a sort at
+//! every observable site to preserve D5, which would cost more than
+//! the dispatch saves. the `native_fns` table — which has *no*
+//! user-observable iteration — was swapped separately (world.zig).
 
 const std = @import("std");
 const Value = @import("value.zig").Value;
