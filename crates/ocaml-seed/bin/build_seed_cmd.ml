@@ -581,6 +581,7 @@ let zig_registry_keys : string list = [
   "Opcode:send:argc:ic:";
   "Opcode:tailSend:argc:";
   "Opcode:superSend:argc:ic:";
+  "Opcode:sendSelf:argc:ic:";
   (* Opcode reflection *)
   "Opcode:op";
   "Opcode:operands";

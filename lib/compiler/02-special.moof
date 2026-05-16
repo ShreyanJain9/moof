@@ -137,11 +137,21 @@
       (if [self symbol?: selector]
           (let ((isSuper (if [self symbol?: receiver]
                              [receiver is 'super]
-                             #false)))
+                             #false))
+                ;; V4 §3.3 fusion: self-as-receiver in non-tail position
+                ;; emits SendSelf instead of LoadSelf+Send. tail position
+                ;; still uses LoadSelf+TailSend (TailSendSelf deferred).
+                (isSelfRecv (if [self symbol?: receiver]
+                                [receiver is 'self]
+                                #false)))
             ;; super: receiver is implicit (uses self_ at runtime).
+            ;; SendSelf (non-tail self): receiver is implicit too — no
+            ;; receiver load. tail position still loads (LoadSelf+TailSend).
             (if isSuper
                 nil
-                [self compileForm: receiver chunk: chunk tail: #false])
+                (if (if isSelfRecv (if tail #false #true) #false)
+                    nil
+                    [self compileForm: receiver chunk: chunk tail: #false]))
             [self compileArgs: args chunk: chunk]
             ;; ic slot reserved unconditionally (matches rust's
             ;; `next_ic()` discipline) — chunk_ics byte-identity.
@@ -153,9 +163,13 @@
                                        ic: ic]]
                   (if tail
                       [chunk emit: [Opcode tailSend: selector argc: argc]]
-                      [chunk emit: [Opcode send: selector
-                                           argc: argc
-                                           ic: ic]]))))
+                      (if isSelfRecv
+                          [chunk emit: [Opcode sendSelf: selector
+                                               argc: argc
+                                               ic: ic]]
+                          [chunk emit: [Opcode send: selector
+                                               argc: argc
+                                               ic: ic]])))))
           (raise: 'compile-error "__send__ selector must be a symbol")))
             ;; folded — emit a LoadConst of the precomputed result.
             (let ((idx [chunk addConst: folded]))

@@ -764,6 +764,11 @@ fn opcodeSuperSendArgcIc(world: *World, _: Value, args: []const Value) anyerror!
     return mkOpForm(world, "SuperSend", args);
 }
 
+fn opcodeSendSelfArgcIc(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 3) return raise(world, "arity", "[Opcode sendSelf: argc: ic:] takes 3 args");
+    return mkOpForm(world, "SendSelf", args);
+}
+
 // ─────────────────────────────────────────────────────────────────
 // Opcode instance methods — `:op`, `:operands`, `:toString`.
 //
@@ -1524,6 +1529,7 @@ pub const REGISTRY = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "Opcode:send:argc:ic:", opcodeSendArgcIc },
     .{ "Opcode:tailSend:argc:", opcodeTailSendArgc },
     .{ "Opcode:superSend:argc:ic:", opcodeSuperSendArgcIc },
+    .{ "Opcode:sendSelf:argc:ic:", opcodeSendSelfArgcIc },
 
     // Opcode instance methods — opcode-Form reflection.
     .{ "Opcode:op", opcodeOp },
