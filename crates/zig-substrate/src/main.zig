@@ -37,15 +37,87 @@ const vm = @import("vm.zig");
 const image = @import("image.zig");
 const reader = @import("reader.zig");
 
+/// process-wide GC options, parsed once in main() from env vars and
+/// CLI flags. each World built by the various subcommands consults
+/// `applyGcOpts` to flip its `gc_enabled` / `gc_stats_enabled`.
+///
+/// `--no-gc` disables collection entirely (for diagnostic / A-B
+/// measurement). `--gc-stats` (or `MOOF_GC_STATS=1`) prints stats to
+/// stderr after every collect cycle.
+const GcOpts = struct {
+    enabled: bool = true,
+    stats: bool = false,
+};
+
+var g_gc_opts: GcOpts = .{};
+
+fn applyGcOpts(world: *World) void {
+    world.gc_enabled = g_gc_opts.enabled;
+    world.gc_stats_enabled = g_gc_opts.stats;
+}
+
 pub fn main(init: std.process.Init) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var it = init.minimal.args.iterate();
-    _ = it.next(); // skip argv[0]
-    const sub_raw = it.next();
-    const path_raw = it.next();
+    // env var: `MOOF_GC_STATS=1` enables single-line GC summary per
+    // collection cycle. silently no-op when unset.
+    if (init.minimal.environ.getPosix("MOOF_GC_STATS")) |val| {
+        if (val.len > 0 and !std.mem.eql(u8, val, "0")) g_gc_opts.stats = true;
+    }
+
+    // pre-scan argv for global flags. these flags can appear in any
+    // position; consumed before we dispatch to a subcommand. (zig's
+    // args iterator is one-shot, so we collect into a list, strip
+    // the flags, and rebuild the iteration sequence below.)
+    var argv_list: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (argv_list.items) |s| allocator.free(s);
+        argv_list.deinit(allocator);
+    }
+    {
+        var pre_it = init.minimal.args.iterate();
+        while (pre_it.next()) |a| {
+            if (std.mem.eql(u8, a, "--no-gc")) {
+                g_gc_opts.enabled = false;
+                continue;
+            }
+            if (std.mem.eql(u8, a, "--gc-stats")) {
+                g_gc_opts.stats = true;
+                continue;
+            }
+            try argv_list.append(allocator, try allocator.dupe(u8, a));
+        }
+    }
+
+    // re-build iteration over the filtered argv. argv_list now owns
+    // duplicated strings; we index by position.
+    var arg_idx: usize = 1; // skip argv[0]
+    const argc = argv_list.items.len;
+    const sub_raw: ?[]const u8 = if (arg_idx < argc) blk: {
+        const s = argv_list.items[arg_idx];
+        arg_idx += 1;
+        break :blk s;
+    } else null;
+    const path_raw: ?[]const u8 = if (arg_idx < argc) blk: {
+        const s = argv_list.items[arg_idx];
+        arg_idx += 1;
+        break :blk s;
+    } else null;
+    // small shim so the existing `it.next()` call sites below keep
+    // working with minimal churn.
+    const ItShim = struct {
+        items: []const []const u8,
+        idx: *usize,
+        fn next(self: @This()) ?[]const u8 {
+            if (self.idx.* >= self.items.len) return null;
+            const s = self.items[self.idx.*];
+            self.idx.* += 1;
+            return s;
+        }
+    };
+    var it = ItShim{ .items = argv_list.items, .idx = &arg_idx };
 
     if (sub_raw != null and path_raw != null and std.mem.eql(u8, sub_raw.?, "decode")) {
         const path_copy = try allocator.dupe(u8, path_raw.?);
@@ -161,6 +233,7 @@ fn printOp(offset: usize, op: opcodes.Op) void {
 fn runLoad(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !void {
     var world = try World.initBare(allocator);
     defer world.deinit();
+    applyGcOpts(&world);
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024 * 1024));
     defer allocator.free(bytes);
     try image.loadVatImage(&world, bytes, allocator);
@@ -171,6 +244,7 @@ fn runLoad(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !void {
 fn runExec(allocator: std.mem.Allocator, io: std.Io, vat_path: []const u8, chunk_id: u32) !void {
     var world = try World.initBare(allocator);
     defer world.deinit();
+    applyGcOpts(&world);
     world.io = io;
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, vat_path, allocator, .limited(1024 * 1024 * 1024));
     defer allocator.free(bytes);
@@ -184,6 +258,7 @@ fn runExec(allocator: std.mem.Allocator, io: std.Io, vat_path: []const u8, chunk
 fn runExecBytecode(allocator: std.mem.Allocator, io: std.Io, vat_path: []const u8, bytecode_path: []const u8) !void {
     var world = try World.initBare(allocator);
     defer world.deinit();
+    applyGcOpts(&world);
     world.io = io;
     const vat_bytes = try std.Io.Dir.cwd().readFileAlloc(io, vat_path, allocator, .limited(1024 * 1024 * 1024));
     defer allocator.free(vat_bytes);
@@ -202,6 +277,7 @@ fn runExecBytecode(allocator: std.mem.Allocator, io: std.Io, vat_path: []const u
 fn runInspectSyms(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !void {
     var world = try World.initBare(allocator);
     defer world.deinit();
+    applyGcOpts(&world);
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1024 * 1024 * 1024));
     defer allocator.free(bytes);
     try image.loadVatImage(&world, bytes, allocator);
@@ -215,6 +291,7 @@ fn runInspectSyms(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !v
 fn runEval(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, vat_path: []const u8, expr_src: []const u8) !void {
     var world = try World.initBare(allocator);
     defer world.deinit();
+    applyGcOpts(&world);
     world.io = io;
     const vat_bytes = try std.Io.Dir.cwd().readFileAlloc(io, vat_path, allocator, .limited(1024 * 1024 * 1024));
     defer allocator.free(vat_bytes);
@@ -254,6 +331,7 @@ fn runEval(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Enviro
 fn runRun(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, vat_path: []const u8, serialize_to: ?[]const u8) !void {
     var world = try World.initBare(allocator);
     defer world.deinit();
+    applyGcOpts(&world);
     world.io = io;
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, vat_path, allocator, .limited(1024 * 1024 * 1024));
     defer allocator.free(bytes);
@@ -316,6 +394,7 @@ fn runSmoke(allocator: std.mem.Allocator) !void {
     p("moof v0.0.0 — V4 polyglot substrate\n", .{});
     var world = try World.init(allocator);
     defer world.deinit();
+    applyGcOpts(&world);
     try intrinsics.install(&world);
     {
         const chunk_id = try world.heap.alloc(Form.withProto(.{ .form = world.protos.chunk }));
@@ -332,6 +411,7 @@ fn runSmoke(allocator: std.mem.Allocator) !void {
 fn runSerialize(allocator: std.mem.Allocator, io: std.Io, in_path: []const u8, out_path: []const u8) !void {
     var world = try World.initBare(allocator);
     defer world.deinit();
+    applyGcOpts(&world);
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, in_path, allocator, .limited(1024 * 1024 * 1024));
     defer allocator.free(bytes);
     try image.loadVatImage(&world, bytes, allocator);
@@ -345,6 +425,7 @@ fn runSerialize(allocator: std.mem.Allocator, io: std.Io, in_path: []const u8, o
 fn runSmokeSerializeTo(allocator: std.mem.Allocator, io: std.Io, out_path: []const u8) !void {
     var world = try World.init(allocator);
     defer world.deinit();
+    applyGcOpts(&world);
     world.io = io;
     try intrinsics.install(&world);
     const path_sym = try world.syms.intern(out_path);
@@ -371,6 +452,7 @@ fn runSmokeSerializeTo(allocator: std.mem.Allocator, io: std.Io, out_path: []con
 fn runBuildTrivialVat(allocator: std.mem.Allocator, io: std.Io, out_path: []const u8) !void {
     var world = try World.init(allocator);
     defer world.deinit();
+    applyGcOpts(&world);
     try intrinsics.install(&world);
     const plus_sym = try world.syms.intern("+");
     const chunk_id = try world.heap.alloc(Form.withProto(.{ .form = world.protos.chunk }));
@@ -398,6 +480,7 @@ fn runBuildTrivialVat(allocator: std.mem.Allocator, io: std.Io, out_path: []cons
 fn runStressRecursion(allocator: std.mem.Allocator, depth: u32) !void {
     var world = try World.init(allocator);
     defer world.deinit();
+    applyGcOpts(&world);
     try intrinsics.install(&world);
     std.debug.print("stress-recursion: depth = {d}\n", .{depth});
     const n_sym = try world.syms.intern("n");

@@ -149,8 +149,34 @@ pub fn runTop(world: *World, chunk: FormId) !Value {
         try step(world);
     }
     // the popped frame's last `Return` left its result on the stack.
-    if (world.vm.stack.items.len == 0) return .nil;
-    return world.vm.stack.pop().?;
+    const result: Value = if (world.vm.stack.items.len == 0) .nil else world.vm.stack.pop().?;
+
+    // turn-boundary stand-in (phase 1 §3.5 option A): trigger GC
+    // after the outermost moof call returns. inner `runMethod` /
+    // `runUntilFrameReturns` calls (from natives re-entering the
+    // VM, option α) skip this — the heap is not quiescent inside
+    // a native call. only when we return to the host (CLI / test
+    // harness) is GC safe and meaningful.
+    //
+    // the result Value is preserved across the cycle: if it's a
+    // .form, it's still on the operand stack at the moment we pop
+    // it above (which is BEFORE this collect call, so it wouldn't
+    // be marked). but by the time we pop, we've already truncated
+    // frames + popped the result, so the result is the *only*
+    // outgoing reference. we re-push it as a "stack root" for the
+    // duration of the collect by leaving it on the stack until
+    // after the cycle. simpler: ensure the result is on the stack
+    // while collecting, then pop.
+    if (world.gc_enabled) {
+        // re-push the result so it counts as a stack root during
+        // the mark phase, then pop it back. cost: one push + pop
+        // per runTop. trivial.
+        try world.vm.stack.append(world.allocator, result);
+        _ = try world.collect();
+        _ = world.vm.stack.pop();
+    }
+
+    return result;
 }
 
 /// drive the dispatch loop until `world.vm.frames.items.len` falls
