@@ -64,10 +64,36 @@ fn applyGcOpts(world: *World) void {
 }
 
 pub fn main(init: std.process.Init) !void {
+    // **allocator policy (phase 2 §4.1, 2026-05-16):**
+    //
+    // default → `std.heap.smp_allocator`. it's a fast single-thread-
+    // optimized arena with bookkeeping kept minimal — ~120 ns / Send
+    // on bench-natives. this is the production path.
+    //
+    // opt-in → `MOOF_DEBUG_ALLOC=1` (or legacy `MOOF_FAST_ALLOC=0`)
+    // selects `std.heap.DebugAllocator`, which catches use-after-free,
+    // double-free, and leaks via guarded pages + stack-trace
+    // bookkeeping. **catastrophically expensive** at the per-Send
+    // granularity (~60× slower than smp_allocator on Send-heavy
+    // benches), so it is reserved for development / leak hunts.
+    //
+    // pre-2026-05-16: default was DebugAllocator with `MOOF_FAST_ALLOC=1`
+    // as the opt-out. profile work in commit 975a137 quantified the
+    // 60× tax and motivated the flip. legacy `MOOF_FAST_ALLOC=0` is
+    // still honored so old scripts that explicitly disabled fast-alloc
+    // continue to see the debug path.
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
-    const use_smp = if (init.minimal.environ.getPosix("MOOF_FAST_ALLOC")) |v| (v.len > 0 and !std.mem.eql(u8, v, "0")) else false;
-    const allocator = if (use_smp) std.heap.smp_allocator else gpa.allocator();
+    const want_debug = blk: {
+        if (init.minimal.environ.getPosix("MOOF_DEBUG_ALLOC")) |v| {
+            if (v.len > 0 and !std.mem.eql(u8, v, "0")) break :blk true;
+        }
+        if (init.minimal.environ.getPosix("MOOF_FAST_ALLOC")) |v| {
+            if (v.len > 0 and std.mem.eql(u8, v, "0")) break :blk true;
+        }
+        break :blk false;
+    };
+    const allocator = if (want_debug) gpa.allocator() else std.heap.smp_allocator;
 
     // env var: `MOOF_GC_STATS=1` enables single-line GC summary per
     // collection cycle. silently no-op when unset.
