@@ -653,9 +653,24 @@ pub fn prepareInvoke(
     const captured_env_v = world.formSlot(method, world.env_sym);
     const captured_env = captured_env_v.asFormId() orelse world.here_form;
     const params_v = world.formSlot(method, world.params_sym);
-    const params = try world.listToSlice(params_v);
+
+    const params = world.listToSlice(params_v) catch |err| {
+        std.debug.print("prepareInvoke: listToSlice failed: {s}\n", .{@errorName(err)});
+        return err;
+    };
     defer world.freeSlice(params);
-    if (params.len != call_args.len) return error.Arity;
+
+    if (params.len != call_args.len) {
+        std.debug.print("prepareInvoke: Arity mismatch: method has {d} params, called with {d} args\n", .{ params.len, call_args.len });
+        // debug: list slots of method
+        const mf = world.heap.get(method);
+        std.debug.print("method Form {d} slots:\n", .{method.payload});
+        var it = mf.slots.iterator();
+        while (it.next()) |entry| {
+            std.debug.print("  {s} -> \n", .{world.syms.resolve(entry.key_ptr.*)});
+        }
+        return error.Arity;
+    }
 
     // bind params from the (still-live) call_args slice into the
     // new env BEFORE shrinking the stack — call_args may point

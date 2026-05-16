@@ -34,10 +34,12 @@ pub const Value = union(enum) {
     nil,
     /// boolean. proto: `Bool`.
     bool_: bool,
-    /// 48-bit signed integer. proto: `Integer`. moof's bignum-ready
-    /// integer width (matches the BigInt unification feedback note;
-    /// values outside i48 promote to a heap BigInt Form).
-    int: i48,
+    /// 64-bit signed integer. proto: `Integer`. moof's bignum-ready
+    /// integer width. values outside the eventually-NaN-boxed range
+    /// (e.g. > 51 bits) will promote to a heap BigInt Form in later
+    /// phases. for phase A, we use a full i64 to match the bootstrap
+    /// rust oracle.
+    int: i64,
     /// interned symbol. proto: `Symbol`. payload is a SymId (see
     /// `sym.zig`); a u32 to keep this union plain-data.
     sym: u32,
@@ -82,8 +84,8 @@ pub const Value = union(enum) {
         };
     }
 
-    /// extract the i48, if this is an integer. `null` otherwise.
-    pub fn asInt(self: Value) ?i48 {
+    /// extract the i64, if this is an integer. `null` otherwise.
+    pub fn asInt(self: Value) ?i64 {
         return switch (self) {
             .int => |n| n,
             else => null,

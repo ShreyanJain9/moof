@@ -958,6 +958,46 @@ fn heapMetaOfAt(world: *World, _: Value, args: []const Value) anyerror!Value {
     return world.formMeta(id, sym);
 }
 
+fn heapSlotKeysOf(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len < 1) return .nil;
+    const id = args[0].asFormId() orelse return .nil;
+    const f = world.heap.get(id);
+    var keys: std.ArrayList(Value) = .empty;
+    defer keys.deinit(world.allocator);
+    var it = f.slots.iterator();
+    while (it.next()) |entry| {
+        try keys.append(world.allocator, .{ .sym = entry.key_ptr.* });
+    }
+    return world.makeList(keys.items);
+}
+
+fn heapHandlerKeysOf(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len < 1) return .nil;
+    const id = args[0].asFormId() orelse return .nil;
+    const f = world.heap.get(id);
+    var keys: std.ArrayList(Value) = .empty;
+    defer keys.deinit(world.allocator);
+    var it = f.handlers.iterator();
+    while (it.next()) |entry| {
+        try keys.append(world.allocator, .{ .sym = entry.key_ptr.* });
+    }
+    return world.makeList(keys.items);
+}
+
+fn heapMetaKeysOf(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len < 1) return .nil;
+    const id = args[0].asFormId() orelse return .nil;
+    const f = world.heap.get(id);
+    var keys: std.ArrayList(Value) = .empty;
+    defer keys.deinit(world.allocator);
+    var it = f.meta.iterator();
+    while (it.next()) |entry| {
+        try keys.append(world.allocator, .{ .sym = entry.key_ptr.* });
+    }
+    return world.makeList(keys.items);
+}
+
+
 // ─────────────────────────────────────────────────────────────────
 // Method:call — invoke a method/closure Form with args. wraps the
 // substrate's send-path so the closure's captured-self is honored.
@@ -1278,18 +1318,37 @@ fn isUnsafePath(rel: []const u8) bool {
 /// (the canonical bindings established by `lib/parser/03-bootstrap.moof`
 /// and `lib/compiler/00-helpers.moof`). returns the last form's result.
 fn evalStringInWorld(world: *World, source_val: Value) anyerror!Value {
-    if (!world.use_moof_reader) return raise(world, "no-reader", "zig has no native reader; flip [$reader useMoof] first");
-    if (!world.use_moof_compiler) return raise(world, "no-compiler", "zig has no native compiler; flip [$compiler useMoof] first");
+    if (!world.use_moof_reader) {
+        std.debug.print("evalStringInWorld: no moof reader, skipping\n", .{});
+        return raise(world, "no-reader", "zig has no native reader; flip [$reader useMoof] first");
+    }
+    if (!world.use_moof_compiler) {
+        std.debug.print("evalStringInWorld: no moof compiler, skipping\n", .{});
+        return raise(world, "no-compiler", "zig has no native compiler; flip [$compiler useMoof] first");
+    }
 
     // look up Parser + Compiler from $here.slots.
-    const parser_sym = lookupSymByName(world, "Parser") orelse return raise(world, "no-parser", "Parser symbol not interned; lib/parser/03-bootstrap.moof has not loaded");
-    const compiler_sym = lookupSymByName(world, "Compiler") orelse return raise(world, "no-compiler", "Compiler symbol not interned; lib/compiler/00-helpers.moof has not loaded");
-    const parser_v = world.envLookup(world.here_form, parser_sym) orelse return raise(world, "no-parser", "Parser is unbound in $here — expected after parser/03-bootstrap.moof");
-    const compiler_v = world.envLookup(world.here_form, compiler_sym) orelse return raise(world, "no-compiler", "Compiler is unbound in $here — expected after compiler/00-helpers.moof");
+    const parser_sym = lookupSymByName(world, "Parser") orelse {
+        std.debug.print("evalStringInWorld: Parser unbound\n", .{});
+        return raise(world, "no-parser", "Parser symbol not interned; lib/parser/03-bootstrap.moof has not loaded");
+    };
+    const compiler_sym = lookupSymByName(world, "Compiler") orelse {
+        std.debug.print("evalStringInWorld: Compiler unbound\n", .{});
+        return raise(world, "no-compiler", "Compiler symbol not interned; lib/compiler/00-helpers.moof has not loaded");
+    };
+    const parser_v = world.envLookup(world.here_form, parser_sym) orelse {
+        std.debug.print("evalStringInWorld: Parser lookup failed\n", .{});
+        return raise(world, "no-parser", "Parser is unbound in $here — expected after parser/03-bootstrap.moof");
+    };
+    const compiler_v = world.envLookup(world.here_form, compiler_sym) orelse {
+        std.debug.print("evalStringInWorld: Compiler lookup failed\n", .{});
+        return raise(world, "no-compiler", "Compiler is unbound in $here — expected after compiler/00-helpers.moof");
+    };
 
     const parse_sel = try world.syms.intern("parse:");
     const compile_top_sel = try world.syms.intern("compileTop:");
 
+    std.debug.print("evalStringInWorld: parsing...\n", .{});
     // [Parser parse: source] → cons-chain of Forms.
     const forms_v = try world.send(parser_v, parse_sel, &.{source_val});
 
@@ -1323,9 +1382,14 @@ fn transporterLoad(world: *World, _: Value, args: []const Value) anyerror!Value 
     const rel = try extractPath(world, args[0]);
     defer world.allocator.free(rel);
 
+    std.debug.print("transporterLoad: {s}\n", .{rel});
+
     if (isUnsafePath(rel)) return raise(world, "tx-bad-path", ":load: refuses absolute or `..`-traversing paths");
 
-    const root = world.transporter_root orelse return raise(world, "tx-no-root", "transporter has no root configured (set MOOF_LIB or place lib/ next to the binary)");
+    const root = world.transporter_root orelse {
+        std.debug.print("transporterLoad: no root configured\n", .{});
+        return raise(world, "tx-no-root", "transporter has no root configured (set MOOF_LIB or place lib/ next to the binary)");
+    };
 
     const io = world.io orelse return raise(world, "no-io", ":load: requires world.io to be set by host");
 
@@ -1339,13 +1403,7 @@ fn transporterLoad(world: *World, _: Value, args: []const Value) anyerror!Value 
     };
     defer world.allocator.free(source);
 
-    // wrap source bytes as a String Value — for now, makeString builds
-    // an empty String-Form (storage TODO). when in-image Parser
-    // exists and dispatches on receiver, this needs real bytes. for
-    // V4 alpha we pass the empty form through; Parser dispatch will
-    // fail with a clearer error than us.
-    const source_v = try world.makeString(source);
-    return evalStringInWorld(world, source_v);
+    return evalStringInWorld(world, try world.makeString(source));
 }
 
 /// `[$transporter loadAll: list]` — walk a cons of String paths,
@@ -1487,6 +1545,9 @@ pub const REGISTRY = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "Heap:slotOf:at:", heapSlotOfAt },
     .{ "Heap:handlerOf:at:", heapHandlerOfAt },
     .{ "Heap:metaOf:at:", heapMetaOfAt },
+    .{ "Heap:slotKeysOf:", heapSlotKeysOf },
+    .{ "Heap:handlerKeysOf:", heapHandlerKeysOf },
+    .{ "Heap:metaKeysOf:", heapMetaKeysOf },
 
     // Method:call — invoke a method/closure form.
     .{ "Method:call", methodCall },

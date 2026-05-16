@@ -119,18 +119,37 @@ let cmd_compile (path : string) : unit =
     print_newline ()
   ) forms
 
-let cmd_bytes (path : string) : unit =
-  Compiler.reset_globals ();
+let cmd_bytes (path : string) (syms_from : string option) : unit =
+  begin match syms_from with
+  | Some vat_path ->
+      let names = Image.load_syms vat_path in
+      Compiler.import_syms names
+  | None ->
+      Compiler.reset_globals ()
+  end;
   let text = read_file path in
   let forms = Reader.read_all text in
   (* dump raw bytecode bytes to stdout — caller pipes to moof (zig).
-     for multi-form sources we concatenate top-chunk bodies. (V4-α;
-     phase ε may want a per-form header.) *)
+     V4-α: for multi-form sources we concatenate top-chunk bodies.
+     we now emit a per-chunk header (spec §10.3) so constants and ICs
+     travel with the bytes. *)
   set_binary_mode_out stdout true;
   List.iter (fun form ->
     let cb = Compiler.compile_top form in
     let final = Compiler.finalize cb in
-    output_bytes stdout final.body
+    let lookup = Image.build_sym_lookup (Compiler.all_syms ()) in
+    let buf = Buffer.create (1024) in
+    (* V4 chunk format (spec §10.3):
+       source_form:u32, body_len:u32, body:[body_len], consts_count:u16, [Value], ic_count:u16, params_count:u16, [u32 sym] *)
+    Bytecode.write_u32_be buf 0; (* source_form *)
+    Bytecode.write_u32_be buf (Bytes.length final.body);
+    Buffer.add_bytes buf final.body;
+    Bytecode.write_u16_be buf (List.length final.consts);
+    List.iter (fun c -> Image.encode_value buf lookup c) final.consts;
+    Bytecode.write_u16_be buf final.ic_count;
+    Bytecode.write_u16_be buf (List.length final.params);
+    List.iter (fun sid -> Bytecode.write_u32_be buf sid) final.params;
+    output_bytes stdout (Buffer.to_bytes buf)
   ) forms
 
 let cmd_build_image (path : string) (output : string) : unit =
@@ -210,8 +229,11 @@ let () =
         if Array.length argv <> 3 then usage ();
         cmd_compile argv.(2)
     | "bytes" ->
-        if Array.length argv <> 3 then usage ();
-        cmd_bytes argv.(2)
+        if Array.length argv = 3 then
+          cmd_bytes argv.(2) None
+        else if Array.length argv = 5 && argv.(2) = "--syms" then
+          cmd_bytes argv.(4) (Some argv.(3))
+        else usage ()
     | "build-image" ->
         if Array.length argv <> 4 then usage ();
         cmd_build_image argv.(2) argv.(3)

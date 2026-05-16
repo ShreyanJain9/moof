@@ -663,6 +663,45 @@ fn readForms(world: *World, bytes: []const u8, pos: *usize, expected_count: u32)
     }
 }
 
+/// read one chunk from `bytes` at `pos`, allocate a fresh Form for it,
+/// and populate the world's chunk side-tables. returns the new FormId.
+/// per spec §10.3 ChunkSection entry layout.
+pub fn loadChunk(world: *World, bytes: []const u8, pos: *usize, allocator: std.mem.Allocator) !FormId {
+    _ = try readU32(bytes, pos); // source_form (ignored for fresh chunks)
+
+    const chunk_fid = try world.heap.alloc(Form.withProto(.{ .form = world.protos.chunk }));
+
+    const body_len = try readU32(bytes, pos);
+    try requireBytes(bytes, pos.*, body_len);
+    const body = try allocator.dupe(u8, bytes[pos.*..][0..body_len]);
+    pos.* += body_len;
+    try world.chunk_bytecode.put(allocator, chunk_fid, body);
+
+    const consts_count = try readU16(bytes, pos);
+    const consts = try allocator.alloc(Value, consts_count);
+    var c: u16 = 0;
+    while (c < consts_count) : (c += 1) {
+        consts[c] = try readValue(bytes, pos);
+    }
+    try world.chunk_consts.put(allocator, chunk_fid, consts);
+
+    const ic_count = try readU16(bytes, pos);
+    const ics = try allocator.alloc(world_mod.ICache, ic_count);
+    var ic_i: u16 = 0;
+    while (ic_i < ic_count) : (ic_i += 1) ics[ic_i] = world_mod.ICache.empty;
+    try world.chunk_ics.put(allocator, chunk_fid, ics);
+
+    const params_count = try readU16(bytes, pos);
+    const params = try allocator.alloc(u32, params_count);
+    var p: u16 = 0;
+    while (p < params_count) : (p += 1) {
+        params[p] = try readU32(bytes, pos);
+    }
+    try world.chunk_params.put(allocator, chunk_fid, params);
+
+    return chunk_fid;
+}
+
 /// ChunkSection — populate world.chunk_bytecode / chunk_consts /
 /// chunk_ics / chunk_params keyed by source-FormId per spec §10.3.
 ///
@@ -809,10 +848,8 @@ fn readValue(bytes: []const u8, pos: *usize) !Value {
             try requireBytes(bytes, pos.*, 8);
             const raw = std.mem.readInt(i64, bytes[pos.*..][0..8], .big);
             pos.* += 8;
-            // moof Int is i48 but the wire pads to i64. truncate
-            // is safe because the encoder is required to honor the
-            // i48 range; values outside it indicate a malformed image.
-            break :blk Value{ .int = @intCast(raw) };
+            // wire pads to i64; Value also uses i64 in phase A.
+            break :blk Value{ .int = raw };
         },
         VTAG_SYM => blk: {
             const raw = try readU32(bytes, pos);

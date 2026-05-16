@@ -45,6 +45,14 @@ open Opcodes
 (* Bytecode is referenced qualified (Bytecode.encode_op) only — no open. *)
 
 (* ─────────────────────────────────────────────────────────────────
+   compile errors.
+   ───────────────────────────────────────────────────────────────── *)
+
+exception Compile_error of string
+
+let err msg = raise (Compile_error msg)
+
+(* ─────────────────────────────────────────────────────────────────
    the SymId model. moof's symbol table interning is per-vat at
    runtime; here at compile time we use a process-wide table that
    the image serializer (OCAML-4) will canonicalize.
@@ -78,33 +86,6 @@ let sym_name (id : int) : string =
     SymTableSection of the image). *)
 let all_syms () : string list =
   Dynarray.to_list sym_names
-
-(* ─────────────────────────────────────────────────────────────────
-   compile errors.
-   ───────────────────────────────────────────────────────────────── *)
-
-exception Compile_error of string
-
-let err msg = raise (Compile_error msg)
-
-(* ─────────────────────────────────────────────────────────────────
-   chunk_builder — per-chunk compilation state.
-
-   layout mirrors crates/substrate/src/compiler.rs's `Compiler`
-   struct. Dynarray is used for ops because we need indexed mutation
-   for jump patching.
-
-   note on `next_pc`: each op has a fixed byte-size per V4 spec §3,
-   so we can maintain a running byte cursor without re-encoding. the
-   emit function returns this cursor (the byte position at which the
-   op was emitted), which is also the position the jump operand will
-   need to reach during patching.
-
-   note on `id`: assigned at construction by the global chunk
-   registry. used by PushClosure to reference sub-chunks. the image
-   serializer reads the registry to lay out all chunks in a single
-   ChunkSection per V4 spec §10.3.
-   ───────────────────────────────────────────────────────────────── *)
 
 type chunk_builder = {
   ops : op Dynarray.t;
@@ -143,6 +124,12 @@ let reset_globals () : unit =
   Hashtbl.clear sym_table;
   Dynarray.clear sym_names;
   Dynarray.clear chunk_registry
+
+(** import a list of symbols into the table, preserving their order.
+    useful for aligning with a hydrated vat's sym table. *)
+let import_syms (names : string list) : unit =
+  reset_globals ();
+  List.iter (fun n -> ignore (intern n)) names
 
 (* ─────────────────────────────────────────────────────────────────
    byte-size of each opcode (V4 spec §3). used by `emit` to advance

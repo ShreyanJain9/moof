@@ -340,3 +340,50 @@ let serialize (img : vat_image) : bytes =
   let h = compute_image_hash so_far in
   Buffer.add_bytes buf h;
   Buffer.to_bytes buf
+
+(* ------- sym-table loader (Track A.3) ------- *)
+
+let load_syms (path : string) : string list =
+  let ic = open_in_bin path in
+  let n = in_channel_length ic in
+  let bytes = Bytes.create n in
+  really_input ic bytes 0 n;
+  close_in ic;
+  let pos = ref 0 in
+  let read_n n =
+    let b = Bytes.sub bytes !pos n in
+    pos := !pos + n;
+    b
+  in
+  let read_u16 () =
+    let b = read_n 2 in
+    (Char.code (Bytes.get b 0) lsl 8) lor (Char.code (Bytes.get b 1))
+  in
+  let read_u32 () =
+    let b = read_n 4 in
+    (Char.code (Bytes.get b 0) lsl 24) lor
+    (Char.code (Bytes.get b 1) lsl 16) lor
+    (Char.code (Bytes.get b 2) lsl 8) lor
+    (Char.code (Bytes.get b 3))
+  in
+  (* skip Magic(4) + Version(2) + VatID(16) + num_forms(4) *)
+  let magic = read_n 4 in
+  if Bytes.to_string magic <> "MVAT" then failwith "not a V4 vat image";
+  let _ = read_u16 () in
+  let _ = read_n 16 in
+  let _ = read_u32 () in
+  (* read num_syms *)
+  let num_syms = read_u32 () in
+  (* skip num_chunks(4) + here(4) + macros(4) + protos(18*4) + ext_refs_count(2) *)
+  let _ = read_n (4 + 4 + 4 + 18*4 + 2) in
+  (* read sym table section *)
+  let count = read_u32 () in
+  if count <> num_syms then failwith "sym count mismatch";
+  let rec loop i acc =
+    if i = 0 then List.rev acc
+    else
+      let len = read_u16 () in
+      let s = Bytes.to_string (read_n len) in
+      loop (i - 1) (s :: acc)
+  in
+  loop count []

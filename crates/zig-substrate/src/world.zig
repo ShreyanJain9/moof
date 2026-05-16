@@ -736,6 +736,17 @@ pub const World = struct {
         try f.slots.put(self.allocator, self.body_sym, .{ .form = chunk });
         try f.slots.put(self.allocator, self.env_sym, .{ .form = env });
         try f.slots.put(self.allocator, self.self_sym, captured_self);
+
+        // V4: also bind :params slot so prepareInvoke knows the arity.
+        // the side-table stores SymIds; we build a Value-list.
+        if (self.chunk_params.get(chunk)) |p_syms| {
+            var params_vals = try self.allocator.alloc(Value, p_syms.len);
+            defer self.allocator.free(params_vals);
+            for (p_syms, 0..) |s, i| params_vals[i] = .{ .sym = s };
+            const params_v = try self.makeList(params_vals);
+            try f.slots.put(self.allocator, self.params_sym, params_v);
+        }
+
         return self.heap.alloc(f);
     }
 
