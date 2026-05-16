@@ -1,6 +1,7 @@
 # phase 2 substrate — moof performance — design
 
-> **status:** profiled + brainstormed 2026-05-16. ready for plan.
+> **status:** profiled + brainstormed 2026-05-16; **real-workload
+> measured + re-ordered 2026-05-16** (see §3.5). ready for plan.
 >
 > **scope:** make the zig substrate fast enough to (a) self-host the
 > moof parser/compiler at sustained workloads, and (b) ship the
@@ -340,6 +341,257 @@ haven't isolated in the microbenchmarks — likely:
 the 90s number won't be one bottleneck but ~5-10 compounding ones
 each costing ~3× — that's how interpreter perf works. each tier-1
 fix unstacks a multiplier.
+
+## 3.5 real-workload findings — measured 2026-05-16 (post tier-1)
+
+with tier-1A/B already shipped (smp_allocator, args scratch, chunk
+side-tables on Frame, chunk_params direct), microbenches report
+6.8-8.1 M sends/sec. but the real bootstrap workload — `moof
+profile-run /tmp/seed.vat` walking `lib/early/*.moof` files through
+the in-image Parser + Compiler — measures at **45,400 sends/sec**:
+a **178× gap from microbench**.
+
+instrumentation added in commit `917e297` (the `profile-run`
+subcommand, plus eight new Profile counters). methodology:
+
+```
+$ MOOF_LIB=$(pwd)/lib MOOF_PROFILE=1 \
+    ./crates/zig-substrate/zig-out/bin/moof profile-run /tmp/seed.vat
+  # ... killed after 60s; the run organically hits UnboundName
+  # 'emit:' (issue #31, defmethod machinery) mid-bootstrap, ~39s
+  # into the workload. profile dumps on graceful error.
+```
+
+### 3.5.1 measured counters (39.33 s run, killed organically at #31)
+
+| metric                         | value          |
+|--------------------------------|----------------|
+| wall elapsed                   | 39.33 s        |
+| ops executed                   | 4,820,757      |
+| sends total                    | 1,785,432      |
+|   native dispatches            | 1,250,318      |
+|   bytecode dispatches          | 212,798        |
+|   tail sends                   | 322,338        |
+| throughput                     | 45,396 send/s  |
+| ns/send                        | 22,029         |
+| ns/op                          | 8,159          |
+| IC hits                        | 1,454,350      |
+| IC misses                      | 8,738          |
+|   cold (empty slot)            | 995            |
+|   **thrash (proto flip)**      | **7,702 (88%)**|
+|   generation stale             | 41             |
+| IC hit ratio                   | 81.46 %        |
+| envs allocated                 | 388,986        |
+| env_bind calls                 | 556,223        |
+| listToSlice calls              | 106,442        |
+|   total items walked           | 121,973        |
+| load_name lookups              | 1,350,091      |
+|   total env hops               | 1,854,112      |
+|   avg hops per LoadName        | **1.373**      |
+| formSlot lookups               | 1,274,030      |
+| protoOf calls                  | 1,683,165      |
+| **sym intern calls**           | **267,878**    |
+| proto-chain walks              | 218,523        |
+| **forms allocated**            | **746,071**    |
+| runTop invocations             | 11             |
+| GC runs (mid-workload)         | 9              |
+| GC wall-ns                     | 257.3 ms       |
+| GC share of wall               | 0.65 %         |
+
+env-walk depth histogram (per LoadName resolve depth):
+
+```
+depth  1: 1,016,536   (75.3%)
+depth  2:   244,769   (18.1%)
+depth  3:    42,928   ( 3.2%)
+depth  4:    25,234   ( 1.9%)
+depth  5:     6,112   ( 0.5%)
+depth  6:    13,844   ( 1.0%)
+depth  7:       667   ( 0.05%)
+```
+
+### 3.5.2 the top 3 real-workload bottlenecks
+
+#### bottleneck R1 — native intrinsic O(N) overheads (parser-internal)
+
+**finding:** ns/op = 8,159 in real workload vs ~36 ns/op in
+bench-parser-like — a **226× gap that the microbench cannot
+detect because it only exercises tagged-int arithmetic natives**.
+
+real native dispatches (1.25 M of them) include `String:at:`,
+`String:length`, `String:=`, `Cons:car`, `Cons:cdr`, `(intern str)`
+etc. several have **O(N) walks that hide behind a single Send**:
+
+- `stringWalk` (helper for `String:at:` and `String:length`) walks
+  the entire :bytes cons-chain every call. parser parses files
+  thousands of chars long; each char read is O(file-position).
+- `lookupSymByName(world, "bytes")` in **every string operation**
+  does a linear scan of the 653-entry sym table — `653 × memcmp(~6
+  ns)` ≈ **4 µs of pure-CPU waste per call**, just to recover a
+  SymId that's already known at compile time. this single helper
+  function may dominate string-native dispatch time.
+- `(intern str)` (`globalIntern`) walks the input String's
+  cons-chain into a UTF-8 buffer, then hits `syms.intern`. parser
+  invokes per identifier read. correlates with the 267,878
+  intern-calls counter — interning 267K syms when only 653 are
+  unique means **410 redundant intern lookups per unique sym**.
+
+evidence pinning intrinsics (not the dispatch loop): `protoOf`
+calls (1.68 M) exceed `sends_total` (1.79 M, near-parity), which
+is expected — every dispatch consults `protoOf`. but `formSlot
+lookups` (1.27 M) are **separate from dispatch**: every `.car`
+/ `.cdr` / `:body` / `:env` read in a native is one. 1.27 M
+of these means the natives are reading cons-chain slots at a
+~1:1 ratio with sends. that's high for a dispatch-bound
+workload, low for a data-walking workload — and matches the
+"natives traverse cons-chains" hypothesis.
+
+**microbench miss reason:** bench-natives uses Integer `:+` which
+is a literal `int1 + int2` — zero internal work. real natives do
+data-structure traversals microbench never touches.
+
+**tier-2 plan adequacy:** existing items §5.1 (PIC), §5.2 (inline
+arith), §5.3 (threaded dispatch), §5.4 (flat env) all target the
+*dispatch loop*. they leave R1 untouched. **§5.7 + §5.8 added
+below** target it.
+
+#### bottleneck R2 — form allocation churn (746K forms per ~40 s of parse)
+
+**finding:** 746,071 Forms allocated, 388,986 of which are env-Forms
+(52% of allocation budget is "calls that bind params"). GC swept
+only ~750 of these total over 9 cycles (the rest survived because
+the parser/compiler retains intermediate AST). **mean alloc rate:
+19 K forms / second.**
+
+each Form allocation costs:
+- one `forms.append` (ArrayList growth, occasionally a realloc),
+- three lazy `AutoArrayHashMapUnmanaged` slots (slots / handlers /
+  meta — though only slots typically gets populated for env-Forms),
+- one or more `slots.put` calls (envBind: 556K of these).
+
+at smp_allocator's ~50 ns / put + ~5 ns / Form-init, the alloc-
+fraction-of-wall is roughly:
+- 746K Forms × 5 ns = 3.7 ms (init)
+- 556K env_binds × 50 ns = 27.8 ms (puts)
+- 388K env allocs × ~10 ns = 3.9 ms (env-specific extra)
+- **total ~35 ms** — only **0.09 %** of wall time.
+
+so the alloc cost itself isn't the time-killer — but the
+**consequent memory pressure** is. 746K Forms × ~200 bytes / Form
+(slots + handlers + meta + bookkeeping) = ~150 MB transient heap.
+this pressures the allocator's caches and the L1/L2 hit rate of
+every subsequent access. the 19K forms/sec rate also implies
+constant heap-grow events for `forms: std.ArrayList(Form)`.
+
+evidence: the 746K Forms accumulate net even after 9 GCs swept
+~750. that means **the parser/compiler hangs on to >99.9% of
+allocations** as live state (parsed AST + compiler IR). nothing
+to sweep until the parsed file's chunk-Form gets evicted, which
+only happens if no future code references it. for `lib/early/*.moof`
+which **defines protos that the rest of bootstrap uses**, none of
+that AST can be swept.
+
+**microbench miss reason:** bench-parser-like and stress-recursion
+both create 0-100K forms in their lifetime — small enough that the
+allocator pool stays hot. real workload **shifts allocation patterns
+into "ArrayList grows past every cache size"** territory.
+
+**tier-2 plan adequacy:** §5.5 (Closure flat repr) helps for
+closures, §4.5 (env-form pool) helps for envs. **but neither
+addresses the parser/compiler AST-Form churn**. they're the bulk
+of the 746K. **§5.9 added below** (Cons + AST pool) targets this.
+
+#### bottleneck R3 — sym intern churn (267K intern calls; 410 per unique sym)
+
+**finding:** `world.syms.intern` was called 267,878 times during
+the run. only ~653 symbols are unique in the table. **the parser
+is interning the same name hundreds of times each.**
+
+mechanism: `(intern str)` in moof code (parsing `'foo`) walks
+the String into UTF-8, then calls `syms.intern`. `syms.intern`
+does `index.get(name)` (a StringHashMap lookup with hash + memcmp).
+at ~150 ns per StringHashMap lookup × 267K calls = **40 ms** —
+small fraction of 39 s but a smoking-gun pattern.
+
+**worse:** several intrinsics intern static strings on every
+invocation:
+- `stringAt` → `lookupSymByName("bytes")` → linear scan, NOT
+  intern. same issue (worst kind).
+- `globalIntern` → `lookupSymByName("bytes")` → linear scan + ⌐
+  `syms.intern` on the result name. so the parser's per-sym-read
+  path costs `653 × memcmp + 1 hashmap-lookup`.
+- `closureCallIn` / `methodSlot` / dozens of others — every native
+  that needs a SymId calls `syms.intern("name")` and gets the same
+  SymId every time.
+
+the **400× redundancy ratio** (interns / unique syms) confirms:
+every per-name native is re-interning. zero-cost in microbench (no
+strings touched) but real cost in parser.
+
+**microbench miss reason:** microbenches use pre-interned SymIds
+(intern at chunk-build time, then dispatch on the SymId). real
+parser converts source-strings to SymIds at parse-time, with
+intermediate cons-chain traversals.
+
+**tier-2 plan adequacy:** none of §5.1-§5.5 addresses this.
+**§5.10 added below** caches sym-by-name in a static comptime
+table on the World.
+
+### 3.5.3 NOT-bottlenecks (microbench was right)
+
+- **IC hit ratio = 81.5%** — better than feared. **but 88% of
+  the misses are polymorphism thrash**, not cold or generation-
+  stale. PICs (§5.1) directly target the 8,738 misses; sizing-
+  by-measurement: 4-way PIC would catch ~7,400 of those
+  (rough JS-engine literature ratio).
+- **env walk depth: avg 1.37 hops, p99 ≤ 6 hops.** parser is NOT
+  using deep nested closures — this kills the hypothesis that
+  env-chain depth dominates. `bench-deep-env` measured this
+  correctly: at 1-2 hops, env walks are cheap.
+- **GC cost: 0.65% of wall time** (257 ms across 9 cycles).
+  the "GC fires per evalStringInWorld sub-form" hypothesis is
+  *true* but the cost is negligible — phase 1 mark-sweep on a
+  ~700K-Form heap takes ~30 ms.
+- **No DNU dispatches** across the entire bootstrap workload.
+  the proto-chain lookup machinery is clean.
+- **Tail-send count (322K) > bytecode dispatch (213K)** — the
+  compiler's tail-call optimization is firing aggressively.
+  more frames are *replaced* than *pushed*. good. **but tail-send
+  has no IC** (per V4 spec §6.2); 322K uncached lookups is real
+  waste. flagged for §5.11.
+
+### 3.5.4 the 178× gap, decomposed
+
+```
+microbench send (bench-parser-like): 147 ns
+   ├─ dispatch loop:            ~17 ns
+   ├─ IC fast path:             ~5  ns
+   ├─ prepareInvoke (native):   ~120 ns (mostly args copy)
+   └─ Integer + Integer:        ~5  ns
+
+real-workload send: 22,029 ns / send (NB. average over all sends,
+  including native sends with heavy bodies)
+   ├─ dispatch loop:            ~17 ns       (unchanged)
+   ├─ IC overhead:              ~10 ns       (81% hit, 19% miss)
+   ├─ prepareInvoke:            ~120 ns      (unchanged)
+   ├─ native body (avg):        ~10,000 ns  ← R1: string walks +
+   │                                            sym name scans +
+   │                                            cons chain reads
+   ├─ env alloc + bind (21%):   ~30 ns       (213K bytecode of
+   │                                          1.79M total)
+   ├─ form allocs (~0.42/send): ~10 ns       (cache pressure
+   │                                          aside, alloc itself
+   │                                          is cheap)
+   └─ misc:                     ~50 ns
+```
+
+so **R1 (native bodies) is responsible for ~90% of the gap.**
+R2 + R3 are real but small. **the dispatch loop is fast; the
+intrinsics are not.**
+
+this reorders the tier-2 priorities significantly. §5.1 / §5.2 /
+§5.3 / §5.4 still ship — they raise the dispatch floor — but
+**the biggest single-line speedup is fixing R1 first**.
 
 ## 4. tier 1 design (immediate, weeks → 100-1000× speedup target)
 
@@ -830,11 +1082,212 @@ creation.
 
 **effort:** 1-2 days.
 
+### 5.7 native intrinsic body audit + cached SymIds (R1, R3)
+
+**mechanism:** the §3.5 profile shows that *most native dispatches
+spend their time inside the native body, not in dispatch*. two
+recurring sins:
+
+1. **`lookupSymByName(world, "bytes")`** in nine intrinsics — a
+   linear scan of the 653-sym table per call (~4 µs of pure CPU).
+   includes `stringWalk` (used by `:at:` / `:length`), `stringEq`,
+   `stringSlice`, `globalIntern`, etc.
+2. **`syms.intern("captured-self")` / `syms.intern("op")` / ...**
+   in dispatch-helper natives — pays one StringHashMap lookup per
+   call where the result is constant.
+
+both are fixable trivially: **cache hot SymIds on the World**
+at boot time, in the same shape as the existing `body_sym`,
+`env_sym`, `params_sym`, `symCar`, `symCdr` fields. add:
+
+```zig
+// world.zig — cached SymIds populated at init/initBare boot.
+bytes_sym:           SymId,   // for String:bytes traversals
+captured_self_sym:   SymId,   // for closure dispatch
+op_sym:              SymId,   // for Opcode:op
+operands_sym:        SymId,   // for Opcode:operands
+// ... plus the ~6 other hot ones identified in the audit
+```
+
+then every `lookupSymByName(world, "bytes")` becomes a direct
+`world.bytes_sym` read — **5 ns vs ~4 µs (800× speedup on that
+call site)**.
+
+**measured potential:** 1.27 M `formSlot` calls in the bootstrap.
+many go through `stringWalk` → `lookupSymByName`. extrapolating:
+if 200K of those 1.27M paid the linear-scan tax at 4 µs each, that's
+**800 ms = 2 % of wall time**. small in *percent*, large in
+absolute, and **trivial to fix**.
+
+paired with this: **eliminate `lookupSymByName` from the codebase**.
+the helper exists "to avoid the implicit intern that `syms.intern`
+would do" (per its docstring) — but at the cost of a 653× linear
+scan. swap to caching the SymId at boot.
+
+**risk:** zero. cached SymIds are already a pattern in the codebase
+(`body_sym`, `params_sym`, etc.). symbol identity is stable
+across the World's lifetime (L11).
+
+**effort:** 0.5-1 day. mostly mechanical — find every
+`lookupSymByName` + `intern("static")` call, add a cached field,
+swap.
+
+**ordering:** ship FIRST in tier 2. zero-risk, expected to recover
+2-5 % of wall time outright, and clears the way for the more
+invasive fixes below.
+
+### 5.8 hot-native rewrite: stringWalk, Cons traversal, intern (R1)
+
+**mechanism:** with cached SymIds in hand (§5.7), audit the
+remaining body cost of the top-3 hot natives:
+
+1. **`String:at:`** — currently O(N) walks the :bytes cons-chain
+   per call. parser uses this to read chars; for a 1000-char file
+   that's 500K cons-cell hops to read every position. **fix:** for
+   String-Forms specifically, materialize the chars as a `[]u32`
+   slice cached in a meta slot on first :at: call. subsequent calls
+   are O(1) indexed lookup. **but** that violates L1 ("everything
+   is a Form") — Strings are Forms-of-conses by canonical V0
+   shape. mitigation: cache lazily in `world.string_cache`
+   (a FormId → []u32 map); invalidate on `:setCharAt:` /
+   `:append:` etc. (these aren't on the hot path; cache hit rate
+   is near-100% for read-only parser input).
+2. **`Cons:car` / `Cons:cdr`** — slot lookups. fast (~5 ns) but
+   1.27 M of them. if Cons becomes a **flat struct** (parallel to
+   §5.5 Closure flat repr), `car` and `cdr` become direct field
+   reads; **~10× speedup** (5 ns → 0.5 ns). reflection still works
+   via a synthetic-slot reader.
+3. **`(intern str)`** — walks String :bytes into UTF-8 buffer +
+   `syms.intern`. fix: **a String→SymId cache** on World. once a
+   String identifier has been interned, the FormId → SymId mapping
+   is stable (L11). cache hit rate near-100% for repeated parses
+   of the same identifier text. cuts `(intern "foo")` from O(n) +
+   memcmp + alloc to O(1) FormId lookup.
+
+**measured potential:** the 22,029 ns/send average is the
+weighted-mean cost across a workload where (1.25M / 1.79M = 70 %)
+are native dispatches. each native body averages ~22-30 µs of
+in-body work (excluding dispatch). cutting that to ~3 µs via
+the cache wins **~7×** on the native-dispatch slice = **5×
+overall**.
+
+**risk:** medium. caches need invalidation discipline; misses on
+"setCharAt:" / "append:" mutations need to evict. moof-side
+reflection (`[s :bytes]`) must continue to work — easy if cache
+is hidden behind a substrate-internal field, not a Form slot.
+
+**effort:** 2-3 days, plus a regression-test pass against the
+String/Cons stdlib tests.
+
+### 5.9 cons-pool + AST-Form sharing (R2)
+
+**mechanism:** the bootstrap allocates 746K Forms in 40 s, almost
+none of which the GC can sweep (parser/compiler AST is live). of
+those, ~389K are env-Forms (already targeted by §4.5's env-Form
+pool, but that pool only helps short-lived ones — env-Forms
+captured by closures escape and stay live).
+
+the **remaining 357K** are predominantly cons cells (parser builds
+list-of-lists AST) and Form-Forms (intermediate compiler IR).
+neither can be addressed by pooling — they're net retained.
+
+two complementary mitigations:
+
+1. **cons-pool with eager init:** pre-allocate cons cells in batches
+   of 4096 at boot. on heap-grow, fewer ArrayList reallocs (each
+   realloc bursts cache cost across the whole heap). doesn't
+   reduce *count*, but reduces *cache-miss frequency* on alloc.
+2. **compiler IR sharing via interning:** common AST shapes
+   (e.g. `(+ x y)` for various x, y) generate identical-shape
+   sub-trees. a content-addressed cache for cons-cells (keyed
+   by (car-FormId, cdr-FormId)) deduplicates. **but** L1
+   (everything is a Form) requires distinct FormIds for
+   user-visible identity; this only applies to compiler-internal
+   shapes. mitigation: gate behind a substrate `dedupe-cons`
+   flag.
+
+**measured potential:** alloc cost itself is ~35 ms in the 40 s
+workload (per §3.5.2 R2 calc). pre-allocation buys most of that
+back. cache pressure from 150 MB transient heap is the bigger
+deal; harder to measure pre-fix, target post-fix is a 30 % drop in
+peak L2 misses (proxy: `perf stat -e LLC-load-misses` before /
+after).
+
+**risk:** medium. dedup-cons changes the heap's L11 invariant for
+deduplicated cells — careful audit needed. without dedup,
+pre-allocation alone is low-risk.
+
+**effort:** 2 days for pre-alloc; 4-5 days for dedup-cons w/ tests.
+
+### 5.10 sym-intern cache for parser hot path (R3)
+
+**mechanism:** 267K intern calls for 653 unique syms = 410×
+redundancy. the parser parses every identifier (e.g. `'foo`) via
+`(intern (string-of-chars …))` — a String → SymId call that
+hashes the String's bytes and looks it up in `syms.index`.
+
+simpler fix: **memoize at the parser level** via a substrate-
+exposed `[$reader internCached:]` cap, backed by a `World`-side
+`FormId(string) → SymId` map. once the parser has interned `'foo`
+once, future `(intern foo-str)` calls hit the map in ~3 ns vs
+~150 ns.
+
+**measured potential:** 267K × ~150 ns = ~40 ms saved. small in
+absolute terms. cumulative with §5.8's hot-natives fix.
+
+**risk:** zero. the cache is one-way (string FormId is immutable
+post-parse); evictions are unnecessary.
+
+**effort:** 0.5 day.
+
+### 5.11 IC for tail-sends (R4)
+
+**mechanism:** tail-sends (`TailSend`, `TailSendSelf`, `TailSendHere`)
+currently have **no IC**. per V4 spec §6.2, the operand layout
+doesn't include `ic_idx`. the profile measured 322K tail-sends in
+the bootstrap, each a full `lookupHandler` walk.
+
+extend the V4 byte encoding: tail-send variants gain a 2-byte
+`ic_idx` operand, mirroring the regular Send forms. the IC slot
+type is unchanged; the dispatch path is the same as regular Send
+minus the frame-push (frame-replace stays).
+
+**measured potential:** if tail-send hit rates parallel
+regular Send (81 %), 322K × 0.81 × ~120 ns saved (slow→fast) ≈
+31 ms. cumulative.
+
+**risk:** medium — wire-format change. need a V4 spec amendment +
+ocaml-seed compiler update + image-format migration. but
+backward-compatible: chunks compiled before the change have no
+ic_idx; substrate falls back to the no-IC path.
+
+**effort:** 2-3 days including ocaml-seed sync.
+
 ### 5.6 expected tier-2 cumulative
 
 stacking tier-2 on top of tier-1: maybe 3-5× more. lands us at
 ~30-50 M sends/sec on micro-benches; ~5-10 M sustained on real
 workloads. **BEAM-interpreted parity**.
+
+**revised tier-2 cumulative incorporating §5.7-§5.11:**
+
+| item                            | gain (real workload) | risk    |
+|---------------------------------|----------------------|---------|
+| §5.7 cached SymIds              | 2-5 %                | low     |
+| §5.8 hot-natives + caches       | **5×**               | medium  |
+| §5.9 cons-pool + IR sharing     | 1.3×                 | medium  |
+| §5.10 sym-intern cache          | 0.1 %                | low     |
+| §5.11 tail-send IC              | 1.1×                 | medium  |
+| §5.1 4-way PIC                  | 1.3×                 | low-med |
+| §5.2 inline Int+Int             | 1.5×                 | medium  |
+| §5.3 threaded dispatch          | 2×                   | medium  |
+| §5.4 flat env                   | 1.5×                 | high    |
+| §5.5 flat closure               | 1.2×                 | low     |
+
+**stacked (not multiplicative — overlapping fixes):** ~10-15×
+on real workloads from current baseline. real `[1 is nil]` at
+**~150-300 ms** (E1 target ≤ 100 ms reachable, requires
+§5.7/§5.8 first).
 
 ## 6. tier 3 design (months → year, BEAMJIT-rivaling)
 
@@ -990,14 +1443,24 @@ tier 1.5 (week 2-3; if needed):
     4.5 env-form pool
     ──── only if stress-recursion still slow
 
-tier 2A (month 1):
-    5.1 PICs                — depends on 4.6 telemetry
-    5.2 inline arithmetic   — depends on 4.6 + L3 generation gate
-    5.5 closure flat repr   — independent
+tier 2-pre (week 3; ≤ 2 days, REVISED 2026-05-16 per §3.5):
+    5.7 cached SymIds in World        — kills R3 + parts of R1
+    5.10 sym-intern cache             — small but trivial
+    ──── unblocks R1/R3; expected 2-5 % wall-time recovery; near-zero risk
 
-tier 2B (month 2-3):
-    5.3 tail-call threaded dispatch  — depends on 5.1 / 5.2 stable
-    5.4 flat env (compiler change)   — separate compiler track
+tier 2A (month 1, REVISED — R1 first):
+    5.8 hot-natives + caches          — biggest single win (~5×)
+    5.1 PICs                          — depends on 4.6 telemetry
+    5.5 closure flat repr             — independent
+
+tier 2B (month 2):
+    5.2 inline arithmetic             — depends on L3 generation gate
+    5.9 cons-pool + IR sharing        — independent; alloc churn fix
+    5.11 tail-send IC (V4 amendment)  — wire-format change
+
+tier 2C (month 3):
+    5.3 tail-call threaded dispatch   — depends on 5.1 / 5.2 stable
+    5.4 flat env (compiler change)    — separate compiler track
 
 tier 3 (quarter 2+):
     profile → choose between 6.1/6.2/6.3
@@ -1007,6 +1470,17 @@ tier 3 (quarter 2+):
 each tier-1 step is independently shippable. each tier-2 step
 depends on tier 1 to have shaken out hot-path bugs (PICs on top of
 unstable monomorphic ICs would mask each other's regressions).
+
+**revised ordering rationale (post §3.5 measurement):** the original
+sequencing put PICs / inline arith / threaded dispatch first because
+the assumption was "the dispatch loop is the bottleneck." the
+real-workload profile (§3.5) showed the dispatch loop is fast and
+**the natives themselves are the bottleneck**. tier 2-pre + 2A now
+ship the §5.7 / §5.8 work first — they're cheaper and bigger wins.
+the dispatch-floor work (PICs / inline arith / threaded dispatch)
+stays on the roadmap but **after** the natives audit; otherwise the
+PIC improvements get drowned out by the native body cost they don't
+address.
 
 ## 9. risks + open questions
 
@@ -1103,7 +1577,10 @@ once tier 1+2+3 are landed, the next steps are research-grade:
   prepareInvoke).
 - `crates/zig-substrate/src/main.zig` — benchmark entry points
   (`bench-loop`, `bench-natives`, `bench-parser-like`,
-  `bench-polymorphic`, `bench-deep-env`, `stress-recursion`).
+  `bench-polymorphic`, `bench-deep-env`, `stress-recursion`,
+  `profile-run` for real-workload diagnosis per §3.5).
+- `crates/zig-substrate/src/sym.zig` — SymTable; `intern` counter
+  wired here per §3.5 instrumentation.
 - `NEXT_SESSION.md` — state at HEAD `4b21407`.
 - `laws/substrate-laws.md` L3, L10, L11.
 - `laws/determinism-laws.md` D5.
