@@ -262,11 +262,19 @@ let op_index_at (b : chunk_builder) (bytepos : int) : int =
 
 (** patch a previously-emitted jump to land at the current next_pc.
     `jump_bytepos` is the value returned by `emit` when the jump was
-    emitted. *)
+    emitted.
+
+    V4 spec §3.4: jump offsets are measured from the byte AFTER the
+    jump's operand bytes (i.e. from `jump_bytepos + 3`, since
+    Jump/JumpIfFalse/JumpIfTrue are 3 bytes). To land at
+    `target_bytepos`, encode `off = target - jump_bytepos - 3` so that
+    runtime's `pc += offset` (with pc already at jump_bytepos + 3)
+    arrives at target. matches crates/substrate/src/v4_export.rs's
+    compute_byte_offset. *)
 let patch_jump_to_here (b : chunk_builder) (jump_bytepos : int) : unit =
   let idx = op_index_at b jump_bytepos in
   let target_bytepos = b.next_pc in
-  let off = target_bytepos - jump_bytepos in
+  let off = target_bytepos - jump_bytepos - 3 in
   if off < -32768 || off > 32767 then
     err (Printf.sprintf "jump offset out of i16 range: %d" off);
   let new_op =
