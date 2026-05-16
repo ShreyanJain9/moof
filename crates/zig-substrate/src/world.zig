@@ -747,7 +747,11 @@ pub const World = struct {
         var f = Form.withProto(.{ .form = self.protos.closure });
         try f.slots.put(self.allocator, self.body_sym, .{ .form = chunk });
         try f.slots.put(self.allocator, self.env_sym, .{ .form = env });
-        try f.slots.put(self.allocator, self.self_sym, captured_self);
+        // canonical slot name is `:captured-self` (matches rust
+        // substrate and intrinsics Method:call). previous bug: this
+        // wrote to `:self`, so Method:call dispatched with nil receiver.
+        const captured_self_sym = try self.syms.intern("captured-self");
+        try f.slots.put(self.allocator, captured_self_sym, captured_self);
 
         // V4: also bind :params slot so prepareInvoke knows the arity.
         // the side-table stores SymIds; we build a Value-list.
@@ -870,18 +874,24 @@ pub const World = struct {
         return acc;
     }
 
-    /// stub: build a String-Form from `text`. for V4 phase α the
-    /// minimum-viable substrate just allocates a Form with proto=String
-    /// and a single `:bytes` slot holding the text (encoded as a
-    /// list-of-chars — yes, inefficient). real String storage is a
-    /// later wave.
+    /// build a String-Form from `text`. minimum-viable: allocates a
+    /// Form with proto=String and a single `:bytes` slot holding the
+    /// text as a cons-chain of Char codepoints. matches the
+    /// ocaml-seed lift convention (see build_seed_cmd.ml's
+    /// build_form_for) and what the moof parser expects on `:bytes`.
     pub fn makeString(self: *World, text: []const u8) !Value {
-        _ = text;
-        // for now we just hand back nil — toString tests don't run
-        // in the minimum-viable smoke. flagged TODO.
+        const bytes_sym = try self.syms.intern("bytes");
+        // decode utf-8 into Value.char per codepoint.
+        var chars: std.ArrayList(Value) = .empty;
+        defer chars.deinit(self.allocator);
+        var it = std.unicode.Utf8Iterator{ .bytes = text, .i = 0 };
+        while (it.nextCodepoint()) |cp| {
+            try chars.append(self.allocator, .{ .char = @intCast(cp) });
+        }
+        const chain = try self.makeList(chars.items);
         var f = Form.withProto(.{ .form = self.protos.string });
+        try f.slots.put(self.allocator, bytes_sym, chain);
         const id = try self.heap.alloc(f);
-        _ = &f;
         return .{ .form = id };
     }
 

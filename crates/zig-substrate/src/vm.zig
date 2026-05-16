@@ -620,7 +620,21 @@ fn prepareDispatchDnu(
     const dnu = world.dnu_sym;
     if (selector == dnu) {
         // we got here from a previous dnu fall-through — there's
-        // no handler to escalate to.
+        // no handler to escalate to. surface the missing selector to
+        // stderr so callers can pinpoint which native is missing.
+        const proto_v = world.protoOf(receiver);
+        const proto_name: []const u8 = blk: {
+            if (proto_v.asFormId()) |pid| {
+                const meta = world.formMeta(pid, world.symName);
+                if (meta.asSym()) |s| break :blk world.syms.resolve(s);
+            }
+            break :blk "<?>";
+        };
+        if (call_args.len > 0) {
+            if (call_args[0].asSym()) |orig_sel| {
+                std.debug.print("UnhandledDnu: [{s} {s}]\n", .{ proto_name, world.syms.resolve(orig_sel) });
+            }
+        }
         return error.UnhandledDnu;
     }
     // makeList allocates Forms but doesn't touch the operand stack;
