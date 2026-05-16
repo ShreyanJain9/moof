@@ -755,6 +755,13 @@ let zig_registry_keys : string list = [
   "Global:cons";
   "Global:list";
   "Global:raise:";
+  "Global:slot";
+  "Global:slotSet!";
+  "Global:metaSet!";
+  "Global:globalEnv";
+  "Global:getOrCreateProto";
+  "Global:append";
+  "Global:macroexpand";
   (* String primitives — parser uses these heavily. *)
   "String:length";
   "String:at:";
@@ -767,6 +774,14 @@ let zig_registry_keys : string list = [
   "Char:toString";
   (* Integer:asChar — coerce Int → Char. *)
   "Integer:asChar";
+  (* Chunk class- + instance-side methods — moof Compiler primitives. *)
+  "Chunk:new:source:";
+  "Chunk:emit:";
+  "Chunk:addConst:";
+  "Chunk:addIc";
+  "Chunk:jumpTarget";
+  "Chunk:patchJump:to:";
+  "Chunk:asClosure";
 ]
 
 (* Split "ProtoName:rest" into (proto, selector). Selector keeps any

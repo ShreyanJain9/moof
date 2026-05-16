@@ -234,6 +234,17 @@ pub const World = struct {
     /// staleness (law L10). missing key implies generation 0.
     proto_generation: std.AutoArrayHashMapUnmanaged(FormId, u32),
 
+    /// tagged-immediate → singleton FormId. lazy: populated only
+    /// when user code asks for a per-instance handler (e.g.
+    /// `[#true ifTrue:ifFalse: t f]`). mirrors rust's
+    /// `World::tagged_storage`. needed because moof code does
+    /// `(setHandler! #true 'ifTrue:ifFalse: …)` etc., where the
+    /// receiver isn't a Form. resolution path:
+    ///   - `effectiveFormId(v)` returns the cached singleton (if any)
+    ///     and falls back to `v.asFormId()`.
+    ///   - `ensureWritableFormId(v)` allocates on demand.
+    tagged_storage: std.AutoArrayHashMapUnmanaged(u64, FormId),
+
     /// V3 — the "here" Form for this vat. exposed as `$here` in
     /// moof code (self-referential binding in here_form.slots).
     /// LoadHere / SendHere / TailSendHere refer to this FormId
@@ -351,6 +362,7 @@ pub const World = struct {
             .native_fns = .empty,
             .far_ref_table = .empty,
             .proto_generation = .empty,
+            .tagged_storage = .empty,
             .here_form = here_form,
             .macros_form = macros_form,
             .vm = Vm.init(),
@@ -441,6 +453,7 @@ pub const World = struct {
             .native_fns = .empty,
             .far_ref_table = .empty,
             .proto_generation = .empty,
+            .tagged_storage = .empty,
             .here_form = FormId.NONE,
             .macros_form = FormId.NONE,
             .vm = Vm.init(),
@@ -494,6 +507,7 @@ pub const World = struct {
         self.native_fns.deinit(self.allocator);
         self.far_ref_table.deinit(self.allocator);
         self.proto_generation.deinit(self.allocator);
+        self.tagged_storage.deinit(self.allocator);
         self.vm.deinit(self.allocator);
         self.syms.deinit();
         self.heap.deinit();
@@ -612,16 +626,50 @@ pub const World = struct {
         };
     }
 
-    /// the effective FormId for any Value, where defined. tagged
-    /// immediates currently have no per-instance singleton FormId
-    /// (returned as null); future singletons (#true / #false) will
-    /// fill this in.
+    /// pack a Value into a 64-bit key for `tagged_storage`. distinct
+    /// tagged immediates hash to distinct keys; Forms aren't keyed
+    /// here (their FormId is the canonical identity).
+    fn valueKey(v: Value) u64 {
+        return switch (v) {
+            .nil => 0,
+            .bool_ => |b| if (b) 1 else 2,
+            .int => |n| (@as(u64, 3) << 56) | (@as(u64, @bitCast(n)) & 0x00ff_ffff_ffff_ffff),
+            .sym => |s| (@as(u64, 4) << 56) | @as(u64, s),
+            .char => |c| (@as(u64, 5) << 56) | @as(u64, c),
+            .float => |f| (@as(u64, 6) << 56) | (@as(u64, @bitCast(f)) >> 8),
+            .form => |id| (@as(u64, 7) << 56) | @as(u64, @as(u32, @bitCast(id))),
+        };
+    }
+
+    /// the effective FormId for any Value, where defined. for Forms
+    /// returns the FormId; for tagged immediates with a cached
+    /// singleton-Form (allocated via `ensureWritableFormId`),
+    /// returns that singleton's id; otherwise `null`.
     pub fn effectiveFormId(self: *const World, v: Value) ?FormId {
-        _ = self;
         return switch (v) {
             .form => |id| id,
-            else => null,
+            else => self.tagged_storage.get(valueKey(v)),
         };
+    }
+
+    /// ensure `v` has a writable Form identity. for Forms returns
+    /// the FormId. for tagged immediates allocates a singleton-Form
+    /// on first call (proto = the value's natural proto, e.g.
+    /// `Bool` for `#true`) and caches it in `tagged_storage`. used
+    /// by `setHandler!` / `slotSet!` / `metaSet!` so user code
+    /// can pin per-instance handlers on `#true` etc.
+    pub fn ensureWritableFormId(self: *World, v: Value) !FormId {
+        if (v.asFormId()) |id| return id;
+        const key = valueKey(v);
+        if (self.tagged_storage.get(key)) |id| return id;
+        // allocate a fresh singleton-Form whose proto is v's natural proto.
+        const proto_v = self.protoOf(v);
+        var f = Form.withProto(proto_v);
+        const singleton_meta = try self.syms.intern("singleton-of");
+        try f.meta.put(self.allocator, singleton_meta, v);
+        const id = try self.heap.alloc(f);
+        try self.tagged_storage.put(self.allocator, key, id);
+        return id;
     }
 
     /// read `slot_name` on `id`, walking only the Form's own slots

@@ -34,7 +34,11 @@ const Form = form.Form;
 const world_mod = @import("world.zig");
 const World = world_mod.World;
 const NativeFn = world_mod.NativeFn;
+const ICache = world_mod.ICache;
 const image_mod = @import("image.zig");
+const opcodes_mod = @import("opcodes.zig");
+const Op = opcodes_mod.Op;
+const bytecode_mod = @import("bytecode.zig");
 
 // ─────────────────────────────────────────────────────────────────
 // install — top-level entry. idempotent: safe to call once at world
@@ -1458,9 +1462,16 @@ fn transporterLoadAll(world: *World, self_: Value, args: []const Value) anyerror
 // port of crates/substrate/src/intrinsics.rs::install_globals `setHandler!`.
 // (setHandler! Proto 'sel fn) — install `fn` as handler for `sel` on
 // `Proto`. bumps proto's generation so existing ICs invalidate (L10).
+//
+// receivers that are tagged immediates (e.g. `#true`, `#false`,
+// `nil`, an Integer) route through `ensureWritableFormId` which
+// lazily allocates a per-instance singleton-Form whose proto is the
+// value's natural proto. matches rust's target_form_id flow —
+// `(setHandler! #true 'ifTrue:ifFalse: …)` writes onto the #true
+// singleton, not the Bool proto.
 fn globalSetHandler(world: *World, _: Value, args: []const Value) anyerror!Value {
     if (args.len != 3) return raise(world, "arity", "(setHandler! Proto 'sel fn)");
-    const proto_id = args[0].asFormId() orelse return typeError(world, "setHandler!: receiver must be a Form");
+    const proto_id = try world.ensureWritableFormId(args[0]);
     const sel = args[1].asSym() orelse return typeError(world, "setHandler!: selector must be a Symbol");
     const proto_form = world.heap.getMut(proto_id);
     try proto_form.handlers.put(world.allocator, sel, args[2]);
@@ -1762,6 +1773,98 @@ fn globalList(world: *World, _: Value, args: []const Value) anyerror!Value {
     return world.makeList(args);
 }
 
+// `(slot v 'name)` — direct slot access (no proto-walk).
+fn globalSlot(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 2) return raise(world, "arity", "(slot v 'name)");
+    const name = args[1].asSym() orelse return typeError(world, "slot: name must be a Symbol");
+    const id = args[0].asFormId() orelse return .nil;
+    return world.formSlot(id, name);
+}
+
+// `(slotSet! v 'name value)` — write a slot. tagged-immediate receivers
+// allocate a singleton-Form via ensureWritableFormId (same flow as
+// setHandler!).
+fn globalSlotSet(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 3) return raise(world, "arity", "(slotSet! v 'name value)");
+    const id = try world.ensureWritableFormId(args[0]);
+    const name = args[1].asSym() orelse return typeError(world, "slotSet!: name must be a Symbol");
+    try world.formSlotSet(id, name, args[2]);
+    return args[2];
+}
+
+// `(metaSet! v 'name value)` — write a meta slot.
+fn globalMetaSet(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 3) return raise(world, "arity", "(metaSet! v 'name value)");
+    const id = try world.ensureWritableFormId(args[0]);
+    const name = args[1].asSym() orelse return typeError(world, "metaSet!: name must be a Symbol");
+    const fm = world.heap.getMut(id);
+    try fm.meta.put(world.allocator, name, args[2]);
+    return args[2];
+}
+
+// `(globalEnv)` — return the canonical $here Form.
+fn globalGlobalEnv(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 0) return raise(world, "arity", "(globalEnv) takes no args");
+    return .{ .form = world.here_form };
+}
+
+// `(getOrCreateProto 'Name Parent)` — defproto reopen helper.
+// returns the existing Form if `Name` is already bound to one;
+// otherwise alloc fresh with proto = Parent, bind, return.
+fn globalGetOrCreateProto(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 2) return raise(world, "arity", "(getOrCreateProto 'Name Parent)");
+    const name_sym = args[0].asSym() orelse return typeError(world, "getOrCreateProto: name must be a Symbol");
+    if (world.envLookup(world.here_form, name_sym)) |existing| {
+        if (existing == .form) return existing;
+    }
+    var f = Form.withProto(args[1]);
+    const name_meta = try world.syms.intern("name");
+    try f.meta.put(world.allocator, name_meta, .{ .sym = name_sym });
+    const id = try world.heap.alloc(f);
+    try world.envBind(world.here_form, name_sym, .{ .form = id });
+    return .{ .form = id };
+}
+
+// `(append xs ys …)` — concatenate cons-lists left-to-right.
+fn globalAppend(world: *World, _: Value, args: []const Value) anyerror!Value {
+    var out: std.ArrayList(Value) = .empty;
+    defer out.deinit(world.allocator);
+    for (args) |arg| {
+        var cur = arg;
+        while (cur == .form) {
+            const fid = cur.asFormId().?;
+            const f = world.heap.get(fid);
+            // accept any cons-shaped form (has :car slot).
+            if (!f.slotPresent(world.symCar)) break;
+            const head = f.slot(world.symCar);
+            const tail = f.slot(world.symCdr);
+            try out.append(world.allocator, head);
+            cur = tail;
+        }
+    }
+    return world.makeList(out.items);
+}
+
+// `(macroexpand '(foo a b …))` — expand the macro registered as `foo`.
+// raises if `foo` isn't a registered macro.
+fn globalMacroexpand(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 1) return raise(world, "arity", "(macroexpand 'form)");
+    const fid = args[0].asFormId() orelse return raise(world, "macroexpand", "form must be a cons-list");
+    const f = world.heap.get(fid);
+    if (!f.slotPresent(world.symCar)) return raise(world, "macroexpand", "empty form");
+    const head = f.slot(world.symCar);
+    const head_sym = head.asSym() orelse return raise(world, "macroexpand", "form head is not a Symbol");
+    // look up the macro on world.macros_form's slots.
+    const macro_v = world.formSlot(world.macros_form, head_sym);
+    if (macro_v == .nil) return raise(world, "macroexpand", "not a macro");
+    const mid = macro_v.asFormId() orelse return raise(world, "macroexpand", "macro entry is not a Form");
+    // macro is invoked with one arg = the args-list (the form's cdr).
+    const args_list = f.slot(world.symCdr);
+    // dispatch via Method:call so captured-self / env are honored.
+    const call_sym = try world.syms.intern("call");
+    return world.send(.{ .form = mid }, call_sym, &.{args_list});
+}
+
 // `(raise: kind message)` — raise a moof-level error.
 fn globalRaise(world: *World, _: Value, args: []const Value) anyerror!Value {
     if (args.len != 2) return raise(world, "arity", "(raise: kind message)");
@@ -1808,6 +1911,263 @@ fn globalIntern(world: *World, _: Value, args: []const Value) anyerror!Value {
     }
     const sid = try world.syms.intern(buf.items);
     return .{ .sym = sid };
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Chunk class- and instance-side methods — port of
+// crates/substrate/src/intrinsics.rs::install_compiler_primitives'
+// chunk subset.
+//
+// the moof Compiler (lib/compiler/*.moof) builds chunks by sending:
+//   [Chunk new: params source: src]
+//   [chunk emit: opcode-form]
+//   [chunk addConst: v]
+//   [chunk addIc]
+//   [chunk jumpTarget]
+//   [chunk patchJump: pos to: tgt]
+//   [chunk asClosure]
+//
+// rust stores per-chunk `chunk_ops` (Vec<Op>) and finalizes to bytes
+// only on serialization. zig has only `chunk_bytecode` (encoded
+// bytes). we eagerly encode each emit:'d op into the bytecode
+// buffer; patchJump:to: rewrites the i16 offset bytes in place at
+// the recorded position (jumpTarget / emit return *byte positions*,
+// not op-list indices, so the encoded layout is the authoritative
+// addressing model).
+//
+// the moof Compiler's patchJump:to: signature passes `pos` (returned
+// by the earlier emit Jump 0) and `tgt` (returned by jumpTarget at
+// the patching point), then expects the substrate to compute the
+// V4-spec offset `tgt - pos - 3`. mirrors rust's patchJump:to: post
+// the byte-offset refactor in ocaml-seed.
+// ─────────────────────────────────────────────────────────────────
+
+/// decode an opcode-Form (slots `:op` Sym + `:operands` cons-list)
+/// into an Op. mirrors crates/substrate/src/intrinsics.rs::decode_op_form.
+fn decodeOpForm(world: *World, v: Value) anyerror!Op {
+    const id = v.asFormId() orelse return typeError(world, "chunk-emit: opcode must be a Form");
+    const op_sym = try world.syms.intern("op");
+    const operands_sym = try world.syms.intern("operands");
+    const name_v = world.formSlot(id, op_sym);
+    const name_sid = name_v.asSym() orelse return raise(world, "compile-error", "opcode :op must be a Symbol");
+    const name = world.syms.resolve(name_sid);
+    // operands as a cons-chain; walk into a slice for indexed access.
+    const operands_v = world.formSlot(id, operands_sym);
+    var operands: []Value = &.{};
+    if (operands_v != .nil) {
+        operands = try world.listToSlice(operands_v);
+    }
+    defer if (operands.len > 0) world.freeSlice(operands);
+
+    // Each operand-typed helper, inline.
+    if (std.mem.eql(u8, name, "PushNil")) return Op.push_nil;
+    if (std.mem.eql(u8, name, "PushTrue")) return Op.push_true;
+    if (std.mem.eql(u8, name, "PushFalse")) return Op.push_false;
+    if (std.mem.eql(u8, name, "Pop")) return Op.pop;
+    if (std.mem.eql(u8, name, "Dup")) return Op.dup;
+    if (std.mem.eql(u8, name, "LoadSelf")) return Op.load_self;
+    if (std.mem.eql(u8, name, "Return")) return Op.return_op;
+
+    if (std.mem.eql(u8, name, "LoadConst")) {
+        if (operands.len < 1) return raise(world, "compile-error", "LoadConst needs 1 operand");
+        const idx_i = operands[0].asInt() orelse return raise(world, "compile-error", "LoadConst operand must be Integer");
+        if (idx_i < 0 or idx_i > std.math.maxInt(u16)) return raise(world, "range-error", "LoadConst idx out of u16 range");
+        return Op{ .load_const = .{ .idx = @intCast(idx_i) } };
+    }
+    if (std.mem.eql(u8, name, "LoadName")) {
+        if (operands.len < 1) return raise(world, "compile-error", "LoadName needs 1 operand");
+        const sym = operands[0].asSym() orelse return raise(world, "compile-error", "LoadName operand must be Symbol");
+        return Op{ .load_name = .{ .name = sym } };
+    }
+    if (std.mem.eql(u8, name, "PushClosure")) {
+        if (operands.len < 1) return raise(world, "compile-error", "PushClosure needs 1 operand");
+        const fid = operands[0].asFormId() orelse return raise(world, "compile-error", "PushClosure operand must be Form");
+        return Op{ .push_closure = .{ .chunk = fid } };
+    }
+    if (std.mem.eql(u8, name, "Jump")) {
+        if (operands.len < 1) return raise(world, "compile-error", "Jump needs 1 operand");
+        const off_i = operands[0].asInt() orelse return raise(world, "compile-error", "Jump operand must be Integer");
+        if (off_i < std.math.minInt(i16) or off_i > std.math.maxInt(i16)) return raise(world, "range-error", "Jump offset out of i16 range");
+        return Op{ .jump = .{ .offset = @intCast(off_i) } };
+    }
+    if (std.mem.eql(u8, name, "JumpIfFalse")) {
+        if (operands.len < 1) return raise(world, "compile-error", "JumpIfFalse needs 1 operand");
+        const off_i = operands[0].asInt() orelse return raise(world, "compile-error", "JumpIfFalse operand must be Integer");
+        if (off_i < std.math.minInt(i16) or off_i > std.math.maxInt(i16)) return raise(world, "range-error", "JumpIfFalse offset out of i16 range");
+        return Op{ .jump_if_false = .{ .offset = @intCast(off_i) } };
+    }
+    if (std.mem.eql(u8, name, "Send")) {
+        if (operands.len < 3) return raise(world, "compile-error", "Send needs 3 operands");
+        const sel = operands[0].asSym() orelse return raise(world, "compile-error", "Send selector must be Symbol");
+        const argc_i = operands[1].asInt() orelse return raise(world, "compile-error", "Send argc must be Integer");
+        const ic_i = operands[2].asInt() orelse return raise(world, "compile-error", "Send ic must be Integer");
+        if (argc_i < 0 or argc_i > std.math.maxInt(u8)) return raise(world, "range-error", "Send argc out of u8 range");
+        if (ic_i < 0 or ic_i > std.math.maxInt(u16)) return raise(world, "range-error", "Send ic out of u16 range");
+        return Op{ .send = .{ .selector = sel, .argc = @intCast(argc_i), .ic_idx = @intCast(ic_i) } };
+    }
+    if (std.mem.eql(u8, name, "TailSend")) {
+        if (operands.len < 2) return raise(world, "compile-error", "TailSend needs 2 operands");
+        const sel = operands[0].asSym() orelse return raise(world, "compile-error", "TailSend selector must be Symbol");
+        const argc_i = operands[1].asInt() orelse return raise(world, "compile-error", "TailSend argc must be Integer");
+        if (argc_i < 0 or argc_i > std.math.maxInt(u8)) return raise(world, "range-error", "TailSend argc out of u8 range");
+        return Op{ .tail_send = .{ .selector = sel, .argc = @intCast(argc_i) } };
+    }
+    if (std.mem.eql(u8, name, "SuperSend")) {
+        if (operands.len < 3) return raise(world, "compile-error", "SuperSend needs 3 operands");
+        const sel = operands[0].asSym() orelse return raise(world, "compile-error", "SuperSend selector must be Symbol");
+        const argc_i = operands[1].asInt() orelse return raise(world, "compile-error", "SuperSend argc must be Integer");
+        const ic_i = operands[2].asInt() orelse return raise(world, "compile-error", "SuperSend ic must be Integer");
+        if (argc_i < 0 or argc_i > std.math.maxInt(u8)) return raise(world, "range-error", "SuperSend argc out of u8 range");
+        if (ic_i < 0 or ic_i > std.math.maxInt(u16)) return raise(world, "range-error", "SuperSend ic out of u16 range");
+        return Op{ .super_send = .{ .selector = sel, .argc = @intCast(argc_i), .ic_idx = @intCast(ic_i) } };
+    }
+    if (std.mem.eql(u8, name, "SendSelf")) {
+        if (operands.len < 3) return raise(world, "compile-error", "SendSelf needs 3 operands");
+        const sel = operands[0].asSym() orelse return raise(world, "compile-error", "SendSelf selector must be Symbol");
+        const argc_i = operands[1].asInt() orelse return raise(world, "compile-error", "SendSelf argc must be Integer");
+        const ic_i = operands[2].asInt() orelse return raise(world, "compile-error", "SendSelf ic must be Integer");
+        if (argc_i < 0 or argc_i > std.math.maxInt(u8)) return raise(world, "range-error", "SendSelf argc out of u8 range");
+        if (ic_i < 0 or ic_i > std.math.maxInt(u16)) return raise(world, "range-error", "SendSelf ic out of u16 range");
+        return Op{ .send_self = .{ .selector = sel, .argc = @intCast(argc_i), .ic_idx = @intCast(ic_i) } };
+    }
+    return raise(world, "compile-error", "decodeOpForm: unknown op name");
+}
+
+/// resolve a Chunk receiver — `chunk` or a Closure pointing at a chunk.
+fn chunkIdSelf(world: *World, self_: Value) anyerror!FormId {
+    const id = self_.asFormId() orelse return typeError(world, "chunk method: receiver must be a Form");
+    if (world.chunk_bytecode.contains(id)) return id;
+    const body_v = world.formSlot(id, world.body_sym);
+    if (body_v.asFormId()) |bid| {
+        if (world.chunk_bytecode.contains(bid)) return bid;
+    }
+    return typeError(world, "chunk method: receiver is not a chunk");
+}
+
+// [Chunk new: params source: source]
+fn chunkNewSource(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 2) return raise(world, "arity", "[Chunk new: ps source: src] takes 2 args");
+    const params_v = args[0];
+    const source_v = args[1];
+    // validate + collect param sym ids.
+    const params_slice = try world.listToSlice(params_v);
+    defer world.freeSlice(params_slice);
+    var param_syms = try world.allocator.alloc(u32, params_slice.len);
+    errdefer world.allocator.free(param_syms);
+    for (params_slice, 0..) |p, i| {
+        const ps = p.asSym() orelse return typeError(world, "Chunk new:source:: each param must be a Symbol");
+        param_syms[i] = ps;
+    }
+    // allocate the chunk-Form with :params + :source meta.
+    const source_sym = try world.syms.intern("source");
+    var chunk_form = Form.withProto(.{ .form = world.protos.chunk });
+    try chunk_form.slots.put(world.allocator, world.params_sym, params_v);
+    try chunk_form.meta.put(world.allocator, source_sym, source_v);
+    const chunk_id = try world.heap.alloc(chunk_form);
+    // register side tables.
+    const empty_bytes = try world.allocator.alloc(u8, 0);
+    try world.chunk_bytecode.put(world.allocator, chunk_id, empty_bytes);
+    const empty_consts = try world.allocator.alloc(Value, 0);
+    try world.chunk_consts.put(world.allocator, chunk_id, empty_consts);
+    const empty_ics = try world.allocator.alloc(ICache, 0);
+    try world.chunk_ics.put(world.allocator, chunk_id, empty_ics);
+    try world.chunk_params.put(world.allocator, chunk_id, param_syms);
+    return .{ .form = chunk_id };
+}
+
+// [chunk emit: op-form] — encode op + append to bytecode; return byte position.
+fn chunkEmit(world: *World, self_: Value, args: []const Value) anyerror!Value {
+    if (args.len != 1) return raise(world, "arity", "[chunk emit: op] takes 1 arg");
+    const chunk_id = try chunkIdSelf(world, self_);
+    const op = try decodeOpForm(world, args[0]);
+    // load existing bytecode into an ArrayList, append, store back.
+    const existing = world.chunk_bytecode.get(chunk_id).?;
+    var buf: std.ArrayList(u8) = .empty;
+    try buf.appendSlice(world.allocator, existing);
+    const pos = buf.items.len;
+    try bytecode_mod.encodeOp(op, &buf, world.allocator);
+    world.allocator.free(existing);
+    const owned = try buf.toOwnedSlice(world.allocator);
+    try world.chunk_bytecode.put(world.allocator, chunk_id, owned);
+    return .{ .int = @intCast(pos) };
+}
+
+// [chunk addConst: v] — append to consts pool; return idx.
+fn chunkAddConst(world: *World, self_: Value, args: []const Value) anyerror!Value {
+    if (args.len != 1) return raise(world, "arity", "[chunk addConst: v] takes 1 arg");
+    const chunk_id = try chunkIdSelf(world, self_);
+    const existing = world.chunk_consts.get(chunk_id).?;
+    if (existing.len >= std.math.maxInt(u16)) return raise(world, "range-error", "addConst:: pool exceeds 65535");
+    const new = try world.allocator.alloc(Value, existing.len + 1);
+    @memcpy(new[0..existing.len], existing);
+    new[existing.len] = args[0];
+    world.allocator.free(existing);
+    try world.chunk_consts.put(world.allocator, chunk_id, new);
+    return .{ .int = @intCast(existing.len) };
+}
+
+// [chunk addIc] — reserve IC slot; return idx.
+fn chunkAddIc(world: *World, self_: Value, args: []const Value) anyerror!Value {
+    if (args.len != 0) return raise(world, "arity", "[chunk addIc] takes no args");
+    const chunk_id = try chunkIdSelf(world, self_);
+    const existing = world.chunk_ics.get(chunk_id).?;
+    if (existing.len >= std.math.maxInt(u16)) return raise(world, "range-error", "addIc: pool exceeds 65535");
+    const new = try world.allocator.alloc(ICache, existing.len + 1);
+    @memcpy(new[0..existing.len], existing);
+    new[existing.len] = ICache.empty;
+    world.allocator.free(existing);
+    try world.chunk_ics.put(world.allocator, chunk_id, new);
+    return .{ .int = @intCast(existing.len) };
+}
+
+// [chunk jumpTarget] — current bytecode length (byte position of next emit).
+fn chunkJumpTarget(world: *World, self_: Value, args: []const Value) anyerror!Value {
+    if (args.len != 0) return raise(world, "arity", "[chunk jumpTarget] takes no args");
+    const chunk_id = try chunkIdSelf(world, self_);
+    const bytes = world.chunk_bytecode.get(chunk_id).?;
+    return .{ .int = @intCast(bytes.len) };
+}
+
+// [chunk patchJump: pos to: tgt] — overwrite the offset bytes at the
+// jump op located at byte `pos`. V4 spec §3.4: offset is relative to
+// the byte AFTER the 3-byte jump op, so we encode `tgt - pos - 3`.
+fn chunkPatchJump(world: *World, self_: Value, args: []const Value) anyerror!Value {
+    if (args.len != 2) return raise(world, "arity", "[chunk patchJump: pos to: tgt] takes 2 args");
+    const chunk_id = try chunkIdSelf(world, self_);
+    const pos_i = args[0].asInt() orelse return typeError(world, "patchJump:to:: pos must be Integer");
+    const tgt_i = args[1].asInt() orelse return typeError(world, "patchJump:to:: target must be Integer");
+    if (pos_i < 0) return raise(world, "range-error", "patchJump:to:: pos must be non-negative");
+    const off = tgt_i - pos_i - 3;
+    if (off < std.math.minInt(i16) or off > std.math.maxInt(i16)) return raise(world, "range-error", "patchJump:to:: offset doesn't fit i16");
+    const bytes = world.chunk_bytecode.getPtr(chunk_id).?;
+    const pos: usize = @intCast(pos_i);
+    if (pos + 3 > bytes.*.len) return raise(world, "range-error", "patchJump:to:: pos out of range");
+    // bytes at [pos] should be a Jump/JumpIfFalse/JumpIfTrue tag.
+    const tag = bytes.*[pos];
+    if (tag != 0x30 and tag != 0x31 and tag != 0x32) return raise(world, "compile-error", "patchJump:to:: op at pos is not a jump");
+    const off_i16: i16 = @intCast(off);
+    bytes.*[pos + 1] = @intCast((@as(u16, @bitCast(off_i16)) >> 8) & 0xff);
+    bytes.*[pos + 2] = @intCast(@as(u16, @bitCast(off_i16)) & 0xff);
+    return .nil;
+}
+
+// [chunk asClosure] — wrap a chunk in a closure-Form ready to call.
+fn chunkAsClosure(world: *World, self_: Value, args: []const Value) anyerror!Value {
+    if (args.len != 0) return raise(world, "arity", "[chunk asClosure] takes no args");
+    const chunk_id = try chunkIdSelf(world, self_);
+    var f = Form.withProto(.{ .form = world.protos.closure });
+    try f.slots.put(world.allocator, world.body_sym, .{ .form = chunk_id });
+    try f.slots.put(world.allocator, world.env_sym, .{ .form = world.here_form });
+    const captured_self_sym = try world.syms.intern("captured-self");
+    try f.slots.put(world.allocator, captured_self_sym, .nil);
+    const params_v = world.formSlot(chunk_id, world.params_sym);
+    try f.slots.put(world.allocator, world.params_sym, params_v);
+    const source_sym = try world.syms.intern("source");
+    const source_v = world.formMeta(chunk_id, source_sym);
+    if (source_v != .nil) {
+        try f.meta.put(world.allocator, source_sym, source_v);
+    }
+    return .{ .form = try world.heap.alloc(f) };
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1946,6 +2306,13 @@ pub const REGISTRY = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "Global:cons", globalCons },
     .{ "Global:list", globalList },
     .{ "Global:raise:", globalRaise },
+    .{ "Global:slot", globalSlot },
+    .{ "Global:slotSet!", globalSlotSet },
+    .{ "Global:metaSet!", globalMetaSet },
+    .{ "Global:globalEnv", globalGlobalEnv },
+    .{ "Global:getOrCreateProto", globalGetOrCreateProto },
+    .{ "Global:append", globalAppend },
+    .{ "Global:macroexpand", globalMacroexpand },
 
     // String primitives — parser uses these heavily.
     .{ "String:length", stringLength },
@@ -1961,4 +2328,13 @@ pub const REGISTRY = std.StaticStringMap(NativeFn).initComptime(.{
 
     // Integer:asChar — coerce Int → Char.
     .{ "Integer:asChar", intAsChar },
+
+    // Chunk class- + instance-side methods — moof Compiler primitives.
+    .{ "Chunk:new:source:", chunkNewSource },
+    .{ "Chunk:emit:", chunkEmit },
+    .{ "Chunk:addConst:", chunkAddConst },
+    .{ "Chunk:addIc", chunkAddIc },
+    .{ "Chunk:jumpTarget", chunkJumpTarget },
+    .{ "Chunk:patchJump:to:", chunkPatchJump },
+    .{ "Chunk:asClosure", chunkAsClosure },
 });
