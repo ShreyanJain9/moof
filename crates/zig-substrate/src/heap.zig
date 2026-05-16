@@ -194,4 +194,45 @@ pub const Heap = struct {
     pub fn isEmpty(self: *const Heap) bool {
         return self.forms.items.len == 1;
     }
+
+    // ─────────────────────────────────────────────────────────────
+    // GC primitives (phase 1 mark-sweep). called from `World.collect`.
+    // ─────────────────────────────────────────────────────────────
+
+    /// reset every Form's `gc_mark` bit to `false`. called at the
+    /// start of every collection cycle. tombstones stay tombstones.
+    pub fn gcResetMarks(self: *Heap) void {
+        for (self.forms.items) |*f| f.gc_mark = false;
+    }
+
+    /// `true` if `id` is a (resolved) vat-local FormId pointing at a
+    /// live, marked Form. external FormIds (shared / far-ref scopes)
+    /// or out-of-range payloads return `false` (caller should not
+    /// recurse into them).
+    pub fn gcIsMarked(self: *const Heap, id: FormId) bool {
+        if (id.isNone()) return false;
+        if (id.scope != .vat_local) return false;
+        if (id.payload >= self.forms.items.len) return false;
+        return self.forms.items[id.payload].gc_mark;
+    }
+
+    /// mark `id`'s Form as live. caller should test `gcIsMarked` first
+    /// to avoid redundant work; this just flips the bit.
+    pub fn gcMark(self: *Heap, id: FormId) void {
+        if (id.isNone()) return;
+        if (id.scope != .vat_local) return;
+        if (id.payload >= self.forms.items.len) return;
+        self.forms.items[id.payload].gc_mark = true;
+    }
+
+    /// tombstone the Form at `payload`: free its slot/handler/meta
+    /// hash-map storage and reset to a clean tombstone marker. the
+    /// slot in `forms` stays — FormId stability (L11) requires we
+    /// never reuse a tombstoned index in V1.
+    pub fn gcTombstone(self: *Heap, payload: u30) void {
+        const f = &self.forms.items[payload];
+        f.deinit(self.allocator);
+        f.* = Form.init();
+        f.gc_tombstone = true;
+    }
 };

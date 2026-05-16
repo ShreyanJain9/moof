@@ -134,6 +134,29 @@ pub const Form = struct {
     /// abort).
     frozen: bool,
 
+    /// GC mark bit (phase 1 mark-sweep, per
+    /// `2026-05-11-phase1-gc-dispatch-compression-design.md` §3).
+    /// reset to `false` at the start of every collection cycle; set
+    /// to `true` by the mark pass when this Form is reached from a
+    /// root. unmarked Forms are tombstoned by the sweep pass.
+    ///
+    /// also serves as the tombstone discriminator post-sweep: a
+    /// tombstoned slot has `gc_mark = false`, `proto = .nil`, and
+    /// empty `slots` / `handlers` / `meta`. live forms never carry
+    /// `gc_mark = false` outside of an active GC cycle.
+    ///
+    /// one byte of bloat per Form. negligible — typical Forms are
+    /// 100+ bytes via their slot/handler/meta hash-map storage.
+    gc_mark: bool,
+
+    /// `true` if this Form is a tombstone (an entry the GC reclaimed
+    /// because no root could reach it). callers should never reach a
+    /// tombstone via a live root — if they do, the GC missed a root.
+    /// distinguishable from a "live Form with no slots" by `proto ==
+    /// .nil` AND `slots.count() == 0` AND `handlers.count() == 0`.
+    /// for V1 we never reuse tombstone slots (L11 trivially preserved).
+    gc_tombstone: bool,
+
     /// build an empty Form with `nil` proto + empty maps. allocator
     /// is taken on every mutation, so init itself is allocation-free.
     pub fn init() Form {
@@ -143,6 +166,8 @@ pub const Form = struct {
             .handlers = .empty,
             .meta = .empty,
             .frozen = false,
+            .gc_mark = false,
+            .gc_tombstone = false,
         };
     }
 

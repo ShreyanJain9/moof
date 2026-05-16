@@ -52,6 +52,9 @@ pub const Protos = protos_mod.Protos;
 
 const vm_mod = @import("vm.zig");
 
+const gc_mod = @import("gc.zig");
+pub const GcStats = gc_mod.GcStats;
+
 /// the bytecode interpreter's per-vat state.
 ///
 /// `stack` is the operand stack; frames are pushed/popped on call /
@@ -245,6 +248,15 @@ pub const World = struct {
 
     /// the bytecode interpreter's per-vat state.
     vm: Vm,
+
+    /// phase 1 GC controls. when `gc_enabled` is true, `runTop`
+    /// triggers a mark-sweep cycle on exit (the "turn boundary
+    /// stand-in" — see `gc.zig` and spec §3.5 option A). when
+    /// `gc_stats_enabled` is true, each cycle prints a one-line
+    /// summary to stderr. both flipped by main.zig via env vars /
+    /// CLI flags.
+    gc_enabled: bool = true,
+    gc_stats_enabled: bool = false,
 
     // ---- cached SymIds for hot paths (V3 env walker + boot) ----
 
@@ -879,6 +891,21 @@ pub const World = struct {
     pub fn setTransporterRoot(self: *World, root: []const u8) !void {
         if (self.transporter_root) |old| self.allocator.free(old);
         self.transporter_root = try self.allocator.dupe(u8, root);
+    }
+
+    /// trigger a mark-sweep GC cycle. callable from any quiescent
+    /// point (no mid-turn invariant violations) — phase 1's intended
+    /// caller is `vm.runTop` on exit of the outermost frame.
+    ///
+    /// returns the cycle's stats; printing to stderr is gated on
+    /// `world.gc_stats_enabled`. cycles are skipped (and `null`
+    /// returned) when `world.gc_enabled` is false (the `--no-gc`
+    /// diagnostic path).
+    pub fn collect(self: *World) !?GcStats {
+        if (!self.gc_enabled) return null;
+        const stats = try gc_mod.collect(self);
+        if (self.gc_stats_enabled) gc_mod.printStats(stats);
+        return stats;
     }
 
     /// look up a named native in the process intrinsics table.
