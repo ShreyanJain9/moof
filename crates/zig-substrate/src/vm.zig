@@ -794,9 +794,19 @@ pub fn prepareInvoke(
             const result = try native(world, self_v, &.{});
             return .{ .native_done = result };
         }
-        const args_buf = try world.allocator.alloc(Value, argc);
-        defer world.allocator.free(args_buf);
+        // **per phase 2 §4.2** — reserve a region of the per-Vm
+        // args_scratch buffer instead of allocator.alloc-ing fresh
+        // each call. bump-allocator discipline: re-entrant
+        // `world.send` (option α) extends further; on return we
+        // truncate back to args_start. amortized zero allocs after
+        // the first few Sends grow the buffer.
+        const scratch = &world.vm.args_scratch;
+        const args_start = scratch.items.len;
+        try scratch.ensureUnusedCapacity(world.allocator, argc);
+        scratch.items.len = args_start + argc;
+        const args_buf = scratch.items[args_start..][0..argc];
         @memcpy(args_buf, call_args);
+        defer scratch.items.len = args_start;
         world.vm.stack.shrinkRetainingCapacity(shrink_to);
         const result = try native(world, self_v, args_buf);
         return .{ .native_done = result };
@@ -888,11 +898,17 @@ fn replaceFrameWithTailCall(
     args_start: usize,
     discard_from: usize,
 ) anyerror!void {
-    // copy args out before mutating the stack.
+    // copy args out before mutating the stack. **per phase 2 §4.2**,
+    // we reserve into the per-Vm args_scratch buffer rather than
+    // allocator.alloc-ing fresh. truncate-back on return.
     const argc = world.vm.stack.items.len - args_start;
-    const args_buf = try world.allocator.alloc(Value, argc);
-    defer world.allocator.free(args_buf);
+    const scratch = &world.vm.args_scratch;
+    const scratch_start = scratch.items.len;
+    try scratch.ensureUnusedCapacity(world.allocator, argc);
+    scratch.items.len = scratch_start + argc;
+    const args_buf = scratch.items[scratch_start..][0..argc];
     @memcpy(args_buf, world.vm.stack.items[args_start..]);
+    defer scratch.items.len = scratch_start;
 
     // dispatch.
     const lookup = world.lookupHandler(receiver, selector);

@@ -61,15 +61,30 @@ pub const GcStats = gc_mod.GcStats;
 /// return. `last_send_sel` tracks the most recently dispatched
 /// selector for error-message hygiene (used by raise paths in the
 /// rust seed; carried forward for parity).
+///
+/// `args_scratch` is a per-Vm bump-allocator buffer for native-call
+/// argument slices (per phase 2 §4.2). zig's `prepareInvoke` previously
+/// did `world.allocator.alloc(Value, argc)` + memcpy + defer free per
+/// Send → ~80 ns/Send at smp_allocator, far more at DebugAllocator.
+/// the scratch buffer is reused across calls; only natives that
+/// re-enter the VM (`World.send`) extend it. when capacity is
+/// exceeded, the underlying ArrayList grows once and never shrinks.
 pub const Vm = struct {
     stack: std.ArrayList(Value),
     frames: std.ArrayList(Frame),
+    /// scratch buffer for native-call args. each `prepareInvoke`
+    /// native-path bumps `args_scratch.items.len` up by argc, copies
+    /// from the operand stack, hands a `[]const Value` slice to the
+    /// native, and on return truncates back. re-entrant `World.send`
+    /// just bumps further into the buffer — bump-allocator discipline.
+    args_scratch: std.ArrayList(Value),
     last_send_sel: ?SymId,
 
     pub fn init() Vm {
         return Vm{
             .stack = .empty,
             .frames = .empty,
+            .args_scratch = .empty,
             .last_send_sel = null,
         };
     }
@@ -77,6 +92,7 @@ pub const Vm = struct {
     pub fn deinit(self: *Vm, allocator: std.mem.Allocator) void {
         self.stack.deinit(allocator);
         self.frames.deinit(allocator);
+        self.args_scratch.deinit(allocator);
     }
 
     /// thin shim so callers (intrinsics' :callIn:withSelf:) can write
