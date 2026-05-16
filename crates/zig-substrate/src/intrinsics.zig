@@ -1392,12 +1392,15 @@ fn transporterLoad(world: *World, _: Value, args: []const Value) anyerror!Value 
     const rel = try extractPath(world, args[0]);
     defer world.allocator.free(rel);
 
-    std.debug.print("transporterLoad: {s}\n", .{rel});
+    // gated behind MOOF_TRACE (phase 2 §4.9 wart hunt — unbuffered
+    // stderr writes per file load are non-trivial on cold disk caches;
+    // keep available for diagnostic mode only).
+    if (world.trace_enabled) std.debug.print("transporterLoad: {s}\n", .{rel});
 
     if (isUnsafePath(rel)) return raise(world, "tx-bad-path", ":load: refuses absolute or `..`-traversing paths");
 
     const root = world.transporter_root orelse {
-        std.debug.print("transporterLoad: no root configured\n", .{});
+        if (world.trace_enabled) std.debug.print("transporterLoad: no root configured\n", .{});
         return raise(world, "tx-no-root", "transporter has no root configured (set MOOF_LIB or place lib/ next to the binary)");
     };
 

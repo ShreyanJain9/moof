@@ -79,6 +79,7 @@ pub const SymTable = struct {
     /// allocates a private copy of `name`; the caller does not have
     /// to keep the input slice alive. returns SymId (u32).
     pub fn intern(self: *SymTable, name: []const u8) !u32 {
+        @import("vm.zig").PROFILE.sym_intern_calls += 1;
         if (self.index.get(name)) |id| return id;
 
         // first-time intern — dupe the bytes into our own storage

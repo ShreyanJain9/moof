@@ -67,7 +67,17 @@ const SymId = world_mod.SymId;
 // PROFILE COUNTERS (temporary, for phase-2 perf design — 2026-05-16)
 // these are zero-cost atomic increments at the hot paths. compiled
 // release-fast they cost ~1 cycle each.
+//
+// **2026-05-16 expansion (real-workload diagnosis):** added counters
+// for the §3.5 hypotheses — IC churn (vs cold misses), per-op slot
+// lookups, GC firing during a run, sym intern count, env-walk depth
+// histogram, and a `runTop` recursion counter. all are unconditional
+// increments; gated behind `MOOF_PROFILE=1` only for the env-walk
+// histogram (writes a per-call bucket update). the existing counter
+// floor (~1 cycle each in ReleaseFast) is preserved.
 // ─────────────────────────────────────────────────────────────────
+
+pub const ENV_DEPTH_BUCKETS: usize = 16;
 
 pub const Profile = struct {
     sends_total: u64 = 0,
@@ -75,6 +85,18 @@ pub const Profile = struct {
     sends_bytecode: u64 = 0,
     ic_hits: u64 = 0,
     ic_misses: u64 = 0,
+    /// **new (2026-05-16)** — IC miss because the cached slot was empty
+    /// (cold start; first dispatch at this site). expected to dominate
+    /// at workload startup, then fall to ~0.
+    ic_miss_cold: u64 = 0,
+    /// **new** — IC miss because cached_proto != receiver_proto. this is
+    /// polymorphism thrash: a different receiver class hit a site
+    /// previously cached for another. THIS is the metric PICs target.
+    ic_miss_thrash: u64 = 0,
+    /// **new** — IC miss because cached_generation != current. signals
+    /// that `setHandler!` (or `become_`) invalidated the slot. rare in
+    /// steady state; spike means a defmethod cycle is running.
+    ic_miss_generation: u64 = 0,
     ic_singleton_mismatch: u64 = 0,
     tail_sends: u64 = 0,
     super_sends: u64 = 0,
@@ -85,11 +107,46 @@ pub const Profile = struct {
     list_to_slice_total_items: u64 = 0,
     load_name_lookups: u64 = 0,
     load_name_walk_hops: u64 = 0,
+    /// **new** — histogram of env-walk depth per LoadName. bucket i =
+    /// LoadName count where the walker stopped at hop i (0 = current
+    /// frame's slots, …, 15 = >=15 hops). gated by `MOOF_PROFILE=1`.
+    load_name_walk_buckets: [ENV_DEPTH_BUCKETS]u64 = [_]u64{0} ** ENV_DEPTH_BUCKETS,
     ops_executed: u64 = 0,
     forms_allocated: u64 = 0,
     env_bind_calls: u64 = 0,
     proto_chain_walks: u64 = 0,
     proto_chain_hops: u64 = 0,
+    /// **new** — `world.formSlot(id, name)` calls. counts proto-less
+    /// slot reads (parser doing `.car`/`.cdr`, intrinsics reading
+    /// `:body`/`:env`/`:params`). high count + low send-count means the
+    /// hot path is in the intrinsics, not in moof-side dispatch.
+    form_slot_lookups: u64 = 0,
+    /// **new** — `world.protoOf(v)` calls. one per dispatch + one per
+    /// proto-chain walk hop; cross-check vs sends_total.
+    proto_of_calls: u64 = 0,
+    /// **new** — `syms.intern(name)` calls. ideally near-zero in steady
+    /// state (all syms pre-interned at image load). non-zero == hot
+    /// path is creating syms (likely in evalStringInWorld's
+    /// `intern("parse:")` etc., or natives that intern on every call).
+    sym_intern_calls: u64 = 0,
+    /// **new** — `world.collect()` invocations during a run. each runTop
+    /// triggers one at exit; nested `evalStringInWorld` calls trigger
+    /// per-form. high count → mid-workload GC churn, possibly thrashing.
+    gc_runs: u64 = 0,
+    /// **new** — wall-ns spent inside `gc.collect`. summed across all
+    /// cycles. divides out gc cost from interpreter cost.
+    gc_ns: u64 = 0,
+    /// **new** — `runTop` invocations. one per outermost moof call, plus
+    /// one per evalStringInWorld sub-form. high count == many parse-eval
+    /// cycles (e.g. transporterLoad walking a multi-form file).
+    run_top_calls: u64 = 0,
+    /// **new** — calls to `prepareSendDispatch` slow-path (the
+    /// `lookupHandler` route). counts how many lookups bypass the IC.
+    slow_send_dispatches: u64 = 0,
+
+    pub fn reset(self: *Profile) void {
+        self.* = .{};
+    }
 
     pub fn dump(self: *const Profile, elapsed_ns: u64) void {
         const p = std.debug.print;
@@ -105,12 +162,21 @@ pub const Profile = struct {
         p("  dnu dispatches:       {d}\n", .{self.dnu_dispatches});
         p("IC fast-path hits:      {d}\n", .{self.ic_hits});
         p("IC misses (slow):       {d}\n", .{self.ic_misses});
+        p("  cold (empty slot):    {d}\n", .{self.ic_miss_cold});
+        p("  thrash (proto flip):  {d}\n", .{self.ic_miss_thrash});
+        p("  generation stale:     {d}\n", .{self.ic_miss_generation});
         p("IC singleton mismatch:  {d}\n", .{self.ic_singleton_mismatch});
         if (self.sends_total > 0) {
             const hit_ratio = @as(f64, @floatFromInt(self.ic_hits)) /
                 @as(f64, @floatFromInt(self.sends_total)) * 100.0;
             p("IC hit ratio:           {d:.2}%\n", .{hit_ratio});
+            if (self.ic_misses > 0) {
+                const thrash_ratio = @as(f64, @floatFromInt(self.ic_miss_thrash)) /
+                    @as(f64, @floatFromInt(self.ic_misses)) * 100.0;
+                p("  miss thrash share:    {d:.2}%  (cold subtracted)\n", .{thrash_ratio});
+            }
         }
+        p("slow-send dispatches:   {d}\n", .{self.slow_send_dispatches});
         p("frames pushed:          {d}\n", .{self.frames_pushed});
         p("envs allocated:         {d}\n", .{self.envs_allocated});
         p("env_bind calls:         {d}\n", .{self.env_bind_calls});
@@ -118,9 +184,36 @@ pub const Profile = struct {
         p("  total items walked:   {d}\n", .{self.list_to_slice_total_items});
         p("load_name lookups:      {d}\n", .{self.load_name_lookups});
         p("  total env hops:       {d}\n", .{self.load_name_walk_hops});
+        if (self.load_name_lookups > 0) {
+            const avg = @as(f64, @floatFromInt(self.load_name_walk_hops)) /
+                @as(f64, @floatFromInt(self.load_name_lookups));
+            p("  avg hops per lookup:  {d:.3}\n", .{avg});
+        }
+        // histogram (only printed when populated, to keep output clean
+        // when MOOF_PROFILE wasn't enabled — buckets stay all-zero).
+        var any_bucket_nonzero = false;
+        for (self.load_name_walk_buckets) |b| {
+            if (b > 0) {
+                any_bucket_nonzero = true;
+                break;
+            }
+        }
+        if (any_bucket_nonzero) {
+            p("  env-walk depth histogram:\n", .{});
+            for (self.load_name_walk_buckets, 0..) |b, i| {
+                if (b == 0) continue;
+                p("    depth {d:>2}: {d}\n", .{ i, b });
+            }
+        }
+        p("formSlot lookups:       {d}\n", .{self.form_slot_lookups});
+        p("protoOf calls:          {d}\n", .{self.proto_of_calls});
+        p("sym intern calls:       {d}\n", .{self.sym_intern_calls});
         p("proto-chain walks:      {d}\n", .{self.proto_chain_walks});
         p("  total proto hops:     {d}\n", .{self.proto_chain_hops});
         p("forms allocated:        {d}\n", .{self.forms_allocated});
+        p("runTop invocations:     {d}\n", .{self.run_top_calls});
+        p("GC runs (mid-workload): {d}\n", .{self.gc_runs});
+        p("GC wall-ns:             {d}  ({d:.3} ms)\n", .{ self.gc_ns, @as(f64, @floatFromInt(self.gc_ns)) / 1.0e6 });
         if (elapsed_ns > 0) {
             const sends_per_sec = @as(f64, @floatFromInt(self.sends_total)) / elapsed_s;
             const ns_per_send = if (self.sends_total > 0) @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(self.sends_total)) else 0;
@@ -128,10 +221,22 @@ pub const Profile = struct {
             p("throughput:             {d:.0} sends/sec\n", .{sends_per_sec});
             p("ns/send:                {d:.2}\n", .{ns_per_send});
             p("ns/op:                  {d:.2}\n", .{ns_per_op});
+            // GC fraction of wall time.
+            if (self.gc_ns > 0) {
+                const gc_pct = @as(f64, @floatFromInt(self.gc_ns)) /
+                    @as(f64, @floatFromInt(elapsed_ns)) * 100.0;
+                p("GC share of wall:       {d:.2}%\n", .{gc_pct});
+            }
         }
         p("===\n", .{});
     }
 };
+
+/// **new** — when true, the env-walk histogram is populated. very cheap
+/// (one array-store per hop) but kept gated so non-profile builds skip
+/// even that. set by main.zig when MOOF_PROFILE=1 or when the
+/// `profile-run` subcommand is invoked.
+pub var PROFILE_ENABLED: bool = false;
 
 pub var PROFILE: Profile = .{};
 
@@ -214,6 +319,7 @@ pub fn step(world: *World) !void {
 /// body is `chunk`. `defining_proto` is `FormId.NONE` because no
 /// method dispatch led here.
 pub fn runTop(world: *World, chunk: FormId) !Value {
+    PROFILE.run_top_calls += 1;
     const starting_depth = world.vm.frames.items.len;
     const frame = try world_mod.makeFrame(
         world,
@@ -252,11 +358,28 @@ pub fn runTop(world: *World, chunk: FormId) !Value {
         // the mark phase, then pop it back. cost: one push + pop
         // per runTop. trivial.
         try world.vm.stack.append(world.allocator, result);
+        // wrap with monotonic-ns measurement so we can attribute
+        // wall time to GC vs interpreter (per phase 2 §3.5
+        // real-workload diagnosis — GC may fire mid-workload via
+        // nested runTop calls, accumulating real cost).
+        const gc_t0 = monotonicNs();
         _ = try world.collect();
+        const gc_t1 = monotonicNs();
+        PROFILE.gc_runs += 1;
+        PROFILE.gc_ns += gc_t1 - gc_t0;
         _ = world.vm.stack.pop();
     }
 
     return result;
+}
+
+/// monotonic-ns helper. duplicated in main.zig but needed here for
+/// per-collect wall-time accounting without an import cycle. uses
+/// CLOCK_MONOTONIC via libc.
+fn monotonicNs() u64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
 }
 
 /// drive the dispatch loop until `world.vm.frames.items.len` falls
@@ -341,17 +464,24 @@ pub fn dispatchOp(world: *World, op: opcodes.Op) !void {
             PROFILE.load_name_lookups += 1;
             const frame_idx = world.vm.frames.items.len - 1;
             const env = world.vm.frames.items[frame_idx].env;
+            // **profile (2026-05-16)** — when MOOF_PROFILE is enabled,
+            // record the env-walk depth at which `args.name` resolved.
+            // gated to avoid per-LoadName overhead on non-profile runs.
+            const before_hops = PROFILE.load_name_walk_hops;
             const v = world.envLookup(env, args.name) orelse {
-                // surface the missing binding name; helps pinpoint
-                // unbound globals during bootstrap. gated behind
-                // `world.trace_enabled` (MOOF_TRACE=1) per phase 2 §4.9
-                // — unbuffered stderr writes are slow even on the
-                // error path.
                 if (world.trace_enabled) {
                     std.debug.print("UnboundName: {s}\n", .{world.syms.resolve(args.name)});
                 }
                 return error.UnboundName;
             };
+            if (PROFILE_ENABLED) {
+                const this_walk: u64 = PROFILE.load_name_walk_hops - before_hops;
+                const bucket: usize = if (this_walk >= ENV_DEPTH_BUCKETS)
+                    ENV_DEPTH_BUCKETS - 1
+                else
+                    @intCast(this_walk);
+                PROFILE.load_name_walk_buckets[bucket] += 1;
+            }
             try world.vm.stack.append(world.allocator, v);
         },
 
@@ -623,6 +753,7 @@ pub fn prepareSendDispatch(
 
     // attempt IC fast-path. ics slice cached on the frame
     // (per phase 2 §4.3); bounds-check.
+    var miss_kind: enum { cold, thrash, generation, none } = .none;
     {
         const ics = world.vm.frames.items[frame_idx].ics;
         if (ic_idx < ics.len) {
@@ -655,11 +786,34 @@ pub fn prepareSendDispatch(
                     shrink_to,
                 );
             }
+            // classify the miss — used by §5.1 PIC sizing decisions.
+            // - cold: cached slot is empty (first dispatch at this site).
+            // - thrash: cached_proto is populated but doesn't match
+            //   receiver_proto. polymorphism at this call site.
+            // - generation: protos match but cached_generation is stale
+            //   (someone called setHandler! / become_ since we cached).
+            if (cached.cached_proto.isNone()) {
+                miss_kind = .cold;
+            } else if (!cached.cached_proto.eql(receiver_proto)) {
+                miss_kind = .thrash;
+            } else if (cached.cached_generation != world.protoGeneration(receiver_proto)) {
+                miss_kind = .generation;
+            } else {
+                // singleton mismatch alone — fall under thrash for accounting
+                miss_kind = .thrash;
+            }
         }
     }
 
     // cache miss or stale — slow lookup + populate.
     PROFILE.ic_misses += 1;
+    switch (miss_kind) {
+        .cold => PROFILE.ic_miss_cold += 1,
+        .thrash => PROFILE.ic_miss_thrash += 1,
+        .generation => PROFILE.ic_miss_generation += 1,
+        .none => {}, // ic_idx out of range — counted neither
+    }
+    PROFILE.slow_send_dispatches += 1;
     const lookup = world.lookupHandler(receiver, selector);
     if (lookup) |hit| {
         const handler = hit.handler;

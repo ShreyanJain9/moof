@@ -705,6 +705,7 @@ pub const World = struct {
     /// the proto Value for any Value (tagged-immediate or Form).
     /// tagged immediates resolve to their canonical proto-Form per V0.
     pub fn protoOf(self: *const World, v: Value) Value {
+        vm_mod.PROFILE.proto_of_calls += 1;
         return switch (v) {
             .nil => .{ .form = self.protos.nil },
             .bool_ => .{ .form = self.protos.bool_ },
@@ -765,6 +766,7 @@ pub const World = struct {
     /// read `slot_name` on `id`, walking only the Form's own slots
     /// (no proto-chain). returns nil if absent.
     pub fn formSlot(self: *const World, id: FormId, slot_name: SymId) Value {
+        vm_mod.PROFILE.form_slot_lookups += 1;
         const f = self.heap.get(id);
         return f.slot(slot_name);
     }

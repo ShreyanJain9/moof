@@ -113,6 +113,15 @@ pub fn main(init: std.process.Init) !void {
         if (val.len > 0 and !std.mem.eql(u8, val, "0")) g_gc_opts.trace = true;
     }
 
+    // env var: `MOOF_PROFILE=1` enables the env-walk depth histogram
+    // (per LoadName bucket update). all other Profile counters are
+    // unconditional (~1-cycle in ReleaseFast) and always populated.
+    // see vm.zig Profile struct; dump triggered by `profile-run` or
+    // by existing bench-* subcommands.
+    if (init.minimal.environ.getPosix("MOOF_PROFILE")) |val| {
+        if (val.len > 0 and !std.mem.eql(u8, val, "0")) vm.PROFILE_ENABLED = true;
+    }
+
     // pre-scan argv for global flags. these flags can appear in any
     // position; consumed before we dispatch to a subcommand. (zig's
     // args iterator is one-shot, so we collect into a list, strip
@@ -236,6 +245,12 @@ pub fn main(init: std.process.Init) !void {
         }
         defer if (serialize_to) |s| allocator.free(s);
         return runRun(allocator, init.io, init.minimal.environ, vat_copy, serialize_to);
+    }
+
+    if (sub_raw != null and path_raw != null and std.mem.eql(u8, sub_raw.?, "profile-run")) {
+        const vat_copy = try allocator.dupe(u8, path_raw.?);
+        defer allocator.free(vat_copy);
+        return runProfileRun(allocator, init.io, init.minimal.environ, vat_copy);
     }
 
     if (sub_raw != null and std.mem.eql(u8, sub_raw.?, "stress-recursion")) {
@@ -407,6 +422,84 @@ fn runEval(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Enviro
     const src_str = try world.makeString(expr_src);
     const result = try intrinsics.evalStringInWorld(&world, src_str);
     printResult(result, &world);
+}
+
+/// `moof profile-run <vat>` — load + run the vat's `main` exactly as
+/// `moof run` does, but with profiling enabled and a final profile
+/// dump on completion (or on error). intended for the phase 2
+/// real-workload diagnosis (per design doc §3.5).
+///
+/// the histogram path costs ~1 array-store per LoadName when enabled.
+/// every other counter is unconditional. for production runs use
+/// `moof run` (skips the histogram; counter overhead is negligible).
+fn runProfileRun(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, vat_path: []const u8) !void {
+    // force PROFILE_ENABLED on for this subcommand — it's the whole
+    // point. env var also honored at startup (above), so either path
+    // works.
+    vm.PROFILE_ENABLED = true;
+    // reset to a clean slate (microbench may have left counters
+    // populated if this were re-entered — defensive).
+    vm.PROFILE.reset();
+
+    var world = try World.initBare(allocator);
+    defer world.deinit();
+    applyGcOpts(&world);
+    world.io = io;
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, vat_path, allocator, .limited(1024 * 1024 * 1024));
+    defer allocator.free(bytes);
+    try image.loadVatImage(&world, bytes, allocator);
+    try intrinsics.installCaps(&world);
+    if (resolveLibRoot(allocator, io, environ)) |root| {
+        defer allocator.free(root);
+        try world.setTransporterRoot(root);
+    }
+
+    // dump profile + timing on every exit path (success, error, or
+    // mid-bootstrap UnboundName per #31). errdefer would skip the
+    // success path; defer always fires.
+    const t0 = monotonicNs();
+    var elapsed: u64 = 0;
+    defer {
+        const elapsed_used = if (elapsed > 0) elapsed else (monotonicNs() - t0);
+        std.debug.print("\n[profile-run] elapsed: {d:.3} s ({d} ns)\n", .{
+            @as(f64, @floatFromInt(elapsed_used)) / 1.0e9,
+            elapsed_used,
+        });
+        std.debug.print("[profile-run] heap.len = {d}, syms.len = {d}, chunks = {d}\n", .{
+            world.heap.len(),
+            world.syms.len(),
+            world.chunk_bytecode.count(),
+        });
+        vm.dumpProfile(elapsed_used);
+    }
+
+    const main_sym_id = lookupSymId(&world, "main");
+    if (main_sym_id != 0 and !world.here_form.isNone()) {
+        const hf = world.heap.get(world.here_form);
+        if (hf.slot(main_sym_id).asFormId()) |maybe_chunk| {
+            const chunk_to_run = if (world.chunk_bytecode.contains(maybe_chunk)) maybe_chunk else world.formSlot(maybe_chunk, world.body_sym).asFormId() orelse maybe_chunk;
+            if (world.chunk_bytecode.contains(chunk_to_run)) {
+                // catch errors so we still dump on failure (e.g. when
+                // bootstrap hits UnboundName per the spec's #31 caveat).
+                if (vm.runTop(&world, chunk_to_run)) |result| {
+                    elapsed = monotonicNs() - t0;
+                    printResult(result, &world);
+                } else |err| {
+                    elapsed = monotonicNs() - t0;
+                    std.debug.print("[profile-run] error during run: {s}\n", .{@errorName(err)});
+                    if (world.vm.last_send_sel) |sel| {
+                        std.debug.print("[profile-run] last send selector: '{s}'\n", .{world.syms.resolve(sel)});
+                    }
+                }
+            } else {
+                std.debug.print("[profile-run] no runnable chunk for main\n", .{});
+            }
+        } else {
+            std.debug.print("[profile-run] main has no chunk slot\n", .{});
+        }
+    } else {
+        std.debug.print("[profile-run] main symbol not present\n", .{});
+    }
 }
 
 fn runRun(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, vat_path: []const u8, serialize_to: ?[]const u8) !void {
