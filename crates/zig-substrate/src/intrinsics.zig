@@ -1469,6 +1469,322 @@ fn globalSetHandler(world: *World, _: Value, args: []const Value) anyerror!Value
 }
 
 // ─────────────────────────────────────────────────────────────────
+// String / Char / Integer (char-related) primitives.
+//
+// the parser (lib/parser/00-lexer.moof) walks source one char at a
+// time via `[src at: i]` + `[c codepoint]`. all moof Strings inside
+// the V4 alpha image are stored as `{ proto=String, slots={bytes:
+// cons-chain-of-Char} }` (see ocaml-seed's build_form_for/Str).
+// the natives below honor that shape; once a real String storage
+// layer lands they can be rewritten without changing the moof side.
+// ─────────────────────────────────────────────────────────────────
+
+/// walk a String-form's :bytes cons-chain. returns the count of
+/// codepoints traversed, and (if `target >= 0`) the codepoint at the
+/// 0-based index `target` (or -1 if past end).
+fn stringWalk(
+    world: *World,
+    self_v: Value,
+    target: i64,
+) struct { count: i64, cp_at_target: i32 } {
+    var count: i64 = 0;
+    var cp_at_target: i32 = -1;
+    const id = self_v.asFormId() orelse return .{ .count = 0, .cp_at_target = -1 };
+    const bytes_sym = lookupSymByName(world, "bytes") orelse return .{ .count = 0, .cp_at_target = -1 };
+    var cur = world.formSlot(id, bytes_sym);
+    while (true) {
+        switch (cur) {
+            .nil => break,
+            .form => |cid| {
+                const cf = world.heap.get(cid);
+                if (!cf.slotPresent(world.symCar)) break;
+                const car_v = cf.slot(world.symCar);
+                const cdr_v = cf.slot(world.symCdr);
+                switch (car_v) {
+                    .char => |cp| {
+                        if (target >= 0 and count == target) {
+                            cp_at_target = @intCast(cp);
+                        }
+                        count += 1;
+                    },
+                    else => break,
+                }
+                cur = cdr_v;
+            },
+            else => break,
+        }
+    }
+    return .{ .count = count, .cp_at_target = cp_at_target };
+}
+
+// port of crates/substrate/src/intrinsics.rs::install_string_methods `:length`
+fn stringLength(world: *World, self_: Value, _: []const Value) anyerror!Value {
+    if (self_ != .form) return typeError(world, "length: receiver must be a String");
+    const r = stringWalk(world, self_, -1);
+    return .{ .int = @intCast(r.count) };
+}
+
+// port of crates/substrate/src/intrinsics.rs::install_string_methods `:at:`
+// returns the Char at the given index, or raises 'index-out-of-bounds.
+fn stringAt(world: *World, self_: Value, args: []const Value) anyerror!Value {
+    if (args.len < 1) return raise(world, "arity", "at: takes 1 arg");
+    const idx = args[0].asInt() orelse return typeError(world, "at: index must be an Integer");
+    if (idx < 0) return raise(world, "index-out-of-bounds", "[String at: i] negative index");
+    if (self_ != .form) return typeError(world, "at: receiver must be a String");
+    const r = stringWalk(world, self_, idx);
+    if (r.cp_at_target < 0) {
+        return raise(world, "index-out-of-bounds", "[String at: i] out of range");
+    }
+    return .{ .char = @intCast(r.cp_at_target) };
+}
+
+// port of crates/substrate/src/intrinsics.rs::install_string_methods `:=`
+// structural equality — compare the two :bytes cons-chains element by
+// element. accepts Strings or anything String-shaped (.bytes cons-chain
+// of Chars); mismatched shape → false (never raises).
+fn stringEq(world: *World, self_: Value, args: []const Value) anyerror!Value {
+    if (args.len < 1) return .{ .bool_ = false };
+    const bytes_sym = lookupSymByName(world, "bytes") orelse return .{ .bool_ = false };
+    if (self_ != .form or args[0] != .form) return .{ .bool_ = false };
+    const a_id = self_.asFormId().?;
+    const b_id = args[0].asFormId().?;
+    var a_cur = world.formSlot(a_id, bytes_sym);
+    var b_cur = world.formSlot(b_id, bytes_sym);
+    while (true) {
+        const a_done = (a_cur == .nil);
+        const b_done = (b_cur == .nil);
+        if (a_done and b_done) return .{ .bool_ = true };
+        if (a_done or b_done) return .{ .bool_ = false };
+        if (a_cur != .form or b_cur != .form) return .{ .bool_ = false };
+        const af = world.heap.get(a_cur.asFormId().?);
+        const bf = world.heap.get(b_cur.asFormId().?);
+        if (!af.slotPresent(world.symCar) or !bf.slotPresent(world.symCar)) return .{ .bool_ = false };
+        const a_car = af.slot(world.symCar);
+        const b_car = bf.slot(world.symCar);
+        const a_cp: u32 = switch (a_car) { .char => |c| c, else => return .{ .bool_ = false } };
+        const b_cp: u32 = switch (b_car) { .char => |c| c, else => return .{ .bool_ = false } };
+        if (a_cp != b_cp) return .{ .bool_ = false };
+        a_cur = af.slot(world.symCdr);
+        b_cur = bf.slot(world.symCdr);
+    }
+}
+
+// port of crates/substrate/src/intrinsics.rs::install_string_methods `:slice:length:`
+// substring by char-index. allocates a new String-Form with a fresh
+// :bytes cons-chain.
+fn stringSlice(world: *World, self_: Value, args: []const Value) anyerror!Value {
+    if (args.len < 2) return raise(world, "arity", "slice:length: takes 2 args");
+    const start = args[0].asInt() orelse return typeError(world, "slice:length: needs Integer start");
+    const len_arg = args[1].asInt() orelse return typeError(world, "slice:length: needs Integer length");
+    if (start < 0 or len_arg < 0) return raise(world, "index-out-of-bounds", "slice:length: negative start or length");
+    if (self_ != .form) return typeError(world, "slice:length: receiver must be a String");
+    const id = self_.asFormId().?;
+    const bytes_sym = lookupSymByName(world, "bytes") orelse return raise(world, "no-bytes-sym", "slice:length: no bytes sym");
+    // first, skip `start` chars, then collect `len` chars into a list.
+    var collected: std.ArrayList(Value) = .empty;
+    defer collected.deinit(world.allocator);
+    var cur = world.formSlot(id, bytes_sym);
+    var skipped: i64 = 0;
+    var taken: i64 = 0;
+    while (taken < len_arg) {
+        switch (cur) {
+            .nil => break,
+            .form => |cid| {
+                const cf = world.heap.get(cid);
+                if (!cf.slotPresent(world.symCar)) break;
+                const car_v = cf.slot(world.symCar);
+                const cdr_v = cf.slot(world.symCdr);
+                if (skipped < start) {
+                    skipped += 1;
+                } else {
+                    switch (car_v) {
+                        .char => |cp| {
+                            try collected.append(world.allocator, .{ .char = cp });
+                            taken += 1;
+                        },
+                        else => break,
+                    }
+                }
+                cur = cdr_v;
+            },
+            else => break,
+        }
+    }
+    const chain = try world.makeList(collected.items);
+    var f = Form.withProto(.{ .form = world.protos.string });
+    try f.slots.put(world.allocator, bytes_sym, chain);
+    const new_id = try world.heap.alloc(f);
+    return .{ .form = new_id };
+}
+
+// port of crates/substrate/src/intrinsics.rs::install_string_methods `:+`
+// concatenation. accepts a String on the right (cons-chain shape);
+// for Sym/Char rhs we coerce via :toString-like inline handling.
+fn stringPlus(world: *World, self_: Value, args: []const Value) anyerror!Value {
+    if (args.len < 1) return raise(world, "arity", "+ takes 1 arg");
+    if (self_ != .form) return typeError(world, "+: receiver must be a String");
+    const bytes_sym = lookupSymByName(world, "bytes") orelse return raise(world, "no-bytes-sym", "+: no bytes sym");
+    // collect chars from self.
+    var collected: std.ArrayList(Value) = .empty;
+    defer collected.deinit(world.allocator);
+    {
+        var cur = world.formSlot(self_.asFormId().?, bytes_sym);
+        while (true) {
+            switch (cur) {
+                .nil => break,
+                .form => |cid| {
+                    const cf = world.heap.get(cid);
+                    if (!cf.slotPresent(world.symCar)) break;
+                    const car_v = cf.slot(world.symCar);
+                    switch (car_v) {
+                        .char => |cp| try collected.append(world.allocator, .{ .char = cp }),
+                        else => break,
+                    }
+                    cur = cf.slot(world.symCdr);
+                },
+                else => break,
+            }
+        }
+    }
+    // append chars from rhs. accepts a String-Form with :bytes, or a
+    // single Char (treated as one-element string).
+    const rhs = args[0];
+    switch (rhs) {
+        .char => |cp| try collected.append(world.allocator, .{ .char = cp }),
+        .form => |rid| {
+            // walk rhs's :bytes (Char chain).
+            var cur = world.formSlot(rid, bytes_sym);
+            while (true) {
+                switch (cur) {
+                    .nil => break,
+                    .form => |cid| {
+                        const cf = world.heap.get(cid);
+                        if (!cf.slotPresent(world.symCar)) break;
+                        const car_v = cf.slot(world.symCar);
+                        switch (car_v) {
+                            .char => |cp| try collected.append(world.allocator, .{ .char = cp }),
+                            else => break,
+                        }
+                        cur = cf.slot(world.symCdr);
+                    },
+                    else => break,
+                }
+            }
+        },
+        .sym => |s| {
+            // append each codepoint of the symbol's text.
+            const text = world.syms.resolve(s);
+            var it = std.unicode.Utf8Iterator{ .bytes = text, .i = 0 };
+            while (it.nextCodepoint()) |cp| {
+                try collected.append(world.allocator, .{ .char = @intCast(cp) });
+            }
+        },
+        else => return typeError(world, "+: rhs must be a String, Char, or Sym"),
+    }
+    const chain = try world.makeList(collected.items);
+    var f = Form.withProto(.{ .form = world.protos.string });
+    try f.slots.put(world.allocator, bytes_sym, chain);
+    const new_id = try world.heap.alloc(f);
+    return .{ .form = new_id };
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Char primitives.
+// ─────────────────────────────────────────────────────────────────
+
+// port of crates/substrate/src/intrinsics.rs::install_char_methods `:codepoint`
+fn charCodepoint(world: *World, self_: Value, _: []const Value) anyerror!Value {
+    return switch (self_) {
+        .char => |cp| .{ .int = @intCast(cp) },
+        else => typeError(world, "codepoint on non-Char"),
+    };
+}
+
+// port of crates/substrate/src/intrinsics.rs::install_char_methods `:<`
+fn charLt(_: *World, self_: Value, args: []const Value) anyerror!Value {
+    return switch (self_) {
+        .char => |a| switch (args[0]) {
+            .char => |b| .{ .bool_ = a < b },
+            else => .{ .bool_ = false },
+        },
+        else => .{ .bool_ = false },
+    };
+}
+
+// `:toString` on Char returns a one-character String. The Object
+// fallback renders a Char as its single utf-8 character (used for
+// e.g. say:), but the moof Lexer wants a String-Form here so it can
+// concat via :+. allocate a one-char String.
+fn charToString(world: *World, self_: Value, _: []const Value) anyerror!Value {
+    const cp = switch (self_) {
+        .char => |c| c,
+        else => return typeError(world, "toString on non-Char"),
+    };
+    const bytes_sym = try world.syms.intern("bytes");
+    const one = [_]Value{ .{ .char = cp } };
+    const chain = try world.makeList(&one);
+    var f = Form.withProto(.{ .form = world.protos.string });
+    try f.slots.put(world.allocator, bytes_sym, chain);
+    const new_id = try world.heap.alloc(f);
+    return .{ .form = new_id };
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Integer:asChar — coerce an Integer to a Char (codepoint).
+// used by the Lexer's escape table: `[10 asChar]` → newline-Char.
+// ─────────────────────────────────────────────────────────────────
+
+// port of crates/substrate/src/intrinsics.rs (Integer `:asChar`)
+fn intAsChar(world: *World, self_: Value, _: []const Value) anyerror!Value {
+    const n = self_.asInt() orelse return typeError(world, "asChar receiver must be an Integer");
+    if (n < 0 or n > 0x10_FFFF) return raise(world, "index-out-of-bounds", "asChar: codepoint out of range");
+    return .{ .char = @intCast(n) };
+}
+
+// ─────────────────────────────────────────────────────────────────
+// `intern` — global free function. `(intern "name")` returns the
+// interned Symbol. accepts a String-Form (cons-chain of chars) or
+// a Symbol (already interned, identity return).
+// ─────────────────────────────────────────────────────────────────
+
+fn globalIntern(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len < 1) return raise(world, "arity", "(intern name) takes 1 arg");
+    const arg = args[0];
+    // Symbol identity passthrough.
+    if (arg == .sym) return arg;
+    // String-Form: walk :bytes chain into a utf-8 buffer.
+    const id = arg.asFormId() orelse return typeError(world, "intern: arg must be a String or Sym");
+    const bytes_sym = lookupSymByName(world, "bytes") orelse return raise(world, "no-bytes-sym", "intern: no bytes sym");
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(world.allocator);
+    var cur = world.formSlot(id, bytes_sym);
+    while (true) {
+        switch (cur) {
+            .nil => break,
+            .form => |cid| {
+                const cf = world.heap.get(cid);
+                if (!cf.slotPresent(world.symCar)) break;
+                const car_v = cf.slot(world.symCar);
+                const cdr_v = cf.slot(world.symCdr);
+                switch (car_v) {
+                    .char => |cp| {
+                        const cp_u21 = std.math.cast(u21, cp) orelse return raise(world, "intern", "bad char");
+                        var tmp: [4]u8 = undefined;
+                        const n = std.unicode.utf8Encode(cp_u21, &tmp) catch return raise(world, "intern", "un-encodable char");
+                        try buf.appendSlice(world.allocator, tmp[0..n]);
+                    },
+                    else => break,
+                }
+                cur = cdr_v;
+            },
+            else => break,
+        }
+    }
+    const sid = try world.syms.intern(buf.items);
+    return .{ .sym = sid };
+}
+
+// ─────────────────────────────────────────────────────────────────
 // REGISTRY — comptime name → NativeFn map (V4 Track C.3 Task 2.1).
 //
 // keyed by canonical "ProtoName:selector" strings. image-load
@@ -1600,4 +1916,20 @@ pub const REGISTRY = std.StaticStringMap(NativeFn).initComptime(.{
     // NativeRefs binding under the `Global:NAME` key. moof code calls
     // these as `(name arg…)` which lowers to LoadName + Send :call.
     .{ "Global:setHandler!", globalSetHandler },
+    .{ "Global:intern", globalIntern },
+
+    // String primitives — parser uses these heavily.
+    .{ "String:length", stringLength },
+    .{ "String:at:", stringAt },
+    .{ "String:=", stringEq },
+    .{ "String:slice:length:", stringSlice },
+    .{ "String:+", stringPlus },
+
+    // Char primitives.
+    .{ "Char:codepoint", charCodepoint },
+    .{ "Char:<", charLt },
+    .{ "Char:toString", charToString },
+
+    // Integer:asChar — coerce Int → Char.
+    .{ "Integer:asChar", intAsChar },
 });

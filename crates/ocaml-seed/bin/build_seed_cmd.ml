@@ -748,6 +748,19 @@ let zig_registry_keys : string list = [
      wire_natives recognizes the `Global:` prefix and routes through a
      different allocation path — see wire_global_native there. *)
   "Global:setHandler!";
+  "Global:intern";
+  (* String primitives — parser uses these heavily. *)
+  "String:length";
+  "String:at:";
+  "String:=";
+  "String:slice:length:";
+  "String:+";
+  (* Char primitives. *)
+  "Char:codepoint";
+  "Char:<";
+  "Char:toString";
+  (* Integer:asChar — coerce Int → Char. *)
+  "Integer:asChar";
 ]
 
 (* Split "ProtoName:rest" into (proto, selector). Selector keeps any
