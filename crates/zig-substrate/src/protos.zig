@@ -158,7 +158,7 @@ pub fn bootstrap(
         .{ .id = bool_p,     .name = "Bool" },
         .{ .id = integer_p,  .name = "Integer" },
         .{ .id = char_p,     .name = "Char" },
-        .{ .id = sym_p,      .name = "Sym" },
+        .{ .id = sym_p,      .name = "Symbol" },
         .{ .id = cons_p,     .name = "Cons" },
         .{ .id = string_p,   .name = "String" },
         .{ .id = bytes_p,    .name = "Bytes" },

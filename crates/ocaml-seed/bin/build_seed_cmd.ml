@@ -457,7 +457,7 @@ let bootstrap_protos () : boot_protos =
   let bool_id = p "Bool" in
   let integer_id = p "Integer" in
   let char_id = p "Char" in
-  let sym_id = p "Sym" in
+  let sym_id = p "Symbol" in
   let cons_id = p "Cons" in
   let string_id = p "String" in
   let bytes_id = p "Bytes" in
@@ -535,7 +535,10 @@ let patch_here_form (here_id : int) (bp : boot_protos) : unit =
   let bool_s = Compiler.intern "Bool" in
   let integer_s = Compiler.intern "Integer" in
   let char_s = Compiler.intern "Char" in
-  let sym_s = Compiler.intern "Sym" in
+  (* canonical user-facing name is "Symbol" — matches rust substrate
+     and what moof code uses (e.g. early/04-symbol.moof's `Symbol`
+     binding sends). zig substrate's proto field is .sym for brevity. *)
+  let sym_s = Compiler.intern "Symbol" in
   let cons_s = Compiler.intern "Cons" in
   let string_s = Compiler.intern "String" in
   let bytes_s = Compiler.intern "Bytes" in
@@ -749,6 +752,9 @@ let zig_registry_keys : string list = [
      different allocation path — see wire_global_native there. *)
   "Global:setHandler!";
   "Global:intern";
+  "Global:cons";
+  "Global:list";
+  "Global:raise:";
   (* String primitives — parser uses these heavily. *)
   "String:length";
   "String:at:";
@@ -783,7 +789,7 @@ let canonical_proto_map (bp : boot_protos) : (string, int) Hashtbl.t =
   Hashtbl.add h "Bool"          bp.bool_id;
   Hashtbl.add h "Integer"       bp.integer_id;
   Hashtbl.add h "Char"          bp.char_id;
-  Hashtbl.add h "Sym"           bp.sym_id;
+  Hashtbl.add h "Symbol"        bp.sym_id;
   Hashtbl.add h "Cons"          bp.cons_id;
   Hashtbl.add h "String"        bp.string_id;
   Hashtbl.add h "Bytes"         bp.bytes_id;

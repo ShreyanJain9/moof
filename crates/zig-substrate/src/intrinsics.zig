@@ -1747,6 +1747,32 @@ fn intAsChar(world: *World, self_: Value, _: []const Value) anyerror!Value {
 // a Symbol (already interned, identity return).
 // ─────────────────────────────────────────────────────────────────
 
+// `(cons head tail)` — alloc a cons cell.
+fn globalCons(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 2) return raise(world, "arity", "(cons h tail) takes 2 args");
+    var f = Form.withProto(.{ .form = world.protos.cons });
+    try f.slots.put(world.allocator, world.symCar, args[0]);
+    try f.slots.put(world.allocator, world.symCdr, args[1]);
+    const id = try world.heap.alloc(f);
+    return .{ .form = id };
+}
+
+// `(list a b c …)` — variadic list constructor.
+fn globalList(world: *World, _: Value, args: []const Value) anyerror!Value {
+    return world.makeList(args);
+}
+
+// `(raise: kind message)` — raise a moof-level error.
+fn globalRaise(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 2) return raise(world, "arity", "(raise: kind message)");
+    const kind_sym = args[0].asSym() orelse return typeError(world, "raise:: kind must be a Symbol");
+    _ = args[1]; // message: not yet propagated through the raise structure.
+    // V4 phase α: substrate uses a simple error.DispatchError + stderr
+    // log. propagate the kind symbol's name so callers know what's up.
+    const kind_name = world.syms.resolve(kind_sym);
+    return world.raise(kind_name, "raised from moof");
+}
+
 fn globalIntern(world: *World, _: Value, args: []const Value) anyerror!Value {
     if (args.len < 1) return raise(world, "arity", "(intern name) takes 1 arg");
     const arg = args[0];
@@ -1917,6 +1943,9 @@ pub const REGISTRY = std.StaticStringMap(NativeFn).initComptime(.{
     // these as `(name arg…)` which lowers to LoadName + Send :call.
     .{ "Global:setHandler!", globalSetHandler },
     .{ "Global:intern", globalIntern },
+    .{ "Global:cons", globalCons },
+    .{ "Global:list", globalList },
+    .{ "Global:raise:", globalRaise },
 
     // String primitives — parser uses these heavily.
     .{ "String:length", stringLength },

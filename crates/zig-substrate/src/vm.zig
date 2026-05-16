@@ -258,7 +258,12 @@ pub fn dispatchOp(world: *World, op: opcodes.Op) !void {
         .load_name => |args| {
             const frame_idx = world.vm.frames.items.len - 1;
             const env = world.vm.frames.items[frame_idx].env;
-            const v = world.envLookup(env, args.name) orelse return error.UnboundName;
+            const v = world.envLookup(env, args.name) orelse {
+                // surface the missing binding name; helps pinpoint
+                // unbound globals during bootstrap.
+                std.debug.print("UnboundName: {s}\n", .{world.syms.resolve(args.name)});
+                return error.UnboundName;
+            };
             try world.vm.stack.append(world.allocator, v);
         },
 
