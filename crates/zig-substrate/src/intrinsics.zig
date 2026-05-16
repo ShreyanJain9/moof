@@ -1362,6 +1362,21 @@ pub fn evalStringInWorld(world: *World, source_val: Value) anyerror!Value {
     // [Parser parse: source] → cons-chain of Forms.
     const forms_v = try world.send(parser_v, parse_sel, &.{source_val});
 
+    // GC-anchor: each form's compile+run ends in a `runTop` which runs
+    // a collect cycle. the parsed forms list lives in this zig local
+    // and is NOT on the VM stack or VM frames, so the mid-eval-loop
+    // GC would tombstone every cons-cell past the one we've already
+    // pulled `:car` from — yielding `proto=.nil, slots=0` decoys whose
+    // `:car` lookup returns nil and the loop quietly bails after one
+    // form per file (root cause of why only the first defmacro per
+    // file got registered before the polyglot self-host fix landed).
+    //
+    // pinning `forms_v` to the VM stack for the loop's duration adds
+    // it to the GC's stack-root set; popping at the end restores the
+    // pre-eval stack state.
+    try world.vm.stack.append(world.allocator, forms_v);
+    defer _ = world.vm.stack.pop();
+
     // iterate the forms, compile + runTop each. last result wins.
     var last: Value = .nil;
     var cur = forms_v;
