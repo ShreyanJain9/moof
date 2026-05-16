@@ -809,23 +809,24 @@ pub fn prepareInvoke(
     const chunk_id = body_v.asFormId() orelse return error.MethodBodyNotAChunk;
     const captured_env_v = world.formSlot(method, world.env_sym);
     const captured_env = captured_env_v.asFormId() orelse world.here_form;
-    const params_v = world.formSlot(method, world.params_sym);
 
-    const params = world.listToSlice(params_v) catch |err| {
-        // gated behind MOOF_TRACE per phase 2 §4.9 — listToSlice
-        // failure is fatal, but the print itself is unbuffered.
-        if (world.trace_enabled) {
-            std.debug.print("prepareInvoke: listToSlice failed: {s}\n", .{@errorName(err)});
-        }
-        return err;
-    };
-    defer world.freeSlice(params);
+    // **per phase 2 §4.4** — read chunk_params directly as `[]u32`
+    // rather than walking the closure's `:params` cons-list back into
+    // a slice via listToSlice. the cons-list was originally built from
+    // chunk_params at compile / closure-alloc time, so it's the same
+    // data; the round-trip was pure overhead (1 alloc + N hashmap
+    // reads per call). reflection on `:params` still works via the
+    // slot lookup elsewhere — this only changes the hot dispatch path.
+    //
+    // a method without a chunk_params entry (e.g. an old image that
+    // pre-dates the side-table) is treated as zero-arg.
+    const params_syms: []const u32 = if (world.chunk_params.get(chunk_id)) |p| p else &.{};
 
-    if (params.len != call_args.len) {
+    if (params_syms.len != call_args.len) {
         // diagnostic dump iterates method slots — O(slots) per arity
         // mismatch. gated behind MOOF_TRACE per phase 2 §4.9.
         if (world.trace_enabled) {
-            std.debug.print("prepareInvoke: Arity mismatch: method has {d} params, called with {d} args\n", .{ params.len, call_args.len });
+            std.debug.print("prepareInvoke: Arity mismatch: method has {d} params, called with {d} args\n", .{ params_syms.len, call_args.len });
             const mf = world.heap.get(method);
             std.debug.print("method Form {d} slots:\n", .{method.payload});
             var it = mf.slots.iterator();
@@ -840,8 +841,7 @@ pub fn prepareInvoke(
     // new env BEFORE shrinking the stack — call_args may point
     // into the operand stack.
     const call_env = try world.allocEnv(captured_env);
-    for (params, call_args) |param_v, arg_v| {
-        const param_sym = param_v.asSym() orelse return error.BadParam;
+    for (params_syms, call_args) |param_sym, arg_v| {
         try world.envBind(call_env, param_sym, arg_v);
     }
 
@@ -931,14 +931,13 @@ fn replaceFrameWithTailCall(
     const chunk_id = body_v.asFormId() orelse return error.MethodBodyNotAChunk;
     const captured_env_v = world.formSlot(method, world.env_sym);
     const captured_env = captured_env_v.asFormId() orelse world.here_form;
-    const params_v = world.formSlot(method, world.params_sym);
-    const params = try world.listToSlice(params_v);
-    defer world.freeSlice(params);
-    if (params.len != args_buf.len) return error.Arity;
+
+    // **per phase 2 §4.4** — chunk_params direct, skip the cons walk.
+    const params_syms: []const u32 = if (world.chunk_params.get(chunk_id)) |p| p else &.{};
+    if (params_syms.len != args_buf.len) return error.Arity;
 
     const call_env = try world.allocEnv(captured_env);
-    for (params, args_buf) |param_v, arg_v| {
-        const param_sym = param_v.asSym() orelse return error.BadParam;
+    for (params_syms, args_buf) |param_sym, arg_v| {
         try world.envBind(call_env, param_sym, arg_v);
     }
 
