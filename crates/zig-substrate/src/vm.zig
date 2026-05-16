@@ -63,6 +63,82 @@ const Frame = world_mod.Frame;
 const ICache = world_mod.ICache;
 const SymId = world_mod.SymId;
 
+// ─────────────────────────────────────────────────────────────────
+// PROFILE COUNTERS (temporary, for phase-2 perf design — 2026-05-16)
+// these are zero-cost atomic increments at the hot paths. compiled
+// release-fast they cost ~1 cycle each.
+// ─────────────────────────────────────────────────────────────────
+
+pub const Profile = struct {
+    sends_total: u64 = 0,
+    sends_native: u64 = 0,
+    sends_bytecode: u64 = 0,
+    ic_hits: u64 = 0,
+    ic_misses: u64 = 0,
+    ic_singleton_mismatch: u64 = 0,
+    tail_sends: u64 = 0,
+    super_sends: u64 = 0,
+    dnu_dispatches: u64 = 0,
+    frames_pushed: u64 = 0,
+    envs_allocated: u64 = 0,
+    list_to_slice_calls: u64 = 0,
+    list_to_slice_total_items: u64 = 0,
+    load_name_lookups: u64 = 0,
+    load_name_walk_hops: u64 = 0,
+    ops_executed: u64 = 0,
+    forms_allocated: u64 = 0,
+    env_bind_calls: u64 = 0,
+    proto_chain_walks: u64 = 0,
+    proto_chain_hops: u64 = 0,
+
+    pub fn dump(self: *const Profile, elapsed_ns: u64) void {
+        const p = std.debug.print;
+        const elapsed_s = @as(f64, @floatFromInt(elapsed_ns)) / 1.0e9;
+        p("\n=== VM PROFILE ===\n", .{});
+        p("elapsed: {d:.6} s\n", .{elapsed_s});
+        p("ops executed:           {d}\n", .{self.ops_executed});
+        p("sends total:            {d}\n", .{self.sends_total});
+        p("  native dispatches:    {d}\n", .{self.sends_native});
+        p("  bytecode dispatches:  {d}\n", .{self.sends_bytecode});
+        p("  tail sends:           {d}\n", .{self.tail_sends});
+        p("  super sends:          {d}\n", .{self.super_sends});
+        p("  dnu dispatches:       {d}\n", .{self.dnu_dispatches});
+        p("IC fast-path hits:      {d}\n", .{self.ic_hits});
+        p("IC misses (slow):       {d}\n", .{self.ic_misses});
+        p("IC singleton mismatch:  {d}\n", .{self.ic_singleton_mismatch});
+        if (self.sends_total > 0) {
+            const hit_ratio = @as(f64, @floatFromInt(self.ic_hits)) /
+                @as(f64, @floatFromInt(self.sends_total)) * 100.0;
+            p("IC hit ratio:           {d:.2}%\n", .{hit_ratio});
+        }
+        p("frames pushed:          {d}\n", .{self.frames_pushed});
+        p("envs allocated:         {d}\n", .{self.envs_allocated});
+        p("env_bind calls:         {d}\n", .{self.env_bind_calls});
+        p("listToSlice calls:      {d}\n", .{self.list_to_slice_calls});
+        p("  total items walked:   {d}\n", .{self.list_to_slice_total_items});
+        p("load_name lookups:      {d}\n", .{self.load_name_lookups});
+        p("  total env hops:       {d}\n", .{self.load_name_walk_hops});
+        p("proto-chain walks:      {d}\n", .{self.proto_chain_walks});
+        p("  total proto hops:     {d}\n", .{self.proto_chain_hops});
+        p("forms allocated:        {d}\n", .{self.forms_allocated});
+        if (elapsed_ns > 0) {
+            const sends_per_sec = @as(f64, @floatFromInt(self.sends_total)) / elapsed_s;
+            const ns_per_send = if (self.sends_total > 0) @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(self.sends_total)) else 0;
+            const ns_per_op = if (self.ops_executed > 0) @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(self.ops_executed)) else 0;
+            p("throughput:             {d:.0} sends/sec\n", .{sends_per_sec});
+            p("ns/send:                {d:.2}\n", .{ns_per_send});
+            p("ns/op:                  {d:.2}\n", .{ns_per_op});
+        }
+        p("===\n", .{});
+    }
+};
+
+pub var PROFILE: Profile = .{};
+
+pub fn dumpProfile(elapsed_ns: u64) void {
+    PROFILE.dump(elapsed_ns);
+}
+
 /// VM-level errors. send-dispatch + native-method errors flow
 /// through `anyerror` so individual native handlers can raise their
 /// own error sets; the VM only adds the structural ones below.
@@ -120,6 +196,7 @@ pub const DispatchAction = union(enum) {
 /// executing thread (single-threaded substrate); operand layout is
 /// fixed-size, no parsing ambiguity.
 pub fn step(world: *World) !void {
+    PROFILE.ops_executed += 1;
     const frame_idx = world.vm.frames.items.len - 1;
     const chunk = world.vm.frames.items[frame_idx].chunk;
     const pc = world.vm.frames.items[frame_idx].pc;
@@ -256,6 +333,7 @@ pub fn dispatchOp(world: *World, op: opcodes.Op) !void {
         .load_here => try world.vm.stack.append(world.allocator, .{ .form = world.here_form }),
 
         .load_name => |args| {
+            PROFILE.load_name_lookups += 1;
             const frame_idx = world.vm.frames.items.len - 1;
             const env = world.vm.frames.items[frame_idx].env;
             const v = world.envLookup(env, args.name) orelse {
@@ -293,6 +371,7 @@ pub fn dispatchOp(world: *World, op: opcodes.Op) !void {
         // frame whose Return pushes the result. (stack effect
         // -(1+argc)/+1, eventually.)
         .send => |args| {
+            PROFILE.sends_total += 1;
             const argc: usize = args.argc;
             if (world.vm.stack.items.len < argc + 1) return error.SendArgcOverflow;
             const receiver_idx = world.vm.stack.items.len - argc - 1;
@@ -311,6 +390,8 @@ pub fn dispatchOp(world: *World, op: opcodes.Op) !void {
         // lookup every time; future work). tail-position frame
         // replacement is already non-recursive (no new host frame).
         .tail_send => |args| {
+            PROFILE.sends_total += 1;
+            PROFILE.tail_sends += 1;
             const argc: usize = args.argc;
             if (world.vm.stack.items.len < argc + 1) return error.SendArgcOverflow;
             const split = world.vm.stack.items.len - argc;
@@ -323,6 +404,8 @@ pub fn dispatchOp(world: *World, op: opcodes.Op) !void {
         // V4 spec §6.3, SuperSend uses self as receiver implicitly
         // — there's no SuperSendSelf.
         .super_send => |args| {
+            PROFILE.sends_total += 1;
+            PROFILE.super_sends += 1;
             try doSuperSend(world, args.selector, args.argc, args.ic_idx);
         },
 
@@ -330,6 +413,7 @@ pub fn dispatchOp(world: *World, op: opcodes.Op) !void {
         // (pop'd first); then receiver; then argc args. [NEW in V4]
         // — compiles down `:perform:withArgs:` directly.
         .send_dynamic => |args| {
+            PROFILE.sends_total += 1;
             const argc: usize = args.argc;
             if (world.vm.stack.items.len < argc + 2) return error.SendArgcOverflow;
             const sel_v = world.vm.stack.pop().?;
@@ -349,6 +433,7 @@ pub fn dispatchOp(world: *World, op: opcodes.Op) !void {
         // LoadSelf;Send fused. per V4 spec §6.6, top-level
         // dispatches with self_ = Nil; cleanly defined.
         .send_self => |args| {
+            PROFILE.sends_total += 1;
             const frame_idx = world.vm.frames.items.len - 1;
             const self_v = world.vm.frames.items[frame_idx].self_;
             const argc: usize = args.argc;
@@ -367,6 +452,7 @@ pub fn dispatchOp(world: *World, op: opcodes.Op) !void {
         // substrate's canonical here_form; bypasses user-level
         // $here rebinding (V4 spec §6.5).
         .send_here => |args| {
+            PROFILE.sends_total += 1;
             const argc: usize = args.argc;
             if (world.vm.stack.items.len < argc) return error.SendArgcOverflow;
             const args_start = world.vm.stack.items.len - argc;
@@ -382,6 +468,8 @@ pub fn dispatchOp(world: *World, op: opcodes.Op) !void {
         // TailSendSelf {sel, argc}: tail-position variant of SendSelf.
         // receiver = current frame's self_; replace frame. [NEW in V4]
         .tail_send_self => |args| {
+            PROFILE.sends_total += 1;
+            PROFILE.tail_sends += 1;
             const frame_idx = world.vm.frames.items.len - 1;
             const self_v = world.vm.frames.items[frame_idx].self_;
             const argc: usize = args.argc;
@@ -393,6 +481,8 @@ pub fn dispatchOp(world: *World, op: opcodes.Op) !void {
         // TailSendHere {sel, argc}: tail-position variant of SendHere.
         // [NEW in V4]
         .tail_send_here => |args| {
+            PROFILE.sends_total += 1;
+            PROFILE.tail_sends += 1;
             const argc: usize = args.argc;
             if (world.vm.stack.items.len < argc) return error.SendArgcOverflow;
             const split = world.vm.stack.items.len - argc;
@@ -543,6 +633,7 @@ pub fn prepareSendDispatch(
                 singleton_ok)
             {
                 // cache hit
+                PROFILE.ic_hits += 1;
                 world.vm.last_send_sel = selector;
                 return prepareInvoke(
                     world,
@@ -557,6 +648,7 @@ pub fn prepareSendDispatch(
     }
 
     // cache miss or stale — slow lookup + populate.
+    PROFILE.ic_misses += 1;
     const lookup = world.lookupHandler(receiver, selector);
     if (lookup) |hit| {
         const handler = hit.handler;
@@ -622,6 +714,7 @@ fn prepareDispatchDnu(
     call_args: []const Value,
     shrink_to: usize,
 ) anyerror!DispatchAction {
+    PROFILE.dnu_dispatches += 1;
     const dnu = world.dnu_sym;
     if (selector == dnu) {
         // we got here from a previous dnu fall-through — there's
@@ -678,6 +771,7 @@ pub fn prepareInvoke(
 ) anyerror!DispatchAction {
     // native? copy args, shrink stack, run inline; no frame push.
     if (world.nativeFn(method)) |native| {
+        PROFILE.sends_native += 1;
         const argc = call_args.len;
         if (argc == 0) {
             world.vm.stack.shrinkRetainingCapacity(shrink_to);
@@ -693,6 +787,8 @@ pub fn prepareInvoke(
     }
 
     // bytecode: build call env, bind params, push a frame.
+    PROFILE.sends_bytecode += 1;
+    PROFILE.frames_pushed += 1;
     const body_v = world.formSlot(method, world.body_sym);
     const chunk_id = body_v.asFormId() orelse return error.MethodBodyNotAChunk;
     const captured_env_v = world.formSlot(method, world.env_sym);

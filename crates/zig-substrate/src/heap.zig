@@ -88,6 +88,8 @@ pub const Heap = struct {
     /// (`laws/substrate-laws.md` L11). the caller transfers
     /// ownership of `form` (and its inner maps) to the heap.
     pub fn alloc(self: *Heap, form: Form) !FormId {
+        // perf: count form allocs via the vm profile counter table.
+        @import("vm.zig").PROFILE.forms_allocated += 1;
         const id = self.forms.items.len;
         // post-V0 the vat-local payload is 30 bits, so the per-vat
         // ceiling is ~1B forms.

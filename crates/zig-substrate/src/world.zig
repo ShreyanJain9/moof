@@ -533,6 +533,7 @@ pub const World = struct {
         var hops: usize = 0;
         const MAX_HOPS: usize = 256;
         while (hops < MAX_HOPS) : (hops += 1) {
+            vm_mod.PROFILE.load_name_walk_hops += 1;
             const f = self.heap.get(cur);
 
             // 1. current Form's slots.
@@ -606,6 +607,7 @@ pub const World = struct {
     /// equivalent to `def` in scheme — establishes a new local
     /// binding (or overwrites an existing local one).
     pub fn envBind(self: *World, env: FormId, name: SymId, val: Value) !void {
+        vm_mod.PROFILE.env_bind_calls += 1;
         const fm = self.heap.getMut(env);
         try fm.slots.put(self.allocator, name, val);
     }
@@ -723,10 +725,12 @@ pub const World = struct {
     /// handler for `selector`. used by lookupHandler and lookupHandlerSuper
     /// (with different starting points).
     fn walkChain(self: *const World, start: FormId, selector: SymId) ?HandlerHit {
+        vm_mod.PROFILE.proto_chain_walks += 1;
         var cur = start;
         var hops: usize = 0;
         const MAX_HOPS: usize = 256;
         while (hops < MAX_HOPS) : (hops += 1) {
+            vm_mod.PROFILE.proto_chain_hops += 1;
             const f = self.heap.get(cur);
             if (f.handler(selector)) |h| {
                 return .{ .handler = h, .defining = cur };
@@ -779,6 +783,7 @@ pub const World = struct {
 
     /// allocate a new Env-Form with `parent` linked via meta.
     pub fn allocEnv(self: *World, parent: FormId) !FormId {
+        vm_mod.PROFILE.envs_allocated += 1;
         var f = Form.withProto(.{ .form = self.protos.env });
         try f.meta.put(self.allocator, self.parent_sym, .{ .form = parent });
         return self.heap.alloc(f);
@@ -868,6 +873,7 @@ pub const World = struct {
     /// caller owns the slice (free with `freeSlice` or `allocator.free`).
     /// nil terminates; non-Cons / non-nil mid-chain raises type-error.
     pub fn listToSlice(self: *World, list: Value) ![]Value {
+        vm_mod.PROFILE.list_to_slice_calls += 1;
         // count first
         var n: usize = 0;
         var cur = list;
@@ -885,6 +891,7 @@ pub const World = struct {
                 else => break,
             }
         }
+        vm_mod.PROFILE.list_to_slice_total_items += n;
         const out = try self.allocator.alloc(Value, n);
         cur = list;
         var i: usize = 0;

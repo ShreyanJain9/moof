@@ -51,6 +51,13 @@ const GcOpts = struct {
 
 var g_gc_opts: GcOpts = .{};
 
+/// monotonic-time ns. uses C clock_gettime CLOCK_MONOTONIC.
+fn monotonicNs() u64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+}
+
 fn applyGcOpts(world: *World) void {
     world.gc_enabled = g_gc_opts.enabled;
     world.gc_stats_enabled = g_gc_opts.stats;
@@ -59,7 +66,8 @@ fn applyGcOpts(world: *World) void {
 pub fn main(init: std.process.Init) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const use_smp = if (init.minimal.environ.getPosix("MOOF_FAST_ALLOC")) |v| (v.len > 0 and !std.mem.eql(u8, v, "0")) else false;
+    const allocator = if (use_smp) std.heap.smp_allocator else gpa.allocator();
 
     // env var: `MOOF_GC_STATS=1` enables single-line GC summary per
     // collection cycle. silently no-op when unset.
@@ -195,6 +203,40 @@ pub fn main(init: std.process.Init) !void {
     if (sub_raw != null and std.mem.eql(u8, sub_raw.?, "stress-recursion")) {
         const depth: u32 = if (path_raw) |s| std.fmt.parseInt(u32, s, 10) catch 10000 else 10000;
         return runStressRecursion(allocator, depth);
+    }
+
+    if (sub_raw != null and std.mem.eql(u8, sub_raw.?, "bench-natives")) {
+        const iters: u32 = if (path_raw) |s| std.fmt.parseInt(u32, s, 10) catch 1000000 else 1000000;
+        return runBenchNatives(allocator, iters);
+    }
+
+    if (sub_raw != null and std.mem.eql(u8, sub_raw.?, "bench-loop")) {
+        const iters: u32 = if (path_raw) |s| std.fmt.parseInt(u32, s, 10) catch 1000000 else 1000000;
+        return runBenchLoop(allocator, iters);
+    }
+
+    if (sub_raw != null and std.mem.eql(u8, sub_raw.?, "bench-parser-like")) {
+        // simulates parser hot-path shape: deep proto chains, polymorphic
+        // call site, env walks, slot reads, alloc-per-send. one iter
+        // performs ~6 sends; iterations are independent.
+        const iters: u32 = if (path_raw) |s| std.fmt.parseInt(u32, s, 10) catch 10000 else 10000;
+        return runBenchParserLike(allocator, iters);
+    }
+
+    if (sub_raw != null and std.mem.eql(u8, sub_raw.?, "bench-polymorphic")) {
+        // alternates `:!!` between Bool and Nil receivers (two different
+        // protos at the same send site) — measures IC miss / re-resolve
+        // overhead on a polymorphic call site.
+        const iters: u32 = if (path_raw) |s| std.fmt.parseInt(u32, s, 10) catch 1000000 else 1000000;
+        return runBenchPolymorphic(allocator, iters);
+    }
+
+    if (sub_raw != null and std.mem.eql(u8, sub_raw.?, "bench-deep-env")) {
+        // mimics a parser-like deep env walk: build an env chain of `depth`
+        // levels, then look up a name that lives only at the deepest frame.
+        const depth: u32 = if (path_raw) |s| std.fmt.parseInt(u32, s, 10) catch 100 else 100;
+        const lookups: u32 = 100_000;
+        return runBenchDeepEnv(allocator, depth, lookups);
     }
 
     return runSmoke(allocator);
@@ -478,6 +520,256 @@ fn runBuildTrivialVat(allocator: std.mem.Allocator, io: std.Io, out_path: []cons
     std.debug.print("wrote trivial vat to {s}\n", .{out_path});
 }
 
+/// purely-native-dispatch microbench: tight loop of LoadConst, LoadConst,
+/// Send(+), Pop in a single chunk. measures the cost of one Send to a
+/// native handler with no frame push, no env alloc, no listToSlice.
+/// expectation: this is the upper bound of IC-fast-path performance.
+fn runBenchNatives(allocator: std.mem.Allocator, iters: u32) !void {
+    var world = try World.init(allocator);
+    defer world.deinit();
+    applyGcOpts(&world);
+    try intrinsics.install(&world);
+    std.debug.print("bench-natives: iters = {d}\n", .{iters});
+    const plus_sym = try world.syms.intern("+");
+    const chunk_id = try world.heap.alloc(Form.withProto(.{ .form = world.protos.chunk }));
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+
+    // n iterations of: push 1; push 2; Send :+; Pop
+    var i: u32 = 0;
+    while (i < iters) : (i += 1) {
+        try bytecode.encodeOp(.{ .load_const = .{ .idx = 0 } }, &buf, allocator);
+        try bytecode.encodeOp(.{ .load_const = .{ .idx = 1 } }, &buf, allocator);
+        try bytecode.encodeOp(.{ .send = .{ .selector = plus_sym, .argc = 1, .ic_idx = 0 } }, &buf, allocator);
+        try bytecode.encodeOp(.pop, &buf, allocator);
+    }
+    try bytecode.encodeOp(.push_nil, &buf, allocator);
+    try bytecode.encodeOp(.return_op, &buf, allocator);
+
+    try world.chunk_bytecode.put(allocator, chunk_id, try allocator.dupe(u8, buf.items));
+    const consts = try allocator.alloc(Value, 2);
+    consts[0] = .{ .int = 1 };
+    consts[1] = .{ .int = 2 };
+    try world.chunk_consts.put(allocator, chunk_id, consts);
+    try world.chunk_ics.put(allocator, chunk_id, try allocator.alloc(ICache, 1));
+    world.chunk_ics.get(chunk_id).?[0] = ICache.empty;
+    try world.chunk_params.put(allocator, chunk_id, try allocator.alloc(u32, 0));
+
+    world.gc_enabled = false;
+    const t0 = monotonicNs();
+    const result = try vm.runTop(&world, chunk_id);
+    const t1 = monotonicNs();
+    const elapsed_ns: u64 = t1 - t0;
+    std.debug.print("=> {s}\n", .{@tagName(result)});
+    std.debug.print("elapsed: {d} ns ({d:.3} ms)\n", .{ elapsed_ns, @as(f64, @floatFromInt(elapsed_ns)) / 1.0e6 });
+    const vm_mod = @import("vm.zig");
+    vm_mod.dumpProfile(elapsed_ns);
+}
+
+/// micro-microbench: just LoadConst + Pop in a tight loop. measures the
+/// absolute floor of dispatch cost (no Send overhead, no allocation).
+fn runBenchLoop(allocator: std.mem.Allocator, iters: u32) !void {
+    var world = try World.init(allocator);
+    defer world.deinit();
+    applyGcOpts(&world);
+    try intrinsics.install(&world);
+    std.debug.print("bench-loop: iters = {d}\n", .{iters});
+    const chunk_id = try world.heap.alloc(Form.withProto(.{ .form = world.protos.chunk }));
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+
+    var i: u32 = 0;
+    while (i < iters) : (i += 1) {
+        try bytecode.encodeOp(.{ .load_const = .{ .idx = 0 } }, &buf, allocator);
+        try bytecode.encodeOp(.pop, &buf, allocator);
+    }
+    try bytecode.encodeOp(.push_nil, &buf, allocator);
+    try bytecode.encodeOp(.return_op, &buf, allocator);
+
+    try world.chunk_bytecode.put(allocator, chunk_id, try allocator.dupe(u8, buf.items));
+    const consts = try allocator.alloc(Value, 1);
+    consts[0] = .{ .int = 42 };
+    try world.chunk_consts.put(allocator, chunk_id, consts);
+    try world.chunk_ics.put(allocator, chunk_id, try allocator.alloc(ICache, 0));
+    try world.chunk_params.put(allocator, chunk_id, try allocator.alloc(u32, 0));
+
+    world.gc_enabled = false;
+    const t0 = monotonicNs();
+    const result = try vm.runTop(&world, chunk_id);
+    const t1 = monotonicNs();
+    const elapsed_ns: u64 = t1 - t0;
+    std.debug.print("=> {s}\n", .{@tagName(result)});
+    std.debug.print("elapsed: {d} ns ({d:.3} ms)\n", .{ elapsed_ns, @as(f64, @floatFromInt(elapsed_ns)) / 1.0e6 });
+    const vm_mod = @import("vm.zig");
+    vm_mod.dumpProfile(elapsed_ns);
+}
+
+/// parser-like microbench: each iteration does ~6 sends across multiple
+/// receiver types (Int, Bool, Object), with deep proto chain (Integer → Object).
+/// approximates the parser's hot path (lexer doing :isDigit:, etc.).
+fn runBenchParserLike(allocator: std.mem.Allocator, iters: u32) !void {
+    var world = try World.init(allocator);
+    defer world.deinit();
+    applyGcOpts(&world);
+    try intrinsics.install(&world);
+    std.debug.print("bench-parser-like: iters = {d}\n", .{iters});
+
+    const plus_sym = try world.syms.intern("+");
+    const lt_sym = try world.syms.intern("<");
+    const gt_sym = try world.syms.intern(">");
+    const eq_sym = try world.syms.intern("=");
+    const chunk_id = try world.heap.alloc(Form.withProto(.{ .form = world.protos.chunk }));
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+
+    // mimic isDigit: [cp < 48] (#false unless [cp > 57]) -- 2 comparisons.
+    // we do 4 comparisons + 2 arithmetic per iter, 6 sends per iter.
+    var i: u32 = 0;
+    while (i < iters) : (i += 1) {
+        // [48 < 57]
+        try bytecode.encodeOp(.{ .load_const = .{ .idx = 0 } }, &buf, allocator);
+        try bytecode.encodeOp(.{ .load_const = .{ .idx = 1 } }, &buf, allocator);
+        try bytecode.encodeOp(.{ .send = .{ .selector = lt_sym, .argc = 1, .ic_idx = 0 } }, &buf, allocator);
+        try bytecode.encodeOp(.pop, &buf, allocator);
+        // [57 > 48]
+        try bytecode.encodeOp(.{ .load_const = .{ .idx = 1 } }, &buf, allocator);
+        try bytecode.encodeOp(.{ .load_const = .{ .idx = 0 } }, &buf, allocator);
+        try bytecode.encodeOp(.{ .send = .{ .selector = gt_sym, .argc = 1, .ic_idx = 1 } }, &buf, allocator);
+        try bytecode.encodeOp(.pop, &buf, allocator);
+        // [48 = 57]
+        try bytecode.encodeOp(.{ .load_const = .{ .idx = 0 } }, &buf, allocator);
+        try bytecode.encodeOp(.{ .load_const = .{ .idx = 1 } }, &buf, allocator);
+        try bytecode.encodeOp(.{ .send = .{ .selector = eq_sym, .argc = 1, .ic_idx = 2 } }, &buf, allocator);
+        try bytecode.encodeOp(.pop, &buf, allocator);
+        // [48 + 57]
+        try bytecode.encodeOp(.{ .load_const = .{ .idx = 0 } }, &buf, allocator);
+        try bytecode.encodeOp(.{ .load_const = .{ .idx = 1 } }, &buf, allocator);
+        try bytecode.encodeOp(.{ .send = .{ .selector = plus_sym, .argc = 1, .ic_idx = 3 } }, &buf, allocator);
+        try bytecode.encodeOp(.pop, &buf, allocator);
+    }
+    try bytecode.encodeOp(.push_nil, &buf, allocator);
+    try bytecode.encodeOp(.return_op, &buf, allocator);
+
+    try world.chunk_bytecode.put(allocator, chunk_id, try allocator.dupe(u8, buf.items));
+    const consts = try allocator.alloc(Value, 2);
+    consts[0] = .{ .int = 48 };
+    consts[1] = .{ .int = 57 };
+    try world.chunk_consts.put(allocator, chunk_id, consts);
+    try world.chunk_ics.put(allocator, chunk_id, try allocator.alloc(ICache, 4));
+    for (world.chunk_ics.get(chunk_id).?) |*ic| ic.* = ICache.empty;
+    try world.chunk_params.put(allocator, chunk_id, try allocator.alloc(u32, 0));
+
+    world.gc_enabled = false;
+    const t0 = monotonicNs();
+    const result = try vm.runTop(&world, chunk_id);
+    const t1 = monotonicNs();
+    const elapsed_ns: u64 = t1 - t0;
+    std.debug.print("=> {s}\n", .{@tagName(result)});
+    std.debug.print("elapsed: {d} ns ({d:.3} ms)\n", .{ elapsed_ns, @as(f64, @floatFromInt(elapsed_ns)) / 1.0e6 });
+    const vm_mod = @import("vm.zig");
+    vm_mod.dumpProfile(elapsed_ns);
+}
+
+/// alternating-receiver Send. iter 0: send :!! to true; iter 1: to nil; etc.
+/// because the IC at one site is monomorphic, every send is a miss + reload.
+fn runBenchPolymorphic(allocator: std.mem.Allocator, iters: u32) !void {
+    var world = try World.init(allocator);
+    defer world.deinit();
+    applyGcOpts(&world);
+    try intrinsics.install(&world);
+    std.debug.print("bench-polymorphic: iters = {d}\n", .{iters});
+    const bb_sym = try world.syms.intern("!!");
+    const chunk_id = try world.heap.alloc(Form.withProto(.{ .form = world.protos.chunk }));
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+
+    var i: u32 = 0;
+    while (i < iters) : (i += 1) {
+        // alternate between push_true and push_nil; send :!! on each.
+        if (i % 2 == 0) try bytecode.encodeOp(.push_true, &buf, allocator) else try bytecode.encodeOp(.push_nil, &buf, allocator);
+        try bytecode.encodeOp(.{ .send = .{ .selector = bb_sym, .argc = 0, .ic_idx = 0 } }, &buf, allocator);
+        try bytecode.encodeOp(.pop, &buf, allocator);
+    }
+    try bytecode.encodeOp(.push_nil, &buf, allocator);
+    try bytecode.encodeOp(.return_op, &buf, allocator);
+
+    try world.chunk_bytecode.put(allocator, chunk_id, try allocator.dupe(u8, buf.items));
+    try world.chunk_consts.put(allocator, chunk_id, try allocator.alloc(Value, 0));
+    try world.chunk_ics.put(allocator, chunk_id, try allocator.alloc(ICache, 1));
+    world.chunk_ics.get(chunk_id).?[0] = ICache.empty;
+    try world.chunk_params.put(allocator, chunk_id, try allocator.alloc(u32, 0));
+
+    world.gc_enabled = false;
+    const t0 = monotonicNs();
+    const result = try vm.runTop(&world, chunk_id);
+    const t1 = monotonicNs();
+    const elapsed_ns: u64 = t1 - t0;
+    std.debug.print("=> {s}\n", .{@tagName(result)});
+    std.debug.print("elapsed: {d} ns ({d:.3} ms)\n", .{ elapsed_ns, @as(f64, @floatFromInt(elapsed_ns)) / 1.0e6 });
+    const vm_mod = @import("vm.zig");
+    vm_mod.dumpProfile(elapsed_ns);
+}
+
+/// build a deep env chain, then time `lookups` LoadName ops at the chain's
+/// deepest frame for a sym bound in the OLDEST env (worst case env walk).
+fn runBenchDeepEnv(allocator: std.mem.Allocator, depth: u32, lookups: u32) !void {
+    var world = try World.init(allocator);
+    defer world.deinit();
+    applyGcOpts(&world);
+    try intrinsics.install(&world);
+    std.debug.print("bench-deep-env: depth = {d}, lookups = {d}\n", .{ depth, lookups });
+
+    const target_sym = try world.syms.intern("target-name");
+    try world.envBind(world.here_form, target_sym, .{ .int = 42 });
+
+    // build a chain of envs: each one's parent is the previous one.
+    var cur = world.here_form;
+    var i: u32 = 0;
+    while (i < depth) : (i += 1) {
+        cur = try world.allocEnv(cur);
+    }
+    const deepest = cur;
+
+    // chunk that does LoadName ; Pop in a loop.
+    const chunk_id = try world.heap.alloc(Form.withProto(.{ .form = world.protos.chunk }));
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var j: u32 = 0;
+    while (j < lookups) : (j += 1) {
+        try bytecode.encodeOp(.{ .load_name = .{ .name = target_sym } }, &buf, allocator);
+        try bytecode.encodeOp(.pop, &buf, allocator);
+    }
+    try bytecode.encodeOp(.push_nil, &buf, allocator);
+    try bytecode.encodeOp(.return_op, &buf, allocator);
+
+    try world.chunk_bytecode.put(allocator, chunk_id, try allocator.dupe(u8, buf.items));
+    try world.chunk_consts.put(allocator, chunk_id, try allocator.alloc(Value, 0));
+    try world.chunk_ics.put(allocator, chunk_id, try allocator.alloc(ICache, 0));
+    try world.chunk_params.put(allocator, chunk_id, try allocator.alloc(u32, 0));
+
+    // override the frame so it runs in the deepest env.
+    world.gc_enabled = false;
+    try world.vm.frames.append(allocator, world_mod.Frame{
+        .chunk = chunk_id,
+        .pc = 0,
+        .env = deepest,
+        .self_ = .nil,
+        .stack_base = @intCast(world.vm.stack.items.len),
+        .defining_proto = FormId.NONE,
+    });
+    const starting_depth = world.vm.frames.items.len - 1;
+    const t0 = monotonicNs();
+    while (world.vm.frames.items.len > starting_depth) {
+        try vm.step(&world);
+    }
+    const t1 = monotonicNs();
+    const elapsed_ns: u64 = t1 - t0;
+    _ = world.vm.stack.pop();
+    std.debug.print("elapsed: {d} ns ({d:.3} ms)\n", .{ elapsed_ns, @as(f64, @floatFromInt(elapsed_ns)) / 1.0e6 });
+    const vm_mod = @import("vm.zig");
+    vm_mod.dumpProfile(elapsed_ns);
+}
+
 fn runStressRecursion(allocator: std.mem.Allocator, depth: u32) !void {
     var world = try World.init(allocator);
     defer world.deinit();
@@ -516,9 +808,30 @@ fn runStressRecursion(allocator: std.mem.Allocator, depth: u32) !void {
     const params = try allocator.alloc(u32, 1);
     params[0] = n_sym;
     try world.chunk_params.put(allocator, chunk_id, params);
+    // wrap chunk in a method-Form (proto=method, :body=chunk, :env=here, :params=(n))
+    var method_form = Form.withProto(.{ .form = world.protos.method });
+    try method_form.slots.put(allocator, world.body_sym, .{ .form = chunk_id });
+    try method_form.slots.put(allocator, world.env_sym, .{ .form = world.here_form });
+    const params_list = try world.makeList(&.{.{ .sym = n_sym }});
+    try method_form.slots.put(allocator, world.params_sym, params_list);
+    const method_id = try world.heap.alloc(method_form);
+
     const proto_id = try world.heap.alloc(Form.init());
-    try world.heap.getMut(proto_id).handlers.put(allocator, rec_sym, .{ .form = chunk_id });
+    try world.heap.getMut(proto_id).handlers.put(allocator, rec_sym, .{ .form = method_id });
     const instance_id = try world.heap.alloc(Form.withProto(.{ .form = proto_id }));
+
+    // disable GC during the benchmark to avoid noise.
+    world.gc_enabled = false;
+
+    const t0 = monotonicNs();
     const result = try world.send(.{ .form = instance_id }, rec_sym, &.{.{ .int = depth }});
+    const t1 = monotonicNs();
+    const elapsed_ns: u64 = t1 - t0;
+
     std.debug.print("=> {s}\n", .{@tagName(result)});
+    std.debug.print("elapsed: {d} ns ({d:.3} ms)\n", .{ elapsed_ns, @as(f64, @floatFromInt(elapsed_ns)) / 1.0e6 });
+
+    // dump profiling counters.
+    const vm_mod = @import("vm.zig");
+    vm_mod.dumpProfile(elapsed_ns);
 }
