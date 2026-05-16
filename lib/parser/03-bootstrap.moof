@@ -57,11 +57,14 @@
 ;;
 ;; the flip is restored once either (a) the substrate gets a GC
 ;; pass, or (b) the parser is rewritten to be flatter (fewer
-;; recursive sends, fewer Env allocations). until then, parsing
-;; continues to route through the rust seed reader — which
-;; matches every other parser-in-development project's reality
-;; (you can't self-host a parser if every parse permanently
-;; leaks a stack frame). see the agent handoff brief for the
-;; full investigation.
+;; recursive sends, fewer Env allocations).
 ;;
-;; [$reader useMoof]
+;; UPDATE 2026-05-15: zig substrate GC landed at commit 4ebaf84.
+;; rust substrate still has no GC — so the flip leaks in the rust
+;; build-time path, but is fine in the zig runtime path. since rust
+;; is queued for deletion (task #7 W5e), and the build-time path is
+;; being moved to ocaml-seed + zig (task #23), re-enabling the flip
+;; here is now correct for the END STATE. it's a no-op for zig
+;; (zig substrate has no alternative reader) and a leak for rust
+;; (until rust is deleted).
+[$reader useMoof]
