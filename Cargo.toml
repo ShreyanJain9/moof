@@ -4,7 +4,7 @@ members = [
     "crates/abi",
     "crates/abi-rust",
     "crates/mco-pack",
-    "crates/substrate",
+    "players/rust",
 ]
 
 [workspace.package]
