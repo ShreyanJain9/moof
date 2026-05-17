@@ -129,6 +129,50 @@ pub const FormId = packed struct(u32) {
 /// an allocator field — allocators flow in through Form methods.
 pub const SlotMap = std.AutoArrayHashMapUnmanaged(u32, Value);
 
+/// **phase 2 §5.8d — per-proto Layout.**
+///
+/// generalizes the FlatCons hack (commit `6d71df6`) so any proto can
+/// declare a fixed schema of named slots, and the substrate stores
+/// instances with those slots inline on the Form struct — no SlotMap
+/// traffic for the common allocation/read/write path.
+///
+/// the schema is just an ordered list of slot-name SymIds. small-N
+/// (typically 1–4) linear search on read/write — faster than a hash
+/// probe when N ≤ 8, which it always is for any reasonable proto.
+///
+/// Layouts are immutable. allocated once per proto (usually at boot
+/// for the canonical protos; later via defproto for user protos),
+/// then keyed in `world.proto_layouts` for instance lookup. lives as
+/// long as the World.
+///
+/// **the four faces (`docs/concepts/forms.md`) are materialized
+/// identically** to general Forms: a Layout-backed Form's `slot(sym)`
+/// returns the inline value, `slotPresent` is true for any layout
+/// slot, `slotCount` counts inline + extras, and reflection iterators
+/// yield layout slots in declaration order then extras in insertion
+/// order. handlers / meta / frozen / become_ are untouched.
+pub const Layout = struct {
+    /// ordered list of canonical slot names. linear search on access
+    /// (small N). order matches user-observable insertion order: the
+    /// slot at index 0 was "added first" at allocation time.
+    slot_names: []const u32,
+    /// equal to `slot_names.len`. cached as `u8` since INLINE_CAPACITY
+    /// is small and this is read on every slot access.
+    inline_size: u8,
+};
+
+/// max number of inline slots per Form. covers every canonical layout
+/// the substrate ships at boot:
+/// - Cons       → 2 (car, cdr)
+/// - Env        → 1 (parent meta is separate; layout reserved for future)
+/// - Counter    → 1 (count)
+/// - Method     → 4 (body, env, source, params) — exact fit
+/// - Closure    → 4 (body, env, captured-self, params) — exact fit
+///
+/// any proto with > INLINE_CAPACITY canonical slots spills the rest
+/// (or all of them) to extras. rare; not currently triggered.
+pub const INLINE_CAPACITY: u8 = 4;
+
 /// phase 2 §5.8b — global SymIds for `car` / `cdr`. set by
 /// `setConsSyms` at World.init and after image-load (the loader
 /// re-interns the sym table, so the SymIds shift). when both are
@@ -210,10 +254,31 @@ pub const Form = struct {
     meta: SlotMap,
 
     /// phase 2 §5.8b — FlatCons inline `:car`. valid iff `is_flat_cons`.
+    /// **DEPRECATED §5.8d** — to be removed once Cons fully migrates
+    /// to Layout. while present, accessors prefer `layout`/`inline_slots`
+    /// when `layout != null`.
     car_inline: Value,
 
     /// phase 2 §5.8b — FlatCons inline `:cdr`. valid iff `is_flat_cons`.
+    /// **DEPRECATED §5.8d** — see car_inline.
     cdr_inline: Value,
+
+    /// phase 2 §5.8d — per-proto Layout descriptor, or `null` for a
+    /// "general" Form whose slots all live in the SlotMap. when set,
+    /// `inline_slots[0..layout.inline_size]` holds the canonical slot
+    /// values in declaration order. non-canonical user-added slots
+    /// fall through to `slots`.
+    ///
+    /// the pointer is borrowed; the Layout is owned by the World
+    /// (proto_layouts arena, lives as long as the proto). nulled out
+    /// on tombstone — sweep clears it alongside is_flat_cons.
+    layout: ?*const Layout,
+
+    /// phase 2 §5.8d — inline storage for the layout's canonical
+    /// slots. only `inline_slots[0..layout.inline_size]` is valid;
+    /// the rest is `.nil`-initialized and ignored. zero-padded so
+    /// `Form.init()` doesn't have to special-case the layout case.
+    inline_slots: [INLINE_CAPACITY]Value,
 
     /// V2 — freezing. once `true`, slot/handler/meta writes raise
     /// `'frozen-form`. one-way; no thaw. transition itself is a
@@ -260,6 +325,8 @@ pub const Form = struct {
             .meta = .empty,
             .car_inline = .nil,
             .cdr_inline = .nil,
+            .layout = null,
+            .inline_slots = [_]Value{.nil} ** INLINE_CAPACITY,
             .frozen = false,
             .is_flat_cons = false,
             .gc_mark = false,
@@ -278,6 +345,10 @@ pub const Form = struct {
     /// `cons_proto_v` (caller passes `Value{.form = world.protos.cons}`);
     /// `car_inline` / `cdr_inline` populated; `slots` empty. allocation-
     /// free (no SlotMap put).
+    ///
+    /// **DEPRECATED §5.8d** — use `withLayout` instead. while present,
+    /// this still works (paths that read FlatCons fields still exist
+    /// during the migration).
     pub fn flatCons(cons_proto_v: Value, car: Value, cdr: Value) Form {
         return .{
             .proto = cons_proto_v,
@@ -286,8 +357,32 @@ pub const Form = struct {
             .meta = .empty,
             .car_inline = car,
             .cdr_inline = cdr,
+            .layout = null,
+            .inline_slots = [_]Value{.nil} ** INLINE_CAPACITY,
             .frozen = false,
             .is_flat_cons = true,
+            .gc_mark = false,
+            .gc_tombstone = false,
+        };
+    }
+
+    /// phase 2 §5.8d — build a Form whose proto carries a Layout.
+    /// canonical slot values default to `.nil`; caller may populate
+    /// some/all of `inline_slots[0..layout.inline_size]` before alloc.
+    /// SlotMap stays empty (extras lazy-init on first non-canonical
+    /// slot write).
+    pub fn withLayout(proto_v: Value, layout: *const Layout) Form {
+        return .{
+            .proto = proto_v,
+            .slots = .empty,
+            .handlers = .empty,
+            .meta = .empty,
+            .car_inline = .nil,
+            .cdr_inline = .nil,
+            .layout = layout,
+            .inline_slots = [_]Value{.nil} ** INLINE_CAPACITY,
+            .frozen = false,
+            .is_flat_cons = false,
             .gc_mark = false,
             .gc_tombstone = false,
         };
@@ -307,11 +402,17 @@ pub const Form = struct {
     /// callers that need to distinguish "missing" from "explicitly
     /// nil" use `slotPresent`.
     ///
-    /// phase 2 §5.8b: for FlatCons Forms, `:car` / `:cdr` return the
-    /// inline fields. requires `CONS_CAR_SYM` / `CONS_CDR_SYM` to be
-    /// set (World.init does this; tests that bypass init may need to
-    /// call `setConsSyms` themselves).
+    /// phase 2 §5.8d: for Layout-backed Forms, linear-search the
+    /// layout's slot_names; on match, return the inline_slot at that
+    /// index. fall through to FlatCons handling (deprecated) and the
+    /// SlotMap.
     pub fn slot(self: *const Form, name: u32) Value {
+        if (self.layout) |lay| {
+            var i: u8 = 0;
+            while (i < lay.inline_size) : (i += 1) {
+                if (lay.slot_names[i] == name) return self.inline_slots[i];
+            }
+        }
         if (self.is_flat_cons) {
             if (name == CONS_CAR_SYM) return self.car_inline;
             if (name == CONS_CDR_SYM) return self.cdr_inline;
@@ -321,10 +422,16 @@ pub const Form = struct {
 
     /// `true` if `name` is bound in this Form's slots.
     ///
-    /// phase 2 §5.8b: for FlatCons Forms, `:car` / `:cdr` are always
-    /// present (their inline storage IS the binding, even if the
-    /// value is `nil`).
+    /// phase 2 §5.8d: for Layout-backed Forms, any name in the
+    /// layout's slot_names is always present (its inline storage IS
+    /// the binding, even if the current value is `nil`).
     pub fn slotPresent(self: *const Form, name: u32) bool {
+        if (self.layout) |lay| {
+            var i: u8 = 0;
+            while (i < lay.inline_size) : (i += 1) {
+                if (lay.slot_names[i] == name) return true;
+            }
+        }
         if (self.is_flat_cons) {
             if (name == CONS_CAR_SYM or name == CONS_CDR_SYM) return true;
         }
@@ -345,13 +452,35 @@ pub const Form = struct {
         return if (self.meta.get(name)) |v| v else Value.nil;
     }
 
-    /// phase 2 §5.8b — count of *observable* slot bindings, including
-    /// the synthesized `:car` / `:cdr` for FlatCons Forms. callers
-    /// doing reflection (e.g. image-serializer, `[obj slots]`) should
-    /// use this instead of `self.slots.count()`.
+    /// phase 2 §5.8b/d — count of *observable* slot bindings, including
+    /// the synthesized layout slots (Layout-backed Forms) or `:car`/`:cdr`
+    /// (legacy FlatCons). callers doing reflection (e.g. image-serializer,
+    /// `[obj slots]`) should use this instead of `self.slots.count()`.
     pub fn slotCount(self: *const Form) usize {
+        if (self.layout) |lay| return @as(usize, lay.inline_size) + self.slots.count();
         if (self.is_flat_cons) return 2 + self.slots.count();
         return self.slots.count();
+    }
+
+    /// **§5.8d** — try to write `name`'s value to an inline slot when
+    /// the Form has a Layout. returns `true` if a layout slot matched
+    /// (caller is done); `false` if the name isn't in the layout
+    /// (caller falls back to SlotMap).
+    ///
+    /// callers MUST check `frozen` before calling — this is the inner
+    /// write that bypasses freezing (so e.g. boot code can populate
+    /// inline_slots before the freeze pass).
+    pub fn layoutTrySet(self: *Form, name: u32, val: Value) bool {
+        if (self.layout) |lay| {
+            var i: u8 = 0;
+            while (i < lay.inline_size) : (i += 1) {
+                if (lay.slot_names[i] == name) {
+                    self.inline_slots[i] = val;
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 };
 
@@ -414,6 +543,57 @@ test "FlatCons: not-flat Form unaffected by CONS_CAR_SYM" {
     // an empty general Form — slot(101) returns nil; not "always-present"
     try testing.expect(f.slot(101).equals(Value.nil));
     try testing.expect(!f.slotPresent(101));
+}
+
+// ─────────────────────────────────────────────────────────────────
+// §5.8d Layout contract tests. exercises the same four-faces
+// invariants as FlatCons but via the generalized Layout dispatch.
+// ─────────────────────────────────────────────────────────────────
+
+test "Layout: slot returns inline value at layout index" {
+    const slot_syms = [_]u32{ 101, 102 };
+    const lay = Layout{ .slot_names = &slot_syms, .inline_size = 2 };
+    var f = Form.withLayout(Value.nil, &lay);
+    f.inline_slots[0] = Value{ .int = 7 };
+    f.inline_slots[1] = Value.nil;
+    try testing.expect(f.slot(101).equals(Value{ .int = 7 }));
+    try testing.expect(f.slot(102).equals(Value.nil));
+    try testing.expect(f.slot(999).equals(Value.nil)); // not in layout
+    try testing.expectEqual(@as(usize, 2), f.slotCount());
+}
+
+test "Layout: slotPresent true for layout names, false for unknown" {
+    const slot_syms = [_]u32{ 101, 102, 103 };
+    const lay = Layout{ .slot_names = &slot_syms, .inline_size = 3 };
+    const f = Form.withLayout(Value.nil, &lay);
+    try testing.expect(f.slotPresent(101));
+    try testing.expect(f.slotPresent(102));
+    try testing.expect(f.slotPresent(103));
+    try testing.expect(!f.slotPresent(999));
+}
+
+test "Layout: layoutTrySet writes inline; non-layout returns false" {
+    const slot_syms = [_]u32{ 101, 102 };
+    const lay = Layout{ .slot_names = &slot_syms, .inline_size = 2 };
+    var f = Form.withLayout(Value.nil, &lay);
+    try testing.expect(f.layoutTrySet(101, Value{ .int = 42 }));
+    try testing.expect(f.layoutTrySet(102, Value{ .int = 7 }));
+    try testing.expect(!f.layoutTrySet(999, Value{ .int = 1 }));
+    try testing.expect(f.slot(101).equals(Value{ .int = 42 }));
+    try testing.expect(f.slot(102).equals(Value{ .int = 7 }));
+}
+
+test "Layout: extras slot lives in SlotMap; counted in slotCount" {
+    const slot_syms = [_]u32{ 101 };
+    const lay = Layout{ .slot_names = &slot_syms, .inline_size = 1 };
+    var f = Form.withLayout(Value.nil, &lay);
+    defer f.deinit(testing.allocator);
+    f.inline_slots[0] = Value{ .int = 1 };
+    try f.slots.put(testing.allocator, 999, Value{ .int = 42 });
+    try testing.expectEqual(@as(usize, 2), f.slotCount()); // 1 inline + 1 extra
+    try testing.expect(f.slot(999).equals(Value{ .int = 42 }));
+    try testing.expect(f.slot(101).equals(Value{ .int = 1 }));
+    try testing.expect(!f.slots.contains(101));
 }
 
 test "FlatCons: car/cdr/handlers/meta all still independent" {
