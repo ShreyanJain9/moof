@@ -275,7 +275,7 @@ requires explicit justification.
 writing an mco from rust:
 
 ```rust
-// crates/moof-mco-blake3/src/lib.rs
+// lib/mcos/blake3-rs/src/lib.rs
 use moof_abi_rust::*;
 
 moof_object! {
