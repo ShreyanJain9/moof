@@ -27,11 +27,11 @@ phase 1 of the vats+substrate carve. design at `docs/superpowers/specs/2026-05-1
 
 ### workstream C — intrinsic shrink first pass
 
-**1 method removed:** `Object:initialize` from zig intrinsics; canonical is now `(defmethod Object (initialize) self)` in stdlib/object.moof. starting intrinsics.zig LoC: 2506, ending: 2503.
+**1 method removed:** `Object:initialize` from zig intrinsics; canonical is now `(defmethod Object (initialize) self)` in stdlib/object.moof. C's isolated diff: 2506 → 2503 (-3 lines).
 
 **Important finding:** the zig substrate was already designed minimally. the methods the plan expected to remove (Cons:length, Cons:map:, Integer:abs, String:trim, etc.) were never added to zig intrinsics — the zig port started conservative. only `Object:initialize` (trivial `return self` stub) was safely removable without modifying the OCaml seed.
 
-**LoC budget status:** 2503 (vs 2506 start; original target was ~1750). The 30% target was based on rust's `intrinsics.rs` as a reference; reality is the zig port never had those redundancies. Future shrink approaches (move chunk/opcode infrastructure to moof, move transporter internals) require deeper redesign and aren't "first pass" work.
+**Net intrinsics.zig LoC after phase 1: 2546** (vs 2506 at phase 1 start). C removed 3 lines; B added ~43 lines (new `__vat-mode__` + `__alloc-mutable__` intrinsics, `isFreezable` predicate, `objFreeze` enhancement, plus doc comments and the `TODO(phase2)` notes). The substrate grew slightly because freezing-as-prereq-for-V4 required new code; the "shrink first pass" demonstrated the existing surface was already minimal rather than producing net reduction. Honest framing: phase 1 added vat-mode surface area; intrinsic reduction will come from future restructuring (chunk/opcode, transporter — see classification doc).
 
 **bootstrap warning:** `image-load: unknown native 'Object:initialize' for form_id=87 — skipping` — harmless. seed.vat still references it; the moof defmethod shadows it. warning disappears when OCaml seed is updated.
 
