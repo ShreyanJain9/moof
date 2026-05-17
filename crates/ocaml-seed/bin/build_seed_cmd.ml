@@ -407,14 +407,23 @@ let finalize_lifted_forms () : Image.vat_form list =
      - everything else proto:Object
    ---------------------------------------------------------------- *)
 
-(* The boot proto FormIds, captured after allocation. Order in this
-   record matches the V4 image header's proto-table order (spec §10.3
-   and image.ml::proto_table). *)
+(* The boot proto FormIds, captured after allocation. Field order
+   roughly tracks V4 image header proto-table order (spec §10.3 and
+   image.ml::proto_table) — but the wire table is locked at 18
+   canonical entries, so `float_id` lives outside it. Float is
+   allocated like any other proto and bound by name on here_form, but
+   omitted from `protos_table` / header. Once zig substrate grows a
+   `Protos.float` field (today its `protoOf(.float)` returns Object —
+   see crates/zig-substrate/src/world.zig:715), the V4 header layout
+   will need a wire-format bump to carry the id; for now we just need
+   `Float` resolvable as a name so stdlib/float.moof can `defmethod`
+   onto it. *)
 type boot_protos = {
   object_id   : int;
   nil_id      : int;
   bool_id     : int;
   integer_id  : int;
+  float_id    : int;
   char_id     : int;
   sym_id      : int;
   cons_id     : int;
@@ -456,6 +465,11 @@ let bootstrap_protos () : boot_protos =
   let nil_id = p "Nil" in
   let bool_id = p "Bool" in
   let integer_id = p "Integer" in
+  (* Float: proto chain is Object (mirrors crates/substrate/src/protos.rs:75
+     and Integer). Not part of the V4 image proto-table (header carries
+     18 entries; Float is the 19th), but needs a Form so user-level
+     `defmethod Float ...` resolves. *)
+  let float_id = p "Float" in
   let char_id = p "Char" in
   let sym_id = p "Symbol" in
   let cons_id = p "Cons" in
@@ -472,9 +486,9 @@ let bootstrap_protos () : boot_protos =
   let macros_id = p "Macros" in
   let opcode_id = p "Opcode" in
   {
-    object_id; nil_id; bool_id; integer_id; char_id; sym_id; cons_id;
-    string_id; bytes_id; method_id; chunk_id; closure_id; env_id;
-    foreign_id; table_id; frame_id; macros_id; opcode_id;
+    object_id; nil_id; bool_id; integer_id; float_id; char_id; sym_id;
+    cons_id; string_id; bytes_id; method_id; chunk_id; closure_id;
+    env_id; foreign_id; table_id; frame_id; macros_id; opcode_id;
   }
 
 (* ----------------------------------------------------------------
@@ -488,8 +502,9 @@ let bootstrap_protos () : boot_protos =
    here_form is the env-Form serving as the vat's globals. Its proto
    is Env, its :meta.parent is Nil (root of env chain), and one of its
    slots binds `$here` to itself (so [Env current] / `$here`-lookup
-   resolves). We also seed bindings for the 18 proto names so user
-   code can reach `Object`, `Cons`, etc. by name.
+   resolves). We also seed bindings for the 18 canonical proto names
+   (Object, Cons, …, Opcode) plus Float so user code can reach them
+   by name.
 
    macros_form is the canonical macro registry — a plain Object-proto
    Form whose slots will hold macro-name → method-Form once macros
@@ -530,6 +545,7 @@ let patch_here_form (here_id : int) (bp : boot_protos) : unit =
   let nil_s = Compiler.intern "Nil" in
   let bool_s = Compiler.intern "Bool" in
   let integer_s = Compiler.intern "Integer" in
+  let float_s = Compiler.intern "Float" in
   let char_s = Compiler.intern "Char" in
   (* canonical user-facing name is "Symbol" — matches rust substrate
      and what moof code uses (e.g. early/04-symbol.moof's `Symbol`
@@ -553,6 +569,7 @@ let patch_here_form (here_id : int) (bp : boot_protos) : unit =
     (nil_s,       Ast.FormRef bp.nil_id);
     (bool_s,      Ast.FormRef bp.bool_id);
     (integer_s,   Ast.FormRef bp.integer_id);
+    (float_s,     Ast.FormRef bp.float_id);
     (char_s,      Ast.FormRef bp.char_id);
     (sym_s,       Ast.FormRef bp.sym_id);
     (cons_s,      Ast.FormRef bp.cons_id);
@@ -799,6 +816,7 @@ let canonical_proto_map (bp : boot_protos) : (string, int) Hashtbl.t =
   Hashtbl.add h "Nil"           bp.nil_id;
   Hashtbl.add h "Bool"          bp.bool_id;
   Hashtbl.add h "Integer"       bp.integer_id;
+  Hashtbl.add h "Float"         bp.float_id;
   Hashtbl.add h "Char"          bp.char_id;
   Hashtbl.add h "Symbol"        bp.sym_id;
   Hashtbl.add h "Cons"          bp.cons_id;
