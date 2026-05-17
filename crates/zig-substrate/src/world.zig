@@ -562,12 +562,6 @@ pub const World = struct {
         const self_sym = try syms.intern("self");
         const bytes_sym = try syms.intern("bytes");
 
-        // §5.8b — set globals so Form.slot / Form.slotPresent honor
-        // the FlatCons inline fields. these are process-wide (one
-        // World per process in V4 phase α). image-load re-interns the
-        // sym table; main.zig calls setConsSyms again after load.
-        form.setConsSyms(car_sym, cdr_sym);
-
         // allocate the here_form: proto = Env, meta.parent = Nil
         // (it's the root of the env chain for this vat).
         var here_form_init = Form.withProto(Value{ .form = protos.env });
@@ -679,12 +673,6 @@ pub const World = struct {
         const self_sym = try syms.intern("self");
         const name_sym = try syms.intern("name");
         const bytes_sym = try syms.intern("bytes");
-
-        // §5.8b — set globals so Form.slot / Form.slotPresent honor
-        // the FlatCons inline fields. these are process-wide (one
-        // World per process in V4 phase α). image-load re-interns the
-        // sym table; main.zig calls setConsSyms again after load.
-        form.setConsSyms(car_sym, cdr_sym);
 
         // every proto FormId starts at NONE; image's header populates.
         // NB: Cons layout is registered post-load by `loadVatImage`,
@@ -1051,48 +1039,33 @@ pub const World = struct {
         }
         // new-alloc within turn, or no turn — write canonical.
         if (fm.layoutTrySet(slot_name, val)) return;
-        if (fm.is_flat_cons) {
-            if (slot_name == self.symCar) {
-                fm.car_inline = val;
-                return;
-            }
-            if (slot_name == self.symCdr) {
-                fm.cdr_inline = val;
-                return;
-            }
-            // fall through: non-canonical slot writes use the SlotMap.
-        }
         try fm.slots.put(self.allocator, slot_name, val);
         if (slot_name == self.symBytes) self.invalidateStringCaches(id);
     }
 
-    /// phase 2 §5.8b — allocate a fresh FlatCons cell. inline-fields
-    /// only, no SlotMap traffic. callers: `consConsInto`, `consReverse`,
-    /// `globalCons`, `World.makeList`. on-disk image format treats
-    /// FlatCons as a Form-with-(car,cdr)-slots; the load path re-
-    /// flattens here.
+    /// allocate a fresh Cons cell using the registered Layout.
+    /// inline-fields only, no SlotMap traffic. callers: `consConsInto`,
+    /// `consReverse`, `globalCons`, `World.makeList`.
     ///
-    /// **§5.8d transitional:** since the Cons proto has a Layout
-    /// registered at init time, every allocFlatCons cell also carries
-    /// a `layout` pointer — both fast paths route to the same inline
-    /// car/cdr values until step 8 deletes the FlatCons fields.
+    /// post-§5.8d: a thin wrapper around `Form.withLayout(cons_proto,
+    /// cons_layout)` with `inline_slots[0..1]` pre-populated. on-disk
+    /// image format treats this as a Form-with-(car,cdr)-slots
+    /// synthesized at serialize time; the loader's `reflatLoadedLayouts`
+    /// re-hoists them on read.
     pub fn allocFlatCons(self: *World, car: Value, cdr: Value) !FormId {
         const cons_proto_v = Value{ .form = self.protos.cons };
-        var f = Form.flatCons(cons_proto_v, car, cdr);
-        // §5.8d — also attach the Layout pointer so layout-aware
-        // readers (Form.slot, gc.zig step 6, image.zig step 7) find
-        // the same canonical slots through the unified dispatch. the
-        // inline_slots stay zero-initialized; the *_inline fields are
-        // canonical until step 8.
-        if (self.proto_layouts.get(self.protos.cons)) |lay| {
-            f.layout = lay;
-            // mirror car/cdr into inline_slots so the Layout fast path
-            // reads them without consulting the FlatCons fields. once
-            // step 8 deletes car_inline/cdr_inline, inline_slots is
-            // the only canonical storage.
-            f.inline_slots[0] = car;
-            f.inline_slots[1] = cdr;
-        }
+        const lay = self.proto_layouts.get(self.protos.cons) orelse {
+            // safety net for image-load paths where the Cons layout
+            // hasn't been registered yet (init order / partial image).
+            // fall back to a general Form-with-cons-proto + slots.
+            var general = Form.withProto(cons_proto_v);
+            try general.slots.put(self.allocator, self.symCar, car);
+            try general.slots.put(self.allocator, self.symCdr, cdr);
+            return self.heap.alloc(general);
+        };
+        var f = Form.withLayout(cons_proto_v, lay);
+        f.inline_slots[0] = car;
+        f.inline_slots[1] = cdr;
         return self.heap.alloc(f);
     }
 
@@ -1870,9 +1843,9 @@ test "makeList: builds FlatCons cells" {
     defer world.deinit();
     const vals = [_]Value{ .{ .int = 10 }, .{ .int = 20 }, .{ .int = 30 } };
     const list = try world.makeList(&vals);
-    // first cell is flat
+    // first cell carries the Cons Layout (post-§5.8d).
     const head_id = list.asFormId().?;
-    try testing.expect(world.heap.get(head_id).is_flat_cons);
+    try testing.expect(world.heap.get(head_id).layout != null);
     // car / cdr work
     try testing.expect(world.formSlot(head_id, world.symCar).equals(Value{ .int = 10 }));
     // listToSlice round-trips

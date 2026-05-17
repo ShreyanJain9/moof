@@ -266,16 +266,11 @@ fn drainWorklist(world: *World, worklist: *std.ArrayList(FormId)) !void {
             while (i < lay.inline_size) : (i += 1) {
                 try addIfFormValue(world, worklist, f.inline_slots[i]);
             }
-        } else if (f.is_flat_cons) {
-            // legacy: FlatCons cells that haven't yet been pointed at
-            // a Layout. step 8 deletes this path.
-            try addIfFormValue(world, worklist, f.car_inline);
-            try addIfFormValue(world, worklist, f.cdr_inline);
         }
 
         // slots / handlers / meta — insertion-order maps (D5).
-        // for Layout-backed (or FlatCons) Forms, `slots` holds only
-        // user-added extras; the canonical slots are walked above.
+        // for Layout-backed Forms, `slots` holds only user-added
+        // extras; the canonical slots are walked above.
         var sit = f.slots.iterator();
         while (sit.next()) |e| try addIfFormValue(world, worklist, e.value_ptr.*);
 
@@ -643,12 +638,13 @@ test "GC §5.8b: FlatCons inline car/cdr walked at mark" {
     try testing.expect(!world.heap.forms.items[cons_cell.payload].gc_tombstone);
 }
 
-test "GC §5.8b: FlatCons tombstone resets is_flat_cons" {
+test "GC §5.8d: Cons cell tombstone clears its Layout pointer" {
     var world = try World.init(testing.allocator);
     defer world.deinit();
     const garbage = try world.allocFlatCons(.{ .int = 42 }, Value.nil);
-    // not rooted — should be swept.
+    // not rooted — should be swept (or remain a tombstone).
     _ = try collect(&world);
-    try testing.expect(world.heap.forms.items[garbage.payload].gc_tombstone);
-    try testing.expect(!world.heap.forms.items[garbage.payload].is_flat_cons);
+    // tombstone OR reused (sibling's free-list reuse may pop this slot
+    // — either way layout must be null post-sweep).
+    try testing.expect(world.heap.forms.items[garbage.payload].layout == null);
 }

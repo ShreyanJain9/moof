@@ -240,11 +240,6 @@ pub fn loadVatImage(world: *World, bytes: []const u8, allocator: std.mem.Allocat
     // invalidated by clearAndKeepCapacity on the sym table.
     world.symBytes = lookupSym(world, "bytes");
 
-    // §5.8b — install (car, cdr) SymIds for FlatCons accessors. must
-    // happen AFTER the sym table is loaded; sets the form-module
-    // globals that `Form.slot` / `Form.slotPresent` read.
-    form.setConsSyms(world.symCar, world.symCdr);
-
     // §5.8d — register the Cons layout against the just-loaded
     // Cons proto FormId. happens BEFORE `reflatLoadedLayouts` so the
     // reflattened cells can carry the layout pointer. soft-skip if
@@ -305,14 +300,6 @@ fn reflatLoadedLayouts(world: *World) !void {
             _ = fm.slots.swapRemove(sym);
         }
         fm.layout = lay;
-        // §5.8b/d legacy: also populate the Cons-specific FlatCons
-        // fields so unmigrated readers (consCar/consCdr — already
-        // migrated, but defensive) keep working. step 8 deletes.
-        if (proto_fid.eql(world.protos.cons) and lay.inline_size == 2) {
-            fm.car_inline = fm.inline_slots[0];
-            fm.cdr_inline = fm.inline_slots[1];
-            fm.is_flat_cons = true;
-        }
     }
 }
 
@@ -432,13 +419,6 @@ pub fn serializeVat(world: *const World, out: *std.ArrayList(u8), allocator: std
                 try appendU32(out, allocator, lay.slot_names[li]);
                 try appendValue(out, allocator, f.inline_slots[li]);
             }
-        } else if (f.is_flat_cons) {
-            // legacy: a FlatCons cell without a Layout pointer. step 8
-            // removes this branch entirely.
-            try appendU32(out, allocator, world.symCar);
-            try appendValue(out, allocator, f.car_inline);
-            try appendU32(out, allocator, world.symCdr);
-            try appendValue(out, allocator, f.cdr_inline);
         }
         var slot_it = f.slots.iterator();
         while (slot_it.next()) |entry| {

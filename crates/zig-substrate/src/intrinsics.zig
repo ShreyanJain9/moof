@@ -991,11 +991,6 @@ fn heapSlotKeysOf(world: *World, _: Value, args: []const Value) anyerror!Value {
         while (i < lay.inline_size) : (i += 1) {
             try keys.append(world.allocator, .{ .sym = lay.slot_names[i] });
         }
-    } else if (f.is_flat_cons) {
-        // legacy: FlatCons cells without a layout pointer (rare
-        // transitional state). step 8 removes this branch.
-        try keys.append(world.allocator, .{ .sym = world.symCar });
-        try keys.append(world.allocator, .{ .sym = world.symCdr });
     }
     var it = f.slots.iterator();
     while (it.next()) |entry| {
