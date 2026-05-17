@@ -2436,3 +2436,71 @@ pub const REGISTRY = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "Chunk:patchJump:to:", chunkPatchJump },
     .{ "Chunk:asClosure", chunkAsClosure },
 });
+
+// ─────────────────────────────────────────────────────────────────
+// $layout cap tests. validate the cons-list-walker on the native
+// against the World.registerLayout API. eval-level smoke through
+// defproto is blocked on the unrelated pre-existing #31 bootstrap
+// gap (compiler `emit:` UnboundName during main), so we test the
+// native directly here.
+// ─────────────────────────────────────────────────────────────────
+
+const testing = std.testing;
+
+test "layoutRegisterSlots: walks cons-list and registers layout" {
+    var world = try World.init(testing.allocator);
+    defer world.deinit();
+    // alloc a fresh proto.
+    const counter_proto = try world.heap.alloc(Form.withProto(.{ .form = world.protos.object }));
+    const count_sym = try world.syms.intern("count");
+    // build a moof list '(count) — a single FlatCons cell.
+    const slots_list = try world.makeList(&.{.{ .sym = count_sym }});
+    const result = try layoutRegisterSlots(&world, .nil, &.{ .{ .form = counter_proto }, slots_list });
+    try testing.expect(result == .nil);
+    // layout should now be registered.
+    const lay = world.layoutForProto(counter_proto) orelse return error.NoLayout;
+    try testing.expectEqual(@as(u8, 1), lay.inline_size);
+    try testing.expectEqual(count_sym, lay.slot_names[0]);
+}
+
+test "layoutRegisterSlots: empty slot list registers zero-size layout" {
+    var world = try World.init(testing.allocator);
+    defer world.deinit();
+    const proto = try world.heap.alloc(Form.withProto(.{ .form = world.protos.object }));
+    _ = try layoutRegisterSlots(&world, .nil, &.{ .{ .form = proto }, .nil });
+    const lay = world.layoutForProto(proto) orelse return error.NoLayout;
+    try testing.expectEqual(@as(u8, 0), lay.inline_size);
+}
+
+test "layoutRegisterSlots: raises on non-Symbol slot name" {
+    var world = try World.init(testing.allocator);
+    defer world.deinit();
+    const proto = try world.heap.alloc(Form.withProto(.{ .form = world.protos.object }));
+    // build a list with an int instead of a sym — should type-error.
+    const bad_list = try world.makeList(&.{.{ .int = 42 }});
+    const got = layoutRegisterSlots(&world, .nil, &.{ .{ .form = proto }, bad_list });
+    try testing.expectError(error.DispatchError, got);
+}
+
+test "layoutRegisterSlots: end-to-end with Object:new picks up inline layout" {
+    var world = try World.init(testing.allocator);
+    defer world.deinit();
+    try install(&world);
+    // alloc a fresh user proto, register a Layout for it, then send :new.
+    const counter_proto = try world.heap.alloc(Form.withProto(.{ .form = world.protos.object }));
+    const count_sym = try world.syms.intern("count");
+    const slots_list = try world.makeList(&.{.{ .sym = count_sym }});
+    _ = try layoutRegisterSlots(&world, .nil, &.{ .{ .form = counter_proto }, slots_list });
+    // [Counter new] — Object:new (objNew above) calls world.allocInstance,
+    // which checks proto_layouts and returns a Form with inline_slots.
+    const new_v = try objNew(&world, .{ .form = counter_proto }, &.{});
+    const instance_id = new_v.asFormId() orelse return error.NotAForm;
+    const f = world.heap.get(instance_id);
+    try testing.expect(f.layout != null);
+    try testing.expectEqual(@as(u8, 1), f.layout.?.inline_size);
+    // count starts nil; setting it via slotSet! should land inline.
+    try world.formSlotSet(instance_id, count_sym, .{ .int = 7 });
+    const f2 = world.heap.get(instance_id);
+    try testing.expect(f2.slots.count() == 0); // didn't spill to SlotMap
+    try testing.expect(f2.inline_slots[0].equals(.{ .int = 7 }));
+}
