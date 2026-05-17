@@ -212,6 +212,36 @@ fn seedRoots(world: *World, worklist: *std.ArrayList(FormId)) !void {
             try addIfFormId(world, worklist, entry.value_ptr.*);
         }
     }
+
+    // V1 — nursery_deltas. mid-turn allocations that are only
+    // reachable via a pending delta (e.g. a Form just created and
+    // about to be bound into a slot of a pre-existing form) MUST
+    // be marked live: the canonical heap doesn't see them yet, but
+    // they're not garbage. without this, a GC fired between native
+    // re-entry calls during a turn (or between commit-vs.-abort
+    // decisions) would sweep them. mirrors rust GC where the
+    // nursery is a root.
+    //
+    // walks the key (pre-existing form whose delta is buffered)
+    // and every Value across all three faces. the key is already
+    // canonical (it's <watermark), so addIfFormId fast-paths it
+    // via the marked check.
+    {
+        var it = world.nursery_deltas.iterator();
+        while (it.next()) |entry| {
+            try addIfFormId(world, worklist, entry.key_ptr.*);
+            const delta = entry.value_ptr;
+
+            var sit = delta.slots.iterator();
+            while (sit.next()) |e| try addIfFormValue(world, worklist, e.value_ptr.*);
+
+            var hit = delta.handlers.iterator();
+            while (hit.next()) |e| try addIfFormValue(world, worklist, e.value_ptr.*);
+
+            var mit = delta.meta.iterator();
+            while (mit.next()) |e| try addIfFormValue(world, worklist, e.value_ptr.*);
+        }
+    }
 }
 
 /// discharge the worklist LIFO. for each FormId: mark it, then

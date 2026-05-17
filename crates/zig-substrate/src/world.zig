@@ -16,8 +16,18 @@
 //! 2. if `:meta at: 'view-target` is set, the target Form's slots,
 //! 3. the Form's `parent` meta (recurse).
 //!
-//! V4 carries this verbatim. nursery-delta interleaving (V1) is NOT
-//! yet present in zig-substrate; it will land as a separate pass.
+//! V4 carries this verbatim.
+//!
+//! ## V1 per-turn nursery + diff
+//!
+//! per `docs/superpowers/specs/2026-05-06-vat-V1-nursery-diff-
+//! design.md`, mutations during a turn buffer in `nursery_deltas`
+//! for forms whose FormId payload predates the turn's watermark.
+//! forms allocated this turn live in the canonical heap directly
+//! (above `turn_watermark`) — they're new, so mutations to them
+//! ARE the canonical value. `formSlot` / `formSlotSet` route
+//! through this. `startTurn` / `commitTurn` / `abortTurn` bracket
+//! the unit of atomicity; outermost `runTop` wraps automatically.
 //!
 //! ## V4 references
 //!
@@ -54,6 +64,11 @@ const vm_mod = @import("vm.zig");
 
 const gc_mod = @import("gc.zig");
 pub const GcStats = gc_mod.GcStats;
+
+const nursery_mod = @import("nursery.zig");
+pub const Delta = nursery_mod.Delta;
+pub const FaceKind = nursery_mod.FaceKind;
+pub const TurnDiff = nursery_mod.TurnDiff;
 
 /// the bytecode interpreter's per-vat state.
 ///
@@ -245,6 +260,28 @@ pub const World = struct {
     ///   - `ensureWritableFormId(v)` allocates on demand.
     tagged_storage: std.AutoArrayHashMapUnmanaged(u64, FormId),
 
+    /// V1 — per-form mutation deltas for the active turn. keyed
+    /// by the canonical FormId of pre-existing forms (payload
+    /// `< turn_watermark`). forms allocated THIS turn are
+    /// canonical-direct and do NOT have an entry here. cleared
+    /// at commit/abort. iteration order = insertion order (D5).
+    nursery_deltas: std.AutoArrayHashMapUnmanaged(FormId, Delta),
+
+    /// V1 — the FormId payload below which forms are canonical
+    /// (committed in a prior turn or at boot). forms at payloads
+    /// `>= turn_watermark` are this-turn allocations. set by
+    /// `startTurn` to `heap.forms.items.len`; advanced by
+    /// `commitTurn` to the post-turn high-water; unchanged by
+    /// `abortTurn` (which instead truncates the heap back to it).
+    turn_watermark: u32,
+
+    /// V1 — `true` iff a turn is currently active. `startTurn`
+    /// flips on; `commitTurn` / `abortTurn` flip off. nested
+    /// `startTurn` panics: V1 supports exactly one active turn
+    /// at a time. V4 will lift this to per-vat state when
+    /// multi-vat lands.
+    in_turn: bool,
+
     /// V3 — the "here" Form for this vat. exposed as `$here` in
     /// moof code (self-referential binding in here_form.slots).
     /// LoadHere / SendHere / TailSendHere refer to this FormId
@@ -350,6 +387,14 @@ pub const World = struct {
         const here_form_ref = heap.getMut(here_form);
         try here_form_ref.slots.put(allocator, here_sym, Value{ .form = here_form });
 
+        // V1 — turn_watermark advances past every Form already
+        // allocated by bootstrap (protos, here_form, macros_form,
+        // their proto/meta wiring). post-init: in_turn = false,
+        // nursery_deltas empty, watermark = heap.len(). first
+        // user-driven turn sees the entire bootstrap heap as
+        // canonical pre-existing state.
+        const watermark: u32 = @intCast(heap.forms.items.len);
+
         return World{
             .heap = heap,
             .syms = syms,
@@ -363,6 +408,9 @@ pub const World = struct {
             .far_ref_table = .empty,
             .proto_generation = .empty,
             .tagged_storage = .empty,
+            .nursery_deltas = .empty,
+            .turn_watermark = watermark,
+            .in_turn = false,
             .here_form = here_form,
             .macros_form = macros_form,
             .vm = Vm.init(),
@@ -441,6 +489,14 @@ pub const World = struct {
             .opcode = FormId.NONE,
         };
 
+        // V1 — bare world: heap.len() is just the sentinel (1).
+        // image-load will append forms; after load, callers should
+        // update turn_watermark to heap.len() if they want loaded
+        // forms treated as canonical for the first turn.
+        // initBareForImage handles that; raw initBare leaves the
+        // watermark at 1 so even the sentinel sits in canonical-land.
+        const watermark: u32 = @intCast(heap.forms.items.len);
+
         return World{
             .heap = heap,
             .syms = syms,
@@ -454,6 +510,9 @@ pub const World = struct {
             .far_ref_table = .empty,
             .proto_generation = .empty,
             .tagged_storage = .empty,
+            .nursery_deltas = .empty,
+            .turn_watermark = watermark,
+            .in_turn = false,
             .here_form = FormId.NONE,
             .macros_form = FormId.NONE,
             .vm = Vm.init(),
@@ -508,6 +567,17 @@ pub const World = struct {
         self.far_ref_table.deinit(self.allocator);
         self.proto_generation.deinit(self.allocator);
         self.tagged_storage.deinit(self.allocator);
+
+        // V1 — release per-form Delta storage. each Delta owns
+        // three FaceMaps (slots / handlers / meta). callers are
+        // expected to commit / abort cleanly before deinit, but
+        // we walk defensively in case a panic interrupted a turn.
+        {
+            var it = self.nursery_deltas.iterator();
+            while (it.next()) |entry| entry.value_ptr.deinit(self.allocator);
+            self.nursery_deltas.deinit(self.allocator);
+        }
+
         self.vm.deinit(self.allocator);
         self.syms.deinit();
         self.heap.deinit();
@@ -674,23 +744,98 @@ pub const World = struct {
 
     /// read `slot_name` on `id`, walking only the Form's own slots
     /// (no proto-chain). returns nil if absent.
+    ///
+    /// V1 nursery-aware: when `in_turn` is set AND `id` is a
+    /// pre-existing form (payload < watermark), checks the
+    /// `nursery_deltas` entry first. otherwise (new-alloc form
+    /// or no active turn) reads canonical directly. matches rust
+    /// `World::form_slot`.
     pub fn formSlot(self: *const World, id: FormId, slot_name: SymId) Value {
+        if (self.in_turn and id.payload < self.turn_watermark) {
+            if (self.nursery_deltas.get(id)) |delta| {
+                if (delta.slots.get(slot_name)) |v| return v;
+            }
+        }
         const f = self.heap.get(id);
         return f.slot(slot_name);
     }
 
-    /// write `val` to slot `slot_name` on `id`. errors on frozen or
-    /// out-of-memory.
+    /// write `val` to slot `slot_name` on `id`. errors on frozen
+    /// or out-of-memory.
+    ///
+    /// V1 nursery-aware: when `in_turn` is set AND `id` is a
+    /// pre-existing form (payload < watermark), buffers the
+    /// write in `nursery_deltas`. otherwise (new-alloc form
+    /// during a turn, or no active turn) writes directly to
+    /// canonical. matches rust `World::form_slot_set` minus the
+    /// rust-side mutation-outside-turn panic (zig allows direct
+    /// writes at boot, where intrinsics still write via
+    /// `heap.getMut(...)` for proto wiring).
     pub fn formSlotSet(self: *World, id: FormId, slot_name: SymId, val: Value) !void {
         const fm = self.heap.getMut(id);
         if (fm.frozen) return error.FrozenForm;
+        if (self.in_turn and id.payload < self.turn_watermark) {
+            // pre-existing form during an active turn — buffer.
+            const gop = try self.nursery_deltas.getOrPut(self.allocator, id);
+            if (!gop.found_existing) gop.value_ptr.* = .{};
+            try gop.value_ptr.slots.put(self.allocator, slot_name, val);
+            return;
+        }
+        // new-alloc within turn, or no turn — write canonical.
         try fm.slots.put(self.allocator, slot_name, val);
     }
 
-    /// read `key` on `id.meta`. nil if absent.
+    /// read `key` on `id.handlers`. returns `null` if absent —
+    /// callers walking the proto chain rely on `null` to keep
+    /// walking. V1 nursery-aware analogous to `formSlot`.
+    pub fn formHandler(self: *const World, id: FormId, key: SymId) ?Value {
+        if (self.in_turn and id.payload < self.turn_watermark) {
+            if (self.nursery_deltas.get(id)) |delta| {
+                if (delta.handlers.get(key)) |v| return v;
+            }
+        }
+        const f = self.heap.get(id);
+        return f.handler(key);
+    }
+
+    /// write `val` to handler `key` on `id`. V1 nursery-aware.
+    /// like `formSlotSet`: pre-existing forms during a turn
+    /// buffer in the delta; new-allocs / no-turn writes go
+    /// straight to canonical.
+    pub fn formHandlerSet(self: *World, id: FormId, key: SymId, val: Value) !void {
+        const fm = self.heap.getMut(id);
+        if (fm.frozen) return error.FrozenForm;
+        if (self.in_turn and id.payload < self.turn_watermark) {
+            const gop = try self.nursery_deltas.getOrPut(self.allocator, id);
+            if (!gop.found_existing) gop.value_ptr.* = .{};
+            try gop.value_ptr.handlers.put(self.allocator, key, val);
+            return;
+        }
+        try fm.handlers.put(self.allocator, key, val);
+    }
+
+    /// read `key` on `id.meta`. nil if absent. V1 nursery-aware.
     pub fn formMeta(self: *const World, id: FormId, key: SymId) Value {
+        if (self.in_turn and id.payload < self.turn_watermark) {
+            if (self.nursery_deltas.get(id)) |delta| {
+                if (delta.meta.get(key)) |v| return v;
+            }
+        }
         const f = self.heap.get(id);
         return f.metaAt(key);
+    }
+
+    /// write `val` to meta `key` on `id`. V1 nursery-aware.
+    pub fn formMetaSet(self: *World, id: FormId, key: SymId, val: Value) !void {
+        const fm = self.heap.getMut(id);
+        if (fm.frozen) return error.FrozenForm;
+        if (self.in_turn and id.payload < self.turn_watermark) {
+            const gop = try self.nursery_deltas.getOrPut(self.allocator, id);
+            if (!gop.found_existing) gop.value_ptr.* = .{};
+            try gop.value_ptr.meta.put(self.allocator, key, val);
+            return;
+        }
+        try fm.meta.put(self.allocator, key, val);
     }
 
     /// `[a become: b]` — record a heap-level indirection. wraps
@@ -715,6 +860,177 @@ pub const World = struct {
     /// look up `proto`'s current handler-generation. missing → 0.
     pub fn protoGeneration(self: *const World, proto: FormId) u32 {
         return self.proto_generation.get(proto) orelse 0;
+    }
+
+    // ---- V1 turn lifecycle ---------------------------------------
+    //
+    // mirrors `crates/substrate/src/world.rs::{start_turn,
+    // commit_turn, abort_turn, in_turn}`. zig deviates from rust in
+    // one place: write-outside-turn does NOT panic — boot-time
+    // intrinsics still poke `heap.getMut(...)` directly, and we
+    // don't want to force a migration audit in this PR. read-paths
+    // and write-paths through `formSlot*` are nursery-aware
+    // when `in_turn` is true, and degrade to direct r/w otherwise.
+
+    /// `true` iff a turn is currently active.
+    pub fn inTurn(self: *const World) bool {
+        return self.in_turn;
+    }
+
+    /// begin a turn. panics if a turn is already active —
+    /// V1 supports exactly one active turn at a time. matches
+    /// rust `World::start_turn`.
+    ///
+    /// records `turn_watermark = heap.forms.items.len`. all
+    /// allocations after this point have payload >= watermark
+    /// and are "new" — mutations to them write canonically.
+    /// mutations to pre-existing forms buffer in
+    /// `nursery_deltas`.
+    pub fn startTurn(self: *World) void {
+        if (self.in_turn) std.debug.panic("startTurn called while a turn is already active", .{});
+        std.debug.assert(self.nursery_deltas.count() == 0);
+        self.in_turn = true;
+        self.turn_watermark = @intCast(self.heap.forms.items.len);
+    }
+
+    /// commit the active turn. computes and returns a
+    /// `TurnDiff`; applies nursery deltas to canonical heap;
+    /// advances `turn_watermark` to the post-turn high-water;
+    /// clears `nursery_deltas`; flips `in_turn` off. panics
+    /// if no turn is active.
+    ///
+    /// caller owns the returned TurnDiff (zig has no Drop —
+    /// call `diff.deinit(world.allocator)`). zig substrate
+    /// doesn't yet journal the diff (V9 persistence work);
+    /// callers that don't need it can `defer diff.deinit(...)`
+    /// immediately.
+    pub fn commitTurn(self: *World) !TurnDiff {
+        if (!self.in_turn) std.debug.panic("commitTurn called outside a turn", .{});
+
+        var diff: TurnDiff = .{};
+        errdefer diff.deinit(self.allocator);
+
+        // process deltas: read canonical prior, emit diff
+        // entry, apply mutation. order is the nursery_deltas
+        // insertion order (D5 — AutoArrayHashMap preserves it).
+        // we drain by iterating, then clearing+freeing at the
+        // end (we can't shrink the map during iteration).
+        var it = self.nursery_deltas.iterator();
+        while (it.next()) |entry| {
+            const form_id = entry.key_ptr.*;
+            const delta = entry.value_ptr;
+            const canonical = self.heap.getMut(form_id);
+
+            // slots
+            var sit = delta.slots.iterator();
+            while (sit.next()) |sentry| {
+                const key = sentry.key_ptr.*;
+                const new_value = sentry.value_ptr.*;
+                const prior: Value = if (canonical.slots.get(key)) |v| v else Value.nil;
+                try diff.mutations.put(self.allocator, .{
+                    .form_id = form_id,
+                    .face = .slots,
+                    .key = key,
+                }, .{ .prior = prior, .new = new_value });
+                try canonical.slots.put(self.allocator, key, new_value);
+            }
+            // handlers
+            var hit = delta.handlers.iterator();
+            while (hit.next()) |hentry| {
+                const key = hentry.key_ptr.*;
+                const new_value = hentry.value_ptr.*;
+                const prior: Value = if (canonical.handlers.get(key)) |v| v else Value.nil;
+                try diff.mutations.put(self.allocator, .{
+                    .form_id = form_id,
+                    .face = .handlers,
+                    .key = key,
+                }, .{ .prior = prior, .new = new_value });
+                try canonical.handlers.put(self.allocator, key, new_value);
+            }
+            // meta
+            var mit = delta.meta.iterator();
+            while (mit.next()) |mentry| {
+                const key = mentry.key_ptr.*;
+                const new_value = mentry.value_ptr.*;
+                const prior: Value = if (canonical.meta.get(key)) |v| v else Value.nil;
+                try diff.mutations.put(self.allocator, .{
+                    .form_id = form_id,
+                    .face = .meta,
+                    .key = key,
+                }, .{ .prior = prior, .new = new_value });
+                try canonical.meta.put(self.allocator, key, new_value);
+            }
+
+            // V2 — frozen-bit transition. only emit a freezings
+            // entry for pre-existing forms (below the pre-commit
+            // watermark, which we still hold). zig doesn't yet
+            // expose freeze() but we honor the field for parity.
+            if (delta.frozen and !canonical.frozen) {
+                canonical.frozen = true;
+                if (form_id.payload < self.turn_watermark) {
+                    try diff.freezings.append(self.allocator, form_id);
+                }
+            }
+        }
+
+        // drain the deltas: deinit each Delta's owned FaceMaps,
+        // then clear the outer map.
+        var dit = self.nursery_deltas.iterator();
+        while (dit.next()) |entry| entry.value_ptr.deinit(self.allocator);
+        self.nursery_deltas.clearRetainingCapacity();
+
+        // collect new-alloc FormIds (allocations during this
+        // turn sit at `heap.forms[turn_watermark..]`).
+        const new_high: u32 = @intCast(self.heap.forms.items.len);
+        var p: u32 = self.turn_watermark;
+        while (p < new_high) : (p += 1) {
+            try diff.new_allocs.append(self.allocator, FormId.vatLocal(@intCast(p)));
+        }
+
+        // advance watermark to include this turn's allocs.
+        self.turn_watermark = new_high;
+        self.in_turn = false;
+
+        return diff;
+    }
+
+    /// abort the active turn. truncates `heap.forms` to
+    /// `turn_watermark` (drops this-turn allocations). clears
+    /// `nursery_deltas` (drops buffered mutations). flips
+    /// `in_turn` off. watermark unchanged. panics if no turn
+    /// is active.
+    ///
+    /// NOTE: truncating `heap.forms` is the rollback for
+    /// allocations — newly allocated Forms vanish with their
+    /// slot/handler/meta backing storage. callers must NOT
+    /// retain raw `*Form` pointers across `abortTurn`
+    /// boundaries (they'd dangle); this matches the rust
+    /// discipline.
+    ///
+    /// NB: `become_` redirects are NOT yet rolled back —
+    /// zig substrate hasn't implemented `turn_redirect_originals`.
+    /// `become_` happens through `Heap.become_` outside the
+    /// nursery. tracked alongside V1 follow-ups in
+    /// `crates/substrate/src/world.rs::turn_redirect_originals`.
+    pub fn abortTurn(self: *World) void {
+        if (!self.in_turn) std.debug.panic("abortTurn called outside a turn", .{});
+
+        // drop new-alloc forms by truncating Forms vec to
+        // watermark. before truncating, deinit each Form's
+        // owned FaceMaps so we don't leak their storage.
+        const watermark_usz: usize = @intCast(self.turn_watermark);
+        var i: usize = watermark_usz;
+        while (i < self.heap.forms.items.len) : (i += 1) {
+            self.heap.forms.items[i].deinit(self.allocator);
+        }
+        self.heap.forms.shrinkRetainingCapacity(watermark_usz);
+
+        // drop buffered mutations (no canonical writes occurred).
+        var it = self.nursery_deltas.iterator();
+        while (it.next()) |entry| entry.value_ptr.deinit(self.allocator);
+        self.nursery_deltas.clearRetainingCapacity();
+
+        self.in_turn = false;
     }
 
     // ---- handler lookup (proto-chain walk) -----------------------
