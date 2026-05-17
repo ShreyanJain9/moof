@@ -314,6 +314,30 @@ pub const World = struct {
     /// staleness (law L10). missing key implies generation 0.
     proto_generation: std.AutoArrayHashMapUnmanaged(FormId, u32),
 
+    /// **phase 2 §5.8d — proto → Layout registry.**
+    ///
+    /// when `Object:new` (or any constructor) allocates an instance,
+    /// it looks up the proto's FormId here; if a Layout is registered,
+    /// the new Form is allocated via `Form.withLayout`, putting its
+    /// canonical slots inline. otherwise, a general Form is allocated.
+    ///
+    /// the Layouts themselves are owned by `layout_arena` — allocated
+    /// once per proto, never freed (lifetime = the World). registration
+    /// is one-way: a proto can grow a Layout but can't shed one (would
+    /// break L11 stability for existing instances).
+    ///
+    /// `AutoHashMapUnmanaged` (not insertion-ordered) per phase 2 §4.7
+    /// — internal table, no user-observable iteration order.
+    proto_layouts: std.AutoHashMapUnmanaged(FormId, *const form.Layout) = .{},
+
+    /// **§5.8d — arena holding Layouts and their `slot_names` slices.**
+    ///
+    /// each `registerLayout` allocation comes out of this arena and
+    /// lives until World.deinit. arena ownership keeps the
+    /// `*const Layout` pointers in `proto_layouts` stable for the
+    /// World's lifetime.
+    layout_arena: std.heap.ArenaAllocator,
+
     /// tagged-immediate → singleton FormId. lazy: populated only
     /// when user code asks for a per-instance handler (e.g.
     /// `[#true ifTrue:ifFalse: t f]`). mirrors rust's
@@ -495,7 +519,7 @@ pub const World = struct {
         const here_form_ref = heap.getMut(here_form);
         try here_form_ref.slots.put(allocator, here_sym, Value{ .form = here_form });
 
-        return World{
+        var world = World{
             .heap = heap,
             .syms = syms,
             .protos = protos,
@@ -507,6 +531,8 @@ pub const World = struct {
             .native_fns = .empty,
             .far_ref_table = .empty,
             .proto_generation = .empty,
+            .proto_layouts = .{},
+            .layout_arena = std.heap.ArenaAllocator.init(allocator),
             .tagged_storage = .empty,
             .here_form = here_form,
             .macros_form = macros_form,
@@ -525,6 +551,12 @@ pub const World = struct {
             .self_sym = self_sym,
             .symBytes = bytes_sym,
         };
+        // §5.8d — register the Cons layout (car, cdr). lives in the
+        // layout_arena; pointer stable for the World's lifetime.
+        // FlatCons fast-path remains in place; this just ensures the
+        // Layout-aware dispatch can find Cons too.
+        _ = try world.registerLayout(protos.cons, &.{ car_sym, cdr_sym });
+        return world;
     }
 
     /// initialize a "bare" World — no protos, no `$here`, no `Macros`.
@@ -573,6 +605,9 @@ pub const World = struct {
         form.setConsSyms(car_sym, cdr_sym);
 
         // every proto FormId starts at NONE; image's header populates.
+        // NB: Cons layout is registered post-load by `loadVatImage`,
+        // since here the proto FormIds are all NONE — the header
+        // populates them later.
         const none_protos: Protos = .{
             .object = FormId.NONE,
             .nil = FormId.NONE,
@@ -606,6 +641,8 @@ pub const World = struct {
             .native_fns = .empty,
             .far_ref_table = .empty,
             .proto_generation = .empty,
+            .proto_layouts = .{},
+            .layout_arena = std.heap.ArenaAllocator.init(allocator),
             .tagged_storage = .empty,
             .here_form = FormId.NONE,
             .macros_form = FormId.NONE,
@@ -661,6 +698,9 @@ pub const World = struct {
         self.native_fns.deinit(self.allocator);
         self.far_ref_table.deinit(self.allocator);
         self.proto_generation.deinit(self.allocator);
+        self.proto_layouts.deinit(self.allocator);
+        // §5.8d — frees every Layout + its slot_names slice in one go.
+        self.layout_arena.deinit();
         self.tagged_storage.deinit(self.allocator);
 
         // §5.8a — free the cached `[]u32` slices, then the map itself.
@@ -954,6 +994,47 @@ pub const World = struct {
         // bump generation on a's slot if it was a proto — cheap to
         // do unconditionally since proto_generation is just a u32.
         try self.bumpGeneration(a);
+    }
+
+    // ---- §5.8d Layout registration ------------------------------
+
+    /// register a Layout for `proto`. allocates a `Layout` (and a
+    /// duped slot-names slice) out of `layout_arena`; the pointer is
+    /// stable for the World's lifetime. callable from boot
+    /// (initBare/init/loadVatImage) and later from `defproto` once
+    /// user-defined layouts land.
+    ///
+    /// idempotent on identical schemas: a second call for the same
+    /// proto with the same slot_names returns the existing Layout
+    /// pointer. mismatched re-registration is rejected — the schema
+    /// has to stay stable for instance L11.
+    pub fn registerLayout(self: *World, proto: FormId, slot_names: []const SymId) !*const form.Layout {
+        std.debug.assert(slot_names.len <= form.INLINE_CAPACITY);
+        if (self.proto_layouts.get(proto)) |existing| {
+            // require schema match (defensive — registrations should
+            // happen once per proto).
+            if (existing.inline_size != slot_names.len) return error.LayoutMismatch;
+            for (slot_names, 0..) |s, i| {
+                if (existing.slot_names[i] != s) return error.LayoutMismatch;
+            }
+            return existing;
+        }
+        const arena = self.layout_arena.allocator();
+        const names_copy = try arena.dupe(SymId, slot_names);
+        const lay_ptr = try arena.create(form.Layout);
+        lay_ptr.* = .{
+            .slot_names = names_copy,
+            .inline_size = @intCast(slot_names.len),
+        };
+        try self.proto_layouts.put(self.allocator, proto, lay_ptr);
+        return lay_ptr;
+    }
+
+    /// look up the Layout registered for `proto`. `null` if the proto
+    /// is general (no inline schema). callers (Object:new, constructors,
+    /// image-load post-pass) consult this to decide allocation shape.
+    pub fn layoutForProto(self: *const World, proto: FormId) ?*const form.Layout {
+        return self.proto_layouts.get(proto);
     }
 
     /// bump `proto`'s handler-generation counter. called by become_,
@@ -1293,6 +1374,50 @@ test "World.become_: FlatCons can be the target of a redirect" {
     try world.become_(a, b);
     // reads via `a` see b's content.
     try testing.expect(world.formSlot(a, world.symCar).equals(Value{ .int = 7 }));
+}
+
+// ─────────────────────────────────────────────────────────────────
+// §5.8d Layout registration tests.
+// ─────────────────────────────────────────────────────────────────
+
+test "Layout: World.init pre-registers Cons layout" {
+    var world = try World.init(testing.allocator);
+    defer world.deinit();
+    const lay = world.layoutForProto(world.protos.cons) orelse return error.NoLayout;
+    try testing.expectEqual(@as(u8, 2), lay.inline_size);
+    try testing.expectEqual(world.symCar, lay.slot_names[0]);
+    try testing.expectEqual(world.symCdr, lay.slot_names[1]);
+}
+
+test "Layout: registerLayout idempotent on identical schema" {
+    var world = try World.init(testing.allocator);
+    defer world.deinit();
+    const lay1 = try world.registerLayout(world.protos.cons, &.{ world.symCar, world.symCdr });
+    const lay2 = world.layoutForProto(world.protos.cons).?;
+    try testing.expect(lay1 == lay2);
+}
+
+test "Layout: registerLayout rejects schema mismatch" {
+    var world = try World.init(testing.allocator);
+    defer world.deinit();
+    // Cons already has (car, cdr); try registering (cdr, car) — mismatch.
+    const got = world.registerLayout(world.protos.cons, &.{ world.symCdr, world.symCar });
+    try testing.expectError(error.LayoutMismatch, got);
+}
+
+test "Layout: register Counter-like proto, alloc + read inline" {
+    var world = try World.init(testing.allocator);
+    defer world.deinit();
+    // make a fresh proto.
+    const counter_proto = try world.heap.alloc(form.Form.withProto(.{ .form = world.protos.object }));
+    const count_sym = try world.syms.intern("count");
+    _ = try world.registerLayout(counter_proto, &.{count_sym});
+    // allocate an instance via Form.withLayout directly (Object:new wiring is step 4).
+    const lay = world.layoutForProto(counter_proto).?;
+    var f = form.Form.withLayout(.{ .form = counter_proto }, lay);
+    f.inline_slots[0] = Value{ .int = 7 };
+    const id = try world.heap.alloc(f);
+    try testing.expect(world.formSlot(id, count_sym).equals(Value{ .int = 7 }));
 }
 
 test "makeList: builds FlatCons cells" {

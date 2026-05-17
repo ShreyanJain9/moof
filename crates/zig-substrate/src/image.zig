@@ -245,6 +245,14 @@ pub fn loadVatImage(world: *World, bytes: []const u8, allocator: std.mem.Allocat
     // globals that `Form.slot` / `Form.slotPresent` read.
     form.setConsSyms(world.symCar, world.symCdr);
 
+    // §5.8d — register the Cons layout against the just-loaded
+    // Cons proto FormId. happens BEFORE `reflatLoadedCons` so the
+    // reflattened cells can carry the layout pointer. soft-skip if
+    // (car, cdr) syms weren't in the image (degenerate test images).
+    if (!world.protos.cons.isNone() and world.symCar != 0 and world.symCdr != 0) {
+        _ = try world.registerLayout(world.protos.cons, &.{ world.symCar, world.symCdr });
+    }
+
     // §5.8b — post-load re-flatten pass. on-disk format is unchanged
     // (a Cons cell serializes as a Form with :car / :cdr in slots),
     // so the loader must scan once after protos are wired to detect
