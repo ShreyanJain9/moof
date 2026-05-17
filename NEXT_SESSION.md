@@ -1,5 +1,22 @@
 # next session — substrate is essentially complete; pivot to conformance + Console cap
 
+## what just shipped (phase1/C intrinsic shrink — branch `phase1-C-shrink`)
+
+**intrinsic shrink first pass:** removed `Object:initialize` from zig intrinsics; canonical is now `(defmethod Object (initialize) self)` in stdlib/object.moof. starting LoC: 2506, ending: 2503.
+
+**finding:** the zig substrate was already minimal. the methods the plan expected to remove (Cons:length, Cons:map:, Integer:abs, String:trim, etc.) were never added to zig intrinsics — the zig port started conservative. only `Object:initialize` (trivial `return self` stub) was safely removable without modifying the OCaml seed.
+
+**bootstrap warning:** `image-load: unknown native 'Object:initialize' for form_id=87 — skipping` — harmless. the seed.vat still references it as a native; the moof defmethod shadows it when stdlib/object.moof loads. the warning disappears once OCaml seed is updated to not emit `Object:initialize` as a native.
+
+**LoC budget status:** 2503 (vs 2506 start; target was ~1750). The ~30% target required methods that don't exist in zig yet. Future shrink approaches:
+- move chunk/opcode infrastructure to moof compiler level (large bodies, ~400 LoC)  
+- move transporter internals to moof (currently ~200 LoC of zig)
+- but these are NOT derivable in moof without deeper redesign
+
+classification working doc: `docs/superpowers/working/2026-05-16-native-classification.txt`
+
+---
+
 ## what just shipped (HEAD `041f8fd`)
 
 a massive session. went from "polyglot is an idea but not in service of a goal" to:
