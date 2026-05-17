@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/abi",
-    "crates/abi-rust",
-    "crates/mco-pack",
+    "tools/abi",
+    "tools/abi-rust",
+    "tools/mco-pack",
     "players/rust",
 ]
 
