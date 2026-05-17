@@ -35,6 +35,7 @@ const world_mod = @import("world.zig");
 const World = world_mod.World;
 const NativeFn = world_mod.NativeFn;
 const ICache = world_mod.ICache;
+const SymId = world_mod.SymId;
 const image_mod = @import("image.zig");
 const opcodes_mod = @import("opcodes.zig");
 const Op = opcodes_mod.Op;
@@ -127,10 +128,12 @@ pub fn installCaps(world: *World) !void {
     const dollar_transporter = try world.syms.intern("$transporter");
     const dollar_compiler = try world.syms.intern("$compiler");
     const dollar_reader = try world.syms.intern("$reader");
+    const dollar_layout = try world.syms.intern("$layout");
     const name_meta = try world.syms.intern("name");
     const transporter_name = try world.syms.intern("Transporter");
     const compiler_name = try world.syms.intern("Compiler");
     const reader_name = try world.syms.intern("Reader");
+    const layout_name = try world.syms.intern("Layout");
 
     // $transporter
     {
@@ -162,6 +165,20 @@ pub fn installCaps(world: *World) !void {
         try installNative(world, proto_id, "useMoof", readerUseMoof);
         try installNative(world, proto_id, "useSeed", readerUseSeed);
         try world.envBind(world.here_form, dollar_reader, .{ .form = proto_id });
+    }
+
+    // $layout — exposes World.registerLayout to moof code. defproto
+    // calls `[$layout register: Counter slots: '(count)]` so user
+    // protos get inline-slot storage (the Layout fast path) without
+    // any per-instance map traffic. anonymous-proto same caveat as
+    // $compiler / $reader: host installs at runtime, not via image
+    // NativeRefsSection.
+    {
+        var proto = Form.withProto(.{ .form = world.protos.object });
+        try proto.meta.put(world.allocator, name_meta, .{ .sym = layout_name });
+        const proto_id = try world.heap.alloc(proto);
+        try installNative(world, proto_id, "register:slots:", layoutRegisterSlots);
+        try world.envBind(world.here_form, dollar_layout, .{ .form = proto_id });
     }
 }
 
@@ -2206,6 +2223,49 @@ fn chunkAsClosure(world: *World, self_: Value, args: []const Value) anyerror!Val
         try f.meta.put(world.allocator, source_sym, source_v);
     }
     return .{ .form = try world.heap.alloc(f) };
+}
+
+// ─────────────────────────────────────────────────────────────────
+// $layout cap — register a Layout for a user proto.
+//
+// `[$layout register: Proto slots: '(s1 s2 ...)]`
+//
+// walks the cons-list of slot-syms, interns nothing (the syms are
+// already interned by the reader / quasiquote expansion) and calls
+// world.registerLayout. nil-return — moof code typically discards.
+//
+// idempotent on identical schemas (World.registerLayout returns the
+// existing Layout pointer); raises LayoutMismatch on schema change.
+// the slot count must be ≤ form.INLINE_CAPACITY (currently 4).
+//
+// installed by installCaps under `$layout` on here_form. used by
+// the defproto macro to give every user-declared proto inline-slot
+// storage automatically.
+// ─────────────────────────────────────────────────────────────────
+
+fn layoutRegisterSlots(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 2) return raise(world, "arity", "[$layout register: Proto slots: '(...)] takes 2 args");
+    const proto_id = args[0].asFormId() orelse return typeError(world, "register:slots: proto must be a Form");
+    var slot_names: std.ArrayList(SymId) = .empty;
+    defer slot_names.deinit(world.allocator);
+    var cur = args[1];
+    while (true) {
+        switch (cur) {
+            .nil => break,
+            .form => |fid| {
+                const f = world.heap.get(fid);
+                if (!f.slotPresent(world.symCar)) break;
+                const car = f.slot(world.symCar);
+                const sym = car.asSym() orelse
+                    return typeError(world, "register:slots: slot name must be a Symbol");
+                try slot_names.append(world.allocator, sym);
+                cur = f.slot(world.symCdr);
+            },
+            else => return typeError(world, "register:slots: slot list must be a Cons or nil"),
+        }
+    }
+    _ = try world.registerLayout(proto_id, slot_names.items);
+    return .nil;
 }
 
 // ─────────────────────────────────────────────────────────────────
