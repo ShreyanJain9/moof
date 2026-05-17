@@ -246,62 +246,73 @@ pub fn loadVatImage(world: *World, bytes: []const u8, allocator: std.mem.Allocat
     form.setConsSyms(world.symCar, world.symCdr);
 
     // §5.8d — register the Cons layout against the just-loaded
-    // Cons proto FormId. happens BEFORE `reflatLoadedCons` so the
+    // Cons proto FormId. happens BEFORE `reflatLoadedLayouts` so the
     // reflattened cells can carry the layout pointer. soft-skip if
     // (car, cdr) syms weren't in the image (degenerate test images).
     if (!world.protos.cons.isNone() and world.symCar != 0 and world.symCdr != 0) {
         _ = try world.registerLayout(world.protos.cons, &.{ world.symCar, world.symCdr });
     }
 
-    // §5.8b — post-load re-flatten pass. on-disk format is unchanged
-    // (a Cons cell serializes as a Form with :car / :cdr in slots),
-    // so the loader must scan once after protos are wired to detect
-    // cons-Forms and migrate their canonical slots into the inline
-    // fields. all newly-allocated Cons cells (from `world.allocFlatCons`
-    // / friends) are already flat — this pass only fires on entries
-    // that came in via the image's FormSection.
-    try reflatLoadedCons(world);
+    // §5.8d — post-load Layout reflatten pass. on-disk format is
+    // unchanged (any Layout-backed Form serializes with canonical
+    // slots inlined into the slots-section). the loader scans every
+    // form after protos + layouts are wired; for any Form whose
+    // proto has a registered Layout, hoist canonical slot values
+    // from the SlotMap into inline_slots. forms allocated locally
+    // (via Object:new / allocFlatCons) are already layout-shaped —
+    // this only fires on FormSection-deserialized entries.
+    try reflatLoadedLayouts(world);
 }
 
-/// §5.8b — walk every loaded Form; for those with proto == cons_proto
-/// and the canonical `:car` / `:cdr` slot bindings, move them into the
-/// inline FlatCons fields and clear from the SlotMap. callers that
-/// previously did `f.slots.put(car_sym, …)` see the slot via
-/// `formSlot` (now flat-cons-aware), preserving the Form contract.
+/// §5.8d — walk every loaded Form; for those whose proto has a
+/// registered Layout in `world.proto_layouts`, hoist the canonical
+/// slot values out of the SlotMap into `inline_slots` and attach
+/// the layout pointer. callers that previously did
+/// `f.slots.put(car_sym, …)` see the slot via `formSlot` (now
+/// Layout-aware), preserving the Form contract.
 ///
-/// non-canonical extra slots on a cons-Form (rare but legal —
-/// `[cell slotSet: 'foo to: 42]`) stay in the SlotMap. the post-pass
-/// preserves them.
-fn reflatLoadedCons(world: *World) !void {
-    if (world.protos.cons.isNone()) return;
-    const cons_id = world.protos.cons;
-    const car_sym = world.symCar;
-    const cdr_sym = world.symCdr;
-    if (car_sym == 0 or cdr_sym == 0) return; // no sym table → skip
-
+/// non-canonical extra slots (e.g. `[cell slotSet: 'foo to: 42]`)
+/// stay in the SlotMap. the post-pass preserves them.
+///
+/// Cons cells additionally get their legacy `is_flat_cons` flag +
+/// `car_inline` / `cdr_inline` fields populated, so the old fast
+/// paths in intrinsics.zig / gc.zig that haven't yet migrated
+/// continue to find the canonical values. step 8 deletes those
+/// fields entirely and this branch reduces to layout-only.
+fn reflatLoadedLayouts(world: *World) !void {
     // walk heap. skip sentinel (index 0). resolve each form's proto
-    // Value and compare to cons proto FormId.
+    // and look it up in proto_layouts.
     var i: usize = 1;
     while (i < world.heap.len()) : (i += 1) {
         const fid = FormId.vatLocal(@intCast(i));
         const f_const = world.heap.get(fid);
-        // skip tombstones and Forms whose proto isn't Cons.
+        // skip tombstones, Forms that already carry a layout (defensive),
+        // and Forms whose proto isn't a Form (tagged immediate proto).
         if (f_const.gc_tombstone) continue;
-        if (f_const.is_flat_cons) continue; // shouldn't happen post-load, but defensive
-        switch (f_const.proto) {
-            .form => |pid| if (!pid.eql(cons_id)) continue,
+        if (f_const.layout != null) continue;
+        const proto_fid = switch (f_const.proto) {
+            .form => |pid| pid,
             else => continue,
-        }
-        // hit. extract car/cdr.
+        };
+        const lay = world.layoutForProto(proto_fid) orelse continue;
+        // hit. hoist each canonical slot out of the SlotMap.
         const fm = world.heap.getMut(fid);
-        const car = if (fm.slots.get(car_sym)) |v| v else Value.nil;
-        const cdr = if (fm.slots.get(cdr_sym)) |v| v else Value.nil;
-        // remove from SlotMap.
-        _ = fm.slots.swapRemove(car_sym);
-        _ = fm.slots.swapRemove(cdr_sym);
-        fm.car_inline = car;
-        fm.cdr_inline = cdr;
-        fm.is_flat_cons = true;
+        var slot_i: u8 = 0;
+        while (slot_i < lay.inline_size) : (slot_i += 1) {
+            const sym = lay.slot_names[slot_i];
+            const v = if (fm.slots.get(sym)) |x| x else Value.nil;
+            fm.inline_slots[slot_i] = v;
+            _ = fm.slots.swapRemove(sym);
+        }
+        fm.layout = lay;
+        // §5.8b/d legacy: also populate the Cons-specific FlatCons
+        // fields so unmigrated readers (consCar/consCdr — already
+        // migrated, but defensive) keep working. step 8 deletes.
+        if (proto_fid.eql(world.protos.cons) and lay.inline_size == 2) {
+            fm.car_inline = fm.inline_slots[0];
+            fm.cdr_inline = fm.inline_slots[1];
+            fm.is_flat_cons = true;
+        }
     }
 }
 
@@ -393,10 +404,15 @@ pub fn serializeVat(world: *const World, out: *std.ArrayList(u8), allocator: std
     //
     // §5.8b: FlatCons cells synthesize :car / :cdr in the slots
     // section when serializing so the on-disk image format stays
-    // unchanged. the loader's `reflatLoadedCons` pass re-hoists them
-    // into the inline fields after load. canonical car/cdr SymIds
-    // are taken from `world.symCar` / `world.symCdr`, which are set
-    // by World.init / loadVatImage's sym-cache refresh.
+    // unchanged. the loader's `reflatLoadedLayouts` pass re-hoists
+    // canonical slots back into `inline_slots` after load. canonical
+    // SymIds come from the proto's registered Layout
+    // (`world.layoutForProto`).
+    //
+    // §5.8d: Layout-backed Forms (incl. all Cons cells) synthesize
+    // their inline slots into the slots-section in declaration order,
+    // then dump the extras map. legacy FlatCons-without-layout cells
+    // still work via the old branch.
     try appendU32(out, allocator, num_forms);
     var i: usize = 1;
     while (i < world.heap.len()) : (i += 1) {
@@ -404,12 +420,21 @@ pub fn serializeVat(world: *const World, out: *std.ArrayList(u8), allocator: std
         const f = world.heap.get(fid);
         // proto
         try appendValue(out, allocator, f.proto);
-        // slots — observable slot count includes synthesized :car/:cdr
-        // for FlatCons (yielded BEFORE the extras-map, matching the
-        // canonical insertion order users see at allocation time).
+        // slots — observable slot count includes synthesized canonical
+        // slots for Layout-backed Forms (yielded BEFORE the extras-map,
+        // matching the canonical insertion order users see at allocation
+        // time).
         const slot_count: u16 = @intCast(f.slotCount());
         try appendU16(out, allocator, slot_count);
-        if (f.is_flat_cons) {
+        if (f.layout) |lay| {
+            var li: u8 = 0;
+            while (li < lay.inline_size) : (li += 1) {
+                try appendU32(out, allocator, lay.slot_names[li]);
+                try appendValue(out, allocator, f.inline_slots[li]);
+            }
+        } else if (f.is_flat_cons) {
+            // legacy: a FlatCons cell without a Layout pointer. step 8
+            // removes this branch entirely.
             try appendU32(out, allocator, world.symCar);
             try appendValue(out, allocator, f.car_inline);
             try appendU32(out, allocator, world.symCdr);
