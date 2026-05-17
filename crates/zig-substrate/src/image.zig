@@ -235,6 +235,66 @@ pub fn loadVatImage(world: *World, bytes: []const u8, allocator: std.mem.Allocat
     world.symParent = world.parent_sym;
     world.symName = lookupSym(world, "name");
     world.self_sym = lookupSym(world, "self");
+    // §5.8a — re-cache `:bytes` so World.getStringChars finds the
+    // String content slot. initBare's interned-at-init SymId is
+    // invalidated by clearAndKeepCapacity on the sym table.
+    world.symBytes = lookupSym(world, "bytes");
+
+    // §5.8b — install (car, cdr) SymIds for FlatCons accessors. must
+    // happen AFTER the sym table is loaded; sets the form-module
+    // globals that `Form.slot` / `Form.slotPresent` read.
+    form.setConsSyms(world.symCar, world.symCdr);
+
+    // §5.8b — post-load re-flatten pass. on-disk format is unchanged
+    // (a Cons cell serializes as a Form with :car / :cdr in slots),
+    // so the loader must scan once after protos are wired to detect
+    // cons-Forms and migrate their canonical slots into the inline
+    // fields. all newly-allocated Cons cells (from `world.allocFlatCons`
+    // / friends) are already flat — this pass only fires on entries
+    // that came in via the image's FormSection.
+    try reflatLoadedCons(world);
+}
+
+/// §5.8b — walk every loaded Form; for those with proto == cons_proto
+/// and the canonical `:car` / `:cdr` slot bindings, move them into the
+/// inline FlatCons fields and clear from the SlotMap. callers that
+/// previously did `f.slots.put(car_sym, …)` see the slot via
+/// `formSlot` (now flat-cons-aware), preserving the Form contract.
+///
+/// non-canonical extra slots on a cons-Form (rare but legal —
+/// `[cell slotSet: 'foo to: 42]`) stay in the SlotMap. the post-pass
+/// preserves them.
+fn reflatLoadedCons(world: *World) !void {
+    if (world.protos.cons.isNone()) return;
+    const cons_id = world.protos.cons;
+    const car_sym = world.symCar;
+    const cdr_sym = world.symCdr;
+    if (car_sym == 0 or cdr_sym == 0) return; // no sym table → skip
+
+    // walk heap. skip sentinel (index 0). resolve each form's proto
+    // Value and compare to cons proto FormId.
+    var i: usize = 1;
+    while (i < world.heap.len()) : (i += 1) {
+        const fid = FormId.vatLocal(@intCast(i));
+        const f_const = world.heap.get(fid);
+        // skip tombstones and Forms whose proto isn't Cons.
+        if (f_const.gc_tombstone) continue;
+        if (f_const.is_flat_cons) continue; // shouldn't happen post-load, but defensive
+        switch (f_const.proto) {
+            .form => |pid| if (!pid.eql(cons_id)) continue,
+            else => continue,
+        }
+        // hit. extract car/cdr.
+        const fm = world.heap.getMut(fid);
+        const car = if (fm.slots.get(car_sym)) |v| v else Value.nil;
+        const cdr = if (fm.slots.get(cdr_sym)) |v| v else Value.nil;
+        // remove from SlotMap.
+        _ = fm.slots.swapRemove(car_sym);
+        _ = fm.slots.swapRemove(cdr_sym);
+        fm.car_inline = car;
+        fm.cdr_inline = cdr;
+        fm.is_flat_cons = true;
+    }
 }
 
 /// linear-scan the sym table for `name`. zero (NONE) if not present.
@@ -322,6 +382,13 @@ pub fn serializeVat(world: *const World, out: *std.ArrayList(u8), allocator: std
     }
 
     // ── FormSection ────────────────────────────────────────────
+    //
+    // §5.8b: FlatCons cells synthesize :car / :cdr in the slots
+    // section when serializing so the on-disk image format stays
+    // unchanged. the loader's `reflatLoadedCons` pass re-hoists them
+    // into the inline fields after load. canonical car/cdr SymIds
+    // are taken from `world.symCar` / `world.symCdr`, which are set
+    // by World.init / loadVatImage's sym-cache refresh.
     try appendU32(out, allocator, num_forms);
     var i: usize = 1;
     while (i < world.heap.len()) : (i += 1) {
@@ -329,8 +396,17 @@ pub fn serializeVat(world: *const World, out: *std.ArrayList(u8), allocator: std
         const f = world.heap.get(fid);
         // proto
         try appendValue(out, allocator, f.proto);
-        // slots
-        try appendU16(out, allocator, @intCast(f.slots.count()));
+        // slots — observable slot count includes synthesized :car/:cdr
+        // for FlatCons (yielded BEFORE the extras-map, matching the
+        // canonical insertion order users see at allocation time).
+        const slot_count: u16 = @intCast(f.slotCount());
+        try appendU16(out, allocator, slot_count);
+        if (f.is_flat_cons) {
+            try appendU32(out, allocator, world.symCar);
+            try appendValue(out, allocator, f.car_inline);
+            try appendU32(out, allocator, world.symCdr);
+            try appendValue(out, allocator, f.cdr_inline);
+        }
         var slot_it = f.slots.iterator();
         while (slot_it.next()) |entry| {
             try appendU32(out, allocator, entry.key_ptr.*);
