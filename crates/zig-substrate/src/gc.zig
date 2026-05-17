@@ -228,7 +228,18 @@ fn drainWorklist(world: *World, worklist: *std.ArrayList(FormId)) !void {
         // proto walks like any other Value.
         try addIfFormValue(world, worklist, f.proto);
 
+        // §5.8b — FlatCons inline car/cdr must be walked too. these
+        // are the canonical :car / :cdr slot values the user sees;
+        // they hold refs to other heap Forms that the GC must keep
+        // alive transitively.
+        if (f.is_flat_cons) {
+            try addIfFormValue(world, worklist, f.car_inline);
+            try addIfFormValue(world, worklist, f.cdr_inline);
+        }
+
         // slots / handlers / meta — insertion-order maps (D5).
+        // for FlatCons, `slots` holds only user-added extras; the
+        // canonical car/cdr are walked above.
         var sit = f.slots.iterator();
         while (sit.next()) |e| try addIfFormValue(world, worklist, e.value_ptr.*);
 
@@ -327,6 +338,14 @@ fn sweepHeap(world: *World) !SweepResult {
 /// remove `fid` from every owned side-table, freeing inner slices.
 /// safe to call on a FormId not in any side-table (the swapRemove
 /// returns false; nothing happens).
+///
+/// **§5.8a/c:** also evict `string_cache` and `intern_cache` entries
+/// keyed on the freshly-tombstoned FormId. without this, the cache
+/// would either leak (intern_cache: `[]u32` is owned; string_cache:
+/// SymId is a scalar but the unbounded key set leaks slots), or
+/// resurrect-via-string-content if a future alloc reused the
+/// tombstone slot (we don't reuse, but defensive eviction matches
+/// the law L11 spirit — caches must shadow heap reality).
 fn sweepSideTables(world: *World, fid: FormId) !void {
     if (world.chunk_bytecode.fetchSwapRemove(fid)) |kv| {
         world.allocator.free(kv.value);
@@ -340,6 +359,10 @@ fn sweepSideTables(world: *World, fid: FormId) !void {
     if (world.chunk_params.fetchSwapRemove(fid)) |kv| {
         world.allocator.free(kv.value);
     }
+    if (world.string_cache.fetchRemove(fid)) |kv| {
+        world.allocator.free(kv.value);
+    }
+    _ = world.intern_cache.remove(fid);
     _ = world.native_fns.remove(fid);
     _ = world.proto_generation.swapRemove(fid);
 }
@@ -488,4 +511,30 @@ test "GC: chunk side-tables freed when chunk is explicitly removed" {
     if (world.chunk_ics.fetchSwapRemove(chunk_id)) |kv| world.allocator.free(kv.value);
     _ = try collect(&world);
     try testing.expect(world.heap.forms.items[chunk_id.payload].gc_tombstone);
+}
+
+test "GC §5.8b: FlatCons inline car/cdr walked at mark" {
+    var world = try World.init(testing.allocator);
+    defer world.deinit();
+    // a leaf Form that's only reachable through a flat-cons's inline car.
+    const leaf = try world.heap.alloc(form_mod.Form.init());
+    // a flat-cons cell with car = leaf-Form (no slot reachability).
+    const cons_cell = try world.allocFlatCons(.{ .form = leaf }, Value.nil);
+    // root the cons cell via here_form.
+    const anchor = try world.syms.intern("flat-cons-anchor");
+    try world.envBind(world.here_form, anchor, .{ .form = cons_cell });
+    _ = try collect(&world);
+    // leaf reachable through inline car must survive.
+    try testing.expect(!world.heap.forms.items[leaf.payload].gc_tombstone);
+    try testing.expect(!world.heap.forms.items[cons_cell.payload].gc_tombstone);
+}
+
+test "GC §5.8b: FlatCons tombstone resets is_flat_cons" {
+    var world = try World.init(testing.allocator);
+    defer world.deinit();
+    const garbage = try world.allocFlatCons(.{ .int = 42 }, Value.nil);
+    // not rooted — should be swept.
+    _ = try collect(&world);
+    try testing.expect(world.heap.forms.items[garbage.payload].gc_tombstone);
+    try testing.expect(!world.heap.forms.items[garbage.payload].is_flat_cons);
 }
