@@ -1,5 +1,16 @@
 # next session — substrate is essentially complete; pivot to conformance + Console cap
 
+## what just shipped (phase 1/B — freezing primitive surface complete)
+
+- **VatMode enum + vat_mode field on World** — `mutable_default` | `frozen_default`. V4 precursor; moves to per-Vat in multi-vat carve.
+- **auto-freeze on alloc** — when `vat_mode == .frozen_default`, every `allocInstance` result is born frozen. `allocMutableBypass` for explicit bypass.
+- **`isFreezable` predicate** — returns false for already-frozen forms OR ForeignHandle forms (live-face per spec §4.5). `Object:freeze` raises `'cannot-freeze-live` for live faces; is idempotent on already-frozen.
+- **`__vat-mode__` intrinsic** — returns `'mutable-by-default` or `'frozen-by-default` as a Symbol.
+- **`__alloc-mutable__` intrinsic** — allocates a fresh mutable form regardless of vat-mode.
+- **`let-mutable` macro** — `lib/early/12-vat-mode.moof`. build-then-seal pattern for frozen-default vats.
+- **freezing conformance corpus** — `tests/conformance/freezing.json` with 4 triples; pending runner (future phase).
+- **36 zig tests pass** (8 new vat-mode tests + 28 existing). bootstrap baseline unchanged: 12-vat-mode.moof loads; final error `UnboundName: Console`.
+
 ## what just shipped (HEAD `041f8fd`)
 
 a massive session. went from "polyglot is an idea but not in service of a goal" to:
