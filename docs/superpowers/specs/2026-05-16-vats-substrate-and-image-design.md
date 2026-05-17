@@ -36,10 +36,11 @@
 §10 — compaction: reflog, gc, pack, journal prune
 §11 — mandatory mco serialize/restore
 §12 — transporter round-trip + intrinsic shrink + vat ergonomics
-§13 — implementation phasing
-§14 — risks + open questions
-§15 — what's NOT in this spec
-§16 — see also
+§13 — performance + compactness as design goals
+§14 — implementation phasing
+§15 — risks + open questions
+§16 — what's NOT in this spec
+§17 — see also
 
 ---
 
@@ -181,7 +182,8 @@ definition; `[vat-form freeze]` raises `'cannot-freeze-live`).
 ### 2.3 vat lifecycle
 
 monotonic: **spawn → running → (optionally crashed-and-restarted)*
-→ shutdown.** see §7 for spawn mechanics; §13 for supervisor logic.
+→ shutdown.** see §7 for spawn mechanics; §12.3 + §14 phase 8
+for supervisor logic.
 
 ---
 
@@ -597,7 +599,7 @@ not a new language.
   receiver queue fills
 
 these are concerns of `concepts/transport.md` (a separate spec,
-deferred per §15). the vat-layer's contract is: **give me an
+deferred per §16). the vat-layer's contract is: **give me an
 envelope; deliver it.**
 
 ### 7.6 the path-table-vat under federation
@@ -1232,7 +1234,173 @@ never; `'transient` = only on abnormal exit).
 
 ---
 
-## §13 — implementation phasing
+## §13 — performance + compactness as design goals
+
+every section of this spec leaves room for tightness. the
+architecture is shaped around these targets; **meeting them is a
+first-class deliverable, not a follow-up.** the substrate is
+small, the forms are tight, the turns are fast, the persistence is
+incremental — by design, not by accident.
+
+### 13.1 substrate compactness
+
+| metric | target | how the design supports it |
+|---|---|---|
+| substrate zig LoC | **5-7K** (from 10.7K) | §1, §12: aggressive push to moof + mcos |
+| player binary size | **3-5 MB** static (release) | one self-contained binary; embedded wasm runtime |
+| bundled seed.vat | **~90 KB** | minimal subset; ocaml-seed strips heavily |
+| stdlib + mcos in shared segment | **<2 MB** | content-addressed dedup; canonical encoding |
+
+stretch goal: **5K LoC zig substrate**, if we push more to moof
+than the conservative shrink list in §12.2 implies (e.g., move
+parts of the VM dispatch into moof-side specialization).
+
+### 13.2 form memory layout
+
+| metric | target | how |
+|---|---|---|
+| minimum Form struct (empty) | **~32 bytes** | lazy slot/handler/meta tables; null = no alloc |
+| typical Form (3-5 slots, 1-2 handlers) | **64-128 bytes** | packed alignment; small-table inline storage |
+| cached hash (vat-local) | **8 bytes** (truncated blake3-64) | safe to ~10^10 forms; full 256-bit only on shared-segment |
+| proto pointer | **4 bytes** (32-bit FormId) | already in design |
+| frozen + dirty + scope-tag bits | **1 byte** packed flags | bit-packed |
+
+**invariant: a freshly-allocated Form with no slots costs ~32 bytes.**
+table allocations happen only on first slot-set / handler-attach.
+this lets a workspace with thousands of small forms (every word in
+a text buffer, every pixel in a sprite) fit easily.
+
+### 13.3 vat memory + spawn rate
+
+| metric | target | how |
+|---|---|---|
+| minimum Vat struct (idle) | **<1 KB** | lazy mailbox, lazy nursery, lazy journal, lazy far-ref-table |
+| typical Vat (active) | **4-16 KB** | most state in heap, not in struct |
+| vat spawn rate | **100K/sec** on desktop | lightweight struct; no syscalls on spawn |
+| concurrent vat count | **100K** | sub-KB overhead × 100K ≈ 100 MB at saturation |
+
+implies: **lazy initialization of every Vat substructure that isn't
+needed on day 1 of the vat's life.** a brand-new vat that hasn't
+received a message yet has no allocated mailbox; a vat that hasn't
+mutated state yet has no allocated nursery; a vat that hasn't
+linked to a far-ref hasn't allocated the far-ref-table.
+
+target rationale: BEAM spawns 100K+ processes routinely. matching
+this opens the (γ) "everything-is-a-vat" granularity option if a
+workload ever needs it.
+
+### 13.4 per-turn cost
+
+| metric | target | how |
+|---|---|---|
+| empty turn (yield, no message) | **<1 μs** | tight loop in scheduler |
+| typical turn (1-3 mutations) | **10-100 μs** | nursery + diff + hash recompute |
+| turn rate per scheduler | **100K-1M/sec** | workload-dependent |
+| journal fsync per turn | **100 μs - 1 ms** | SSD-bound; batching reduces |
+
+at 1M turns/sec/scheduler × 4 cores = 4M turns/sec total per
+process. each turn produces a journal entry → 4M fsyncs/sec
+saturates disk. **mitigation**: configurable fsync batching (lose
+<1ms of work on crash for a typical batch); per-vat journal
+grouped writes.
+
+### 13.5 cross-scheduler messaging
+
+| metric | target | how |
+|---|---|---|
+| MPMC enqueue | **<100 ns** | lock-free atomic CAS on tail |
+| per-message envelope | **<100 bytes** typical | tight encoding; vat-id + form-id + sym-id + args |
+| mailbox memory | **64 B header + 8 B/slot** | ring buffer; grows on demand |
+| backpressure trigger | **10K messages** (configurable) | per-link flow control |
+
+### 13.6 shared segment + intern table
+
+| metric | target | how |
+|---|---|---|
+| intern lookup | **<100 ns** | atomic acquire-load on probed slot |
+| intern install (CAS) | **<1 μs** | hash + slot probe + atomic exchange |
+| per-interned-form overhead | **<50 bytes** | hash entry + table slot + arena slot header |
+| shared segment cap | **256 MB** default (configurable) | gc reclaims when refcount drops or cap nears |
+
+### 13.7 persistence
+
+| metric | target | how |
+|---|---|---|
+| typical merkle flush size | **<100 KB** per flush | only changed-subgraph objects |
+| flush latency | **<10 ms** | batched sequential writes; one fsync per batch |
+| store size (months interactive) | **50-200 MB** | reflog retention + gc + pack |
+| cold boot from system.vat | **<1 sec** | lazy mmap; materialize on access |
+| time-travel to past turn | **<100 ms** | direct merkle ref load; no full replay needed |
+
+### 13.8 mcos
+
+| metric | target | how |
+|---|---|---|
+| typical mco binary | **<100 KB** | -O3 wasm + size-tuned languages |
+| mco instantiation | **<1 ms** | wasmtime AOT cache |
+| mco call overhead | **<1 μs** | tight trampoline; handle-table reuse |
+| mco serialize, pure compute | **<1 μs**, empty bytes | most stdlib mcos |
+| mco serialize, linmem-only | **proportional to linmem** | bulk memcpy |
+
+### 13.9 tuning levers
+
+knobs the substrate exposes for measurement-driven tuning:
+
+```
+MOOF_SCHEDULERS              N pinned scheduler threads (default: ncpu)
+MOOF_FLUSH_TURNS             turns between merkle flushes (default 10)
+MOOF_FLUSH_MS                ms between merkle flushes (default 100)
+MOOF_FSYNC_BATCH             turns between journal fsync (default 1)
+MOOF_RETENTION_HOURS         reflog window (default 24)
+MOOF_SHARED_CAP_MB           shared segment cap (default 256)
+MOOF_HASH_BITS               64 or 256 (default 64; 256 on shared seg)
+MOOF_VAT_SPAWN_PREALLOC      N idle vat structs preallocated (default 0)
+MOOF_PACKFILE_THRESHOLD      loose objects before pack triggers (default 1000)
+MOOF_NURSERY_INITIAL_KB      initial nursery size (default 64; grows)
+```
+
+defaults work for an interactive workspace. tune for headless
+servers (more aggressive batching), embedded (smaller caps),
+high-throughput (larger nursery, batched fsync).
+
+### 13.10 measurement discipline
+
+every implementation phase ships **microbenchmarks** for its
+targets:
+
+- phase 2 (vat carve): vat spawn rate, idle vat memory, turn cost
+- phase 3 (shared segment): intern lookup, install, promotion cost
+- phase 4 (multi-scheduler): MPMC enqueue, cross-scheduler send latency, contended-shared-segment throughput
+- phase 5 (persistence): journal append, merkle flush, cold boot
+- phase 6 (mco serialize): per-category serialize/restore cost
+- phase 7 (compaction): gc throughput, pack consolidation, size reduction
+- phase 8 (supervision): supervisor restart latency, child spawn
+
+**perf regressions block merge.** the conformance suite includes
+perf oracles with tolerance bands per metric. measurement is part
+of the conformance contract, not separate.
+
+### 13.11 stretch goals (post-v1.0)
+
+if v1.0 ships and we want to push further:
+
+- **1B sends/sec hot-code path** via Self-style shape specialization
+  + per-call-site JIT (phase 3 vision §6.3)
+- **<100 ns turn loop** via threaded dispatch + flat env + flat
+  closure (phase 2 perf spec §5.3-5.5)
+- **substrate <5K LoC** via more aggressive moof-side migration of
+  things currently in `intrinsics.zig` (e.g., bytecode emit becomes
+  a moof-internal concern, substrate just consumes finished chunks)
+- **<10 MB image for typical workspaces** via per-vat zstd on
+  packfiles + smarter encoding
+- **1M concurrent vats** via tighter Vat struct (256-512 bytes
+  minimum) and pooled allocator
+- **zero-copy cross-process far-ref via shared memory** when both
+  parties on same host
+
+---
+
+## §14 — implementation phasing
 
 dependency order. each phase compiles, tests pass at boundary.
 
@@ -1380,16 +1548,16 @@ largely independent and can parallelize across two or three streams:
 
 ---
 
-## §14 — risks + open questions
+## §15 — risks + open questions
 
-### 14.1 substrate refactor scope
+### 15.1 substrate refactor scope
 
 the world → world + vat carve is large. underestimating it would
 stall the entire roadmap. **mitigation:** phase 2 is its own
 session; do it before scoping later phases. budget bug fix-loop
 time generously.
 
-### 14.2 thread-safety of the shared segment
+### 15.2 thread-safety of the shared segment
 
 CAS install on the intern table is the most subtle code path.
 **risks:** ABA, lost updates under high promotion concurrency,
@@ -1398,7 +1566,7 @@ table-grow synchronization. **mitigation:** start single-threaded
 specifically for the intern table; consider hazard pointers if
 needed.
 
-### 14.3 mco linmem serialization edge cases
+### 15.3 mco linmem serialization edge cases
 
 wgpu framebuffers, mid-protocol tcp, file-handles. **risks:**
 restore semantics that look right in isolation but don't actually
@@ -1406,7 +1574,7 @@ recover usable state. **mitigation:** define `'ephemeral-warn`
 category explicitly; mcos that can't truly recover declare so;
 consumers (workspace vats) handle the warning.
 
-### 14.4 autosave performance under load
+### 15.4 autosave performance under load
 
 per-turn journal fsync at 1000+ turns/sec on a hot vat could
 overwhelm disk. **mitigation:** measure first; if it bites,
@@ -1415,7 +1583,7 @@ async io_uring, dedicated journal thread. acceptable to start
 with per-turn fsync and tune later — most vats aren't at 1000+
 turns/sec.
 
-### 14.5 vat-mode + parser/compiler interaction
+### 15.5 vat-mode + parser/compiler interaction
 
 the parser and compiler are frozen-by-default vats. they construct
 new Forms during parsing/compiling. **risk:** building a complex
@@ -1426,7 +1594,7 @@ the helper-call expression's return value is the to-be-frozen form;
 helper's body is a `let-mutable` block; mutation is local. test
 this on real parser code in phase 1.
 
-### 14.6 merkle hash collisions
+### 15.6 merkle hash collisions
 
 blake3 has ~2^128 collision resistance. for moof workloads (max
 ~10^12 forms over a project's lifetime) this is comfortably safe.
@@ -1434,7 +1602,7 @@ blake3 has ~2^128 collision resistance. for moof workloads (max
 substrate raises `'hash-collision` and refuses to install — gives
 a debuggable failure mode rather than silent corruption.
 
-### 14.7 path-table-vat as a federation bottleneck
+### 15.7 path-table-vat as a federation bottleneck
 
 if every cross-host send goes through path resolution, the path-
 table-vat is a hot spot. **mitigation:** path resolution caches on
@@ -1442,21 +1610,21 @@ the resolving vat (the resolved id-ref or far-ref is itself stable
 for the resolved form's life). cache invalidation only on
 path-table-vat mutation.
 
-### 14.8 user adoption of mandatory mco serialize/restore
+### 15.8 user adoption of mandatory mco serialize/restore
 
 users writing custom mcos face higher burden. **mitigation:**
 ship language glue libraries (in `tools/abi/`) that provide
 default impls for `'pure` and `'linmem-only` cases — most user
 mcos won't need to write more than a `serializability:` field.
 
-### 14.9 transporter conflict resolution under heavy editing
+### 15.9 transporter conflict resolution under heavy editing
 
 simultaneous file-edit and inspector-edit of the same definition
 is rare but possible. **mitigation:** debounce both directions;
 `'prompt` policy opens an inspector view with diff. for now
 default to `'file-wins`; revisit if anyone complains.
 
-### 14.10 image format binding at v1.0
+### 15.10 image format binding at v1.0
 
 once v1.0 ships, the merkle store layout + canonical-bytes
 encoding is binding. **mitigation:** write the format spec as
@@ -1466,7 +1634,7 @@ format.md` (new doc, late phase 5).
 
 ---
 
-## §15 — what's NOT in this spec
+## §16 — what's NOT in this spec
 
 deferred to follow-up specs / sessions:
 
@@ -1493,7 +1661,7 @@ deferred to follow-up specs / sessions:
 
 ---
 
-## §16 — see also
+## §17 — see also
 
 - `docs/superpowers/specs/2026-05-04-vats-and-references-protocol-design.md`
 - `docs/superpowers/specs/2026-05-16-phase3-cohesive-vision-design.md`
