@@ -1132,8 +1132,14 @@ fn objInitialize(_: *World, self_: Value, _: []const Value) anyerror!Value {
 
 fn objFreeze(world: *World, self_: Value, _: []const Value) anyerror!Value {
     const id = self_.asFormId() orelse return self_;
-    const fm = world.heap.getMut(id);
-    fm.frozen = true;
+    const fm = world.heap.get(id);
+    // already frozen: idempotent no-op (calling freeze twice is fine).
+    if (fm.frozen) return self_;
+    // live-face forms (ForeignHandle in V0): cannot-freeze-live per spec §4.5.
+    if (!world.isFreezable(id)) {
+        return world.raise("cannot-freeze-live", "form is a live face and cannot be frozen");
+    }
+    world.heap.getMut(id).frozen = true;
     return self_;
 }
 
@@ -1142,11 +1148,38 @@ fn objFrozen(world: *World, self_: Value, _: []const Value) anyerror!Value {
     return .{ .bool_ = world.heap.get(id).frozen };
 }
 
-fn objFreezable(_: *World, self_: Value, _: []const Value) anyerror!Value {
-    // every Form is freezable; tagged immediates are conceptually
-    // already-frozen. report true uniformly (matches rust default).
-    _ = self_;
-    return .{ .bool_ = true };
+fn objFreezable(world: *World, self_: Value, _: []const Value) anyerror!Value {
+    // spec §4.5: report false for live-face forms (ForeignHandle in V0).
+    // tagged immediates are conceptually already-frozen but not "live",
+    // so report true for them (they can be "frozen" trivially).
+    const id = self_.asFormId() orelse return .{ .bool_ = true };
+    return .{ .bool_ = world.isFreezable(id) };
+}
+
+// ── phase1/B: vat-mode intrinsics ────────────────────────────────
+
+/// `(__vat-mode__)` — returns the current world's vat mode as a Symbol.
+/// returns 'mutable-by-default or 'frozen-by-default.
+fn globalVatMode(world: *World, _: Value, args: []const Value) anyerror!Value {
+    if (args.len != 0) return raise(world, "arity", "(__vat-mode__) takes no args");
+    const sym_name: []const u8 = switch (world.vat_mode) {
+        .mutable_default => "mutable-by-default",
+        .frozen_default => "frozen-by-default",
+    };
+    const sym_id = try world.syms.intern(sym_name);
+    return .{ .sym = sym_id };
+}
+
+/// `(__alloc-mutable__ proto)` — allocate a fresh form that is mutable
+/// regardless of vat-mode. used by the let-mutable macro to bypass
+/// auto-freeze for scoped construct-then-seal idioms.
+fn globalAllocMutable(world: *World, _: Value, args: []const Value) anyerror!Value {
+    const proto_id = if (args.len > 0)
+        args[0].asFormId() orelse return typeError(world, "__alloc-mutable__: proto must be a Form")
+    else
+        world.protos.object;
+    const id = try world.allocMutableBypass(proto_id);
+    return .{ .form = id };
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -2411,6 +2444,10 @@ pub const REGISTRY = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "Global:getOrCreateProto", globalGetOrCreateProto },
     .{ "Global:append", globalAppend },
     .{ "Global:macroexpand", globalMacroexpand },
+
+    // phase1/B — vat-mode intrinsics.
+    .{ "Global:__vat-mode__", globalVatMode },
+    .{ "Global:__alloc-mutable__", globalAllocMutable },
 
     // String primitives — parser uses these heavily.
     .{ "String:length", stringLength },

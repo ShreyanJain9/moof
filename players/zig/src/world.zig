@@ -1109,16 +1109,60 @@ pub const World = struct {
     /// a registered Layout, allocate a Form whose inline_slots are
     /// the canonical schema. otherwise, allocate a general Form.
     ///
+    /// respects vat_mode: when frozen_default, the returned Form is
+    /// immediately frozen (per design spec §4.1). use `allocMutableBypass`
+    /// when you need to build-then-seal within a frozen-default vat.
+    ///
     /// callers: `Object:new` and any constructor that wants to honor
     /// the proto's declared shape. caller may populate inline slots
     /// before passing to alloc via `f.layoutTrySet`.
     pub fn allocInstance(self: *World, proto_id: FormId) !FormId {
         const proto_v = Value{ .form = proto_id };
+        const id = if (self.proto_layouts.get(proto_id)) |lay|
+            try self.heap.alloc(Form.withLayout(proto_v, lay))
+        else
+            try self.heap.alloc(Form.withProto(proto_v));
+        // vat-mode auto-freeze: spec §4.1. applied post-alloc so the
+        // form's initial state is mutable during construction (inside
+        // allocInstance callers). freezes on return to moof code.
+        if (self.vat_mode == .frozen_default) {
+            self.heap.getMut(id).frozen = true;
+        }
+        return id;
+    }
+
+    /// allocate a fresh mutable Form regardless of vat_mode.
+    ///
+    /// used by the `let-mutable` macro's `__alloc-mutable__` intrinsic
+    /// to bypass auto-freeze for build-then-seal idioms in frozen-default
+    /// vats. the caller is responsible for explicitly freezing the form
+    /// at scope exit (let-mutable does this automatically).
+    pub fn allocMutableBypass(self: *World, proto_id: FormId) !FormId {
+        const proto_v = Value{ .form = proto_id };
         if (self.proto_layouts.get(proto_id)) |lay| {
-            const f = Form.withLayout(proto_v, lay);
-            return self.heap.alloc(f);
+            return self.heap.alloc(Form.withLayout(proto_v, lay));
         }
         return self.heap.alloc(Form.withProto(proto_v));
+    }
+
+    /// per spec §4.5: returns false for already-frozen forms OR for
+    /// "live face" forms that cannot be frozen. in V0, the only live
+    /// face category is ForeignHandle (the wasm mco ABI handle). V4
+    /// adds vat-Forms, mailboxes, cap-tokens; those land later.
+    ///
+    /// note: `Object:freeze` also uses this to detect live-face forms.
+    /// `Object:freeze` on an already-frozen form is a silent no-op
+    /// (idempotent); `Object:freeze` on a live-face raises
+    /// `'cannot-freeze-live`. the distinction is carried by the
+    /// caller: `objFreeze` checks `fm.frozen` first, then `isFreezable`.
+    pub fn isFreezable(self: *const World, id: FormId) bool {
+        const fm = self.heap.get(id);
+        if (fm.frozen) return false;
+        // V0 live face: ForeignHandle. identified by proto == protos.foreign_handle.
+        if (fm.proto.asFormId()) |proto_id| {
+            if (proto_id.eql(self.protos.foreign_handle)) return false;
+        }
+        return true;
     }
 
     /// evict cached `[]u32` materialization and intern result for `id`.
