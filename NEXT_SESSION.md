@@ -1,229 +1,155 @@
-# next session — V4 polyglot, getting toward rust deletion
+# next session — substrate is essentially complete; pivot to conformance + Console cap
 
-## what just shipped (HEAD `380203b`)
+## what just shipped (HEAD `041f8fd`)
 
-**V4 polyglot substrate. the stdlib boots end-to-end through zig + ocaml.**
+a massive session. went from "polyglot is an idea but not in service of a goal" to:
 
-over the last two sessions we went from "rust substrate only, V3 done"
-to a working polyglot stack where:
+- **substrate-level functional self-host** — moof drives its own bootstrap through 22 stdlib files
+- **5.87× real-workload speedup** plus 64× microbench from §4.x tier-1 perf
+- **Layout mechanism** — generalizable flat-rep; FlatCons hack removed; foundation for user-proto auto-flatten
+- **V1 per-turn nursery + diff** ported from rust to zig (preserves turn semantics pre-rust-deletion)
+- **GC adaptive trigger + free-list reuse** — 23→2 cycles per bootstrap, GC overhead 22%→12%
+- **VM dispatch refactor** + TailSend Method:call peephole — no host-stack recursion (216,670 peephole hits during bootstrap)
+- **String/intern caches** in zig; **defproto auto-flatten** wired via `$layout` cap
+- **phase 3 cohesive vision spec** (2096 lines) — image-as-canon polyglot reframe + native laziness + compaction + MCO hooks + Erlang vats + 1B-sends/sec path
 
-- **rust at build time** produces `system.vat` (21.6 MB) — a V4 vat-image
-  capturing the fully-bootstrapped moof World (596K forms, 685 syms,
-  1153 chunks, 50+ native methods).
-- **zig at runtime** loads `system.vat` and reconstructs the World in
-  memory. heap populated, native methods re-bound by name, here_form
-  + macros_form resolved.
+### the bootstrap journey this session
 
 ```
-$ cargo run -p moof --bin moof-rs -- export-v4 --output /tmp/system.vat
-  wrote /tmp/system.vat (21,645,729 bytes)
-
-$ ./crates/zig-substrate/zig-out/bin/moof load /tmp/system.vat
-  loaded /tmp/system.vat (21,645,729 bytes)
-    heap.len    = 596,905
-    syms.len    = 685
-    chunks      = 1,153
-    natives     = 21 (29 in registry; rest are stdlib-internal)
-    here_form   = FormId(scope=vat_local, payload=18)
-    macros_form = FormId(scope=vat_local, payload=19)
-  V4 vat-image alive ٩(◕‿◕｡)۶
+moof run /tmp/seed.vat
+↓
+all 11 early/* ✅       (cons, nil, bool, string-ess, symbol,
+                         quasiquote, control-macros, modules,
+                         match-defn-proto, defmethod, if-macro)
+↓
+stdlib/* ✅              (object, bool, nil, cons, freezing, integer,
+                         float, string, char, table)
+↓
+stdlib/console.moof → UnboundName: Console (substrate cap not installed)
 ```
 
-### what exists
+**22 stdlib files load in ~22.5s.** the polyglot self-host stack works end-to-end at the substrate level — what remains is mostly missing cap wiring.
 
-| crate | LoC | role | status |
-|---|---|---|---|
-| `crates/zig-substrate/` | ~3500 zig | the runtime (heap, vm, intrinsics, image-load) | builds clean; loads stdlib; runs hand-constructed bytecode |
-| `crates/substrate/` | ~8000 rust | the build-time oracle (runs `new_world()` + serializes) | builds clean; existing runtime CLI still works (REPL, `moof '<expr>'`); deletion target after polyglot proves itself |
-| `crates/ocaml-seed/` | ~2500 ocaml | future compiler (will replace rust when parser.moof self-hosts) | builds clean; parses + compiles simple programs; produces V4-spec bytes; cross-stack verified at the byte boundary |
-| `lib/` | ~5000 moof | the stdlib — Compiler.moof + early/* + stdlib/* + mcos | unchanged; compiled by rust runtime, serialized into system.vat |
+### what exists now
 
-### V4 ops set (24 total)
-
-19 op-tag bytes used; 5 reserved for phase D (Suspend/Resume) and future
-fusions. byte-tagged, big-endian, fixed-width operands. content-hashable
-chunk bytecode. spec at `docs/superpowers/specs/2026-05-10-vm-V4-opcodes-design.md`.
-
-### key strategic move from session N
-
-option D — use rust at BUILD time as a compiler+serializer, not RUNTIME.
-this skipped the bootstrap chicken-and-egg entirely (parser.moof doesn't
-exist yet; macro expansion in OCaml would be huge). rust runtime keeps
-working as the safety net; rust deletion happens LATER once polyglot
-fully self-hosts.
-
-dual-brainstorm contributed two gold nuggets:
-- gemini caught: sym-table hydration semantics (image replaces world.syms,
-  doesn't append)
-- gemini caught: `std.StaticStringMap` for comptime native registry
-
-both folded in. resulting load is robust.
-
----
-
-## what's next (this session)
-
-three tracks, roughly in dependency order. each is ~half a session.
-
-### track A — execute moof code against the loaded image
-
-**right now:** moof LOADS the vat-image but doesn't RUN moof code
-against it. the world is "alive" but inert.
-
-**what we want:** `moof run /tmp/system.vat <chunk-id>` or similar —
-invoke a specific chunk, observe the result. or: `moof exec /tmp/system.vat
-<bytecode-file>` — load image, then run a hand-constructed bytecode against
-its world.
-
-**why it matters:** proves end-to-end. proves IC dispatch works against
-re-bound native methods. proves chunk_consts / chunk_ics / heap references
-all align across the rust-emit / zig-load boundary.
-
-**concrete plan:**
-1. add `moof exec <vat> <bytecode-file>` — instantiate a top-level
-   chunk from raw V4 bytes, run via `vm.runTop` against the loaded world.
-2. smoke: `moof-seed bytes /tmp/test.moof | moof exec /tmp/system.vat -`
-   for `[1 + 2]` → `Int 3` via real IC dispatch through stdlib's protos.
-3. probable bug-hunt: chunk side-tables, IC slot initialization, dispatch
-   against re-bound natives.
-
-**risk:** the stdlib's chunks reference SymIds that may not match what
-fresh bytecode (compiled at runtime by moof-seed) uses. solution: have
-moof-seed READ the loaded image's sym table first, intern symbols against
-that canonical numbering. or: post-process moof-seed's output to remap
-SymIds.
-
-### track B — grow zig's intrinsic registry
-
-**right now:** zig REGISTRY has 29 natives. rust v4_export emits ~50.
-20+ are warned-and-skipped at load time. these are mostly:
-- `Opcode:loadSelf`, `Opcode:return`, `Opcode:loadConst:`, etc. — chunk-
-  reflection methods used by the moof Compiler when introspecting its
-  own output.
-- `Chunks:bodyOf:`, `Chunks:opsListOf:`, `Chunks:icsListOf:`, etc. —
-  same family.
-- `Compiler.useMoof` / `Compiler.useSeed` — the flag-flip methods.
-- `$transporter.of:` — the file-load cap.
-- ~6 anonymous singleton methods (the `<anon-N>:foo` warnings).
-
-**what to do:** port each missing native from rust intrinsics.rs to zig
-intrinsics.zig + add to the comptime REGISTRY. mostly mechanical. some
-will need wasm runtime support (for `$mco`).
-
-**scope:** ~3-6 hours of porting. completes before track A's smokes
-have any chance of running stdlib code that needs these natives.
-
-### track C — runtime source parsing (the parser problem)
-
-**right now:** moof consumes bytecode but can't parse source. once
-track A works, the natural ask is `moof "(+ 1 2)"` — eval a source
-string. needs a reader at runtime.
-
-**three approaches:**
-1. **port `reader.rs` → `reader.zig`.** ~1000 LoC of zig. self-contained;
-   no dependencies. preferred long-term.
-2. **call ocaml-seed as a subprocess.** `moof` shells out to
-   `moof-seed bytes -` to compile. simple; introduces a subprocess
-   dependency at runtime.
-3. **embed ocaml-seed in moof via wasm.** compile ocaml-seed to wasm
-   (with wasm_of_ocaml if it works), call it via the wasm runtime that's
-   already in zig substrate. fits the philosophy ("OCaml as mco"); requires
-   solving the OCaml→wasm story.
-
-**recommend:** option 1 for V4 maturity, option 2 for tonight if we want
-to ship something running. option 3 is the elegant end state.
-
-once any of these works, plus track A + B, we have **moof replacing
-moof entirely** for ordinary use. rust deletion is one step away.
-
----
-
-## the bigger arc (post this session)
-
-| step | what | unlocks |
+| crate | role | status |
 |---|---|---|
-| this session | tracks A + B + C | moof is feature-complete |
-| next session | rust deletion | only crates/zig-substrate + crates/ocaml-seed remain |
-| then | parser.moof + compiler.moof self-host | phase A-self-host complete; ocaml seed deletion follows |
-| then | phase B (persistence) | save vat per turn; restore from disk; live image is real |
-| then | phase D (replication) | multi-vat in-process; canonical-hash convergence |
-| then | phase E (3D world demo) | the moofpaint forcing function |
-| then | phase F (federation) | multi-user 3D world via websocket |
+| `crates/zig-substrate/` | THE runtime — heap, vm, gc, image, intrinsics, nursery, layout | substantial; 4000+ LoC zig |
+| `crates/substrate/` | rust build-time oracle | WORKS but slated for deletion (W5e) once polyglot complete |
+| `crates/ocaml-seed/` | minimal bootstrap compiler | works; produces seed.vat (~91 KB, 305 chunks, 77 natives) |
+| `lib/` | stdlib + parser + compiler + early macros | unchanged structurally; defproto auto-flatten added |
 
-the V4 image format ALREADY IS the phase-B persistence format. designing
-it well now (per-vat structure, content-addressable, deterministic) pays
-back across B/D/F all at once.
+### perf snapshot
+
+| metric | value | path-to-target |
+|---|---|---|
+| bench-natives microbench | 14.9M sends/sec | tier 2: PICs + threaded dispatch → 50M+ |
+| bench-parser-like microbench | 10.7M sends/sec | tier 2 → 30M+ |
+| real-workload (parser+compiler on stdlib) | 532K sends/sec | tier 2 → 5M; tier 3 JIT → 100M; specialization → 1B |
+| GC overhead | 12% of wall time | generational compaction → ~3% |
+| bootstrap wall time | 22.5s (was: hung) | tier 2/3 + Console fix → <5s |
+| `[1 is nil]` parse (isolated) | ~100ms range | tier 2 → <10ms |
+
+we are well within striking distance of BEAM-interpreted parity (5-10M sends/sec real). tier 3 copy-and-patch JIT gets to BEAMJIT-class.
 
 ---
 
-## known gotchas + TODOs
+## what's next (this session's queued tasks)
 
-these are flagged-but-not-blocking. fix when they become hot:
+### immediate unblocker (1-2 hours)
 
-### from track 1 (rust v4_export)
+**Console cap install in zig substrate (task #46).** the 23rd stdlib file blocks because `Console` global isn't installed by `installCaps`. mirror rust's `install_console_cap` in `crates/substrate/src/intrinsics.rs`. after this, bootstrap likely reaches even further into stdlib OR completes end-to-end.
 
-1. **non-scalar Value serialization.** rust may have inline `Value::Str` /
-   `Value::Bytes` somewhere; current export treats only the 7 scalar
-   variants (Nil/Bool/Int/Sym/Char/Float/Form). If a non-scalar Value
-   shows up in a chunk's const-pool or a Form's slot, it's emitted as
-   Nil with a panic-on-encounter. **investigate:** does `lib/` ever hit
-   this? unclear. mitigation: scan for inline String values during
-   export; allocate them as Forms first if found.
-2. **Source form linking.** every chunk has a `:source` slot referencing
-   the source-Form it was compiled from. currently the export writes
-   `chunk_id` as `source_form_id` (placeholder). L5 (source is canonical,
-   bytecode derived) is violated until this is fixed. **fix:** look up
-   chunk's `:source` meta slot, find that Form's FormId, emit.
-3. **Footer hash is zeros.** zig stubs verification. real blake3 footer
-   needed when content-addressing actually matters. phase 9 work.
-4. **Proto count mismatch.** spec §10.3 wants 18 protos; rust has 17 +
-   `macros_form` slotted in. `Opcode` proto FormId is emitted as NONE.
-   moof handles NONE gracefully; long-term, add Opcode proto on rust
-   side OR shrink spec to 17.
+### tier-2 perf (next big push, ~2-3 weeks)
 
-### from track 2 (zig image-load)
+phase 2 spec at `docs/superpowers/specs/2026-05-16-phase2-moof-performance-design.md`:
 
-5. **sym-table cached symbol IDs in `World.initBare`.** zig caches hot
-   syms (parent, view-target, etc.) at init; after image-load's
-   `clearAndKeepCapacity`, those SymIds are stale. fine for load-and-
-   inspect, broken for active env walks. **fix:** re-intern after load,
-   or read SymIds from the loaded image's table.
-6. **wasm mco loading is stubbed.** moof logs "would load mco" and
-   continues. for stdlib methods that genuinely need mcos (Hash, Utf8,
-   Clock, etc.), they'll fail at dispatch. acceptable for boot-and-inspect;
-   blocks "run stdlib code that hashes things."
-7. **20+ unknown natives skipped at load.** see track B above.
+- §5.1 4-way PIC (polymorphic inline caches) — 1.3×
+- §5.2 inline Int+Int fast path — 1.5×
+- §5.3 tail-call threaded dispatch (zig 0.16 `@call(.always_tail)`) — 2×
+- §5.4 flat env representation — 1.5× (high risk; touches L1)
+- §5.5 closure flat representation — 1.3×
+- §5.10 parser-level intern memoization — small, was 0% hit (re-dispatch)
+- §5.11 tail-send IC (wire-format amendment) — 1.1×
 
-### across both
+cumulative target: 10-15× → 5-10M sends/sec real workload (BEAM-interpreted parity).
 
-8. **OCaml seed didn't ship a working build-image command.** the
-   image+CLI agent in session N stubbed it; it produces a SKELETON .vat
-   but not a full bootstrap image. rust's v4_export is the canonical
-   path until ocaml-seed catches up.
-9. **stale worktree branches in `git branch`.** 9+ zombie branches from
-   parallel-subagent work. `git branch -D worktree-agent-*` cleanup is
-   safe; not urgent.
-10. **OCaml lives in `opam switch wasm-mco`.** undocumented for CI.
-    `eval $(opam env --switch=wasm-mco)` before any `dune` command.
+### handoff session priorities (recommendation from #45 design agent)
+
+> **"design the v0.5 conformance test corpus — 50-100 (image, message, expected-result) triples + the `moof conform manifest.json` command per spec §1.3."**
+
+this pivots polyglot from "described in a spec" to "tested on every commit." enabling work for: wasm-browser player, byte-format freeze, cross-player parity.
+
+### vats-V4 onward (months of work, BEAM-rivaling)
+
+per `docs/superpowers/specs/2026-05-04-vats-and-references-protocol-design.md` §22:
+
+- V4 multi-vat container — round-robin scheduler, per-vat heap isolation
+- V5 references protocol — far-refs, membrane translation, cap-tokens
+- V6 shared segment — content-addressed cross-vat immutable
+- V7 eventual sends — `<-` operator, Promise Form
+- V8 supervision + spawn — `[$vat spawn:]`, let-it-crash
+- V9 persistence — per-vat lmdb + journal
+- V10 capabilities + intents
+- V11 replication + CRDT hooks
+
+V1 nursery just landed in zig → V4 multi-vat is unblocked.
+
+### tier-3 perf (months out)
+
+per phase 3 spec §6:
+
+- copy-and-patch JIT (~4-6w MVP) → BEAMJIT-class
+- Self/Truffle-style shape specialization → near-native (1B sends/sec hot)
+
+---
+
+## known gotchas + open questions
+
+### immediate
+
+1. **moof eval / run requires MOOF_LIB env set** when called without lib/ in cwd. Set `MOOF_LIB=/path/to/lib` before running.
+2. **The polyglot path requires ocaml-seed + zig moof + lib/ all in sync.** rebuild seed.vat after any lib/ change.
+3. **Console + emit + a few other caps** missing on zig substrate's installCaps — small ports each.
+4. **`(set! count ...)` style still routes through env-binding**, not slot. defproto auto-flatten registers the Layout but full ergonomics require §11 `.foo`/env-lookup work (`docs/superpowers/specs/2026-05-10-dot-slots-and-pipes-design.md`).
+
+### phase 3 spec risks (load-bearing)
+
+1. **wasm-browser players cannot JIT** — interpreted-only, no top-tier parity. decision deadline: v2.0.
+2. **.vat format frozen at v1.0 is binding** — byte-level spec + validator + migration framework needed AT v1.0, not after.
+3. **mco security audit before v2.0** — moof_call / moof_form_slot_set ABI is the cap surface; needs cap-token enforcement before public mcos.
+
+### deferred items
+
+| task | what | why |
+|---|---|---|
+| #34 §5.7 cached SymIds | small mechanical port | overlapped with §5.8 work; may already be partly done |
+| #35 §5.10 parser-level intern memoization | parser-side cache | small win; re-dispatch with tight scope |
+| #43 follow-ups | `become_` rollback in nursery; TurnDiff serialization | V9 persistence work |
+| Env / Method / Closure layouts | one-liner each post-#41 + sweep alloc sites | small but tedious |
+| §5.4 flat env | high risk, touches L1 | needs design care |
+| §5.5 flat closure | medium risk, many alloc sites | sweep work |
+| §11 `.foo` slot read + pipes implementation | spec ready at 2026-05-10-dot-slots-and-pipes-design.md | unblocks Counter-style ergonomics |
 
 ---
 
 ## starting the next session
 
-1. `git pull` — confirm at `380203b` or later.
-2. `cargo build -p moof --release --bin moof-rs` — produces `target/release/moof-rs`.
-3. `cd crates/zig-substrate && zig build && cd ..` — produces
-   `crates/zig-substrate/zig-out/bin/moof`.
-4. `cargo run -p moof --bin moof-rs -- export-v4 --output /tmp/system.vat`
-   — 21 MB image.
-5. `./crates/zig-substrate/zig-out/bin/moof load /tmp/system.vat`
-   — should print `V4 vat-image alive`.
-6. read `docs/superpowers/plans/2026-05-10-vm-V4-C3-stdlib-bootstrap.md`
-   if you need plan context.
-7. read `docs/superpowers/specs/2026-05-10-vm-V4-opcodes-design.md` for
-   the byte format / image format contract.
+1. `git pull` — confirm at `041f8fd` or later
+2. `cargo build --release -p moof --bin moof-rs` — produces rust safety net
+3. `cd crates/zig-substrate && zig build && cd ..` — produces `crates/zig-substrate/zig-out/bin/moof`
+4. `eval $(opam env --switch=wasm-mco)` then `dune build --root crates/ocaml-seed` — ocaml-seed builds
+5. `dune exec --root crates/ocaml-seed bin/seed.exe -- build-seed --root lib/ --output /tmp/seed.vat` — produces 91 KB seed.vat
+6. `MOOF_LIB=$PWD/lib ./crates/zig-substrate/zig-out/bin/moof run /tmp/seed.vat` — should reach `UnboundName: Console`
+7. Read `docs/superpowers/specs/2026-05-16-phase3-cohesive-vision-design.md` for the next several months' direction
+8. Read this file's "what's next" sections + recommended first dispatch
+9. Pick a workstream:
+   - immediate: Console cap install (#46) + remaining cap wirings
+   - cleanup: §5.10 intern + Env/Method layouts (§5.5)
+   - strategic: tier-2 perf push, OR conformance test corpus, OR vats-V4 multi-vat
+10. Dispatch agents in parallel where files don't overlap
 
-if all 6 pass, pick a track (A/B/C above) and dispatch parallel agents.
+if all 6 build/setup steps pass, you're ready to dispatch.
 
 ---
 
@@ -235,6 +161,18 @@ still:
 - the four faces of Form
 - moldable, reflective, expressive, pure
 
-we've just made the substrate **smaller** and **polyglot**. zig owns the
-runtime; ocaml will own the compiler; rust is the build-tool that goes
-away. moof code keeps doing what it does. ٩(◕‿◕｡)۶
+we've made the substrate dramatically faster + added turn semantics + generalized flat reps + clarified the vision. moof is a real shape now, not just an idea.
+
+next session: **make a moof image a real artifact**. ٩(◕‿◕｡)۶
+
+---
+
+## see also
+
+- `docs/superpowers/specs/2026-05-16-phase3-cohesive-vision-design.md` — THE roadmap doc
+- `docs/superpowers/specs/2026-05-16-phase2-moof-performance-design.md` — perf design + real-workload measurements
+- `docs/superpowers/specs/2026-05-11-phase1-gc-dispatch-compression-design.md` — substrate optimization (mostly shipped)
+- `docs/superpowers/specs/2026-05-10-self-host-and-rust-deletion-design.md` — self-host design
+- `docs/superpowers/specs/2026-05-10-dot-slots-and-pipes-design.md` — `.foo` + pipes language design
+- `docs/superpowers/specs/2026-05-04-vats-and-references-protocol-design.md` — vats roadmap V4-V11
+- `docs/roadmap.md` — overall phase plan
