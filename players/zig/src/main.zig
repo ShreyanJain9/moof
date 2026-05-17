@@ -578,14 +578,21 @@ fn runRun(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ
 ///    - print "moof> " prompt to stdout
 ///    - read a line from stdin
 ///    - EOF (ctrl-d) → print "goodbye." and exit cleanly
-///    - `:quit` or `:q` → same
+///    - `:quit`, `:q`, or `(quit)` → same
 ///    - empty line → skip
-///    - otherwise: eval via `evalStringInWorld`, print result via `printResult`
-///    - on error: print the error name, continue
+///    - otherwise: eval via `evalStringInWorld`, print result via `replPrintResult`
+///    - on error: print the error name to stderr, continue
 ///
-/// prompt and output go to stdout via `std.Io.File.writeStreamingAll`
-/// (same discipline as `std.debug.print` goes to stderr; prompt to
-/// stdout keeps the REPL usable when stdout is a terminal).
+/// **stream discipline**: prompts and successful results go to **stdout**
+/// (so a script can `./moof eval … | grep` the values). errors and warnings
+/// go to **stderr** (so they don't pollute the value stream). bootstrap
+/// status messages also go to stderr.
+///
+/// **cap-discipline TODO**: the rust REPL writes prompts via the `$out`
+/// cap; this zig REPL writes directly to stdout because Console isn't
+/// installed in the zig substrate yet (see NEXT_SESSION task #46). once
+/// Console lands, the REPL should route through `$out` for parity with
+/// the rust impl.
 fn runRepl(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, vat_path: []const u8) !void {
     var world = try World.initBare(allocator);
     defer world.deinit();
@@ -732,14 +739,20 @@ fn runRepl(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Enviro
             return;
         }
 
-        // eval
+        // eval — capture pre-eval frame depth so we can clean up after errors
+        const pre_eval_frames = world.vm.frames.items.len;
+        const pre_eval_stack = world.vm.stack.items.len;
         const src_val = world.makeString(line) catch |err| {
             std.debug.print("! makeString failed: {s}\n", .{@errorName(err)});
             continue;
         };
         if (intrinsics.evalStringInWorld(&world, src_val)) |result| {
-            printResult(result, &world);
+            replPrintResult(result, &world, io, stdout_file, &stdout_buf);
         } else |err| {
+            // eval error: clean up any frames/stack left behind so the next
+            // eval starts from the same depth as before this attempt.
+            world.vm.frames.shrinkRetainingCapacity(pre_eval_frames);
+            world.vm.stack.shrinkRetainingCapacity(pre_eval_stack);
             std.debug.print("! {s}", .{@errorName(err)});
             if (world.vm.last_send_sel) |sel| {
                 std.debug.print(" (last send: '{s})", .{world.syms.resolve(sel)});
@@ -776,6 +789,29 @@ fn printResult(v: Value, world: *const World) void {
         .float => |f| p("=> Float({d})\n", .{f}),
         .form => |id| p("=> Form#{d} (scope={s})\n", .{ id.payload, @tagName(id.scope) }),
     }
+}
+
+/// REPL-specific result printer. Writes to stdout via an explicit writer
+/// (the regular `printResult` above uses `std.debug.print` which goes to
+/// stderr — that's wrong for the REPL where stdout-piping should work).
+///
+/// future: once the Console cap is installed in the zig substrate, the
+/// REPL should send `[result inspect]` and emit the resulting String
+/// through `$out`, getting moof-side pretty representation. for now,
+/// debug format is what we have.
+fn replPrintResult(v: Value, world: *const World, io: std.Io, stdout_file: std.Io.File, buf: []u8) void {
+    var sw = stdout_file.writerStreaming(io, buf);
+    const w = &sw.interface;
+    switch (v) {
+        .nil => w.print("=> nil\n", .{}) catch {},
+        .bool_ => |b| w.print("=> {s}\n", .{if (b) "#true" else "#false"}) catch {},
+        .int => |n| w.print("=> Int({d})\n", .{n}) catch {},
+        .sym => |s| w.print("=> Sym('{s})\n", .{world.syms.resolve(s)}) catch {},
+        .char => |c| w.print("=> Char(#\\{u})\n", .{@as(u21, @truncate(@as(u32, @bitCast(c))))}) catch {},
+        .float => |f| w.print("=> Float({d})\n", .{f}) catch {},
+        .form => |id| w.print("=> Form#{d} (scope={s})\n", .{ id.payload, @tagName(id.scope) }) catch {},
+    }
+    sw.flush() catch {};
 }
 
 fn runSmoke(allocator: std.mem.Allocator) !void {

@@ -72,8 +72,8 @@ if [[ "$SKIP_BUILD" != "1" ]]; then
     if [[ ! -x "$ZIG_BIN" ]]; then
         build_zig_substrate
     elif [[ -d "$ZIG_SRC" ]]; then
-        # rebuild if any .zig source is newer than the binary
-        stale=$(find "$ZIG_SRC" -name "*.zig" -newer "$ZIG_BIN" 2>/dev/null | head -1)
+        # rebuild if any .zig source OR the build.zig config is newer than the binary
+        stale=$(find "$REPO/players/zig" \( -name "*.zig" \) -not -path "*/zig-out/*" -not -path "*/.zig-cache/*" -newer "$ZIG_BIN" 2>/dev/null | head -1)
         if [[ -n "$stale" ]]; then
             build_zig_substrate
         fi
@@ -81,9 +81,11 @@ if [[ "$SKIP_BUILD" != "1" ]]; then
 fi
 
 # ── step 2: ensure seed.vat is up to date ───────────────────────────────────
+# build_seed_vat <output_path>: builds seed.vat to the given path.
 build_seed_vat() {
+    local out_path="$1"
     echo "building seed.vat..." >&2
-    mkdir -p "$REPO/.moof"
+    mkdir -p "$(dirname "$out_path")"
 
     # check ocaml toolchain availability
     if ! command -v opam &>/dev/null; then
@@ -92,13 +94,14 @@ build_seed_vat() {
         exit 1
     fi
 
-    # eval opam env for wasm-mco switch
-    if ! eval "$(opam env --switch=wasm-mco 2>/dev/null)"; then
+    # check that the wasm-mco switch exists (more robust than evaling its env)
+    if ! opam switch list --short 2>/dev/null | grep -qx wasm-mco; then
         echo "error: opam switch 'wasm-mco' not found." >&2
         echo "  run: opam switch create wasm-mco ocaml-base-compiler" >&2
         echo "  then install dune and dependencies." >&2
         exit 1
     fi
+    eval "$(opam env --switch=wasm-mco)"
 
     # build ocaml seed
     if ! dune build --root "$OCAML_SEED" 2>&1; then
@@ -108,27 +111,27 @@ build_seed_vat() {
 
     # generate seed.vat
     if ! dune exec --root "$OCAML_SEED" bin/seed.exe -- \
-             build-seed --root "$LIB_DIR/" --output "$SEED_VAT" 2>&1; then
+             build-seed --root "$LIB_DIR/" --output "$out_path" 2>&1; then
         echo "error: seed.exe build-seed failed." >&2
         exit 1
     fi
-    echo "seed.vat built: $SEED_VAT" >&2
+    echo "seed.vat built: $out_path" >&2
 }
 
 SEED_VAT_PATH="${MOOF_SEED_VAT:-$SEED_VAT}"
 
 if [[ "$SKIP_BUILD" != "1" ]]; then
     if [[ ! -f "$SEED_VAT_PATH" ]]; then
-        build_seed_vat
+        build_seed_vat "$SEED_VAT_PATH"
     elif [[ -d "$LIB_DIR" ]]; then
         # rebuild if any .moof file in lib/ is newer than seed.vat
         stale=$(find "$LIB_DIR" -name "*.moof" -newer "$SEED_VAT_PATH" 2>/dev/null | head -1)
-        # also rebuild if ocaml seed sources changed
+        # also rebuild if ocaml seed sources or dune configs changed
         if [[ -z "$stale" && -d "$OCAML_SEED" ]]; then
-            stale=$(find "$OCAML_SEED" \( -name "*.ml" -o -name "*.mli" \) -newer "$SEED_VAT_PATH" 2>/dev/null | head -1)
+            stale=$(find "$OCAML_SEED" \( -name "*.ml" -o -name "*.mli" -o -name "dune" -o -name "dune-project" \) -newer "$SEED_VAT_PATH" 2>/dev/null | head -1)
         fi
         if [[ -n "$stale" ]]; then
-            build_seed_vat
+            build_seed_vat "$SEED_VAT_PATH"
         fi
     fi
 fi
