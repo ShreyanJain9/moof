@@ -116,6 +116,15 @@
             (handlers [[[parsed cdr] cdr] car]))
         (let ((proto-decl
                 `(def ,name (getOrCreateProto ',name ,parent)))
+              ;; §5.8d — register a Layout on the proto so every
+              ;; `[Name new]` instance gets inline-slot storage
+              ;; (no per-instance SlotMap traffic for the declared
+              ;; slots). emitted only when (slots ...) is non-empty;
+              ;; a slotless proto stays "general" (SlotMap-backed).
+              (layout-decl
+                (if [slots empty?]
+                    'nil
+                    `[$layout register: ,name slots: (quote ,slots)]))
               (getters
                 [slots map:
                   (fn (s) [DefProto slotGetter: name k: s])])
@@ -126,6 +135,7 @@
                 [handlers map:
                   (fn (h) [DefProto handler: name decl: h])]))
           `(do ,proto-decl
+               ,layout-decl
                ,@getters
                ,@setters
                ,@handler-forms
