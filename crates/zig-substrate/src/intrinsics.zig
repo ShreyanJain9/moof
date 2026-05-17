@@ -1077,6 +1077,17 @@ fn objEq(_: *World, self_: Value, args: []const Value) anyerror!Value {
 
 fn objNew(world: *World, self_: Value, _: []const Value) anyerror!Value {
     // [Proto new] — allocate a fresh form whose proto is the receiver.
+    // §5.8b — when the receiver IS the Cons proto, use the flat-cons
+    // fast path so `{Cons car: x cdr: y}`-style literal construction
+    // produces an inline-storage cell. car/cdr default to nil; the
+    // subsequent `slotSet!: 'car to: x` lands on the inline field via
+    // formSlotSet's FlatCons branch.
+    if (self_.asFormId()) |proto_id| {
+        if (proto_id.eql(world.protos.cons)) {
+            const id = try world.allocFlatCons(Value.nil, Value.nil);
+            return .{ .form = id };
+        }
+    }
     var f = Form.withProto(self_);
     const id = try world.heap.alloc(f);
     _ = &f;
@@ -1869,13 +1880,30 @@ fn globalRaise(world: *World, _: Value, args: []const Value) anyerror!Value {
     return world.raise(kind_name, "raised from moof");
 }
 
+// **§5.8c** — String→Sym intern cache. profile shows 267K intern
+// calls / 653 unique syms = 410× redundancy; the parser interns the
+// same identifier text repeatedly across passes. caching String
+// FormId → SymId reduces those calls to a single hashmap probe.
+//
+// safety: the cache is in `world.intern_cache`; invalidation lives on
+// `world.formSlotSet` (when `:bytes` rewrites) and `gc.sweepSideTables`
+// (when a String FormId tombstones). by L11 the FormId itself is
+// stable for the lifetime of the vat, so a hit always points at the
+// canonical SymId for this string's content.
 fn globalIntern(world: *World, _: Value, args: []const Value) anyerror!Value {
     if (args.len < 1) return raise(world, "arity", "(intern name) takes 1 arg");
     const arg = args[0];
     // Symbol identity passthrough.
     if (arg == .sym) return arg;
-    // String-Form: walk :bytes chain into a utf-8 buffer.
+    // String-Form: cache lookup first.
     const id = arg.asFormId() orelse return typeError(world, "intern: arg must be a String or Sym");
+    if (world.intern_cache.get(id)) |cached_sym| {
+        vm_mod.PROFILE.intern_cache_hits += 1;
+        return .{ .sym = cached_sym };
+    }
+    vm_mod.PROFILE.intern_cache_misses += 1;
+
+    // miss — walk :bytes chain into a utf-8 buffer.
     const bytes_sym = lookupSymByName(world, "bytes") orelse return raise(world, "no-bytes-sym", "intern: no bytes sym");
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(world.allocator);
@@ -1903,6 +1931,9 @@ fn globalIntern(world: *World, _: Value, args: []const Value) anyerror!Value {
         }
     }
     const sid = try world.syms.intern(buf.items);
+    // populate cache. errors here are non-fatal — the cache is a soft
+    // optimization, and we already have a valid SymId to return.
+    world.intern_cache.put(world.allocator, id, sid) catch {};
     return .{ .sym = sid };
 }
 
