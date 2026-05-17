@@ -129,11 +129,64 @@ pub const FormId = packed struct(u32) {
 /// an allocator field — allocators flow in through Form methods.
 pub const SlotMap = std.AutoArrayHashMapUnmanaged(u32, Value);
 
+/// phase 2 §5.8b — global SymIds for `car` / `cdr`. set by
+/// `setConsSyms` at World.init and after image-load (the loader
+/// re-interns the sym table, so the SymIds shift). when both are
+/// non-zero, `Form.slot` / `Form.slotPresent` honor the FlatCons
+/// inline fields; before they're set, those methods behave like
+/// the pre-§5.8b code (treat every Form as general).
+///
+/// these are *not* per-World — only one vat exists per process in
+/// V4 phase α, and the same intrinsic registry serves all. when
+/// multi-vat lands (V6), this will need to move onto World.
+pub var CONS_CAR_SYM: u32 = 0;
+pub var CONS_CDR_SYM: u32 = 0;
+
+/// install the (car, cdr) SymIds for FlatCons accessors. idempotent;
+/// safe to call repeatedly. World.init and image.loadVatImage both
+/// invoke this after the sym table is populated.
+pub fn setConsSyms(car_sym: u32, cdr_sym: u32) void {
+    CONS_CAR_SYM = car_sym;
+    CONS_CDR_SYM = cdr_sym;
+}
+
 /// the universal heap kind.
 ///
 /// every conceptually-allocated moof value is a Form. dispatch walks
 /// `proto`. user data lives in `slots`. methods live in `handlers`.
 /// provenance + annotations live in `meta`.
+///
+/// ## phase 2 §5.8b — flat-Cons layout
+///
+/// per the perf design, ~half of all heap forms during bootstrap are
+/// cons cells. the canonical layout stored car/cdr inside the `slots`
+/// ArrayHashMap — two `put` calls per allocation, two hashmap walks
+/// per `car`/`cdr` read. that's ~30 ns per access and ~80 ns per alloc.
+///
+/// the FlatCons optimization stores `car` and `cdr` *inline* on the
+/// Form struct itself when `is_flat_cons == true`. for fresh Cons
+/// allocations (`(cons h t)`, `[h cons: t]`, `(list …)`,
+/// `[xs reverse]`, image-load re-flatten):
+///   - `slots` stays `.empty` (no allocator traffic for canonical slots)
+///   - `formSlot(id, sym_car)` / `formSlot(id, sym_cdr)` return the
+///     inline field directly (one branch + load, no hashmap probe)
+///   - `formSlotSet(id, sym_car, v)` writes the inline field directly
+///   - if user code adds a *non-canonical* slot via
+///     `[cell slotSet: 'foo to: 42]`, it lazy-inits `slots` and stores
+///     there. canonical slots still flow through inline fields.
+///
+/// reflection (`[obj slots]`-style iterators) must yield `'car, 'cdr`
+/// *before* iterating `slots` — that's the responsibility of every
+/// site that previously walked `f.slots.iterator()` for a Cons.
+/// `heapSlotKeysOf`, `gc.drainWorklist`, and `image.serializeVat`
+/// have been updated.
+///
+/// the on-disk image format is UNCHANGED — a FlatCons serializes as
+/// a Form with `car` / `cdr` synthesized into the slots-section, and
+/// the loader re-flattens on read (proto == cons → set is_flat_cons,
+/// hoist car/cdr inline).
+///
+/// ## phase 2 §4.7 — `handlers` (unchanged) — see header comment.
 pub const Form = struct {
     /// the immediate delegation parent. `Value.nil` for the root
     /// `Object` proto; `.form` for everything else.
@@ -142,6 +195,10 @@ pub const Form = struct {
 
     /// named bindings. insertion-order — deterministic across
     /// replicas (`laws/determinism-laws.md` D5).
+    ///
+    /// for `is_flat_cons` Forms, canonical `:car` / `:cdr` are NOT
+    /// stored here; only user-added non-canonical slots land in this
+    /// map (lazy-init on first non-cons slot write).
     slots: SlotMap,
 
     /// selector → method-Form (`Value.form` of a method-shaped
@@ -152,11 +209,23 @@ pub const Form = struct {
     /// by user code (`laws/reflection-contract.md` R7).
     meta: SlotMap,
 
+    /// phase 2 §5.8b — FlatCons inline `:car`. valid iff `is_flat_cons`.
+    car_inline: Value,
+
+    /// phase 2 §5.8b — FlatCons inline `:cdr`. valid iff `is_flat_cons`.
+    cdr_inline: Value,
+
     /// V2 — freezing. once `true`, slot/handler/meta writes raise
     /// `'frozen-form`. one-way; no thaw. transition itself is a
     /// turn-mutation (journals via the V1 nursery; rolls back on
     /// abort).
     frozen: bool,
+
+    /// phase 2 §5.8b — `true` if this Form uses the FlatCons inline
+    /// layout. when set, `car_inline` and `cdr_inline` are the
+    /// canonical `:car` and `:cdr` slot values; `slots` holds only
+    /// user-added non-canonical slots (lazy-inited).
+    is_flat_cons: bool,
 
     /// GC mark bit (phase 1 mark-sweep, per
     /// `2026-05-11-phase1-gc-dispatch-compression-design.md` §3).
@@ -189,7 +258,10 @@ pub const Form = struct {
             .slots = .empty,
             .handlers = .empty,
             .meta = .empty,
+            .car_inline = .nil,
+            .cdr_inline = .nil,
             .frozen = false,
+            .is_flat_cons = false,
             .gc_mark = false,
             .gc_tombstone = false,
         };
@@ -200,6 +272,25 @@ pub const Form = struct {
         var f = Form.init();
         f.proto = proto;
         return f;
+    }
+
+    /// phase 2 §5.8b — build a fresh FlatCons. proto is set to
+    /// `cons_proto_v` (caller passes `Value{.form = world.protos.cons}`);
+    /// `car_inline` / `cdr_inline` populated; `slots` empty. allocation-
+    /// free (no SlotMap put).
+    pub fn flatCons(cons_proto_v: Value, car: Value, cdr: Value) Form {
+        return .{
+            .proto = cons_proto_v,
+            .slots = .empty,
+            .handlers = .empty,
+            .meta = .empty,
+            .car_inline = car,
+            .cdr_inline = cdr,
+            .frozen = false,
+            .is_flat_cons = true,
+            .gc_mark = false,
+            .gc_tombstone = false,
+        };
     }
 
     /// release backing storage for slots / handlers / meta. does NOT
@@ -215,17 +306,36 @@ pub const Form = struct {
     /// look up a slot by name. returns `Value.nil` if missing —
     /// callers that need to distinguish "missing" from "explicitly
     /// nil" use `slotPresent`.
+    ///
+    /// phase 2 §5.8b: for FlatCons Forms, `:car` / `:cdr` return the
+    /// inline fields. requires `CONS_CAR_SYM` / `CONS_CDR_SYM` to be
+    /// set (World.init does this; tests that bypass init may need to
+    /// call `setConsSyms` themselves).
     pub fn slot(self: *const Form, name: u32) Value {
+        if (self.is_flat_cons) {
+            if (name == CONS_CAR_SYM) return self.car_inline;
+            if (name == CONS_CDR_SYM) return self.cdr_inline;
+        }
         return if (self.slots.get(name)) |v| v else Value.nil;
     }
 
     /// `true` if `name` is bound in this Form's slots.
+    ///
+    /// phase 2 §5.8b: for FlatCons Forms, `:car` / `:cdr` are always
+    /// present (their inline storage IS the binding, even if the
+    /// value is `nil`).
     pub fn slotPresent(self: *const Form, name: u32) bool {
+        if (self.is_flat_cons) {
+            if (name == CONS_CAR_SYM or name == CONS_CDR_SYM) return true;
+        }
         return self.slots.contains(name);
     }
 
     /// look up a handler by selector. returns `null` if absent —
     /// callers walk the proto chain via the VM dispatch helper.
+    ///
+    /// FlatCons has no instance handlers (the Cons proto carries
+    /// them; instances delegate). this just reads the `handlers` map.
     pub fn handler(self: *const Form, selector: u32) ?Value {
         return self.handlers.get(selector);
     }
@@ -234,4 +344,89 @@ pub const Form = struct {
     pub fn metaAt(self: *const Form, name: u32) Value {
         return if (self.meta.get(name)) |v| v else Value.nil;
     }
+
+    /// phase 2 §5.8b — count of *observable* slot bindings, including
+    /// the synthesized `:car` / `:cdr` for FlatCons Forms. callers
+    /// doing reflection (e.g. image-serializer, `[obj slots]`) should
+    /// use this instead of `self.slots.count()`.
+    pub fn slotCount(self: *const Form) usize {
+        if (self.is_flat_cons) return 2 + self.slots.count();
+        return self.slots.count();
+    }
 };
+
+// ─────────────────────────────────────────────────────────────────
+// phase 2 §5.8b — FlatCons contract tests. exercises the Form-faces
+// invariants the spec calls out: structure (car/cdr), identity
+// (frozen, becomes), history (meta), reflection (slotCount), and the
+// extras path (non-canonical slot writes).
+// ─────────────────────────────────────────────────────────────────
+
+const testing = std.testing;
+
+test "FlatCons: slot(:car) returns inline car" {
+    setConsSyms(101, 102); // dummy sym ids for the test
+    defer setConsSyms(0, 0); // reset so other tests don't see them
+
+    const car = Value{ .int = 7 };
+    const cdr = Value.nil;
+    const f = Form.flatCons(Value.nil, car, cdr);
+    try testing.expect(f.is_flat_cons);
+    try testing.expectEqual(@as(usize, 2), f.slotCount());
+    try testing.expect(f.slot(101).equals(car));
+    try testing.expect(f.slot(102).equals(cdr));
+}
+
+test "FlatCons: slotPresent on :car / :cdr is always true" {
+    setConsSyms(101, 102);
+    defer setConsSyms(0, 0);
+
+    const f = Form.flatCons(Value.nil, Value.nil, Value.nil);
+    try testing.expect(f.slotPresent(101));
+    try testing.expect(f.slotPresent(102));
+    try testing.expect(!f.slotPresent(999));
+}
+
+test "FlatCons: extras slot in lazy SlotMap" {
+    setConsSyms(101, 102);
+    defer setConsSyms(0, 0);
+
+    var f = Form.flatCons(Value.nil, Value{ .int = 1 }, Value{ .int = 2 });
+    defer f.deinit(testing.allocator);
+    // car / cdr should not be in the SlotMap
+    try testing.expect(!f.slots.contains(101));
+    try testing.expect(!f.slots.contains(102));
+    // user adds a non-canonical slot — goes to the SlotMap
+    try f.slots.put(testing.allocator, 999, Value{ .int = 42 });
+    try testing.expectEqual(@as(usize, 3), f.slotCount()); // car + cdr + 999
+    try testing.expect(f.slot(999).equals(Value{ .int = 42 }));
+    // canonical car/cdr still work
+    try testing.expect(f.slot(101).equals(Value{ .int = 1 }));
+    try testing.expect(f.slot(102).equals(Value{ .int = 2 }));
+}
+
+test "FlatCons: not-flat Form unaffected by CONS_CAR_SYM" {
+    setConsSyms(101, 102);
+    defer setConsSyms(0, 0);
+
+    var f = Form.init();
+    defer f.deinit(testing.allocator);
+    // an empty general Form — slot(101) returns nil; not "always-present"
+    try testing.expect(f.slot(101).equals(Value.nil));
+    try testing.expect(!f.slotPresent(101));
+}
+
+test "FlatCons: car/cdr/handlers/meta all still independent" {
+    setConsSyms(101, 102);
+    defer setConsSyms(0, 0);
+
+    var f = Form.flatCons(Value.nil, Value{ .int = 1 }, Value{ .int = 2 });
+    defer f.deinit(testing.allocator);
+    try f.handlers.put(testing.allocator, 500, Value{ .sym = 99 });
+    try f.meta.put(testing.allocator, 600, Value{ .sym = 88 });
+    try testing.expect(f.handler(500).?.equals(Value{ .sym = 99 }));
+    try testing.expect(f.metaAt(600).equals(Value{ .sym = 88 }));
+    // slot lookup for handler / meta keys: not slot bindings.
+    try testing.expect(f.slot(500).equals(Value.nil));
+    try testing.expect(f.slot(600).equals(Value.nil));
+}
