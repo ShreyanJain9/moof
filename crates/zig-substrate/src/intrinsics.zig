@@ -362,22 +362,24 @@ fn objSlotSet(world: *World, self_: Value, args: []const Value) anyerror!Value {
 // map, filter, reduce, …) is moof-only in stdlib/cons.moof.
 // ─────────────────────────────────────────────────────────────────
 
-// §5.8b — Cons:car fast path. for the common case (a FlatCons cell)
-// this is a direct heap-index → struct-field load; for the legacy
-// general-Form case (cons made via [Heap allocFormWithProto:]) it
-// falls back through formSlot.
+// §5.8d — Cons:car fast path. when the Form has a layout (every
+// allocFlatCons cell does, post-§5.8d step 2), read inline_slots[0]
+// directly — that's where allocFlatCons stores the canonical car.
+// general-Form Cons cells (rare, only from image-load before
+// reflatten or from synthetic test allocations) fall through to
+// formSlot, which still works via the SlotMap.
 fn consCar(world: *World, self_: Value, _: []const Value) anyerror!Value {
     const id = self_.asFormId() orelse return typeError(world, "car on non-Cons");
     const f = world.heap.get(id);
-    if (f.is_flat_cons) return f.car_inline;
+    if (f.layout != null) return f.inline_slots[0];
     return world.formSlot(id, world.symCar);
 }
 
-// §5.8b — Cons:cdr fast path. mirrors consCar.
+// §5.8d — Cons:cdr fast path. mirrors consCar.
 fn consCdr(world: *World, self_: Value, _: []const Value) anyerror!Value {
     const id = self_.asFormId() orelse return typeError(world, "cdr on non-Cons");
     const f = world.heap.get(id);
-    if (f.is_flat_cons) return f.cdr_inline;
+    if (f.layout != null) return f.inline_slots[1];
     return world.formSlot(id, world.symCdr);
 }
 
@@ -981,9 +983,17 @@ fn heapSlotKeysOf(world: *World, _: Value, args: []const Value) anyerror!Value {
     const f = world.heap.get(id);
     var keys: std.ArrayList(Value) = .empty;
     defer keys.deinit(world.allocator);
-    // §5.8b — for FlatCons, surface :car / :cdr BEFORE the extras map
-    // (matches canonical insertion order at allocation time).
-    if (f.is_flat_cons) {
+    // §5.8d — for Layout-backed Forms, surface layout slot names in
+    // declaration order BEFORE the extras map (matches canonical
+    // insertion order at allocation time).
+    if (f.layout) |lay| {
+        var i: u8 = 0;
+        while (i < lay.inline_size) : (i += 1) {
+            try keys.append(world.allocator, .{ .sym = lay.slot_names[i] });
+        }
+    } else if (f.is_flat_cons) {
+        // legacy: FlatCons cells without a layout pointer (rare
+        // transitional state). step 8 removes this branch.
         try keys.append(world.allocator, .{ .sym = world.symCar });
         try keys.append(world.allocator, .{ .sym = world.symCdr });
     }
