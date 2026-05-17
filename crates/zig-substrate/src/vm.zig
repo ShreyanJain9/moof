@@ -143,6 +143,24 @@ pub const Profile = struct {
     /// **new** — calls to `prepareSendDispatch` slow-path (the
     /// `lookupHandler` route). counts how many lookups bypass the IC.
     slow_send_dispatches: u64 = 0,
+    /// **§5.8a** — String char-cache hits. one per `:at:` / `:length`
+    /// / `:slice:length:` call that found a pre-materialized `[]u32`
+    /// in `world.string_cache`. ratio against
+    /// `string_cache_hits + string_cache_misses` is the cache hit rate.
+    string_cache_hits: u64 = 0,
+    /// **§5.8a** — String char-cache misses. each miss walks the
+    /// `:bytes` cons-chain once then populates the cache. high count
+    /// on a steady-state workload signals churn (unique-String
+    /// allocations dominating hits) or invalidation thrash.
+    string_cache_misses: u64 = 0,
+    /// **§5.8c** — intern-cache hits. one per `(intern str)` call
+    /// that found a cached `FormId → SymId`. expected ~100% after
+    /// warm-up for parser workloads.
+    intern_cache_hits: u64 = 0,
+    /// **§5.8c** — intern-cache misses. each miss walks the String's
+    /// `:bytes` into UTF-8 then calls `syms.intern`. should drop to
+    /// ~unique-identifier-count after warm-up.
+    intern_cache_misses: u64 = 0,
 
     pub fn reset(self: *Profile) void {
         self.* = .{};
@@ -177,6 +195,22 @@ pub const Profile = struct {
             }
         }
         p("slow-send dispatches:   {d}\n", .{self.slow_send_dispatches});
+        p("string char-cache hits: {d}\n", .{self.string_cache_hits});
+        p("string char-cache miss: {d}\n", .{self.string_cache_misses});
+        if (self.string_cache_hits + self.string_cache_misses > 0) {
+            const total = self.string_cache_hits + self.string_cache_misses;
+            const ratio = @as(f64, @floatFromInt(self.string_cache_hits)) /
+                @as(f64, @floatFromInt(total)) * 100.0;
+            p("  hit ratio:            {d:.2}%\n", .{ratio});
+        }
+        p("intern cache hits:      {d}\n", .{self.intern_cache_hits});
+        p("intern cache misses:    {d}\n", .{self.intern_cache_misses});
+        if (self.intern_cache_hits + self.intern_cache_misses > 0) {
+            const total = self.intern_cache_hits + self.intern_cache_misses;
+            const ratio = @as(f64, @floatFromInt(self.intern_cache_hits)) /
+                @as(f64, @floatFromInt(total)) * 100.0;
+            p("  hit ratio:            {d:.2}%\n", .{ratio});
+        }
         p("frames pushed:          {d}\n", .{self.frames_pushed});
         p("envs allocated:         {d}\n", .{self.envs_allocated});
         p("env_bind calls:         {d}\n", .{self.env_bind_calls});
