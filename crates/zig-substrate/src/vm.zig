@@ -390,17 +390,28 @@ pub fn runTop(world: *World, chunk: FormId) !Value {
     if (world.gc_enabled) {
         // re-push the result so it counts as a stack root during
         // the mark phase, then pop it back. cost: one push + pop
-        // per runTop. trivial.
+        // per runTop. trivial. (we push unconditionally even when
+        // the adaptive trigger skips collection — the push/pop is
+        // ~10ns; the branch on gc_enabled below is the real gate.)
         try world.vm.stack.append(world.allocator, result);
         // wrap with monotonic-ns measurement so we can attribute
         // wall time to GC vs interpreter (per phase 2 §3.5
         // real-workload diagnosis — GC may fire mid-workload via
         // nested runTop calls, accumulating real cost).
+        //
+        // **adaptive trigger:** `collectIfNeeded` returns null when
+        // the heap hasn't grown past `world.gc_threshold_min` allocs
+        // or `gc_threshold_pct` percent since the last cycle. on a
+        // bootstrap with 27 transporter loads that drops the cycle
+        // count from ~27 to ~3-5 (per-cycle cost unchanged; total
+        // wall time roughly halves).
         const gc_t0 = monotonicNs();
-        _ = try world.collect();
+        const maybe_stats = try world.collectIfNeeded();
         const gc_t1 = monotonicNs();
-        PROFILE.gc_runs += 1;
-        PROFILE.gc_ns += gc_t1 - gc_t0;
+        if (maybe_stats != null) {
+            PROFILE.gc_runs += 1;
+            PROFILE.gc_ns += gc_t1 - gc_t0;
+        }
         _ = world.vm.stack.pop();
     }
 

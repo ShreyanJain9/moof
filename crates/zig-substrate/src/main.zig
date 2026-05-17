@@ -44,9 +44,17 @@ const image = @import("image.zig");
 /// `--no-gc` disables collection entirely (for diagnostic / A-B
 /// measurement). `--gc-stats` (or `MOOF_GC_STATS=1`) prints stats to
 /// stderr after every collect cycle.
+///
+/// `threshold_min` / `threshold_pct` are the adaptive-trigger knobs
+/// (see `World.collectIfNeeded`). null means "use World defaults";
+/// otherwise the parsed env-var value overrides per-World defaults
+/// in `applyGcOpts`. tuned via `MOOF_GC_THRESHOLD_MIN` /
+/// `MOOF_GC_THRESHOLD_PCT`.
 const GcOpts = struct {
     enabled: bool = true,
     stats: bool = false,
+    threshold_min: ?usize = null,
+    threshold_pct: ?u32 = null,
     /// when true, surface diagnostic prints from vm.zig + intrinsics.zig.
     /// gated behind `MOOF_TRACE=1` — see spec §4.9 (the "wart hunt").
     trace: bool = false,
@@ -65,6 +73,8 @@ fn applyGcOpts(world: *World) void {
     world.gc_enabled = g_gc_opts.enabled;
     world.gc_stats_enabled = g_gc_opts.stats;
     world.trace_enabled = g_gc_opts.trace;
+    if (g_gc_opts.threshold_min) |v| world.gc_threshold_min = v;
+    if (g_gc_opts.threshold_pct) |v| world.gc_threshold_pct = v;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -103,6 +113,21 @@ pub fn main(init: std.process.Init) !void {
     // collection cycle. silently no-op when unset.
     if (init.minimal.environ.getPosix("MOOF_GC_STATS")) |val| {
         if (val.len > 0 and !std.mem.eql(u8, val, "0")) g_gc_opts.stats = true;
+    }
+
+    // env vars: adaptive GC trigger knobs. see
+    // `World.collectIfNeeded`. ignored on parse failure (we don't want
+    // a typo'd env var to crash the run — silently fall back to the
+    // World defaults).
+    if (init.minimal.environ.getPosix("MOOF_GC_THRESHOLD_MIN")) |val| {
+        if (std.fmt.parseInt(usize, val, 10)) |n| {
+            g_gc_opts.threshold_min = n;
+        } else |_| {}
+    }
+    if (init.minimal.environ.getPosix("MOOF_GC_THRESHOLD_PCT")) |val| {
+        if (std.fmt.parseInt(u32, val, 10)) |n| {
+            g_gc_opts.threshold_pct = n;
+        } else |_| {}
     }
 
     // env var: `MOOF_TRACE=1` surfaces vm.zig / intrinsics.zig
