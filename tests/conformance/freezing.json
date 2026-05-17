@@ -22,10 +22,18 @@
     {
       "name": "let-mutable-result-is-frozen",
       "image": "tests/conformance/freezing/empty.vat",
-      "send": ["[Object new] let-mutable: |p| [p frozen?]"],
+      "send": ["(let-mutable (p (alloc-mutable Object)) [p frozen?])"],
+      "expect-value": "#false",
+      "expect-stdout": "",
+      "note": "let-mutable evaluates body with mutable binding; freezes the form at scope EXIT (after body returns). inside body, frozen? is #false. the let-mutable form's return value is body's value (here #false), not the now-frozen form. to verify the form is frozen AFTER let-mutable returns, you must bind it: see next triple."
+    },
+    {
+      "name": "let-mutable-form-is-frozen-after-scope",
+      "image": "tests/conformance/freezing/empty.vat",
+      "send": ["(let ((p (alloc-mutable Object))) (let-mutable (q p) [p slot: 'x put: 1]) [p frozen?])"],
       "expect-value": "#true",
       "expect-stdout": "",
-      "note": "let-mutable freezes the form at scope exit"
+      "note": "after let-mutable exits, the bound form is frozen. attempting [p slot: 'x put: 2] after this point would raise 'frozen-form."
     },
     {
       "name": "freezable-on-foreign-handle-returns-false",

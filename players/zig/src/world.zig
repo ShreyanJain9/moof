@@ -1088,6 +1088,14 @@ pub const World = struct {
     /// image format treats this as a Form-with-(car,cdr)-slots
     /// synthesized at serialize time; the loader's `reflatLoadedLayouts`
     /// re-hoists them on read.
+    /// TODO(phase2): this path does NOT consult `vat_mode` for auto-freeze.
+    /// Cons cells allocated here in a `frozen_default` vat are born MUTABLE,
+    /// which diverges from spec §4.1's "every alloc-expression result is born
+    /// frozen" semantics. impact is currently zero because `vat_mode` defaults
+    /// to `.mutable_default` and no code sets `.frozen_default` yet. when
+    /// `frozen_default` vats land in phase 2+, add the same auto-freeze hook
+    /// as `allocInstance` (or factor a shared `maybeFreeze(id)` helper).
+    /// the same gap exists in `heapAllocFormWithProto` (intrinsics.zig).
     pub fn allocFlatCons(self: *World, car: Value, cdr: Value) !FormId {
         const cons_proto_v = Value{ .form = self.protos.cons };
         const lay = self.proto_layouts.get(self.protos.cons) orelse {
@@ -1149,6 +1157,16 @@ pub const World = struct {
     /// "live face" forms that cannot be frozen. in V0, the only live
     /// face category is ForeignHandle (the wasm mco ABI handle). V4
     /// adds vat-Forms, mailboxes, cap-tokens; those land later.
+    ///
+    /// **semantic of `freezable?`**: this is a "will calling freeze do
+    /// useful work without raising" predicate, not a pure category check.
+    /// already-frozen → false (no useful work — freeze is a no-op).
+    /// live-face → false (raises 'cannot-freeze-live).
+    /// fresh mutable → true.
+    /// rationale: most user code asks `freezable?` to decide "should i
+    /// call freeze here?" — the current-state interpretation is more
+    /// useful than a pure-category one. category-only callers can check
+    /// `not [form is-live-face?]` (future API) instead.
     ///
     /// note: `Object:freeze` also uses this to detect live-face forms.
     /// `Object:freeze` on an already-frozen form is a silent no-op

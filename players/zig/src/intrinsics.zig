@@ -963,6 +963,12 @@ fn heapHeapIdOf(_: *World, _: Value, args: []const Value) anyerror!Value {
 }
 
 fn heapAllocFormWithProto(world: *World, _: Value, args: []const Value) anyerror!Value {
+    // TODO(phase2): this reflection primitive bypasses `vat_mode` auto-freeze
+    // (per design spec §4.1). in a `frozen_default` vat, `[$heap
+    // allocFormWithProto: SomeProto]` would yield a mutable form, diverging
+    // from `allocInstance` behavior. impact is currently zero (default mode
+    // is mutable); revisit when frozen-default vats arrive. same gap exists
+    // in `world.allocFlatCons`.
     if (args.len < 1) return typeError(world, "allocFormWithProto: needs 1 arg");
     const proto_v = args[0];
     if (proto_v != .form) return typeError(world, "allocFormWithProto: proto must be a Form");

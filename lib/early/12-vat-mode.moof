@@ -4,7 +4,7 @@
 ;; (bypassing vat-mode auto-freeze), mutate it inside the body,
 ;; then auto-freeze it at scope exit.
 
-;; usage:
+;; usage (in a vat with mode mutable-by-default — the current default):
 ;;
 ;;   (let-mutable (p [Point new])
 ;;     [p setX: 1]
@@ -12,9 +12,19 @@
 ;;     p)
 ;;   ; → returns p, which is now frozen
 ;;
-;; the binding may be either a single (name expr) pair, allocating
-;; whatever expr returns; the form returned by expr is what gets
-;; frozen at exit. typical: expr is __alloc-mutable__ + initial setup.
+;; usage (in a vat with mode frozen-by-default):
+;;
+;;   (let-mutable (p (alloc-mutable Point))
+;;     [p setX: 1]
+;;     [p setY: 2]
+;;     p)
+;;   ; → use alloc-mutable to bypass auto-freeze for the binding;
+;;     [Point new] would otherwise auto-freeze before body runs.
+;;
+;; the binding is a single (name expr) pair; the form returned by expr
+;; is what gets frozen at scope EXIT. inside body, the form is mutable
+;; (assuming expr returned a mutable form). let-mutable returns body's
+;; last value, not the form itself.
 
 (defmacro let-mutable (binding . body)
   (let ((name (car binding))
@@ -24,7 +34,8 @@
          [,name freeze]
          __lm-result__))))
 
-;; convenience: allocate a fresh form (proto optional), bypassing vat-mode.
+;; convenience: allocate a fresh form with the given proto, bypassing
+;; vat-mode auto-freeze. proto is REQUIRED (one arg).
 (def alloc-mutable
   (fn (proto)
     (__alloc-mutable__ proto)))
