@@ -1088,8 +1088,9 @@ fn methodCall(world: *World, self_: Value, args: []const Value) anyerror!Value {
 //
 // `:=` is identity equality (Object default; protos like Integer
 // override). `:new` allocates a fresh form with this proto.
-// `:initialize` is a hook returning self. `:freeze` flips the
-// `frozen` bit; `:frozen?` / `:freezable?` query it.
+// `:freeze` flips the `frozen` bit; `:frozen?` / `:freezable?`
+// query it. `:initialize` was a trivial `return self` stub — now
+// lives in stdlib/object.moof as a defmethod.
 // ─────────────────────────────────────────────────────────────────
 
 fn objEq(_: *World, self_: Value, args: []const Value) anyerror!Value {
@@ -1124,10 +1125,6 @@ fn objNew(world: *World, self_: Value, _: []const Value) anyerror!Value {
     const id = try world.heap.alloc(f);
     _ = &f;
     return .{ .form = id };
-}
-
-fn objInitialize(_: *World, self_: Value, _: []const Value) anyerror!Value {
-    return self_;
 }
 
 fn objFreeze(world: *World, self_: Value, _: []const Value) anyerror!Value {
@@ -2361,7 +2358,7 @@ pub const REGISTRY = std.StaticStringMap(NativeFn).initComptime(.{
     // Object basics.
     .{ "Object:=", objEq },
     .{ "Object:new", objNew },
-    .{ "Object:initialize", objInitialize },
+    // Object:initialize removed — canonical is stdlib/object.moof (defmethod Object (initialize) self)
     .{ "Object:freeze", objFreeze },
     .{ "Object:frozen?", objFrozen },
     .{ "Object:freezable?", objFreezable },

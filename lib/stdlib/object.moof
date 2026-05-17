@@ -4,9 +4,10 @@
 ;; reflection methods are moof, delegating to the Heap singleton
 ;; (a primordial object whose handlers are the only rust-side heap
 ;; operations remaining). only the irreducible identity / dispatch
-;; primitives stay rust: :is, :=, :toString, :new, :initialize,
+;; primitives stay rust: :is, :=, :toString, :new,
 ;; :doesNotUnderstand:with:. (:proto lives in compiler/00-helpers.moof
 ;; because the compiler needs it before this file loads.)
+;; :initialize was a trivial `return self` stub — now a moof defmethod.
 
 ;; ─────────────────────────────────────────────────────────────────
 ;; reflection — every method here is a moof one-liner forwarding to
@@ -22,6 +23,12 @@
 (defmethod Object (metaKeys) [Heap metaKeysOf: self])
 (defmethod Object (handlerAt: sel) [Heap handlerOf: self at: sel])
 (defmethod Object (metaAt: sym) [Heap metaOf: self at: sym])
+
+;; :initialize — lifecycle hook called (optionally) after allocation.
+;; the default is a no-op: return self unchanged. protos that need
+;; post-allocation setup override this. was a zig stub (return self_);
+;; moved to moof since it has no substrate-level requirements.
+(defmethod Object (initialize) self)
 
 ;; default :!= — Bool:not over identity-equality.
 (defmethod Object (!= other) [[self = other] not])
