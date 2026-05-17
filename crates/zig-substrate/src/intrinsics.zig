@@ -39,6 +39,7 @@ const image_mod = @import("image.zig");
 const opcodes_mod = @import("opcodes.zig");
 const Op = opcodes_mod.Op;
 const bytecode_mod = @import("bytecode.zig");
+const vm_mod = @import("vm.zig");
 
 // ─────────────────────────────────────────────────────────────────
 // install — top-level entry. idempotent: safe to call once at world
@@ -361,15 +362,22 @@ fn objSlotSet(world: *World, self_: Value, args: []const Value) anyerror!Value {
 // map, filter, reduce, …) is moof-only in stdlib/cons.moof.
 // ─────────────────────────────────────────────────────────────────
 
-// port of crates/substrate/src/intrinsics.rs::install_cons_and_nil_primitives `:car`
+// §5.8b — Cons:car fast path. for the common case (a FlatCons cell)
+// this is a direct heap-index → struct-field load; for the legacy
+// general-Form case (cons made via [Heap allocFormWithProto:]) it
+// falls back through formSlot.
 fn consCar(world: *World, self_: Value, _: []const Value) anyerror!Value {
     const id = self_.asFormId() orelse return typeError(world, "car on non-Cons");
+    const f = world.heap.get(id);
+    if (f.is_flat_cons) return f.car_inline;
     return world.formSlot(id, world.symCar);
 }
 
-// port of crates/substrate/src/intrinsics.rs::install_cons_and_nil_primitives `:cdr`
+// §5.8b — Cons:cdr fast path. mirrors consCar.
 fn consCdr(world: *World, self_: Value, _: []const Value) anyerror!Value {
     const id = self_.asFormId() orelse return typeError(world, "cdr on non-Cons");
+    const f = world.heap.get(id);
+    if (f.is_flat_cons) return f.cdr_inline;
     return world.formSlot(id, world.symCdr);
 }
 
@@ -973,6 +981,12 @@ fn heapSlotKeysOf(world: *World, _: Value, args: []const Value) anyerror!Value {
     const f = world.heap.get(id);
     var keys: std.ArrayList(Value) = .empty;
     defer keys.deinit(world.allocator);
+    // §5.8b — for FlatCons, surface :car / :cdr BEFORE the extras map
+    // (matches canonical insertion order at allocation time).
+    if (f.is_flat_cons) {
+        try keys.append(world.allocator, .{ .sym = world.symCar });
+        try keys.append(world.allocator, .{ .sym = world.symCdr });
+    }
     var it = f.slots.iterator();
     while (it.next()) |entry| {
         try keys.append(world.allocator, .{ .sym = entry.key_ptr.* });
@@ -1101,10 +1115,9 @@ fn objFreezable(_: *World, self_: Value, _: []const Value) anyerror!Value {
 
 fn consConsInto(world: *World, self_: Value, args: []const Value) anyerror!Value {
     if (args.len != 1) return raise(world, "arity", "cons: takes 1 arg");
-    var f = Form.withProto(.{ .form = world.protos.cons });
-    try f.slots.put(world.allocator, world.symCar, args[0]);
-    try f.slots.put(world.allocator, world.symCdr, self_);
-    const id = try world.heap.alloc(f);
+    // §5.8b — flat-cons. car = args[0] (new head), cdr = self_
+    // (prior tail). zero SlotMap traffic.
+    const id = try world.allocFlatCons(args[0], self_);
     return .{ .form = id };
 }
 
@@ -1131,10 +1144,8 @@ fn consReverse(world: *World, self_: Value, _: []const Value) anyerror!Value {
                 if (!f.slotPresent(world.symCar)) break;
                 const car = f.slot(world.symCar);
                 const cdr = f.slot(world.symCdr);
-                var node = Form.withProto(.{ .form = world.protos.cons });
-                try node.slots.put(world.allocator, world.symCar, car);
-                try node.slots.put(world.allocator, world.symCdr, acc);
-                const nid = try world.heap.alloc(node);
+                // §5.8b — new node is a flat-cons.
+                const nid = try world.allocFlatCons(car, acc);
                 acc = .{ .form = nid };
                 cur = cdr;
             },
@@ -1512,46 +1523,24 @@ fn globalSetHandler(world: *World, _: Value, args: []const Value) anyerror!Value
 /// walk a String-form's :bytes cons-chain. returns the count of
 /// codepoints traversed, and (if `target >= 0`) the codepoint at the
 /// 0-based index `target` (or -1 if past end).
-fn stringWalk(
-    world: *World,
-    self_v: Value,
-    target: i64,
-) struct { count: i64, cp_at_target: i32 } {
-    var count: i64 = 0;
-    var cp_at_target: i32 = -1;
-    const id = self_v.asFormId() orelse return .{ .count = 0, .cp_at_target = -1 };
-    const bytes_sym = lookupSymByName(world, "bytes") orelse return .{ .count = 0, .cp_at_target = -1 };
-    var cur = world.formSlot(id, bytes_sym);
-    while (true) {
-        switch (cur) {
-            .nil => break,
-            .form => |cid| {
-                const cf = world.heap.get(cid);
-                if (!cf.slotPresent(world.symCar)) break;
-                const car_v = cf.slot(world.symCar);
-                const cdr_v = cf.slot(world.symCdr);
-                switch (car_v) {
-                    .char => |cp| {
-                        if (target >= 0 and count == target) {
-                            cp_at_target = @intCast(cp);
-                        }
-                        count += 1;
-                    },
-                    else => break,
-                }
-                cur = cdr_v;
-            },
-            else => break,
-        }
+// **§5.8a** — get the cached `[]u32` for a String FormId, bumping
+// hit/miss counters. wraps `world.getStringChars` to centralize the
+// profile instrumentation. returns null on malformed `:bytes`.
+fn cachedStringChars(world: *World, id: form.FormId) !?[]const u32 {
+    if (world.string_cache.contains(id)) {
+        vm_mod.PROFILE.string_cache_hits += 1;
+    } else {
+        vm_mod.PROFILE.string_cache_misses += 1;
     }
-    return .{ .count = count, .cp_at_target = cp_at_target };
+    return world.getStringChars(id);
 }
 
 // port of crates/substrate/src/intrinsics.rs::install_string_methods `:length`
 fn stringLength(world: *World, self_: Value, _: []const Value) anyerror!Value {
     if (self_ != .form) return typeError(world, "length: receiver must be a String");
-    const r = stringWalk(world, self_, -1);
-    return .{ .int = @intCast(r.count) };
+    const id = self_.asFormId().?;
+    const chars = (try cachedStringChars(world, id)) orelse return typeError(world, "length: malformed String");
+    return .{ .int = @intCast(chars.len) };
 }
 
 // port of crates/substrate/src/intrinsics.rs::install_string_methods `:at:`
@@ -1561,11 +1550,12 @@ fn stringAt(world: *World, self_: Value, args: []const Value) anyerror!Value {
     const idx = args[0].asInt() orelse return typeError(world, "at: index must be an Integer");
     if (idx < 0) return raise(world, "index-out-of-bounds", "[String at: i] negative index");
     if (self_ != .form) return typeError(world, "at: receiver must be a String");
-    const r = stringWalk(world, self_, idx);
-    if (r.cp_at_target < 0) {
+    const id = self_.asFormId().?;
+    const chars = (try cachedStringChars(world, id)) orelse return typeError(world, "at: malformed String");
+    if (idx >= @as(i64, @intCast(chars.len))) {
         return raise(world, "index-out-of-bounds", "[String at: i] out of range");
     }
-    return .{ .char = @intCast(r.cp_at_target) };
+    return .{ .char = chars[@intCast(idx)] };
 }
 
 // port of crates/substrate/src/intrinsics.rs::install_string_methods `:=`
@@ -1602,6 +1592,11 @@ fn stringEq(world: *World, self_: Value, args: []const Value) anyerror!Value {
 // port of crates/substrate/src/intrinsics.rs::install_string_methods `:slice:length:`
 // substring by char-index. allocates a new String-Form with a fresh
 // :bytes cons-chain.
+//
+// **§5.8a** — sources its codepoints from the char-cache, so the
+// `start`-char skip + `len`-char collect is O(start+len) array reads
+// instead of O(start+len) cons-walks. cache populates lazily on
+// first access.
 fn stringSlice(world: *World, self_: Value, args: []const Value) anyerror!Value {
     if (args.len < 2) return raise(world, "arity", "slice:length: takes 2 args");
     const start = args[0].asInt() orelse return typeError(world, "slice:length: needs Integer start");
@@ -1609,39 +1604,21 @@ fn stringSlice(world: *World, self_: Value, args: []const Value) anyerror!Value 
     if (start < 0 or len_arg < 0) return raise(world, "index-out-of-bounds", "slice:length: negative start or length");
     if (self_ != .form) return typeError(world, "slice:length: receiver must be a String");
     const id = self_.asFormId().?;
-    const bytes_sym = lookupSymByName(world, "bytes") orelse return raise(world, "no-bytes-sym", "slice:length: no bytes sym");
-    // first, skip `start` chars, then collect `len` chars into a list.
+    const chars = (try cachedStringChars(world, id)) orelse return typeError(world, "slice:length: malformed String");
+    const start_u: usize = @intCast(start);
+    const len_u: usize = @intCast(len_arg);
+    // clamp end at chars.len (matches the cons-walk's nil-terminated stop).
+    const end_u = @min(chars.len, start_u +| len_u);
+    const begin_u = @min(chars.len, start_u);
     var collected: std.ArrayList(Value) = .empty;
     defer collected.deinit(world.allocator);
-    var cur = world.formSlot(id, bytes_sym);
-    var skipped: i64 = 0;
-    var taken: i64 = 0;
-    while (taken < len_arg) {
-        switch (cur) {
-            .nil => break,
-            .form => |cid| {
-                const cf = world.heap.get(cid);
-                if (!cf.slotPresent(world.symCar)) break;
-                const car_v = cf.slot(world.symCar);
-                const cdr_v = cf.slot(world.symCdr);
-                if (skipped < start) {
-                    skipped += 1;
-                } else {
-                    switch (car_v) {
-                        .char => |cp| {
-                            try collected.append(world.allocator, .{ .char = cp });
-                            taken += 1;
-                        },
-                        else => break,
-                    }
-                }
-                cur = cdr_v;
-            },
-            else => break,
-        }
+    var i: usize = begin_u;
+    while (i < end_u) : (i += 1) {
+        try collected.append(world.allocator, .{ .char = chars[i] });
     }
     const chain = try world.makeList(collected.items);
     var f = Form.withProto(.{ .form = world.protos.string });
+    const bytes_sym = world.symBytes;
     try f.slots.put(world.allocator, bytes_sym, chain);
     const new_id = try world.heap.alloc(f);
     return .{ .form = new_id };
@@ -1777,13 +1754,10 @@ fn intAsChar(world: *World, self_: Value, _: []const Value) anyerror!Value {
 // a Symbol (already interned, identity return).
 // ─────────────────────────────────────────────────────────────────
 
-// `(cons head tail)` — alloc a cons cell.
+// `(cons head tail)` — alloc a cons cell. §5.8b — flat-cons fast path.
 fn globalCons(world: *World, _: Value, args: []const Value) anyerror!Value {
     if (args.len != 2) return raise(world, "arity", "(cons h tail) takes 2 args");
-    var f = Form.withProto(.{ .form = world.protos.cons });
-    try f.slots.put(world.allocator, world.symCar, args[0]);
-    try f.slots.put(world.allocator, world.symCdr, args[1]);
-    const id = try world.heap.alloc(f);
+    const id = try world.allocFlatCons(args[0], args[1]);
     return .{ .form = id };
 }
 
