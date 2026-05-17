@@ -2,7 +2,7 @@
 //!
 //! V4 task A.6. installed at `World.init()`, before any moof source
 //! loads. ports the minimal-viable-subset (~30 natives) from
-//! `crates/substrate/src/intrinsics.rs`; the rest are derived in moof
+//! `players/rust/src/intrinsics.rs`; the rest are derived in moof
 //! (lib/bootstrap.moof + friends) once the seed-emitted bytecode runs.
 //!
 //! installed surface (see plan §A.6 step 1):
@@ -232,28 +232,28 @@ fn raise(world: *World, comptime kind: []const u8, comptime msg: []const u8) any
 // V4 phase α defers Float to lib/bootstrap.moof). div-by-zero raises.
 // ─────────────────────────────────────────────────────────────────
 
-// port of crates/substrate/src/intrinsics.rs::install_integer_methods `:+`
+// port of players/rust/src/intrinsics.rs::install_integer_methods `:+`
 fn intPlus(world: *World, self_: Value, args: []const Value) anyerror!Value {
     const a = self_.asInt() orelse return typeError(world, "+ expected an Integer");
     const b = args[0].asInt() orelse return typeError(world, "+ expected a numeric rhs");
     return .{ .int = a +% b };
 }
 
-// port of crates/substrate/src/intrinsics.rs::install_integer_methods `:-`
+// port of players/rust/src/intrinsics.rs::install_integer_methods `:-`
 fn intMinus(world: *World, self_: Value, args: []const Value) anyerror!Value {
     const a = self_.asInt() orelse return typeError(world, "- expected an Integer");
     const b = args[0].asInt() orelse return typeError(world, "- expected a numeric rhs");
     return .{ .int = a -% b };
 }
 
-// port of crates/substrate/src/intrinsics.rs::install_integer_methods `:*`
+// port of players/rust/src/intrinsics.rs::install_integer_methods `:*`
 fn intMultiply(world: *World, self_: Value, args: []const Value) anyerror!Value {
     const a = self_.asInt() orelse return typeError(world, "* expected an Integer");
     const b = args[0].asInt() orelse return typeError(world, "* expected a numeric rhs");
     return .{ .int = a *% b };
 }
 
-// port of crates/substrate/src/intrinsics.rs::install_integer_methods `:/`
+// port of players/rust/src/intrinsics.rs::install_integer_methods `:/`
 fn intDivide(world: *World, self_: Value, args: []const Value) anyerror!Value {
     const a = self_.asInt() orelse return typeError(world, "/ expected an Integer");
     const b = args[0].asInt() orelse return typeError(world, "/ expected a numeric rhs");
@@ -263,7 +263,7 @@ fn intDivide(world: *World, self_: Value, args: []const Value) anyerror!Value {
     return .{ .int = @divTrunc(a, b) };
 }
 
-// port of crates/substrate/src/intrinsics.rs::install_integer_methods `:=`
+// port of players/rust/src/intrinsics.rs::install_integer_methods `:=`
 fn intEq(_: *World, self_: Value, args: []const Value) anyerror!Value {
     // defensive against proto-Form receivers (see rust comment at
     // intrinsics.rs:1371): if self isn't actually an Int, fall back
@@ -274,14 +274,14 @@ fn intEq(_: *World, self_: Value, args: []const Value) anyerror!Value {
     return .{ .bool_ = self_.equals(args[0]) };
 }
 
-// port of crates/substrate/src/intrinsics.rs::install_integer_methods `:<`
+// port of players/rust/src/intrinsics.rs::install_integer_methods `:<`
 fn intLt(world: *World, self_: Value, args: []const Value) anyerror!Value {
     const a = self_.asInt() orelse return typeError(world, "< expected an Integer receiver");
     const b = args[0].asInt() orelse return typeError(world, "< expected a numeric rhs");
     return .{ .bool_ = a < b };
 }
 
-// port of crates/substrate/src/intrinsics.rs::install_integer_methods `:>`
+// port of players/rust/src/intrinsics.rs::install_integer_methods `:>`
 fn intGt(world: *World, self_: Value, args: []const Value) anyerror!Value {
     const a = self_.asInt() orelse return typeError(world, "> expected an Integer receiver");
     const b = args[0].asInt() orelse return typeError(world, "> expected a numeric rhs");
@@ -301,17 +301,17 @@ fn intGt(world: *World, self_: Value, args: []const Value) anyerror!Value {
 // dispatches `:!!` *before* early/02 loads.
 // ─────────────────────────────────────────────────────────────────
 
-// port of crates/substrate/src/intrinsics.rs::install_if_dispatch `:!!` on Object
+// port of players/rust/src/intrinsics.rs::install_if_dispatch `:!!` on Object
 fn objBangBang(_: *World, _: Value, _: []const Value) anyerror!Value {
     return .{ .bool_ = true };
 }
 
-// port of crates/substrate/src/intrinsics.rs::install_if_dispatch `:!!` on Nil
+// port of players/rust/src/intrinsics.rs::install_if_dispatch `:!!` on Nil
 fn nilBangBang(_: *World, _: Value, _: []const Value) anyerror!Value {
     return .{ .bool_ = false };
 }
 
-// port of crates/substrate/src/intrinsics.rs::install_if_dispatch `:!!` on Bool
+// port of players/rust/src/intrinsics.rs::install_if_dispatch `:!!` on Bool
 fn boolBangBang(_: *World, self_: Value, _: []const Value) anyerror!Value {
     return self_;
 }
@@ -320,13 +320,13 @@ fn boolBangBang(_: *World, self_: Value, _: []const Value) anyerror!Value {
 // Object reflection / identity primitives.
 // ─────────────────────────────────────────────────────────────────
 
-// port of crates/substrate/src/intrinsics.rs::install_object_reflection `:is`
+// port of players/rust/src/intrinsics.rs::install_object_reflection `:is`
 // identity equality (same heap-id or same tagged-immediate).
 fn objIs(_: *World, self_: Value, args: []const Value) anyerror!Value {
     return .{ .bool_ = self_.equals(args[0]) };
 }
 
-// port of crates/substrate/src/intrinsics.rs (Heap singleton `protoOf:` /
+// port of players/rust/src/intrinsics.rs (Heap singleton `protoOf:` /
 // the moof `:proto` defmethod that delegates there). returns the proto
 // Value of a Form receiver. tagged immediates fall through to their
 // proto-Form (e.g. Int → Integer-proto) via world.protoOf — matches
@@ -335,7 +335,7 @@ fn objProto(world: *World, self_: Value, _: []const Value) anyerror!Value {
     return world.protoOf(self_);
 }
 
-// port of crates/substrate/src/intrinsics.rs (Heap singleton `heapIdOf:` /
+// port of players/rust/src/intrinsics.rs (Heap singleton `heapIdOf:` /
 // moof `:identity`). returns the FormId's raw payload as an Int — the
 // stable identity number. for non-Forms (tagged immediates) returns 0,
 // matching `Heap heapIdOf:`.
@@ -356,14 +356,14 @@ fn objIdentity(_: *World, self_: Value, _: []const Value) anyerror!Value {
 // layer of boot-time indirection.
 // ─────────────────────────────────────────────────────────────────
 
-// port of crates/substrate/src/intrinsics.rs `(slot v 'name)`
+// port of players/rust/src/intrinsics.rs `(slot v 'name)`
 fn objSlot(world: *World, self_: Value, args: []const Value) anyerror!Value {
     const sym = args[0].asSym() orelse return typeError(world, "slot: name must be a Symbol");
     const id = self_.asFormId() orelse return .nil;
     return world.formSlot(id, sym);
 }
 
-// port of crates/substrate/src/intrinsics.rs `(slotSet! v 'name v)`
+// port of players/rust/src/intrinsics.rs `(slotSet! v 'name v)`
 fn objSlotSet(world: *World, self_: Value, args: []const Value) anyerror!Value {
     const sym = args[0].asSym() orelse return typeError(world, "slotSet!: name must be a Symbol");
     const id = self_.asFormId() orelse return typeError(world, "slotSet!: receiver must be a Form");
@@ -407,7 +407,7 @@ fn consCdr(world: *World, self_: Value, _: []const Value) anyerror!Value {
 // and the `[Env current]` class-method-style accessor.
 // ─────────────────────────────────────────────────────────────────
 
-// port of crates/substrate/src/intrinsics.rs::install_env_proto_methods `:bind:to:`
+// port of players/rust/src/intrinsics.rs::install_env_proto_methods `:bind:to:`
 fn envBindTo(world: *World, self_: Value, args: []const Value) anyerror!Value {
     const env = self_.asFormId() orelse return typeError(world, ":bind:to: receiver must be an Env Form");
     const name = args[0].asSym() orelse return typeError(world, ":bind:to: name must be a Symbol");
@@ -416,7 +416,7 @@ fn envBindTo(world: *World, self_: Value, args: []const Value) anyerror!Value {
     return val;
 }
 
-// port of crates/substrate/src/intrinsics.rs::install_env_proto_methods `:set:to:`
+// port of players/rust/src/intrinsics.rs::install_env_proto_methods `:set:to:`
 fn envSetTo(world: *World, self_: Value, args: []const Value) anyerror!Value {
     const env = self_.asFormId() orelse return typeError(world, ":set:to: receiver must be an Env Form");
     const name = args[0].asSym() orelse return typeError(world, ":set:to: name must be a Symbol");
@@ -426,20 +426,20 @@ fn envSetTo(world: *World, self_: Value, args: []const Value) anyerror!Value {
     return val;
 }
 
-// port of crates/substrate/src/intrinsics.rs::install_env_proto_methods `:lookup:`
+// port of players/rust/src/intrinsics.rs::install_env_proto_methods `:lookup:`
 fn envLookupTo(world: *World, self_: Value, args: []const Value) anyerror!Value {
     const env = self_.asFormId() orelse return typeError(world, ":lookup: receiver must be an Env Form");
     const name = args[0].asSym() orelse return typeError(world, ":lookup: name must be a Symbol");
     return world.envLookup(env, name) orelse .nil;
 }
 
-// port of crates/substrate/src/intrinsics.rs::install_env_proto_methods `:parent`
+// port of players/rust/src/intrinsics.rs::install_env_proto_methods `:parent`
 fn envParent(world: *World, self_: Value, _: []const Value) anyerror!Value {
     const env = self_.asFormId() orelse return typeError(world, ":parent receiver must be a Form");
     return world.formMeta(env, world.symParent);
 }
 
-// port of crates/substrate/src/intrinsics.rs::install_env_proto_methods `:current`
+// port of players/rust/src/intrinsics.rs::install_env_proto_methods `:current`
 // the LIVE current frame's env. natives don't push a VM frame, so
 // frames.last().env IS the caller's lexical env. used by `set!` macro.
 fn envCurrent(world: *World, _: Value, _: []const Value) anyerror!Value {
@@ -455,7 +455,7 @@ fn envCurrent(world: *World, _: Value, _: []const Value) anyerror!Value {
 // uses for lexical scope). used by Object:eval: and future vau/fexpr.
 // ─────────────────────────────────────────────────────────────────
 
-// port of crates/substrate/src/intrinsics.rs::install_closure_proto_methods `:callIn:withSelf:`
+// port of players/rust/src/intrinsics.rs::install_closure_proto_methods `:callIn:withSelf:`
 fn closureCallInWithSelf(world: *World, self_: Value, args: []const Value) anyerror!Value {
     const closure_id = self_.asFormId() orelse return typeError(world, ":callIn:withSelf: on non-closure");
     if (args.len != 2) return raise(world, "arity", ":callIn:withSelf: expects 2 args (env, self)");
@@ -477,7 +477,7 @@ fn closureCallInWithSelf(world: *World, self_: Value, args: []const Value) anyer
 // self-become is a no-op (handled inside world.become_).
 // ─────────────────────────────────────────────────────────────────
 
-// port of crates/substrate/src/intrinsics.rs::install_if_dispatch `:become:`
+// port of players/rust/src/intrinsics.rs::install_if_dispatch `:become:`
 fn objBecome(world: *World, self_: Value, args: []const Value) anyerror!Value {
     const a = self_.asFormId() orelse return typeError(world, ":become: receiver must be a Form");
     const b = args[0].asFormId() orelse return typeError(world, ":become: argument must be a Form");
@@ -491,7 +491,7 @@ fn objBecome(world: *World, self_: Value, args: []const Value) anyerror!Value {
 // the args-list (cons-chain).
 // ─────────────────────────────────────────────────────────────────
 
-// port of crates/substrate/src/intrinsics.rs::install_object_reflection `:doesNotUnderstand:with:`
+// port of players/rust/src/intrinsics.rs::install_object_reflection `:doesNotUnderstand:with:`
 fn objDoesNotUnderstand(world: *World, _: Value, args: []const Value) anyerror!Value {
     // include the missed selector in the message if we can resolve
     // it. format_short-style detail is deferred — the rust impl
@@ -512,7 +512,7 @@ fn objDoesNotUnderstand(world: *World, _: Value, args: []const Value) anyerror!V
 // chain terminating in nil).
 // ─────────────────────────────────────────────────────────────────
 
-// port of crates/substrate/src/intrinsics.rs::install_if_dispatch `:perform:withArgs:`
+// port of players/rust/src/intrinsics.rs::install_if_dispatch `:perform:withArgs:`
 fn objPerformWithArgs(world: *World, self_: Value, args: []const Value) anyerror!Value {
     const sel = args[0].asSym() orelse return typeError(world, ":perform:withArgs: selector must be a Symbol");
     const arg_list = args[1];
@@ -530,7 +530,7 @@ fn objPerformWithArgs(world: *World, self_: Value, args: []const Value) anyerror
 // seed's `if` bytecode run during phase-1 boot.
 // ─────────────────────────────────────────────────────────────────
 
-// port of crates/substrate/src/intrinsics.rs::install_if_dispatch `:ifTrue:ifFalse:`
+// port of players/rust/src/intrinsics.rs::install_if_dispatch `:ifTrue:ifFalse:`
 fn boolIfTrueIfFalse(world: *World, self_: Value, args: []const Value) anyerror!Value {
     const chosen = switch (self_) {
         .bool_ => |b| if (b) args[0] else args[1],
@@ -549,7 +549,7 @@ fn boolIfTrueIfFalse(world: *World, self_: Value, args: []const Value) anyerror!
 // layer; the Object fallback handles every other shape.
 // ─────────────────────────────────────────────────────────────────
 
-// port of crates/substrate/src/intrinsics.rs::install_object_reflection `:toString` for Int receivers
+// port of players/rust/src/intrinsics.rs::install_object_reflection `:toString` for Int receivers
 fn intToString(world: *World, self_: Value, _: []const Value) anyerror!Value {
     const a = self_.asInt() orelse return typeError(world, "toString expected an Integer");
     var buf: [32]u8 = undefined;
@@ -557,7 +557,7 @@ fn intToString(world: *World, self_: Value, _: []const Value) anyerror!Value {
     return world.makeString(text);
 }
 
-// port of crates/substrate/src/intrinsics.rs::install_object_reflection `:toString`
+// port of players/rust/src/intrinsics.rs::install_object_reflection `:toString`
 // default rendering: `<Form#N>` for heap forms; tagged immediates render
 // using their natural type. forms carrying a `:name` meta render as that
 // name — so `[Integer toString]` → `Integer`.
@@ -700,7 +700,7 @@ fn valueCharsToBuffer(world: *World, chain: Value, buf: []u8) ![]const u8 {
 // re-decoded via `[chunk emit:]`, which we mirror in `chunkEmit`
 // below using the same cons-shape contract.
 //
-// port of crates/substrate/src/intrinsics.rs::install_compiler_primitives.
+// port of players/rust/src/intrinsics.rs::install_compiler_primitives.
 // ─────────────────────────────────────────────────────────────────
 
 /// build an opcode-Form `{Opcode :op 'name :operands (cons-list operands...)}`.
@@ -846,7 +846,7 @@ fn opcodeToString(world: *World, self_: Value, _: []const Value) anyerror!Value 
 // fly. for now we return nil with a TODO — the moof Method's
 // `:bytecodes` reflection method can fall back to nil.
 //
-// port of crates/substrate/src/intrinsics.rs::install_chunks_singleton.
+// port of players/rust/src/intrinsics.rs::install_chunks_singleton.
 // ─────────────────────────────────────────────────────────────────
 
 /// helper: extract a chunk-FormId from a value that might be a chunk,
@@ -1047,7 +1047,7 @@ fn heapMetaKeysOf(world: *World, _: Value, args: []const Value) anyerror!Value {
 // Method:call — invoke a method/closure Form with args. wraps the
 // substrate's send-path so the closure's captured-self is honored.
 //
-// port of crates/substrate/src/intrinsics.rs::install_call_on_method.
+// port of players/rust/src/intrinsics.rs::install_call_on_method.
 // ─────────────────────────────────────────────────────────────────
 
 fn methodCall(world: *World, self_: Value, args: []const Value) anyerror!Value {
@@ -1273,7 +1273,7 @@ fn readerUseSeed(world: *World, _: Value, _: []const Value) anyerror!Value {
 // ─────────────────────────────────────────────────────────────────
 // $transporter — Self-style file ↔ image bridge.
 //
-// port of crates/substrate/src/transporter.rs (~160 LoC). subset:
+// port of players/rust/src/transporter.rs (~160 LoC). subset:
 //
 //   [$transporter load: rel]     — read file, parse, compile, run
 //   [$transporter loadAll: list] — same on each path in a cons-list
@@ -1532,7 +1532,7 @@ fn transporterLoadAll(world: *World, self_: Value, args: []const Value) anyerror
 // to the NativeFn directly with the call args.
 // ─────────────────────────────────────────────────────────────────
 
-// port of crates/substrate/src/intrinsics.rs::install_globals `setHandler!`.
+// port of players/rust/src/intrinsics.rs::install_globals `setHandler!`.
 // (setHandler! Proto 'sel fn) — install `fn` as handler for `sel` on
 // `Proto`. bumps proto's generation so existing ICs invalidate (L10).
 //
@@ -1578,7 +1578,7 @@ fn cachedStringChars(world: *World, id: form.FormId) !?[]const u32 {
     return world.getStringChars(id);
 }
 
-// port of crates/substrate/src/intrinsics.rs::install_string_methods `:length`
+// port of players/rust/src/intrinsics.rs::install_string_methods `:length`
 fn stringLength(world: *World, self_: Value, _: []const Value) anyerror!Value {
     if (self_ != .form) return typeError(world, "length: receiver must be a String");
     const id = self_.asFormId().?;
@@ -1586,7 +1586,7 @@ fn stringLength(world: *World, self_: Value, _: []const Value) anyerror!Value {
     return .{ .int = @intCast(chars.len) };
 }
 
-// port of crates/substrate/src/intrinsics.rs::install_string_methods `:at:`
+// port of players/rust/src/intrinsics.rs::install_string_methods `:at:`
 // returns the Char at the given index, or raises 'index-out-of-bounds.
 fn stringAt(world: *World, self_: Value, args: []const Value) anyerror!Value {
     if (args.len < 1) return raise(world, "arity", "at: takes 1 arg");
@@ -1601,7 +1601,7 @@ fn stringAt(world: *World, self_: Value, args: []const Value) anyerror!Value {
     return .{ .char = chars[@intCast(idx)] };
 }
 
-// port of crates/substrate/src/intrinsics.rs::install_string_methods `:=`
+// port of players/rust/src/intrinsics.rs::install_string_methods `:=`
 // structural equality — compare the two :bytes cons-chains element by
 // element. accepts Strings or anything String-shaped (.bytes cons-chain
 // of Chars); mismatched shape → false (never raises).
@@ -1632,7 +1632,7 @@ fn stringEq(world: *World, self_: Value, args: []const Value) anyerror!Value {
     }
 }
 
-// port of crates/substrate/src/intrinsics.rs::install_string_methods `:slice:length:`
+// port of players/rust/src/intrinsics.rs::install_string_methods `:slice:length:`
 // substring by char-index. allocates a new String-Form with a fresh
 // :bytes cons-chain.
 //
@@ -1667,7 +1667,7 @@ fn stringSlice(world: *World, self_: Value, args: []const Value) anyerror!Value 
     return .{ .form = new_id };
 }
 
-// port of crates/substrate/src/intrinsics.rs::install_string_methods `:+`
+// port of players/rust/src/intrinsics.rs::install_string_methods `:+`
 // concatenation. accepts a String on the right (cons-chain shape);
 // for Sym/Char rhs we coerce via :toString-like inline handling.
 fn stringPlus(world: *World, self_: Value, args: []const Value) anyerror!Value {
@@ -1742,7 +1742,7 @@ fn stringPlus(world: *World, self_: Value, args: []const Value) anyerror!Value {
 // Char primitives.
 // ─────────────────────────────────────────────────────────────────
 
-// port of crates/substrate/src/intrinsics.rs::install_char_methods `:codepoint`
+// port of players/rust/src/intrinsics.rs::install_char_methods `:codepoint`
 fn charCodepoint(world: *World, self_: Value, _: []const Value) anyerror!Value {
     return switch (self_) {
         .char => |cp| .{ .int = @intCast(cp) },
@@ -1750,7 +1750,7 @@ fn charCodepoint(world: *World, self_: Value, _: []const Value) anyerror!Value {
     };
 }
 
-// port of crates/substrate/src/intrinsics.rs::install_char_methods `:<`
+// port of players/rust/src/intrinsics.rs::install_char_methods `:<`
 fn charLt(_: *World, self_: Value, args: []const Value) anyerror!Value {
     return switch (self_) {
         .char => |a| switch (args[0]) {
@@ -1784,7 +1784,7 @@ fn charToString(world: *World, self_: Value, _: []const Value) anyerror!Value {
 // used by the Lexer's escape table: `[10 asChar]` → newline-Char.
 // ─────────────────────────────────────────────────────────────────
 
-// port of crates/substrate/src/intrinsics.rs (Integer `:asChar`)
+// port of players/rust/src/intrinsics.rs (Integer `:asChar`)
 fn intAsChar(world: *World, self_: Value, _: []const Value) anyerror!Value {
     const n = self_.asInt() orelse return typeError(world, "asChar receiver must be an Integer");
     if (n < 0 or n > 0x10_FFFF) return raise(world, "index-out-of-bounds", "asChar: codepoint out of range");
@@ -1970,7 +1970,7 @@ fn globalIntern(world: *World, _: Value, args: []const Value) anyerror!Value {
 
 // ─────────────────────────────────────────────────────────────────
 // Chunk class- and instance-side methods — port of
-// crates/substrate/src/intrinsics.rs::install_compiler_primitives'
+// players/rust/src/intrinsics.rs::install_compiler_primitives'
 // chunk subset.
 //
 // the moof Compiler (lib/compiler/*.moof) builds chunks by sending:
@@ -1998,7 +1998,7 @@ fn globalIntern(world: *World, _: Value, args: []const Value) anyerror!Value {
 // ─────────────────────────────────────────────────────────────────
 
 /// decode an opcode-Form (slots `:op` Sym + `:operands` cons-list)
-/// into an Op. mirrors crates/substrate/src/intrinsics.rs::decode_op_form.
+/// into an Op. mirrors players/rust/src/intrinsics.rs::decode_op_form.
 fn decodeOpForm(world: *World, v: Value) anyerror!Op {
     const id = v.asFormId() orelse return typeError(world, "chunk-emit: opcode must be a Form");
     const op_sym = try world.syms.intern("op");
@@ -2376,7 +2376,7 @@ pub const REGISTRY = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "Nil:proto", nilProto },
     .{ "Cons:reverse", consReverse },
 
-    // $transporter (W5b — port of crates/substrate/src/transporter.rs).
+    // $transporter (W5b — port of players/rust/src/transporter.rs).
     // names match what rust would emit if its anonymous-proto issue
     // were resolved: in rust the transporter proto is anonymous, so
     // v4_export emits `<anon-N>:load:` which won't match here. these

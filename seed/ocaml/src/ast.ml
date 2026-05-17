@@ -1,5 +1,5 @@
 (* moof source Form. mirrors what the reader produces and what the
-   compiler consumes. matches the structure of crates/substrate/src/reader.rs's
+   compiler consumes. matches the structure of players/rust/src/reader.rs's
    Value enum at the read layer.
 
    note on integer width: moof's source-level Integer is i48 ∪ BigInt

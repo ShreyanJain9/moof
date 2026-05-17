@@ -8,7 +8,7 @@
 //! `TurnDiff` summarizing what changed; abort drops the buffered
 //! state and truncates the heap to watermark.
 //!
-//! ported from `crates/substrate/src/nursery.rs`. concepts ported,
+//! ported from `players/rust/src/nursery.rs`. concepts ported,
 //! not lines — the zig substrate is starting fresh and only carries
 //! the V1 essentials. V2 frozen-bit transitions are noted in the
 //! Delta struct but not yet wired through `freeze` (zig substrate

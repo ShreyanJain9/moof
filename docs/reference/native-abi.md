@@ -3,7 +3,7 @@
 > **language-neutral contract every wasm mco speaks. binding files
 > in zig / c / ocaml / haskell / future-langs target THIS doc as
 > source-of-truth, not each other. host substrate's
-> `crates/substrate/src/wasm.rs` implements the host side.**
+> `players/rust/src/wasm.rs` implements the host side.**
 
 ## abi version
 
@@ -110,4 +110,4 @@ binding implements against.
 - `docs/reference/mco-format.md` — the .mco artifact format (manifest schema, custom sections, content-addressing, signature)
 - `docs/concepts/data-sources.md` — DataSource protocol and infinite-source subclass
 - `docs/superpowers/specs/2026-05-03-track-1-mcos-and-datasource-design.md` — the design driving this abi
-- `crates/substrate/src/wasm.rs` — the host-side trampoline that implements this contract
+- `players/rust/src/wasm.rs` — the host-side trampoline that implements this contract

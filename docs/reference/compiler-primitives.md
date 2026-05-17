@@ -35,7 +35,7 @@ finalize.
 
 ## opcode constructors
 
-every `Op` variant in `crates/substrate/src/opcodes.rs` has a
+every `Op` variant in `players/rust/src/opcodes.rs` has a
 matching class-side method on `Opcode`. send returns an
 opcode-Form ready to feed into `[chunk emit:]`.
 
@@ -242,6 +242,6 @@ view of this Form," not "send a message to a receiver."
 - `laws/reflection-contract.md` — R2, R6.
 - `concepts/sends-and-calls.md` — what selectors / argc / ics
   mean at dispatch time.
-- `crates/substrate/src/opcodes.rs` — the canonical Op set.
+- `players/rust/src/opcodes.rs` — the canonical Op set.
 - `lib/compiler.moof` (when written) — the consumer of these
   primitives.

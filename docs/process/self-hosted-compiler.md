@@ -154,7 +154,7 @@ phase-G perf win, not a correctness concern.
 
 phase A-self-host has two remaining moves:
 
-1. **port the reader.** `crates/substrate/src/reader.rs` (1634
+1. **port the reader.** `players/rust/src/reader.rs` (1634
    LoC) becomes `lib/parser.moof`. the rust reader shim shrinks
    to "read just enough text to load parser.moof itself."
 2. **byte-identical chunks.** track 3 verified value-equivalence
@@ -173,5 +173,5 @@ everything else is moof — and editable from inside moof.
 - `docs/laws/substrate-laws.md` L4, L5 — what self-hosting
   preserves.
 - `lib/compiler.moof` — the canonical compiler.
-- `crates/substrate/src/compiler.rs` — the seed.
+- `players/rust/src/compiler.rs` — the seed.
 - `NEXT_SESSION.md` — the original three-track plan.

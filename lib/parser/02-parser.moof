@@ -4,7 +4,7 @@
 ;;             01-tokens.moof (Tokens singleton — β2).
 ;;
 ;; recursive-descent. one method per syntactic category.
-;; mirrors `crates/substrate/src/reader.rs` end-to-end.
+;; mirrors `players/rust/src/reader.rs` end-to-end.
 ;;
 ;; written in the minimal-subset moof: raw setHandler!, no macros,
 ;; no quasiquote, no defmethod sugar, no pattern-match params.

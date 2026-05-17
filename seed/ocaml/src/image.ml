@@ -150,7 +150,7 @@ let put_f64 (b : Buffer.t) (v : float) : unit =
    from `image.syms`). We use a hashtable for O(1) lookup.
 
    IMPORTANT: zig's sym table reserves SymId 0 as the NONE sentinel
-   (see crates/zig-substrate/src/sym.zig — entries[0] = ""). After
+   (see players/zig/src/sym.zig — entries[0] = ""). After
    image-load, the first user-interned sym lands at SymId 1, the
    second at SymId 2, etc. So a sym at OCaml position `i` (0-based
    in `image.syms`) becomes SymId `i + 1` on the wire. *)

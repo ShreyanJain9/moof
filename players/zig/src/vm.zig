@@ -3,7 +3,7 @@
 //! one switch-based interpreter; one shared operand stack; one
 //! shared frame stack (so tail-sends and recursive send-from-native
 //! stay in bounded memory). this is the zig port of the rust seed's
-//! `crates/substrate/src/vm.rs`, updated for the V4 opcode set —
+//! `players/rust/src/vm.rs`, updated for the V4 opcode set —
 //! 24 opcodes across 6 categories (V4 spec §2).
 //!
 //! per `laws/substrate-laws.md` L3, *every* method call goes through
@@ -40,7 +40,7 @@
 //! runMethod`, ~5 host-stack frames per moof send, blowing the
 //! default 8 MB stack at ~26 levels deep. the rust seed has the
 //! same shape and a 128 MB worker-thread workaround
-//! (`crates/substrate/src/main.rs:16-30`); the zig substrate fixes
+//! (`players/rust/src/main.rs:16-30`); the zig substrate fixes
 //! it structurally.
 //!
 //! native re-entry (e.g. `:perform:withArgs:` calling `World.send`)

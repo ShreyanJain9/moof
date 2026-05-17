@@ -1,7 +1,7 @@
-// crates/substrate/build.rs — verify Hash mco exists at compile time,
+// players/rust/build.rs — verify Hash mco exists at compile time,
 // emit its path as an env var for include_bytes!.
 //
-// runs from the crates/substrate directory; repo root is two levels up.
+// runs from the players/rust directory; repo root is two levels up.
 
 use std::path::Path;
 
@@ -27,7 +27,7 @@ fn main() {
             hash_str.len()
         );
     }
-    // build.rs runs from `crates/substrate/`; abs path makes include_bytes! work
+    // build.rs runs from `players/rust/`; abs path makes include_bytes! work
     // regardless of which directory rustc resolves relative paths from.
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let repo_root = Path::new(&manifest_dir).join("../..").canonicalize().unwrap();

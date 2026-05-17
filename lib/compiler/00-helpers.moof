@@ -15,7 +15,7 @@
 ;;
 ;; per `docs/process/docs-driven.md`'s self-host rule, this file is
 ;; the *canonical* compiler. the rust seed in
-;; `crates/substrate/src/compiler.rs` stays as the bootstrap
+;; `players/rust/src/compiler.rs` stays as the bootstrap
 ;; fallback that gets THIS file loaded; once compiler.moof's defs
 ;; land, `World.use_moof_compiler` flips and every subsequent
 ;; compile (including bootstrap.moof) routes through here.
@@ -35,7 +35,7 @@
 ;;
 ;; the public api the rust shim cares about is exactly one method:
 ;;   [Compiler compileTop: form]   →   chunk-Form
-;; (see crates/substrate/src/compiler.rs `compile_via_moof`).
+;; (see players/rust/src/compiler.rs `compile_via_moof`).
 ;;
 ;; tail-position is threaded through. it controls Send vs TailSend;
 ;; the rest of the cases ignore it.

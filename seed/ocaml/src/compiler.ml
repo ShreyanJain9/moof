@@ -1,6 +1,6 @@
 (* compiler.ml — moof source Form → V4 byte-tagged bytecode.
 
-   ports crates/substrate/src/compiler.rs (the rust seed) to OCaml,
+   ports players/rust/src/compiler.rs (the rust seed) to OCaml,
    with V4 emission rules layered on per the V4 opcode design spec
    (docs/superpowers/specs/2026-05-10-vm-V4-opcodes-design.md, §5).
 
@@ -64,7 +64,7 @@ let sym_names : string Dynarray.t = Dynarray.create ()
 (** intern a string into the symbol table, returning its SymId.
 
     SymIds are 1-based to match the zig substrate's convention
-    (crates/zig-substrate/src/sym.zig — entries[0] = NONE sentinel,
+    (players/zig/src/sym.zig — entries[0] = NONE sentinel,
     first user-interned sym lands at SymId 1). The image's
     SymTableSection serializes the entries in encounter order, so
     OCaml's `intern("foo") = N` lines up with zig's
@@ -269,7 +269,7 @@ let op_index_at (b : chunk_builder) (bytepos : int) : int =
     Jump/JumpIfFalse/JumpIfTrue are 3 bytes). To land at
     `target_bytepos`, encode `off = target - jump_bytepos - 3` so that
     runtime's `pc += offset` (with pc already at jump_bytepos + 3)
-    arrives at target. matches crates/substrate/src/v4_export.rs's
+    arrives at target. matches players/rust/src/v4_export.rs's
     compute_byte_offset. *)
 let patch_jump_to_here (b : chunk_builder) (jump_bytepos : int) : unit =
   let idx = op_index_at b jump_bytepos in

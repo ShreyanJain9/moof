@@ -1,7 +1,7 @@
 //! lib/mcos/_lib/moof.zig — zig binding for the wasm mco abi.
 //!
 //! see docs/reference/native-abi.md for the canonical contract.
-//! every import below is implemented in crates/substrate/src/wasm.rs.
+//! every import below is implemented in players/rust/src/wasm.rs.
 
 // ── moof-namespaced imports ──────────────────────────────────────
 

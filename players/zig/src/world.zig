@@ -2,7 +2,7 @@
 //! chunk side-tables, native-fn registry, and the bytecode interpreter
 //! state. one World per vat (V4 polyglot-substrate plan, Track A).
 //!
-//! the rust seed equivalent is `crates/substrate/src/world.rs`; this
+//! the rust seed equivalent is `players/rust/src/world.rs`; this
 //! is the zig port. concepts ported, not lines — the rust file is
 //! ~1500 lines of accumulated phase work, while zig-substrate is
 //! starting fresh with V4 semantics from the start.
@@ -285,14 +285,14 @@ pub const World = struct {
     /// owned by the world's allocator; freed in deinit.
     transporter_root: ?[]u8 = null,
 
-    /// mirror of `crates/substrate/src/world.rs::use_moof_compiler`.
+    /// mirror of `players/rust/src/world.rs::use_moof_compiler`.
     /// when `true`, `$compiler` is in-image — every compile routes
     /// through `[Compiler compileTop: form]`. zig substrate has no
     /// native compiler, so this MUST be true for any compile to
     /// happen. defaulted false; flipped by `[$compiler useMoof]`.
     use_moof_compiler: bool = false,
 
-    /// mirror of `crates/substrate/src/world.rs::use_moof_reader`.
+    /// mirror of `players/rust/src/world.rs::use_moof_reader`.
     /// when `true`, `$reader` is in-image — every parse routes through
     /// `[Parser parse: src]`. zig has no native reader, so this MUST
     /// be true. defaulted false; flipped by `[$reader useMoof]`.
@@ -1269,7 +1269,7 @@ pub const World = struct {
 
     // ---- V1 turn lifecycle ---------------------------------------
     //
-    // mirrors `crates/substrate/src/world.rs::{start_turn,
+    // mirrors `players/rust/src/world.rs::{start_turn,
     // commit_turn, abort_turn, in_turn}`. zig deviates from rust in
     // one place: write-outside-turn does NOT panic — boot-time
     // intrinsics still poke `heap.getMut(...)` directly, and we
@@ -1416,7 +1416,7 @@ pub const World = struct {
     /// zig substrate hasn't implemented `turn_redirect_originals`.
     /// `become_` happens through `Heap.become_` outside the
     /// nursery. tracked alongside V1 follow-ups in
-    /// `crates/substrate/src/world.rs::turn_redirect_originals`.
+    /// `players/rust/src/world.rs::turn_redirect_originals`.
     pub fn abortTurn(self: *World) void {
         if (!self.in_turn) std.debug.panic("abortTurn called outside a turn", .{});
 
@@ -1466,7 +1466,7 @@ pub const World = struct {
     /// handler table first (so proto-as-receiver and singleton-method
     /// sends dispatch correctly), then walks the proto chain. returns
     /// the matched handler + defining proto, or null on miss.
-    /// mirrors rust crates/substrate/src/world.rs::lookup_handler.
+    /// mirrors rust players/rust/src/world.rs::lookup_handler.
     pub fn lookupHandler(self: *const World, receiver: Value, selector: SymId) ?HandlerHit {
         // 1. receiver's own handlers (singleton / proto-as-receiver).
         if (self.effectiveFormId(receiver)) |id| {

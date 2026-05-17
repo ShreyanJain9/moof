@@ -323,7 +323,7 @@ fn lookupSym(world: *World, name: []const u8) u32 {
 /// serialize the given `world` as a V4 vat-image, appending bytes to
 /// `out` (an ArrayList(u8)) using `allocator` for growth.
 ///
-/// mirrors the byte layout produced by `crates/substrate/src/v4_export.rs`
+/// mirrors the byte layout produced by `players/rust/src/v4_export.rs`
 /// exactly so a round-trip (rust→zig→rust→…) yields bit-identical bytes
 /// modulo: insertion order of native methods (we walk proto handler
 /// tables in heap order, matching rust's `collect_native_methods`), and

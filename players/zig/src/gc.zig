@@ -29,11 +29,11 @@
 //! CLI flag.
 //!
 //! see also:
-//! - `crates/zig-substrate/src/heap.zig` — `Heap.gcResetMarks`,
+//! - `players/zig/src/heap.zig` — `Heap.gcResetMarks`,
 //!   `Heap.gcMark`, `Heap.gcIsMarked`, `Heap.gcTombstone`.
-//! - `crates/zig-substrate/src/form.zig` — `Form.gc_mark`,
+//! - `players/zig/src/form.zig` — `Form.gc_mark`,
 //!   `Form.gc_tombstone`.
-//! - `crates/zig-substrate/src/vm.zig` — `runTop` calls `World.collect`
+//! - `players/zig/src/vm.zig` — `runTop` calls `World.collect`
 //!   after the outermost frame returns when `gc_enabled` is true.
 //! - `laws/substrate-laws.md` L10, L11.
 //! - `laws/determinism-laws.md` D5, D6.

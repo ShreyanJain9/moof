@@ -395,8 +395,8 @@ let finalize_lifted_forms () : Image.vat_form list =
 (* ----------------------------------------------------------------
    boot proto allocation
 
-   Mirror crates/substrate/src/protos.rs::Protos::bootstrap and
-   crates/zig-substrate/src/protos.zig::bootstrap. The 18 canonical
+   Mirror players/rust/src/protos.rs::Protos::bootstrap and
+   players/zig/src/protos.zig::bootstrap. The 18 canonical
    protos are allocated in a fixed order so the image's Header.protos
    table can name them by FormId.
 
@@ -414,7 +414,7 @@ let finalize_lifted_forms () : Image.vat_form list =
    allocated like any other proto and bound by name on here_form, but
    omitted from `protos_table` / header. Once zig substrate grows a
    `Protos.float` field (today its `protoOf(.float)` returns Object —
-   see crates/zig-substrate/src/world.zig:715), the V4 header layout
+   see players/zig/src/world.zig:715), the V4 header layout
    will need a wire-format bump to carry the id; for now we just need
    `Float` resolvable as a name so stdlib/float.moof can `defmethod`
    onto it. *)
@@ -465,7 +465,7 @@ let bootstrap_protos () : boot_protos =
   let nil_id = p "Nil" in
   let bool_id = p "Bool" in
   let integer_id = p "Integer" in
-  (* Float: proto chain is Object (mirrors crates/substrate/src/protos.rs:75
+  (* Float: proto chain is Object (mirrors players/rust/src/protos.rs:75
      and Integer). Not part of the V4 image proto-table (header carries
      18 entries; Float is the 19th), but needs a Form so user-level
      `defmethod Float ...` resolves. *)
@@ -494,8 +494,8 @@ let bootstrap_protos () : boot_protos =
 (* ----------------------------------------------------------------
    here_form / macros_form allocation
 
-   Mirror crates/substrate/src/world.rs::World::new (lines ~330-340)
-   and crates/zig-substrate/src/world.zig::init (lines ~311-328). The
+   Mirror players/rust/src/world.rs::World::new (lines ~330-340)
+   and players/zig/src/world.zig::init (lines ~311-328). The
    image carries the canonical FormIds for both; zig's image-load reads
    them from the header and populates world.here_form / world.macros_form.
 
@@ -624,7 +624,7 @@ let patch_form_handlers (target_id : int) (handler : int * Ast.form) : unit =
 (* ----------------------------------------------------------------
    native handler wiring (NativeRefsSection)
 
-   Mirror of crates/zig-substrate/src/intrinsics.zig REGISTRY: a list
+   Mirror of players/zig/src/intrinsics.zig REGISTRY: a list
    of "ProtoName:selector" keys that the zig host's image-load step
    rebinds to NativeFn pointers via World.lookupNativeByName.
 
@@ -1021,7 +1021,7 @@ and build_form_for (v : Ast.form) : Image.vat_form =
   | Ast.Str s ->
       (* moof String layout: proto=String, :bytes slot = cons-chain
          of Char codepoints. This is what zig's transporter expects;
-         see crates/zig-substrate/src/intrinsics.zig::extractPath
+         see players/zig/src/intrinsics.zig::extractPath
          (it walks :bytes cell-by-cell, expecting .char car values).
 
          We use UTF-8 codepoints: decode each byte sequence to a

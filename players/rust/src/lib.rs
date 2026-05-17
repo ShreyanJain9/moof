@@ -38,7 +38,7 @@ pub mod wasm;
 pub mod world;
 
 /// the Hash mco bytes, baked in at compile time.
-/// built by `lib/mcos/hash/build.sh`; path resolved by `crates/substrate/build.rs`.
+/// built by `lib/mcos/hash/build.sh`; path resolved by `players/rust/build.rs`.
 const HASH_MCO_BYTES: &[u8] = include_bytes!(env!("MOOF_HASH_MCO_PATH"));
 
 /// V2 — vat mode. controls whether `:new` (Object, Table) returns

@@ -22,7 +22,7 @@
 ;; [Parser parse: src] → list of top-level Forms.
 ;; threads through 00-lexer.moof's [Lexer tokenize:] and
 ;; 02-parser.moof's [ParserCore parseAll:]. matches the rust
-;; `World::read_all` shape (see crates/substrate/src/world.rs).
+;; `World::read_all` shape (see players/rust/src/world.rs).
 (setHandler! Parser 'parse:
   (fn (src)
     (let ((tokens [Lexer tokenize: src]))

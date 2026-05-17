@@ -1,6 +1,6 @@
 ;; lib/repl-init.moof — eager-binds for interactive REPL sessions.
 ;;
-;; loaded by the `moof` REPL binary (see crates/substrate/src/main.rs).
+;; loaded by the `moof` REPL binary (see players/rust/src/main.rs).
 ;; in production world manifests (phase B+), users choose their own
 ;; bindings and skip this. cap-discipline preserved.
 

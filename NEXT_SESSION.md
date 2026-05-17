@@ -32,11 +32,11 @@ stdlib/console.moof → UnboundName: Console (substrate cap not installed)
 
 ### what exists now
 
-| crate | role | status |
+| dir | role | status |
 |---|---|---|
-| `crates/zig-substrate/` | THE runtime — heap, vm, gc, image, intrinsics, nursery, layout | substantial; 4000+ LoC zig |
-| `crates/substrate/` | rust build-time oracle | WORKS but slated for deletion (W5e) once polyglot complete |
-| `crates/ocaml-seed/` | minimal bootstrap compiler | works; produces seed.vat (~91 KB, 305 chunks, 77 natives) |
+| `players/zig/` | THE runtime — heap, vm, gc, image, intrinsics, nursery, layout | substantial; 4000+ LoC zig |
+| `players/rust/` | rust build-time oracle | WORKS but slated for deletion (W5e) once polyglot complete |
+| `seed/ocaml/` | minimal bootstrap compiler | works; produces seed.vat (~91 KB, 305 chunks, 77 natives) |
 | `lib/` | stdlib + parser + compiler + early macros | unchanged structurally; defproto auto-flatten added |
 
 ### perf snapshot
@@ -58,7 +58,7 @@ we are well within striking distance of BEAM-interpreted parity (5-10M sends/sec
 
 ### immediate unblocker (1-2 hours)
 
-**Console cap install in zig substrate (task #46).** the 23rd stdlib file blocks because `Console` global isn't installed by `installCaps`. mirror rust's `install_console_cap` in `crates/substrate/src/intrinsics.rs`. after this, bootstrap likely reaches even further into stdlib OR completes end-to-end.
+**Console cap install in zig substrate (task #46).** the 23rd stdlib file blocks because `Console` global isn't installed by `installCaps`. mirror rust's `install_console_cap` in `players/rust/src/intrinsics.rs`. after this, bootstrap likely reaches even further into stdlib OR completes end-to-end.
 
 ### tier-2 perf (next big push, ~2-3 weeks)
 
@@ -137,10 +137,10 @@ per phase 3 spec §6:
 
 1. `git pull` — confirm at `041f8fd` or later
 2. `cargo build --release -p moof --bin moof-rs` — produces rust safety net
-3. `cd crates/zig-substrate && zig build && cd ..` — produces `crates/zig-substrate/zig-out/bin/moof`
-4. `eval $(opam env --switch=wasm-mco)` then `dune build --root crates/ocaml-seed` — ocaml-seed builds
-5. `dune exec --root crates/ocaml-seed bin/seed.exe -- build-seed --root lib/ --output /tmp/seed.vat` — produces 91 KB seed.vat
-6. `MOOF_LIB=$PWD/lib ./crates/zig-substrate/zig-out/bin/moof run /tmp/seed.vat` — should reach `UnboundName: Console`
+3. `cd players/zig && zig build && cd -` — produces `players/zig/zig-out/bin/moof`
+4. `eval $(opam env --switch=wasm-mco)` then `dune build --root seed/ocaml` — ocaml-seed builds
+5. `dune exec --root seed/ocaml bin/seed.exe -- build-seed --root lib/ --output /tmp/seed.vat` — produces 91 KB seed.vat
+6. `MOOF_LIB=$PWD/lib ./players/zig/zig-out/bin/moof run /tmp/seed.vat` — should reach `UnboundName: Console`
 7. Read `docs/superpowers/specs/2026-05-16-phase3-cohesive-vision-design.md` for the next several months' direction
 8. Read this file's "what's next" sections + recommended first dispatch
 9. Pick a workstream:
