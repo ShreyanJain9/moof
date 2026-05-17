@@ -6,6 +6,9 @@
 //! subcommands:
 //!   moof                  — built-in smoke (boots a World, runs two
 //!                                hand-constructed chunks).
+//!   moof repl <vat>       — interactive REPL. load vat, run main,
+//!                                load repl-init.moof (non-fatal),
+//!                                then loop: prompt → eval → print.
 //!   moof decode <path>    — read raw V4 bytecode bytes from <path>
 //!                                (use `/dev/stdin` for piped input on
 //!                                POSIX systems) and print each decoded
@@ -198,6 +201,12 @@ pub fn main(init: std.process.Init) !void {
         }
     };
     var it = ItShim{ .items = argv_list.items, .idx = &arg_idx };
+
+    if (sub_raw != null and path_raw != null and std.mem.eql(u8, sub_raw.?, "repl")) {
+        const vat_copy = try allocator.dupe(u8, path_raw.?);
+        defer allocator.free(vat_copy);
+        return runRepl(allocator, init.io, init.minimal.environ, vat_copy);
+    }
 
     if (sub_raw != null and path_raw != null and std.mem.eql(u8, sub_raw.?, "decode")) {
         const path_copy = try allocator.dupe(u8, path_raw.?);
@@ -556,6 +565,187 @@ fn runRun(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ
         defer buf.deinit(allocator);
         try image.serializeVat(&world, &buf, allocator);
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_path, .data = buf.items, .flags = .{ .truncate = true } });
+    }
+}
+
+/// `moof repl <vat>` — interactive REPL.
+///
+/// 1. Load seed.vat, install caps, set MOOF_LIB root.
+/// 2. Run the vat's `main` chunk (boots parser+compiler, loads stdlib).
+/// 3. Attempt to load `repl-init.moof` via `[$transporter load:]` —
+///    non-fatal if it fails (mcos may not be available).
+/// 4. Loop:
+///    - print "moof> " prompt to stdout
+///    - read a line from stdin
+///    - EOF (ctrl-d) → print "goodbye." and exit cleanly
+///    - `:quit` or `:q` → same
+///    - empty line → skip
+///    - otherwise: eval via `evalStringInWorld`, print result via `printResult`
+///    - on error: print the error name, continue
+///
+/// prompt and output go to stdout via `std.Io.File.writeStreamingAll`
+/// (same discipline as `std.debug.print` goes to stderr; prompt to
+/// stdout keeps the REPL usable when stdout is a terminal).
+fn runRepl(allocator: std.mem.Allocator, io: std.Io, environ: std.process.Environ, vat_path: []const u8) !void {
+    var world = try World.initBare(allocator);
+    defer world.deinit();
+    applyGcOpts(&world);
+    world.io = io;
+
+    // load vat image
+    const vat_bytes = try std.Io.Dir.cwd().readFileAlloc(io, vat_path, allocator, .limited(1024 * 1024 * 1024));
+    defer allocator.free(vat_bytes);
+    try image.loadVatImage(&world, vat_bytes, allocator);
+    try intrinsics.installCaps(&world);
+
+    // set transporter root from env or default ./lib
+    if (resolveLibRoot(allocator, io, environ)) |root| {
+        defer allocator.free(root);
+        try world.setTransporterRoot(root);
+    }
+
+    // run the vat's `main` chunk — boots parser+compiler, loads stdlib.
+    //
+    // special bootstrap discipline: we pre-open a turn so that runTop
+    // doesn't open its own. this lets us commit the turn (rather than
+    // abort) even when bootstrap stops partway (e.g. UnboundName: Console
+    // — the known baseline per NEXT_SESSION.md §"starting the next session").
+    // aborting would truncate the heap and leave here_form with dangling
+    // slot values, making the subsequent REPL loop crash.
+    world.startTurn();
+    const main_sym_id = lookupSymId(&world, "main");
+    if (main_sym_id != 0 and !world.here_form.isNone()) {
+        const hf = world.heap.get(world.here_form);
+        if (hf.slot(main_sym_id).asFormId()) |maybe_chunk| {
+            const chunk_to_run = if (world.chunk_bytecode.contains(maybe_chunk)) maybe_chunk else world.formSlot(maybe_chunk, world.body_sym).asFormId() orelse maybe_chunk;
+            if (world.chunk_bytecode.contains(chunk_to_run)) {
+                if (vm.runTop(&world, chunk_to_run)) |_| {
+                    // bootstrap complete — REPL can use full stdlib
+                } else |err| {
+                    std.debug.print("repl: bootstrap stopped at {s} (continuing)\n", .{@errorName(err)});
+                    // VM left a partial frame; clean up operand stack and frames
+                    // to the pre-bootstrap state so subsequent evals start clean.
+                    world.vm.stack.clearRetainingCapacity();
+                    world.vm.frames.clearRetainingCapacity();
+                }
+            }
+        }
+    }
+    // commit the bootstrap turn regardless — preserves all forms allocated
+    // during bootstrap (proto handlers, stdlib methods, etc.) that would be
+    // lost by abortTurn. the diff is discarded (not journaled yet).
+    {
+        var diff = world.commitTurn() catch |err| {
+            std.debug.print("repl: commitTurn failed ({s}); REPL may be unstable\n", .{@errorName(err)});
+            return;
+        };
+        diff.deinit(world.allocator);
+    }
+
+    // reset all ICs — during bootstrap the IC cache was populated with
+    // form IDs that may now be valid but correspond to the post-commit
+    // heap. a fresh IC table ensures the REPL's first dispatch re-learns
+    // method locations cleanly.
+    {
+        var ic_it = world.chunk_ics.iterator();
+        while (ic_it.next()) |entry| {
+            for (entry.value_ptr.*) |*ic| ic.* = world_mod.ICache.empty;
+        }
+    }
+
+    // attempt to load repl-init.moof — non-fatal.
+    // only try if the in-image parser+compiler are active.
+    if (world.use_moof_reader and world.use_moof_compiler) {
+        const repl_init_src = "[$transporter load: \"repl-init.moof\"]";
+        const src_val = world.makeString(repl_init_src) catch null;
+        if (src_val) |sv| {
+            _ = intrinsics.evalStringInWorld(&world, sv) catch |err| {
+                std.debug.print("repl: repl-init.moof not loaded ({s}); continuing\n", .{@errorName(err)});
+            };
+        }
+    }
+
+    // banner + REPL loop — write prompts/results to stdout directly.
+    // std.debug.print goes to stderr; we write the prompt to stdout
+    // so it appears before the user's input on a terminal.
+    var stdout_buf: [256]u8 = undefined;
+    const stdout_file = std.Io.File.stdout();
+
+    // print banner
+    {
+        var sw = stdout_file.writerStreaming(io, &stdout_buf);
+        sw.interface.writeAll("moof \xe2\x80\x94 V4 polyglot substrate\ntype expressions; ctrl-d or :quit to exit.\n") catch {};
+        sw.flush() catch {};
+    }
+
+    // read-eval-print loop.
+    // use POSIX read() directly so we get reliable byte-by-byte stdin
+    // semantics without the Io.Reader buffering complexity.
+    var line_buf: [8192]u8 = undefined;
+    var line_len: usize = 0;
+    var byte_buf: [1]u8 = undefined;
+
+    while (true) {
+        // prompt to stdout
+        {
+            var pw = stdout_file.writerStreaming(io, &stdout_buf);
+            pw.interface.writeAll("moof> ") catch {};
+            pw.flush() catch {};
+        }
+
+        // read one line byte-by-byte from stdin via POSIX read.
+        // returns when '\n' is found, EOF (n=0), or error.
+        line_len = 0;
+        const line = blk: {
+            while (true) {
+                const n = std.posix.read(std.posix.STDIN_FILENO, &byte_buf) catch |err| {
+                    std.debug.print("repl: stdin read error: {s}\n", .{@errorName(err)});
+                    return;
+                };
+                if (n == 0) {
+                    // EOF / Ctrl-D
+                    var bw = stdout_file.writerStreaming(io, &stdout_buf);
+                    bw.interface.writeAll("\ngoodbye.\n") catch {};
+                    bw.flush() catch {};
+                    return;
+                }
+                const b = byte_buf[0];
+                if (b == '\n') break;
+                if (b == '\r') continue; // skip carriage return
+                if (line_len < line_buf.len - 1) {
+                    line_buf[line_len] = b;
+                    line_len += 1;
+                }
+                // silently truncate if line too long
+            }
+            break :blk line_buf[0..line_len];
+        };
+
+        // skip empty lines
+        if (line.len == 0) continue;
+
+        // quit commands
+        if (std.mem.eql(u8, line, ":quit") or std.mem.eql(u8, line, ":q") or std.mem.eql(u8, line, "(quit)")) {
+            var bw = stdout_file.writerStreaming(io, &stdout_buf);
+            bw.interface.writeAll("goodbye.\n") catch {};
+            bw.flush() catch {};
+            return;
+        }
+
+        // eval
+        const src_val = world.makeString(line) catch |err| {
+            std.debug.print("! makeString failed: {s}\n", .{@errorName(err)});
+            continue;
+        };
+        if (intrinsics.evalStringInWorld(&world, src_val)) |result| {
+            printResult(result, &world);
+        } else |err| {
+            std.debug.print("! {s}", .{@errorName(err)});
+            if (world.vm.last_send_sel) |sel| {
+                std.debug.print(" (last send: '{s})", .{world.syms.resolve(sel)});
+            }
+            std.debug.print("\n", .{});
+        }
     }
 }
 
