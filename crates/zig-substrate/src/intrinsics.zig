@@ -1881,15 +1881,28 @@ fn globalRaise(world: *World, _: Value, args: []const Value) anyerror!Value {
 }
 
 // **§5.8c** — String→Sym intern cache. profile shows 267K intern
-// calls / 653 unique syms = 410× redundancy; the parser interns the
-// same identifier text repeatedly across passes. caching String
-// FormId → SymId reduces those calls to a single hashmap probe.
+// calls / 653 unique syms = 410× redundancy when the parser re-uses a
+// pre-interned String identity (e.g. compiler-internal identifier
+// tables that hold onto the parsed-name String-Form across passes).
+// caching String FormId → SymId reduces those redundant calls to a
+// single hashmap probe.
+//
+// the per-call walk (cons → UTF-8 buffer → `syms.intern`) is still on
+// the miss path, but now uses the §5.8a char-cache for the cons walk,
+// so each unique String is materialized into a `[]u32` exactly once.
 //
 // safety: the cache is in `world.intern_cache`; invalidation lives on
 // `world.formSlotSet` (when `:bytes` rewrites) and `gc.sweepSideTables`
 // (when a String FormId tombstones). by L11 the FormId itself is
 // stable for the lifetime of the vat, so a hit always points at the
 // canonical SymId for this string's content.
+//
+// note: when the parser builds a fresh String per identifier (cf.
+// lib/parser/00-lexer.moof), the FormId is unique per call → all
+// misses. that's the §5.10 "memoize at the parser level" territory;
+// this cache only helps when the caller holds onto a String. cheap
+// to install regardless — the miss path is no slower than the
+// pre-cache code.
 fn globalIntern(world: *World, _: Value, args: []const Value) anyerror!Value {
     if (args.len < 1) return raise(world, "arity", "(intern name) takes 1 arg");
     const arg = args[0];
@@ -1903,32 +1916,18 @@ fn globalIntern(world: *World, _: Value, args: []const Value) anyerror!Value {
     }
     vm_mod.PROFILE.intern_cache_misses += 1;
 
-    // miss — walk :bytes chain into a utf-8 buffer.
-    const bytes_sym = lookupSymByName(world, "bytes") orelse return raise(world, "no-bytes-sym", "intern: no bytes sym");
+    // miss — use the §5.8a char-cache to grab the codepoints (one
+    // cons-walk per unique String FormId), then UTF-8 encode into a
+    // local buffer.
+    const chars = (try cachedStringChars(world, id)) orelse return raise(world, "intern", "malformed String");
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(world.allocator);
-    var cur = world.formSlot(id, bytes_sym);
-    while (true) {
-        switch (cur) {
-            .nil => break,
-            .form => |cid| {
-                const cf = world.heap.get(cid);
-                if (!cf.slotPresent(world.symCar)) break;
-                const car_v = cf.slot(world.symCar);
-                const cdr_v = cf.slot(world.symCdr);
-                switch (car_v) {
-                    .char => |cp| {
-                        const cp_u21 = std.math.cast(u21, cp) orelse return raise(world, "intern", "bad char");
-                        var tmp: [4]u8 = undefined;
-                        const n = std.unicode.utf8Encode(cp_u21, &tmp) catch return raise(world, "intern", "un-encodable char");
-                        try buf.appendSlice(world.allocator, tmp[0..n]);
-                    },
-                    else => break,
-                }
-                cur = cdr_v;
-            },
-            else => break,
-        }
+    try buf.ensureTotalCapacity(world.allocator, chars.len);
+    for (chars) |cp| {
+        const cp_u21 = std.math.cast(u21, cp) orelse return raise(world, "intern", "bad char");
+        var tmp: [4]u8 = undefined;
+        const n = std.unicode.utf8Encode(cp_u21, &tmp) catch return raise(world, "intern", "un-encodable char");
+        try buf.appendSlice(world.allocator, tmp[0..n]);
     }
     const sid = try world.syms.intern(buf.items);
     // populate cache. errors here are non-fatal — the cache is a soft
