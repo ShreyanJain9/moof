@@ -212,6 +212,36 @@ fn seedRoots(world: *World, worklist: *std.ArrayList(FormId)) !void {
             try addIfFormId(world, worklist, entry.value_ptr.*);
         }
     }
+
+    // V1 — nursery_deltas. mid-turn allocations that are only
+    // reachable via a pending delta (e.g. a Form just created and
+    // about to be bound into a slot of a pre-existing form) MUST
+    // be marked live: the canonical heap doesn't see them yet, but
+    // they're not garbage. without this, a GC fired between native
+    // re-entry calls during a turn (or between commit-vs.-abort
+    // decisions) would sweep them. mirrors rust GC where the
+    // nursery is a root.
+    //
+    // walks the key (pre-existing form whose delta is buffered)
+    // and every Value across all three faces. the key is already
+    // canonical (it's <watermark), so addIfFormId fast-paths it
+    // via the marked check.
+    {
+        var it = world.nursery_deltas.iterator();
+        while (it.next()) |entry| {
+            try addIfFormId(world, worklist, entry.key_ptr.*);
+            const delta = entry.value_ptr;
+
+            var sit = delta.slots.iterator();
+            while (sit.next()) |e| try addIfFormValue(world, worklist, e.value_ptr.*);
+
+            var hit = delta.handlers.iterator();
+            while (hit.next()) |e| try addIfFormValue(world, worklist, e.value_ptr.*);
+
+            var mit = delta.meta.iterator();
+            while (mit.next()) |e| try addIfFormValue(world, worklist, e.value_ptr.*);
+        }
+    }
 }
 
 /// discharge the worklist LIFO. for each FormId: mark it, then
@@ -536,6 +566,44 @@ test "GC: chunk side-tables stay attached while chunk is alive" {
     _ = try collect(&world);
     try testing.expect(world.chunk_bytecode.contains(chunk_id));
     try testing.expect(!world.heap.forms.items[chunk_id.payload].gc_tombstone);
+}
+
+test "GC: nursery_deltas keep mid-turn newly-referenced Forms alive (V1)" {
+    // mid-turn: a pre-existing form has a slot buffered in the
+    // nursery; the value is a freshly-allocated Form not yet bound
+    // anywhere else. without the nursery walk in the mark phase,
+    // the value-Form would be swept; with it, it survives.
+    var world = try World.init(testing.allocator);
+    defer world.deinit();
+
+    // anchor a pre-existing form on here_form so it's reachable.
+    const anchor_id = try world.heap.alloc(Form.init());
+    const anchor_sym = try world.syms.intern("anchor");
+    try world.envBind(world.here_form, anchor_sym, .{ .form = anchor_id });
+    // bump watermark so anchor_id is canonical pre-existing.
+    world.turn_watermark = @intCast(world.heap.forms.items.len);
+
+    world.startTurn();
+    // alloc a fresh form during the turn — its only incoming
+    // reference is the soon-to-be-set nursery delta entry.
+    const fresh_id = try world.heap.alloc(Form.init());
+    const slot_sym = try world.syms.intern("fresh-ref");
+    try world.formSlotSet(anchor_id, slot_sym, .{ .form = fresh_id });
+
+    // fresh_id is in nursery_deltas[anchor_id].slots.
+    try testing.expect(world.nursery_deltas.contains(anchor_id));
+
+    // collect mid-turn. fresh_id MUST survive because the
+    // nursery walk treats delta Values as roots.
+    _ = try collect(&world);
+    try testing.expect(!world.heap.forms.items[fresh_id.payload].gc_tombstone);
+
+    // commit cleans up the delta + applies it. fresh_id remains
+    // reachable via the (now-canonical) anchor.slots entry.
+    var diff = try world.commitTurn();
+    defer diff.deinit(world.allocator);
+    _ = try collect(&world);
+    try testing.expect(!world.heap.forms.items[fresh_id.payload].gc_tombstone);
 }
 
 test "GC: chunk side-tables freed when chunk is explicitly removed" {
