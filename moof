@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+# moof — repo-root launcher.
+#
+# usage:
+#   ./moof                      drop into interactive REPL
+#   ./moof eval "(+ 1 2)"       one-shot eval, print result
+#   ./moof run <vat>            run a .vat file directly
+#   ./moof repl <vat>           explicit REPL with a custom vat
+#   ./moof <subcommand> ...     pass through to zig binary
+#   ./moof --help               print this help
+#
+# on first run (or after source changes), automatically:
+#   1. builds the zig substrate if the binary is missing or stale
+#   2. builds seed.vat if missing or stale (requires ocaml-seed toolchain)
+
+set -euo pipefail
+
+# ── locate repo root ─────────────────────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$SCRIPT_DIR"
+
+ZIG_BIN="$REPO/players/zig/zig-out/bin/moof"
+ZIG_SRC="$REPO/players/zig/src"
+SEED_VAT="$REPO/.moof/seed.vat"
+LIB_DIR="$REPO/lib"
+OCAML_SEED="$REPO/seed/ocaml"
+
+# ── help ─────────────────────────────────────────────────────────────────────
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    cat <<'HELP'
+moof — V4 polyglot substrate launcher
+
+usage:
+  ./moof                    interactive REPL (builds everything first)
+  ./moof eval "<expr>"      evaluate one expression, print result
+  ./moof run <vat>          load and run a .vat image
+  ./moof repl <vat>         REPL with explicit vat path
+  ./moof <subcmd> ...       pass through to the zig binary
+  ./moof --help             this help
+
+environment:
+  MOOF_LIB        path to lib/ directory (default: $REPO/lib)
+  MOOF_SEED_VAT   path to seed.vat to use (default: .moof/seed.vat)
+  MOOF_NO_BUILD   set to 1 to skip auto-build steps
+  MOOF_GC_STATS   set to 1 to print GC stats
+  MOOF_TRACE      set to 1 for VM trace output
+  MOOF_DEBUG_ALLOC set to 1 for debug allocator (very slow)
+
+auto-build:
+  zig substrate is rebuilt when any .zig file in players/zig/src/ is
+  newer than the binary. seed.vat is rebuilt when any .moof file in
+  lib/ is newer than .moof/seed.vat. seed.vat build requires:
+    opam switch wasm-mco  (eval $(opam env --switch=wasm-mco))
+    dune (from opam)
+HELP
+    exit 0
+fi
+
+# ── skip auto-build if requested ────────────────────────────────────────────
+SKIP_BUILD="${MOOF_NO_BUILD:-0}"
+
+# ── step 1: ensure zig binary is up to date ─────────────────────────────────
+build_zig_substrate() {
+    echo "building zig substrate..." >&2
+    (cd "$REPO/players/zig" && zig build) || {
+        echo "error: zig build failed. is 'zig' in PATH?" >&2
+        exit 1
+    }
+}
+
+if [[ "$SKIP_BUILD" != "1" ]]; then
+    if [[ ! -x "$ZIG_BIN" ]]; then
+        build_zig_substrate
+    elif [[ -d "$ZIG_SRC" ]]; then
+        # rebuild if any .zig source is newer than the binary
+        stale=$(find "$ZIG_SRC" -name "*.zig" -newer "$ZIG_BIN" 2>/dev/null | head -1)
+        if [[ -n "$stale" ]]; then
+            build_zig_substrate
+        fi
+    fi
+fi
+
+# ── step 2: ensure seed.vat is up to date ───────────────────────────────────
+build_seed_vat() {
+    echo "building seed.vat..." >&2
+    mkdir -p "$REPO/.moof"
+
+    # check ocaml toolchain availability
+    if ! command -v opam &>/dev/null; then
+        echo "error: 'opam' not found. seed.vat requires the OCaml toolchain." >&2
+        echo "  install opam, then: opam switch create wasm-mco ocaml-base-compiler" >&2
+        exit 1
+    fi
+
+    # eval opam env for wasm-mco switch
+    if ! eval "$(opam env --switch=wasm-mco 2>/dev/null)"; then
+        echo "error: opam switch 'wasm-mco' not found." >&2
+        echo "  run: opam switch create wasm-mco ocaml-base-compiler" >&2
+        echo "  then install dune and dependencies." >&2
+        exit 1
+    fi
+
+    # build ocaml seed
+    if ! dune build --root "$OCAML_SEED" 2>&1; then
+        echo "error: dune build failed for seed/ocaml." >&2
+        exit 1
+    fi
+
+    # generate seed.vat
+    if ! dune exec --root "$OCAML_SEED" bin/seed.exe -- \
+             build-seed --root "$LIB_DIR/" --output "$SEED_VAT" 2>&1; then
+        echo "error: seed.exe build-seed failed." >&2
+        exit 1
+    fi
+    echo "seed.vat built: $SEED_VAT" >&2
+}
+
+SEED_VAT_PATH="${MOOF_SEED_VAT:-$SEED_VAT}"
+
+if [[ "$SKIP_BUILD" != "1" ]]; then
+    if [[ ! -f "$SEED_VAT_PATH" ]]; then
+        build_seed_vat
+    elif [[ -d "$LIB_DIR" ]]; then
+        # rebuild if any .moof file in lib/ is newer than seed.vat
+        stale=$(find "$LIB_DIR" -name "*.moof" -newer "$SEED_VAT_PATH" 2>/dev/null | head -1)
+        # also rebuild if ocaml seed sources changed
+        if [[ -z "$stale" && -d "$OCAML_SEED" ]]; then
+            stale=$(find "$OCAML_SEED" \( -name "*.ml" -o -name "*.mli" \) -newer "$SEED_VAT_PATH" 2>/dev/null | head -1)
+        fi
+        if [[ -n "$stale" ]]; then
+            build_seed_vat
+        fi
+    fi
+fi
+
+# ── step 3: dispatch to the zig binary ───────────────────────────────────────
+export MOOF_LIB="${MOOF_LIB:-$LIB_DIR}"
+
+# transform user-level subcommands to zig binary subcommands
+case "${1:-}" in
+    "")
+        # no args → interactive REPL
+        exec "$ZIG_BIN" repl "$SEED_VAT_PATH"
+        ;;
+    eval)
+        # ./moof eval "<expr>" → moof eval <seed.vat> "<expr>"
+        shift
+        if [[ $# -eq 0 ]]; then
+            echo "usage: ./moof eval \"<expression>\"" >&2
+            exit 1
+        fi
+        exec "$ZIG_BIN" eval "$SEED_VAT_PATH" "$@"
+        ;;
+    run)
+        # ./moof run <vat> → pass through
+        exec "$ZIG_BIN" "$@"
+        ;;
+    repl)
+        # ./moof repl [<vat>] — explicit REPL; default vat is seed.vat
+        shift
+        if [[ $# -eq 0 ]]; then
+            exec "$ZIG_BIN" repl "$SEED_VAT_PATH"
+        else
+            exec "$ZIG_BIN" repl "$@"
+        fi
+        ;;
+    *)
+        # pass all other subcommands through unchanged
+        exec "$ZIG_BIN" "$@"
+        ;;
+esac
