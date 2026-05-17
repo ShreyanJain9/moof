@@ -1,0 +1,30 @@
+;; lib/early/12-vat-mode.moof
+;;
+;; vat-mode helpers. let-mutable lets you allocate a form mutably
+;; (bypassing vat-mode auto-freeze), mutate it inside the body,
+;; then auto-freeze it at scope exit.
+
+;; usage:
+;;
+;;   (let-mutable (p [Point new])
+;;     [p setX: 1]
+;;     [p setY: 2]
+;;     p)
+;;   ; → returns p, which is now frozen
+;;
+;; the binding may be either a single (name expr) pair, allocating
+;; whatever expr returns; the form returned by expr is what gets
+;; frozen at exit. typical: expr is __alloc-mutable__ + initial setup.
+
+(defmacro let-mutable (binding . body)
+  (let ((name (car binding))
+        (init-expr (car (cdr binding))))
+    `(let ((,name ,init-expr))
+       (let ((__lm-result__ (do ,@body)))
+         [,name freeze]
+         __lm-result__))))
+
+;; convenience: allocate a fresh form (proto optional), bypassing vat-mode.
+(def alloc-mutable
+  (fn (proto)
+    (__alloc-mutable__ proto)))
