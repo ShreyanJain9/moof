@@ -1077,16 +1077,26 @@ fn objEq(_: *World, self_: Value, args: []const Value) anyerror!Value {
 
 fn objNew(world: *World, self_: Value, _: []const Value) anyerror!Value {
     // [Proto new] — allocate a fresh form whose proto is the receiver.
-    // §5.8b — when the receiver IS the Cons proto, use the flat-cons
-    // fast path so `{Cons car: x cdr: y}`-style literal construction
-    // produces an inline-storage cell. car/cdr default to nil; the
-    // subsequent `slotSet!: 'car to: x` lands on the inline field via
-    // formSlotSet's FlatCons branch.
+    //
+    // §5.8d — consult the proto_layouts registry; if the receiver
+    // proto has a Layout registered, `allocInstance` produces a Form
+    // whose `layout` pointer is set and whose `inline_slots` are
+    // zero-initialized. all subsequent `slotSet!` calls on a canonical
+    // slot land on `inline_slots` via `formSlotSet`'s layoutTrySet
+    // fast path. proto without a Layout → general Form (SlotMap).
+    //
+    // §5.8b legacy: Cons specifically still routes through
+    // `allocFlatCons` because consCar/consCdr in this file still
+    // read `f.car_inline` / `f.cdr_inline`. step 5 retires those
+    // reads and migrates Cons to the unified Layout path; step 8
+    // deletes the FlatCons fields entirely.
     if (self_.asFormId()) |proto_id| {
         if (proto_id.eql(world.protos.cons)) {
             const id = try world.allocFlatCons(Value.nil, Value.nil);
             return .{ .form = id };
         }
+        const id = try world.allocInstance(proto_id);
+        return .{ .form = id };
     }
     var f = Form.withProto(self_);
     const id = try world.heap.alloc(f);
