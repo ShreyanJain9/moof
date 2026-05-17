@@ -1,0 +1,158 @@
+# Native Method Classification — phase1/C shrink audit
+# Generated: 2026-05-16
+# Starting intrinsics.zig LoC: 2506
+
+## REGISTRY entries analyzed
+
+### KEEP (truly primitive — required before any moof loads):
+# Integer arithmetic
+Integer:+          KEEP — arithmetic primitive
+Integer:-          KEEP — arithmetic primitive
+Integer:*          KEEP — arithmetic primitive
+Integer:/          KEEP — arithmetic primitive
+Integer:=          KEEP — arithmetic primitive  
+Integer:<          KEEP — arithmetic primitive
+Integer:>          KEEP — arithmetic primitive
+Integer:toString   KEEP — used in early/07-modules.moof [i toString] and parser/02-parser.moof [pos toString] before stdlib/integer.moof loads
+
+# Object primitives
+Object:!!          KEEP — bootstrap truthiness (before early/02-bool.moof)
+Object:is          KEEP — identity equality primitive
+Object:proto       KEEP — proto chain navigation, used everywhere in early/
+Object:identity    KEEP — Heap:heapIdOf wraps this; used by stdlib/object.moof
+Object:slot:       KEEP — slot read primitive
+Object:slotSet!:   KEEP — slot write primitive
+Object:become:     KEEP — heap-level indirection
+Object:doesNotUnderstand:with:  KEEP — DNU handler
+Object:perform:withArgs:        KEEP — dynamic dispatch
+Object:toString    KEEP — fallback toString for all values
+Object:serializeTo:             KEEP — image serialization
+Object:=           KEEP — identity equality default (Integer:= overrides for ints; no moof alternative for Object)
+Object:new         KEEP — allocation primitive; no moof alternative
+Object:freeze      KEEP — workstream B, don't touch
+Object:frozen?     KEEP — workstream B, don't touch
+Object:freezable?  KEEP — workstream B, don't touch
+
+# Nil/Bool
+Nil:!!             KEEP — bootstrap truthiness
+Bool:!!            KEEP — bootstrap truthiness
+Bool:ifTrue:ifFalse:  KEEP — bootstrap branching (before early/02-bool.moof)
+
+# Cons primitives
+Cons:car           KEEP — irreducible heap read
+Cons:cdr           KEEP — irreducible heap read
+Cons:cons:         KEEP — irreducible allocation
+Nil:cons:          KEEP — irreducible allocation on nil (list prepend)
+
+# Cons derived (but LOAD-BEARING for early bootstrap):
+Cons:empty?        KEEP — used heavily in early/06,07,08,09.moof BEFORE stdlib/cons.moof loads
+Cons:null?         KEEP — same: early bootstrap dependency
+Cons:nonEmpty?     KEEP — same: early bootstrap dependency  
+Nil:empty?         KEEP — same: early bootstrap dependency
+Nil:proto          KEEP — nil chain; early/ uses [nil proto] == nil for self-reference checks
+Cons:reverse       KEEP — used in early/08-match-defn-proto.moof and early/09-defmethod.moof BEFORE stdlib/cons.moof loads
+
+# Env (V3)
+Env:bind:to:       KEEP — env primitive
+Env:set:to:        KEEP — env primitive
+Env:lookup:        KEEP — env primitive
+Env:parent         KEEP — env primitive
+Env:current        KEEP — env primitive
+
+# Closure
+Closure:callIn:withSelf:  KEEP — macro expansion / Object:eval: primitive
+
+# String primitives
+String:length      KEEP — parser/lexer (before stdlib/string.moof)
+String:at:         KEEP — parser/lexer (before stdlib/string.moof)
+String:=           KEEP — parser/early bootstrap (before stdlib/string.moof)
+String:slice:length:      KEEP — parser/early bootstrap (String:endsWith?: in early/03)
+String:+           KEEP — parser/compiler/early all use string concat
+
+# Char primitives
+Char:codepoint     KEEP — lexer, parser (before stdlib/char.moof)
+Char:<             KEEP — char comparison (before stdlib/char.moof)
+Char:toString      KEEP — lexer uses [ch toString] (before stdlib/char.moof); cannot be replaced by Object:toString because the Object:toString native handles .char -> utf8 via the zig buffer path, but the Char:toString native creates a proper String-Form (cons-chain) which is what parser expects. CANNOT REMOVE.
+
+# Integer extras
+Integer:asChar     KEEP — lexer escape table ([10 asChar] etc.)
+
+# Heap singleton
+Heap:protoOf:      KEEP — stdlib/object.moof delegates to Heap
+Heap:heapIdOf:     KEEP — Object:identity in stdlib/object.moof
+Heap:allocFormWithProto:  KEEP — Object:new in stdlib
+Heap:slotOf:at:    KEEP — reflection
+Heap:handlerOf:at: KEEP — reflection
+Heap:metaOf:at:    KEEP — reflection
+Heap:slotKeysOf:   KEEP — reflection
+Heap:handlerKeysOf: KEEP — reflection
+Heap:metaKeysOf:   KEEP — reflection
+
+# Method
+Method:call        KEEP — closure call primitive
+
+# Compiler primitives
+Opcode:*           KEEP — compiler infrastructure
+Chunk:*            KEEP — compiler infrastructure
+Chunks:*           KEEP — compiler infrastructure
+
+# Transporter + compiler/reader caps
+Transporter:load:  KEEP — bootstrap essential
+Transporter:loadAll:  KEEP — bootstrap essential
+Compiler:useMoof   KEEP — compiler flip
+Compiler:useSeed   KEEP — compiler flip
+Reader:useMoof     KEEP — reader flip
+Reader:useSeed     KEEP — reader flip
+
+# Globals
+Global:setHandler! KEEP — macro + early bootstrap essential
+Global:intern      KEEP — everywhere in early/
+Global:cons        KEEP — everywhere in early/
+Global:list        KEEP — everywhere in early/
+Global:raise:      KEEP — error handling
+Global:slot        KEEP — compiler helpers
+Global:slotSet!    KEEP — compiler helpers
+Global:metaSet!    KEEP — meta manipulation
+Global:globalEnv   KEEP — env access
+Global:getOrCreateProto  KEEP — defproto
+Global:append      KEEP — quasiquote
+Global:macroexpand KEEP — macroexpand
+
+### AXABLE (stdlib has canonical equivalent, NOT needed before stdlib loads):
+
+Object:initialize  AXE — trivial `return self_` stub; no moof code calls [obj initialize] in early/parser/compiler before stdlib loads; stdlib/object.moof comment says it's primitive but it's not implemented there (so adding it as a moof method and removing zig copy is feasible)
+
+### NOTE: near-miss candidates that seemed axeable but are NOT:
+
+# Integer:toString — early/07-modules.moof uses [i toString] on Integers before stdlib loads.
+# Char:toString — lexer uses [ch toString] before stdlib loads.
+# Cons:reverse — early/08 and early/09 call [acc-params reverse] before stdlib/cons.moof loads.
+# Cons:empty?/null?/nonEmpty?, Nil:empty? — used by ALL early/ files.
+# Object:= — fundamental identity eq; no moof equivalent in stdlib/object.moof.
+
+## SUMMARY
+# REGISTRY entries: 112 total (~77 explicit Proto:method entries + ~35
+#                   infrastructure entries enumerated above as Opcode:*,
+#                   Chunk:*, Chunks:*, Heap:*, Env:*, Global:*, etc.)
+# Axeable: 1 (Object:initialize)
+# Keep: 111
+#
+# Note: tasks C2-C11 from the phase 1 plan are all no-ops at this layer —
+# the spec's §12.2 axe table predicted removals (Cons:length, Cons:map:,
+# Integer:abs, String:trim, Char:digit?, etc.) but those methods never
+# existed in the zig substrate (greps confirm: zero matches for any of
+# them). The zig port was designed minimally from the start.
+#
+# The zig substrate is already minimal for a 30% shrink via method removal.
+# The spec's §12.2 shrink table assumed more derivable methods were in zig
+# (as in the rust player). The zig port was designed more conservatively
+# from the start, so fewer methods need removing.
+#
+# Actual LoC reduction achievable via C2-C10:
+#   - Object:initialize: ~5 lines (fn body + 1 REGISTRY entry)
+#   Total: ~6 lines removed from 2506 = ~0.2% reduction
+#
+# To hit the 30% target (~750 line reduction), a different approach is needed:
+# the large zig functions (transporter, chunk ops, serialization) are candidates
+# but they are NOT derivable in moof — they require zig-level integration.
+# The 30% target as stated in the spec assumed a different starting point.

@@ -1,15 +1,51 @@
 # next session — substrate is essentially complete; pivot to conformance + Console cap
 
-## what just shipped (phase 1/B — freezing primitive surface complete)
+## what just shipped (phase 1 complete: rename + freezing + intrinsic shrink)
+
+phase 1 of the vats+substrate carve. design at `docs/superpowers/specs/2026-05-16-vats-substrate-and-image-design.md`. plan at `docs/superpowers/plans/2026-05-16-phase1-rename-freezing-shrink.md`. three workstreams, all merged.
+
+### workstream A — directory rename
+
+- `crates/zig-substrate/` → `players/zig/`
+- `crates/substrate/` → `players/rust/`
+- `crates/ocaml-seed/` → `seed/ocaml/`
+- `crates/{abi,abi-rust,mco-pack}/` → `tools/`
+- `crates/` directory removed.
+- Cargo.toml workspace updated; all builds (rust workspace, zig, ocaml, polyglot bootstrap) green from new paths.
+- 7 commits; history preserved via `git mv`.
+
+### workstream B — freezing primitive surface
 
 - **VatMode enum + vat_mode field on World** — `mutable_default` | `frozen_default`. V4 precursor; moves to per-Vat in multi-vat carve.
-- **auto-freeze on alloc** — when `vat_mode == .frozen_default`, every `allocInstance` result is born frozen. `allocMutableBypass` for explicit bypass.
+- **auto-freeze on alloc** — when `vat_mode == .frozen_default`, every `allocInstance` result is born frozen. `allocMutableBypass` for explicit bypass. (Known gap: `allocFlatCons` and `heapAllocFormWithProto` don't yet honor vat-mode; TODO(phase2) comments in place. Zero impact today since default mode is mutable.)
 - **`isFreezable` predicate** — returns false for already-frozen forms OR ForeignHandle forms (live-face per spec §4.5). `Object:freeze` raises `'cannot-freeze-live` for live faces; is idempotent on already-frozen.
 - **`__vat-mode__` intrinsic** — returns `'mutable-by-default` or `'frozen-by-default` as a Symbol.
 - **`__alloc-mutable__` intrinsic** — allocates a fresh mutable form regardless of vat-mode.
 - **`let-mutable` macro** — `lib/early/12-vat-mode.moof`. build-then-seal pattern for frozen-default vats.
-- **freezing conformance corpus** — `tests/conformance/freezing.json` with 4 triples; pending runner (future phase).
-- **36 zig tests pass** (8 new vat-mode tests + 28 existing). bootstrap baseline unchanged: 12-vat-mode.moof loads; final error `UnboundName: Console`.
+- **freezing conformance corpus** — `tests/conformance/freezing.json` with 5 triples; pending runner (future phase).
+- **36 zig tests pass** (8 new vat-mode tests + 28 existing).
+
+### workstream C — intrinsic shrink first pass
+
+**1 method removed:** `Object:initialize` from zig intrinsics; canonical is now `(defmethod Object (initialize) self)` in stdlib/object.moof. starting intrinsics.zig LoC: 2506, ending: 2503.
+
+**Important finding:** the zig substrate was already designed minimally. the methods the plan expected to remove (Cons:length, Cons:map:, Integer:abs, String:trim, etc.) were never added to zig intrinsics — the zig port started conservative. only `Object:initialize` (trivial `return self` stub) was safely removable without modifying the OCaml seed.
+
+**LoC budget status:** 2503 (vs 2506 start; original target was ~1750). The 30% target was based on rust's `intrinsics.rs` as a reference; reality is the zig port never had those redundancies. Future shrink approaches (move chunk/opcode infrastructure to moof, move transporter internals) require deeper redesign and aren't "first pass" work.
+
+**bootstrap warning:** `image-load: unknown native 'Object:initialize' for form_id=87 — skipping` — harmless. seed.vat still references it; the moof defmethod shadows it. warning disappears when OCaml seed is updated.
+
+**classification working doc:** `docs/superpowers/working/2026-05-16-native-classification.txt` — full audit of all 112 registry entries with KEEP/AXE classification + reasoning per entry. useful reference for future shrink work.
+
+### phase 1 baseline preserved
+
+bootstrap: 23 stdlib files load (12 early + 11 stdlib including `12-vat-mode.moof`); final error `UnboundName: Console` — same baseline as pre-phase-1.
+
+### next: phase 2 — vat carve (W4)
+
+per the spec §14 implementation phasing: carve `World` into `World + Vat`. single scheduler initially. spawn / mailbox / supervisor primitives. ~1-2 weeks. unblocks V5 (references), V6 (shared segment), V7 (promises), V8 (supervision).
+
+---
 
 ## what just shipped (HEAD `041f8fd`)
 
