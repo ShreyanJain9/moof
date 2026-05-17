@@ -99,6 +99,14 @@ pub const Profile = struct {
     ic_miss_generation: u64 = 0,
     ic_singleton_mismatch: u64 = 0,
     tail_sends: u64 = 0,
+    /// **2026-05-16** — count of TailSend dispatches that hit the
+    /// `Method:call` peephole in `replaceFrameWithTailCall`. each
+    /// increment = one host-stack frame saved (and one runMethod
+    /// re-entry avoided). high counts during bootstrap = the
+    /// peephole is paying for itself; zero counts = the moof code
+    /// path never tail-recurses through Method:call (or the
+    /// optimization didn't catch it — check method_call_native).
+    tail_send_method_call_peephole: u64 = 0,
     super_sends: u64 = 0,
     dnu_dispatches: u64 = 0,
     frames_pushed: u64 = 0,
@@ -176,6 +184,7 @@ pub const Profile = struct {
         p("  native dispatches:    {d}\n", .{self.sends_native});
         p("  bytecode dispatches:  {d}\n", .{self.sends_bytecode});
         p("  tail sends:           {d}\n", .{self.tail_sends});
+        p("    Method:call peep:   {d}\n", .{self.tail_send_method_call_peephole});
         p("  super sends:          {d}\n", .{self.super_sends});
         p("  dnu dispatches:       {d}\n", .{self.dnu_dispatches});
         p("IC fast-path hits:      {d}\n", .{self.ic_hits});
@@ -1177,7 +1186,86 @@ fn replaceFrameWithTailCall(
 
     // native? same as Send's native path; pop args and push result;
     // no frame replacement.
+    //
+    // **2026-05-16 Method:call peephole** — there's one native that
+    // breaks the bounded-host-stack invariant on tail recursion:
+    // `Method:call` (`intrinsics.zig::methodCall`). when a moof method
+    // ends in `[other call: …]`, the dispatcher tail-sends `call` to
+    // `other`; lookup resolves to the methodCall native, which calls
+    // `runMethod` (one host-stack frame). if `other`'s body also ends
+    // in `[third call: …]`, that's another tail-send → another
+    // methodCall → another runMethod. the host stack grows in
+    // proportion to moof tail depth, defeating tail recursion and
+    // overflowing the host stack at ~couple-thousand iterations
+    // (agent #33's bootstrap repro).
+    //
+    // shortcut: when the resolved native equals the cached
+    // `method_call_native` AND the receiver itself is a method-Form
+    // with a `:body` chunk (i.e. the indirection would just unwrap to
+    // the receiver's body anyway), frame-replace directly with that
+    // body. skips the native call entirely, preserves true TCO.
+    //
+    // if the receiver has NO body slot (it's a "free-function" native
+    // method-Form — e.g. `setHandler!`, `cons`, `list` — that gets
+    // dispatched via `Method:call` because it lives on here_form's
+    // handlers), fall through to the regular native dispatch below.
+    // those terminate without further moof re-entry, so bounded.
     if (world.nativeFn(method)) |native| {
+        if (world.method_call_native) |mcn| {
+            if (native == mcn) {
+                // peek the receiver's `:body` slot — present iff this
+                // is a real method/closure (PushClosure / defmethod) vs
+                // a bare native method-Form.
+                const recv_id_opt = receiver.asFormId();
+                if (recv_id_opt) |recv_id| {
+                    const body_v = world.formSlot(recv_id, world.body_sym);
+                    if (body_v.asFormId()) |body_chunk_id| {
+                        // also avoid the shortcut for "free-function" native
+                        // method-Forms that happen to also have a body — the
+                        // native check inside methodCall preempts the body
+                        // path, so honoring it here would change observable
+                        // semantics. mirror that: if the receiver itself has
+                        // a registered native_fn, bail to the slow path.
+                        if (world.nativeFn(recv_id) == null) {
+                            const captured_env_v = world.formSlot(recv_id, world.env_sym);
+                            const captured_env = captured_env_v.asFormId() orelse world.here_form;
+                            const captured_self_sym = try world.syms.intern("captured-self");
+                            const captured_self = world.formSlot(recv_id, captured_self_sym);
+
+                            const params_syms: []const u32 = if (world.chunk_params.get(body_chunk_id)) |p| p else &.{};
+                            if (params_syms.len != args_buf.len) return error.Arity;
+
+                            const call_env = try world.allocEnv(captured_env);
+                            for (params_syms, args_buf) |param_sym, arg_v| {
+                                try world.envBind(call_env, param_sym, arg_v);
+                            }
+
+                            world.vm.last_send_sel = selector;
+                            const frame_idx = world.vm.frames.items.len - 1;
+                            const base = world.vm.frames.items[frame_idx].stack_base;
+                            world.vm.stack.shrinkRetainingCapacity(base);
+                            // defining_proto = NONE — Method:call isn't a
+                            // method-on-proto dispatch from the body's pov;
+                            // super-send from inside the body raises
+                            // SuperFromNonMethodFrame, matching the
+                            // post-methodCall semantics (methodCall passed
+                            // FormId.NONE for defining_proto too).
+                            world.vm.frames.items[frame_idx] = try world_mod.makeFrame(
+                                world,
+                                body_chunk_id,
+                                0,
+                                call_env,
+                                captured_self,
+                                base,
+                                FormId.NONE,
+                            );
+                            PROFILE.tail_send_method_call_peephole += 1;
+                            return;
+                        }
+                    }
+                }
+            }
+        }
         world.vm.last_send_sel = selector;
         world.vm.stack.shrinkRetainingCapacity(discard_from);
         const result = try native(world, receiver, args_buf);

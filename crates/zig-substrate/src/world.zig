@@ -321,6 +321,21 @@ pub const World = struct {
     /// table's two-step (hash → index → array load).
     native_fns: std.AutoHashMapUnmanaged(FormId, NativeFn),
 
+    /// cached `Method:call` native function pointer (post-2026-05-16
+    /// tail-call peephole). populated by `lookupNativeByName` the
+    /// first time someone resolves "Method:call" — image-load takes
+    /// that path during NativeRefsSection rebind, so the field is
+    /// already warm by the time any moof code dispatches.
+    ///
+    /// the VM's tail-send dispatcher consults this to short-circuit
+    /// `TailSend → Method:call → runMethod` recursion: when the
+    /// resolved native equals this pointer AND the receiver is itself
+    /// a method-Form with a `:body` chunk, frame-replace directly
+    /// instead of entering the native (which would push a fresh host
+    /// stack frame per tail-iteration and blow the stack on tail
+    /// recursion). see vm.zig::replaceFrameWithTailCall.
+    method_call_native: ?NativeFn = null,
+
     /// FormId(.far_ref) → FarRef. populated by image-load (V4 §10.4).
     far_ref_table: std.AutoArrayHashMapUnmanaged(FormId, FarRef),
 
@@ -1725,13 +1740,20 @@ pub const World = struct {
     /// natives on freshly-deserialized methods. backed by the
     /// comptime REGISTRY in intrinsics.zig — names match the rust
     /// v4_export's NativeRefsSection format ("ProtoName:selector").
-    pub fn lookupNativeByName(self: *const World, name: []const u8) ?NativeFn {
-        _ = self;
+    ///
+    /// side-effect: caches the `Method:call` pointer on the World
+    /// when it shows up, so the tail-send dispatcher can compare
+    /// against it without re-resolving by name on the hot path.
+    pub fn lookupNativeByName(self: *World, name: []const u8) ?NativeFn {
         // late import to avoid a top-level cycle (intrinsics imports
         // world). zig comptime @import returns a struct; this works
         // because we only access REGISTRY at call time.
         const intrinsics = @import("intrinsics.zig");
-        return intrinsics.REGISTRY.get(name);
+        const fp = intrinsics.REGISTRY.get(name) orelse return null;
+        if (std.mem.eql(u8, name, "Method:call")) {
+            self.method_call_native = fp;
+        }
+        return fp;
     }
 };
 
