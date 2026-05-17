@@ -251,6 +251,19 @@ pub const HandlerHit = struct {
     defining: FormId,
 };
 
+/// vat-mode controls the default mutability for newly-allocated forms.
+/// per design spec §4.1, this is set at vat-spawn time and immutable for
+/// the vat's life. in V0 (single-vat), this is held on World; in V4
+/// (multi-vat), it moves to per-Vat struct.
+pub const VatMode = enum {
+    /// new forms are born mutable; [form freeze] is explicit.
+    mutable_default,
+    /// new forms auto-freeze at end of their allocation expression.
+    /// internal building during alloc is mutable; on alloc-expr exit,
+    /// the form locks. for parsers, compilers, computation kernels.
+    frozen_default,
+};
+
 /// the substrate's per-vat root.
 ///
 /// owns the heap, sym table, proto cache, chunk side-tables, native-fn
@@ -271,6 +284,12 @@ pub const World = struct {
     syms: SymTable,
     protos: Protos,
     allocator: std.mem.Allocator,
+
+    /// vat-mode for this world. defaults to mutable_default for
+    /// backward-compat with existing workspaces. moof code can set
+    /// this at world-creation time via a yet-to-be-added intrinsic
+    /// or via direct world.vat_mode assignment in tests.
+    vat_mode: VatMode,
 
     /// optional std.Io handle for natives that need filesystem access
     /// (e.g. `:serializeTo:`). zig 0.16 routes all fs through std.Io.Dir;
@@ -612,6 +631,7 @@ pub const World = struct {
             .syms = syms,
             .protos = protos,
             .allocator = allocator,
+            .vat_mode = .mutable_default,
             .chunk_bytecode = .empty,
             .chunk_consts = .empty,
             .chunk_ics = .empty,
@@ -727,6 +747,7 @@ pub const World = struct {
             .syms = syms,
             .protos = none_protos,
             .allocator = allocator,
+            .vat_mode = .mutable_default,
             .chunk_bytecode = .empty,
             .chunk_consts = .empty,
             .chunk_ics = .empty,
