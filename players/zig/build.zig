@@ -31,4 +31,24 @@ pub fn build(b: *std.Build) void {
 
     const run_step = b.step("run", "run moof");
     run_step.dependOn(&run_cmd.step);
+
+    // test step — collects unit tests from all src/*.zig files.
+    const test_step = b.step("test", "run unit tests");
+
+    const src_files = [_][]const u8{
+        "src/intrinsics.zig",
+        "src/test_vat_mode.zig",
+    };
+
+    for (src_files) |src| {
+        const t = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(src),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        const run_t = b.addRunArtifact(t);
+        test_step.dependOn(&run_t.step);
+    }
 }
