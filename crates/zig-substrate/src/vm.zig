@@ -135,8 +135,26 @@ pub fn step(world: *World) !void {
 /// pops the result. equivalent to invoking a zero-arg method whose
 /// body is `chunk`. `defining_proto` is `FormId.NONE` because no
 /// method dispatch led here.
+///
+/// V1: the outermost `runTop` wraps the call in
+/// `startTurn` / `commitTurn` (with `abortTurn` on error). nested
+/// `runTop` calls (from natives re-entering the VM via
+/// `World.send` / `runMethod`) do NOT open a new turn — they run
+/// inside the already-active turn. matches rust's
+/// `eval_program`'s `was_in_turn` idempotent wrap.
+///
+/// GC fires AFTER commit/abort so the heap is quiescent (no
+/// pending delta to confuse the mark phase, no half-rolled-back
+/// allocations from a failed turn).
 pub fn runTop(world: *World, chunk: FormId) !Value {
     const starting_depth = world.vm.frames.items.len;
+
+    // V1 — open a turn iff none is active. inner re-entries
+    // (option α via World.send / runMethod) inherit the outer
+    // turn; only the truly-outermost call opens and closes one.
+    const opened_turn = !world.inTurn();
+    if (opened_turn) world.startTurn();
+
     try world.vm.frames.append(world.allocator, Frame{
         .chunk = chunk,
         .pc = 0,
@@ -145,18 +163,35 @@ pub fn runTop(world: *World, chunk: FormId) !Value {
         .stack_base = @intCast(world.vm.stack.items.len),
         .defining_proto = FormId.NONE,
     });
-    while (world.vm.frames.items.len > starting_depth) {
-        try step(world);
-    }
+    runLoop(world, starting_depth) catch |err| {
+        // turn-aborts on any error before we propagate. if we
+        // opened the turn, roll it back so the next runTop starts
+        // clean. inner runTop callers (opened_turn = false) leave
+        // the turn alone — the outer caller decides.
+        if (opened_turn) world.abortTurn();
+        return err;
+    };
     // the popped frame's last `Return` left its result on the stack.
     const result: Value = if (world.vm.stack.items.len == 0) .nil else world.vm.stack.pop().?;
 
+    // success — commit the turn (if we opened it). commit
+    // produces a TurnDiff; zig substrate doesn't journal it yet
+    // (V9 work), so we discard immediately. the diff carries
+    // owned slices — deinit frees them.
+    if (opened_turn) {
+        var diff = try world.commitTurn();
+        diff.deinit(world.allocator);
+    }
+
     // turn-boundary stand-in (phase 1 §3.5 option A): trigger GC
-    // after the outermost moof call returns. inner `runMethod` /
+    // after the outermost moof call returns AND after the turn
+    // has committed/aborted. inner `runMethod` /
     // `runUntilFrameReturns` calls (from natives re-entering the
     // VM, option α) skip this — the heap is not quiescent inside
-    // a native call. only when we return to the host (CLI / test
-    // harness) is GC safe and meaningful.
+    // a native call, and the turn is still active mid-call.
+    //
+    // post-commit: nursery_deltas is empty, watermark is current,
+    // no dangling pending-state for the GC to consider. clean.
     //
     // the result Value is preserved across the cycle: if it's a
     // .form, it's still on the operand stack at the moment we pop
@@ -167,7 +202,7 @@ pub fn runTop(world: *World, chunk: FormId) !Value {
     // duration of the collect by leaving it on the stack until
     // after the cycle. simpler: ensure the result is on the stack
     // while collecting, then pop.
-    if (world.gc_enabled) {
+    if (world.gc_enabled and opened_turn) {
         // re-push the result so it counts as a stack root during
         // the mark phase, then pop it back. cost: one push + pop
         // per runTop. trivial.
@@ -177,6 +212,15 @@ pub fn runTop(world: *World, chunk: FormId) !Value {
     }
 
     return result;
+}
+
+/// inner step loop — extracted so `runTop` can catch dispatch
+/// errors and trigger `abortTurn` before re-raising. no
+/// behavior change from the previous inlined while-loop.
+fn runLoop(world: *World, starting_depth: usize) !void {
+    while (world.vm.frames.items.len > starting_depth) {
+        try step(world);
+    }
 }
 
 /// drive the dispatch loop until `world.vm.frames.items.len` falls

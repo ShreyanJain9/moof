@@ -499,6 +499,44 @@ test "GC: chunk side-tables stay attached while chunk is alive" {
     try testing.expect(!world.heap.forms.items[chunk_id.payload].gc_tombstone);
 }
 
+test "GC: nursery_deltas keep mid-turn newly-referenced Forms alive (V1)" {
+    // mid-turn: a pre-existing form has a slot buffered in the
+    // nursery; the value is a freshly-allocated Form not yet bound
+    // anywhere else. without the nursery walk in the mark phase,
+    // the value-Form would be swept; with it, it survives.
+    var world = try World.init(testing.allocator);
+    defer world.deinit();
+
+    // anchor a pre-existing form on here_form so it's reachable.
+    const anchor_id = try world.heap.alloc(Form.init());
+    const anchor_sym = try world.syms.intern("anchor");
+    try world.envBind(world.here_form, anchor_sym, .{ .form = anchor_id });
+    // bump watermark so anchor_id is canonical pre-existing.
+    world.turn_watermark = @intCast(world.heap.forms.items.len);
+
+    world.startTurn();
+    // alloc a fresh form during the turn — its only incoming
+    // reference is the soon-to-be-set nursery delta entry.
+    const fresh_id = try world.heap.alloc(Form.init());
+    const slot_sym = try world.syms.intern("fresh-ref");
+    try world.formSlotSet(anchor_id, slot_sym, .{ .form = fresh_id });
+
+    // fresh_id is in nursery_deltas[anchor_id].slots.
+    try testing.expect(world.nursery_deltas.contains(anchor_id));
+
+    // collect mid-turn. fresh_id MUST survive because the
+    // nursery walk treats delta Values as roots.
+    _ = try collect(&world);
+    try testing.expect(!world.heap.forms.items[fresh_id.payload].gc_tombstone);
+
+    // commit cleans up the delta + applies it. fresh_id remains
+    // reachable via the (now-canonical) anchor.slots entry.
+    var diff = try world.commitTurn();
+    defer diff.deinit(world.allocator);
+    _ = try collect(&world);
+    try testing.expect(!world.heap.forms.items[fresh_id.payload].gc_tombstone);
+}
+
 test "GC: chunk side-tables freed when chunk is explicitly removed" {
     // counterpart: if the user removes a chunk from chunk_bytecode
     // (e.g. via a hypothetical chunk-eviction op), and the chunk-Form
