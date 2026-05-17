@@ -332,6 +332,52 @@ pub const World = struct {
     /// V4 spec §6.5).
     here_form: FormId,
 
+    /// **phase 2 §5.8a — String char-materialization cache.**
+    ///
+    /// Strings are V0-shape Forms whose `:bytes` slot holds a
+    /// cons-chain of Char codepoints. naive `:at:` / `:length` walks
+    /// that chain per call — O(N) per access, O(N²) to scan a string.
+    /// the parser reads every codepoint via `:at:` during lex, so this
+    /// dominates real-workload time.
+    ///
+    /// fix: lazily materialize the chain into a `[]u32` slice the
+    /// first time `:at:` / `:length` / `:slice:length:` is called on
+    /// a given String FormId. subsequent calls are O(1) indexed reads.
+    ///
+    /// invariants:
+    /// - **L1 (everything is a Form) preserved** — the cache lives on
+    ///   the World, not in any Form slot; moof-side reflection
+    ///   (`[s :bytes]`) still walks the cons-chain.
+    /// - **invalidation:** on any `formSlotSet` to a String's `:bytes`
+    ///   slot (the only mutation path in zig-substrate). also evicted
+    ///   on GC sweep when the String FormId is tombstoned.
+    /// - **GC safety:** the cache does NOT keep Strings alive — sweep
+    ///   evicts entries whose key is unmarked before tombstoning.
+    /// - **AutoHashMap** (not insertion-ordered) per phase 2 §4.7 —
+    ///   internal cache, no user-observable iteration order.
+    string_cache: std.AutoHashMapUnmanaged(FormId, []u32) = .{},
+
+    /// **phase 2 §5.8c — String→Sym intern cache.**
+    ///
+    /// `(intern str)` walks `str.:bytes` into a UTF-8 buffer then
+    /// calls `syms.intern`. profile shows 267K calls / 653 unique
+    /// syms = 410× redundancy. since FormId is stable for the lifetime
+    /// of a vat (L11) and a String's content is conventionally
+    /// immutable after parse, caching FormId → SymId is safe.
+    ///
+    /// invariants:
+    /// - **soft cache** — a miss falls through to the slow path. an
+    ///   evicted entry just re-walks once next call.
+    /// - **GC safety:** sweep removes entries whose String key is
+    ///   tombstoned. without this, the cache would leak SymIds
+    ///   indefinitely (small leak — SymIds are 4 bytes — but
+    ///   unbounded).
+    /// - **mutation safety:** if `formSlotSet` rewrites a String's
+    ///   `:bytes`, we evict the intern cache entry alongside the
+    ///   string_cache entry. Strings becoming a different identifier
+    ///   would otherwise lie to callers.
+    intern_cache: std.AutoHashMapUnmanaged(FormId, SymId) = .{},
+
     /// the canonical macro registry: a plain Form (proto: Object)
     /// whose slots are macro-name → method-Form. exposed as the
     /// `Macros` global so user code can introspect.
@@ -390,6 +436,10 @@ pub const World = struct {
     symName: SymId,
     /// `'self` — slot on closures holding captured receiver.
     self_sym: SymId,
+    /// `'bytes` — slot on String-Forms holding the cons-chain of
+    /// Char codepoints. cached so `formSlotSet` can fast-check
+    /// "is this a String mutation?" without a re-intern.
+    symBytes: SymId,
 
     /// initialize a fresh, empty world.
     ///
@@ -418,6 +468,13 @@ pub const World = struct {
         const car_sym = try syms.intern("car");
         const cdr_sym = try syms.intern("cdr");
         const self_sym = try syms.intern("self");
+        const bytes_sym = try syms.intern("bytes");
+
+        // §5.8b — set globals so Form.slot / Form.slotPresent honor
+        // the FlatCons inline fields. these are process-wide (one
+        // World per process in V4 phase α). image-load re-interns the
+        // sym table; main.zig calls setConsSyms again after load.
+        form.setConsSyms(car_sym, cdr_sym);
 
         // allocate the here_form: proto = Env, meta.parent = Nil
         // (it's the root of the env chain for this vat).
@@ -466,6 +523,7 @@ pub const World = struct {
             .symParent = parent_sym,
             .symName = name_meta,
             .self_sym = self_sym,
+            .symBytes = bytes_sym,
         };
     }
 
@@ -506,6 +564,13 @@ pub const World = struct {
         const cdr_sym = try syms.intern("cdr");
         const self_sym = try syms.intern("self");
         const name_sym = try syms.intern("name");
+        const bytes_sym = try syms.intern("bytes");
+
+        // §5.8b — set globals so Form.slot / Form.slotPresent honor
+        // the FlatCons inline fields. these are process-wide (one
+        // World per process in V4 phase α). image-load re-interns the
+        // sym table; main.zig calls setConsSyms again after load.
+        form.setConsSyms(car_sym, cdr_sym);
 
         // every proto FormId starts at NONE; image's header populates.
         const none_protos: Protos = .{
@@ -557,6 +622,7 @@ pub const World = struct {
             .symParent = parent_sym,
             .symName = name_sym,
             .self_sym = self_sym,
+            .symBytes = bytes_sym,
         };
     }
 
@@ -596,6 +662,18 @@ pub const World = struct {
         self.far_ref_table.deinit(self.allocator);
         self.proto_generation.deinit(self.allocator);
         self.tagged_storage.deinit(self.allocator);
+
+        // §5.8a — free the cached `[]u32` slices, then the map itself.
+        // §5.8c — intern_cache values are scalars; just deinit the map.
+        {
+            var it = self.string_cache.iterator();
+            while (it.next()) |entry| {
+                self.allocator.free(entry.value_ptr.*);
+            }
+            self.string_cache.deinit(self.allocator);
+        }
+        self.intern_cache.deinit(self.allocator);
+
         self.vm.deinit(self.allocator);
         self.syms.deinit();
         self.heap.deinit();
@@ -773,10 +851,92 @@ pub const World = struct {
 
     /// write `val` to slot `slot_name` on `id`. errors on frozen or
     /// out-of-memory.
+    ///
+    /// **§5.8a/c invalidation:** if `slot_name == :bytes`, evict any
+    /// string_cache / intern_cache entry for `id`. cheap (two
+    /// hashmap removes; both no-op if not present).
+    ///
+    /// **§5.8b FlatCons:** if `id` is a flat-cons Form and the slot
+    /// name is `:car` / `:cdr`, write the inline field directly (skip
+    /// the SlotMap). other slot names fall through to the SlotMap
+    /// path (the "extras" of the form contract — `[cell slotSet: 'foo …]`
+    /// still works on a flat-cons cell).
     pub fn formSlotSet(self: *World, id: FormId, slot_name: SymId, val: Value) !void {
         const fm = self.heap.getMut(id);
         if (fm.frozen) return error.FrozenForm;
+        if (fm.is_flat_cons) {
+            if (slot_name == self.symCar) {
+                fm.car_inline = val;
+                return;
+            }
+            if (slot_name == self.symCdr) {
+                fm.cdr_inline = val;
+                return;
+            }
+            // fall through: non-canonical slot writes use the SlotMap.
+        }
         try fm.slots.put(self.allocator, slot_name, val);
+        if (slot_name == self.symBytes) self.invalidateStringCaches(id);
+    }
+
+    /// phase 2 §5.8b — allocate a fresh FlatCons cell. inline-fields
+    /// only, no SlotMap traffic. callers: `consConsInto`, `consReverse`,
+    /// `globalCons`, `World.makeList`. on-disk image format treats
+    /// FlatCons as a Form-with-(car,cdr)-slots; the load path re-
+    /// flattens here.
+    pub fn allocFlatCons(self: *World, car: Value, cdr: Value) !FormId {
+        const cons_proto_v = Value{ .form = self.protos.cons };
+        const f = Form.flatCons(cons_proto_v, car, cdr);
+        return self.heap.alloc(f);
+    }
+
+    /// evict cached `[]u32` materialization and intern result for `id`.
+    /// callable from any String-mutating native; also called by
+    /// `formSlotSet` whenever the `:bytes` slot is written.
+    pub fn invalidateStringCaches(self: *World, id: FormId) void {
+        if (self.string_cache.fetchRemove(id)) |kv| {
+            self.allocator.free(kv.value);
+        }
+        _ = self.intern_cache.remove(id);
+    }
+
+    /// **§5.8a — fetch (or lazily build) the cached `[]u32`
+    /// codepoint slice for a String FormId.**
+    ///
+    /// fast path: cache hit returns the slice in one hashmap probe.
+    /// slow path: walks `id.:bytes` once, allocates a `[]u32`,
+    /// inserts into the cache, returns the slice. subsequent calls
+    /// at this site become O(1).
+    ///
+    /// returns null if `id`'s `:bytes` chain is malformed (missing,
+    /// non-Cons mid-chain, non-Char car). callers fall back to
+    /// raising an error.
+    pub fn getStringChars(self: *World, id: FormId) !?[]const u32 {
+        if (self.string_cache.get(id)) |cached| return cached;
+        // miss — walk the :bytes chain into a buffer.
+        var buf: std.ArrayList(u32) = .empty;
+        defer buf.deinit(self.allocator);
+        var cur = self.formSlot(id, self.symBytes);
+        while (true) {
+            switch (cur) {
+                .nil => break,
+                .form => |cid| {
+                    const cf = self.heap.get(cid);
+                    if (!cf.slotPresent(self.symCar)) break;
+                    const car_v = cf.slot(self.symCar);
+                    const cdr_v = cf.slot(self.symCdr);
+                    switch (car_v) {
+                        .char => |cp| try buf.append(self.allocator, cp),
+                        else => return null,
+                    }
+                    cur = cdr_v;
+                },
+                else => return null,
+            }
+        }
+        const owned = try self.allocator.dupe(u32, buf.items);
+        try self.string_cache.put(self.allocator, id, owned);
+        return owned;
     }
 
     /// read `key` on `id.meta`. nil if absent.
@@ -1005,15 +1165,13 @@ pub const World = struct {
     }
 
     /// build a cons-chain from `values`. returns the head (or nil).
+    /// §5.8b — flat-cons fast path; no SlotMap traffic per cell.
     pub fn makeList(self: *World, values: []const Value) !Value {
         var acc: Value = .nil;
         var i: usize = values.len;
         while (i > 0) {
             i -= 1;
-            var f = Form.withProto(.{ .form = self.protos.cons });
-            try f.slots.put(self.allocator, self.symCar, values[i]);
-            try f.slots.put(self.allocator, self.symCdr, acc);
-            const id = try self.heap.alloc(f);
+            const id = try self.allocFlatCons(values[i], acc);
             acc = .{ .form = id };
         }
         return acc;
@@ -1077,3 +1235,81 @@ pub const World = struct {
         return intrinsics.REGISTRY.get(name);
     }
 };
+
+// ─────────────────────────────────────────────────────────────────
+// §5.8b FlatCons contract tests at the World level: formSlot /
+// formSlotSet / allocFlatCons preserve every Form-face the spec
+// requires.
+// ─────────────────────────────────────────────────────────────────
+
+const testing = std.testing;
+
+test "World.allocFlatCons: car/cdr accessible via formSlot" {
+    var world = try World.init(testing.allocator);
+    defer world.deinit();
+    const cell = try world.allocFlatCons(Value{ .int = 1 }, Value{ .int = 2 });
+    try testing.expect(world.formSlot(cell, world.symCar).equals(Value{ .int = 1 }));
+    try testing.expect(world.formSlot(cell, world.symCdr).equals(Value{ .int = 2 }));
+    // proto chain points at the Cons proto.
+    const proto_v = world.protoOf(.{ .form = cell });
+    try testing.expect(proto_v.equals(.{ .form = world.protos.cons }));
+}
+
+test "World.formSlotSet: :car / :cdr write inline; extras lazy-init" {
+    var world = try World.init(testing.allocator);
+    defer world.deinit();
+    const cell = try world.allocFlatCons(Value{ .int = 1 }, Value{ .int = 2 });
+    // overwrite car inline.
+    try world.formSlotSet(cell, world.symCar, Value{ .int = 99 });
+    try testing.expect(world.formSlot(cell, world.symCar).equals(Value{ .int = 99 }));
+    // an extras slot goes to SlotMap; canonical slots still read inline.
+    const foo_sym = try world.syms.intern("foo");
+    try world.formSlotSet(cell, foo_sym, Value{ .int = 42 });
+    try testing.expect(world.formSlot(cell, foo_sym).equals(Value{ .int = 42 }));
+    try testing.expect(world.formSlot(cell, world.symCar).equals(Value{ .int = 99 }));
+    // SlotMap holds only the extra (not car/cdr).
+    const fm = world.heap.get(cell);
+    try testing.expectEqual(@as(usize, 1), fm.slots.count());
+    try testing.expect(fm.slots.contains(foo_sym));
+    try testing.expect(!fm.slots.contains(world.symCar));
+}
+
+test "World.formSlotSet: frozen FlatCons raises" {
+    var world = try World.init(testing.allocator);
+    defer world.deinit();
+    const cell = try world.allocFlatCons(Value{ .int = 1 }, Value{ .int = 2 });
+    world.heap.getMut(cell).frozen = true;
+    const got = world.formSlotSet(cell, world.symCar, Value{ .int = 99 });
+    try testing.expectError(error.FrozenForm, got);
+    // cell unchanged.
+    try testing.expect(world.formSlot(cell, world.symCar).equals(Value{ .int = 1 }));
+}
+
+test "World.become_: FlatCons can be the target of a redirect" {
+    var world = try World.init(testing.allocator);
+    defer world.deinit();
+    const a = try world.allocFlatCons(Value{ .int = 1 }, Value.nil);
+    const b = try world.allocFlatCons(Value{ .int = 7 }, Value.nil);
+    try world.become_(a, b);
+    // reads via `a` see b's content.
+    try testing.expect(world.formSlot(a, world.symCar).equals(Value{ .int = 7 }));
+}
+
+test "makeList: builds FlatCons cells" {
+    var world = try World.init(testing.allocator);
+    defer world.deinit();
+    const vals = [_]Value{ .{ .int = 10 }, .{ .int = 20 }, .{ .int = 30 } };
+    const list = try world.makeList(&vals);
+    // first cell is flat
+    const head_id = list.asFormId().?;
+    try testing.expect(world.heap.get(head_id).is_flat_cons);
+    // car / cdr work
+    try testing.expect(world.formSlot(head_id, world.symCar).equals(Value{ .int = 10 }));
+    // listToSlice round-trips
+    const slice = try world.listToSlice(list);
+    defer world.freeSlice(slice);
+    try testing.expectEqual(@as(usize, 3), slice.len);
+    try testing.expect(slice[0].equals(Value{ .int = 10 }));
+    try testing.expect(slice[1].equals(Value{ .int = 20 }));
+    try testing.expect(slice[2].equals(Value{ .int = 30 }));
+}
