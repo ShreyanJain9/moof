@@ -1,0 +1,39 @@
+{
+  "name": "freezing-v1",
+  "description": "freeze locks state; mutation raises; let-mutable scoped; cannot-freeze-live",
+  "runner": "pending — future phase; hand-verify via REPL until moof conform <manifest.json> exists",
+  "triples": [
+    {
+      "name": "freeze-and-frozen-query",
+      "image": "tests/conformance/freezing/empty.vat",
+      "send": ["(let ((p [Object new])) [p freeze] [p frozen?])"],
+      "expect-value": "#true",
+      "expect-stdout": "",
+      "note": "freeze is idempotent; frozen? returns #true after freeze"
+    },
+    {
+      "name": "mutation-after-freeze-raises",
+      "image": "tests/conformance/freezing/empty.vat",
+      "send": ["(let ((p [Object new])) [p freeze] [p slot: 'x put: 1])"],
+      "expect-error-kind": "frozen-form",
+      "expect-stdout": "",
+      "note": "slot mutation on a frozen form raises 'frozen-form"
+    },
+    {
+      "name": "let-mutable-result-is-frozen",
+      "image": "tests/conformance/freezing/empty.vat",
+      "send": ["[Object new] let-mutable: |p| [p frozen?]"],
+      "expect-value": "#true",
+      "expect-stdout": "",
+      "note": "let-mutable freezes the form at scope exit"
+    },
+    {
+      "name": "freezable-on-foreign-handle-returns-false",
+      "image": "tests/conformance/freezing/with-foreign.vat",
+      "send": ["[$foreign-handle freezable?]"],
+      "expect-value": "#false",
+      "expect-stdout": "",
+      "note": "ForeignHandle forms are live faces; freezable? returns #false per spec §4.5"
+    }
+  ]
+}
