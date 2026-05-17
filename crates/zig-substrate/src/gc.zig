@@ -228,18 +228,24 @@ fn drainWorklist(world: *World, worklist: *std.ArrayList(FormId)) !void {
         // proto walks like any other Value.
         try addIfFormValue(world, worklist, f.proto);
 
-        // §5.8b — FlatCons inline car/cdr must be walked too. these
-        // are the canonical :car / :cdr slot values the user sees;
-        // they hold refs to other heap Forms that the GC must keep
-        // alive transitively.
-        if (f.is_flat_cons) {
+        // §5.8d — Layout-backed Forms hold canonical slot values
+        // inline (`inline_slots[0..layout.inline_size]`). walk those
+        // first; the SlotMap below holds only non-canonical extras.
+        if (f.layout) |lay| {
+            var i: u8 = 0;
+            while (i < lay.inline_size) : (i += 1) {
+                try addIfFormValue(world, worklist, f.inline_slots[i]);
+            }
+        } else if (f.is_flat_cons) {
+            // legacy: FlatCons cells that haven't yet been pointed at
+            // a Layout. step 8 deletes this path.
             try addIfFormValue(world, worklist, f.car_inline);
             try addIfFormValue(world, worklist, f.cdr_inline);
         }
 
         // slots / handlers / meta — insertion-order maps (D5).
-        // for FlatCons, `slots` holds only user-added extras; the
-        // canonical car/cdr are walked above.
+        // for Layout-backed (or FlatCons) Forms, `slots` holds only
+        // user-added extras; the canonical slots are walked above.
         var sit = f.slots.iterator();
         while (sit.next()) |e| try addIfFormValue(world, worklist, e.value_ptr.*);
 
@@ -451,17 +457,57 @@ test "GC: FormIds of survivors are unchanged (L11)" {
     try testing.expect(!world.heap.forms.items[c_payload].gc_tombstone);
 }
 
-test "GC: tombstones not reused — next alloc gets a fresh FormId" {
+test "GC §5.8d: tombstoned FormId IS reused by the next alloc" {
+    // post-§5.8d perf: tombstoned slots feed a free-list that
+    // `Heap.alloc` pops before extending `forms.items`. so an alloc
+    // immediately after a collect cycle reuses the most recently
+    // freed slot.
+    //
+    // L11 sanity (see heap.zig header): the original Form-at-that-
+    // FormId is gone; the new Form is a new identity. no overlap.
     var world = try World.init(testing.allocator);
     defer world.deinit();
     const garbage = try world.heap.alloc(Form.init());
     const garbage_payload = garbage.payload;
+    // forms.items.len BEFORE collect; we'll check it doesn't grow on
+    // the subsequent alloc (the slot is reused).
+    const len_before = world.heap.forms.items.len;
     _ = try collect(&world);
     try testing.expect(world.heap.forms.items[garbage_payload].gc_tombstone);
+    try testing.expect(world.heap.free_list.items.len >= 1);
 
     const fresh = try world.heap.alloc(Form.init());
-    // tombstones not reused: fresh.payload != garbage_payload.
-    try testing.expect(fresh.payload != garbage_payload);
+    // tombstoned slot reused: fresh.payload == garbage_payload AND
+    // the heap didn't grow.
+    try testing.expectEqual(garbage_payload, fresh.payload);
+    try testing.expectEqual(len_before, world.heap.forms.items.len);
+    // and the slot is no longer a tombstone — the alloc cleared it.
+    try testing.expect(!world.heap.forms.items[fresh.payload].gc_tombstone);
+}
+
+test "GC §5.8d: free-list LIFO discharge (most-recently freed first)" {
+    var world = try World.init(testing.allocator);
+    defer world.deinit();
+    // allocate three pieces of unreachable garbage; remember their
+    // payloads in alloc order.
+    const g1 = try world.heap.alloc(Form.init());
+    const g2 = try world.heap.alloc(Form.init());
+    const g3 = try world.heap.alloc(Form.init());
+    _ = try collect(&world);
+    // sweep walks index-ascending → pushes g1 first, g3 last.
+    // LIFO pop returns g3 first.
+    const r1 = try world.heap.alloc(Form.init());
+    try testing.expectEqual(g3.payload, r1.payload);
+    const r2 = try world.heap.alloc(Form.init());
+    try testing.expectEqual(g2.payload, r2.payload);
+    const r3 = try world.heap.alloc(Form.init());
+    try testing.expectEqual(g1.payload, r3.payload);
+    // free-list now empty; next alloc extends.
+    try testing.expectEqual(@as(usize, 0), world.heap.free_list.items.len);
+    const r4 = try world.heap.alloc(Form.init());
+    try testing.expect(r4.payload != g1.payload);
+    try testing.expect(r4.payload != g2.payload);
+    try testing.expect(r4.payload != g3.payload);
 }
 
 test "GC: --no-gc path skips collection" {

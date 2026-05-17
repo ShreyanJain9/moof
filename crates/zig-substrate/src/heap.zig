@@ -9,6 +9,34 @@
 //! phase B's gc tombstones dead slots; phase G+ considers an
 //! indirection table if heap density becomes a concern.
 //!
+//! ## tombstone reuse (post-§5.8d perf, 2026-05-16)
+//!
+//! the GC's sweep pass tombstones unmarked Forms; previously those
+//! slots stayed dead forever (`heap.forms.items.len` grew monotonically,
+//! peaking near 440k forms / ~99% tombstones on a bootstrap). this
+//! left the heap arena bloated and made every subsequent `gcResetMarks`
+//! walk pay for the dead slots' cache footprint.
+//!
+//! fix: the sweep pushes each freshly-tombstoned `payload` onto
+//! `Heap.free_list`. `Heap.alloc` pops from the free-list first
+//! before extending `forms.items`. the slot is re-initialized in
+//! place — the tombstone bit clears, slot/handler/meta maps are
+//! freshly empty (sweep already called `Form.deinit` on them).
+//!
+//! **L11 sanity:** L11 says "FormId is stable for the lifetime of
+//! a vat." tombstoning a Form means the original Form-at-that-FormId
+//! is GONE — no user-visible reference can reach it (else the mark
+//! pass would have kept it). allocating a NEW Form at the same
+//! FormId is logically a new identity. no user can observe both the
+//! old and the new at the same time, since the old was unreachable
+//! at the moment the GC walked. L11's "lifetime" is the lifetime of
+//! the original identity — once that identity is gone, the slot is
+//! reusable.
+//!
+//! this matches how every modern GC handles "address stability":
+//! a tracing GC may move objects (we don't), but the conceptual
+//! id is only meaningful for the duration the reference is live.
+//!
 //! per `laws/determinism-laws.md` D4, allocation order in a
 //! replicated vat is deterministic by turn-seq + per-turn ordinal.
 //! phase A is single-vat solo, so the deterministic-id discipline
@@ -55,6 +83,23 @@ pub const Heap = struct {
     /// preserves insertion order — important for D5 determinism
     /// when the redirects are part of a vat snapshot.
     redirects: std.AutoArrayHashMapUnmanaged(FormId, FormId),
+    /// **tombstone free-list (post-§5.8d).** GC sweep pushes the
+    /// payload of each freshly-tombstoned slot here; `alloc` pops
+    /// from here before extending `forms.items`. LIFO so the most
+    /// recently freed slot is reused first (better cache locality —
+    /// the slot's hash-map storage may still be hot when the next
+    /// alloc lands).
+    ///
+    /// D5 determinism: free-list discharge order is deterministic
+    /// (LIFO over deterministic sweep order). replicas sweep in the
+    /// same order (index-ascending across `forms.items`), push in
+    /// the same order, pop in the same order → reused FormIds match
+    /// across replicas.
+    ///
+    /// L11: see heap.zig header. tombstoned slots have no live
+    /// references, so reusing their FormId for a new identity is
+    /// observably safe.
+    free_list: std.ArrayListUnmanaged(u30),
     /// shared allocator for `forms` growth, redirects growth, and
     /// each Form's slot/handler/meta maps.
     allocator: std.mem.Allocator,
@@ -69,6 +114,7 @@ pub const Heap = struct {
         return .{
             .forms = forms,
             .redirects = .empty,
+            .free_list = .empty,
             .allocator = allocator,
         };
     }
@@ -79,6 +125,7 @@ pub const Heap = struct {
         for (self.forms.items) |*f| f.deinit(self.allocator);
         self.forms.deinit(self.allocator);
         self.redirects.deinit(self.allocator);
+        self.free_list.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -87,9 +134,25 @@ pub const Heap = struct {
     /// the id is stable for the heap's lifetime
     /// (`laws/substrate-laws.md` L11). the caller transfers
     /// ownership of `form` (and its inner maps) to the heap.
+    ///
+    /// **§5.8d free-list reuse:** if `free_list` is non-empty, pop
+    /// a tombstoned slot's payload and re-initialize it in place.
+    /// the previous occupant's `slots`/`handlers`/`meta` were freed
+    /// by `gcTombstone` (which calls `Form.deinit`), so overwriting
+    /// is safe — no double-free, no stale capacity. otherwise,
+    /// extend `forms.items` and return the fresh index.
     pub fn alloc(self: *Heap, form: Form) !FormId {
         // perf: count form allocs via the vm profile counter table.
         @import("vm.zig").PROFILE.forms_allocated += 1;
+        if (self.free_list.pop()) |payload| {
+            // re-init the tombstoned slot in place. the Form value
+            // assigned here is the caller's `form` — its maps are
+            // owned by the caller and now transfer to the heap.
+            // gc_tombstone bit gets cleared by the assignment (we
+            // overwrite the whole Form struct).
+            self.forms.items[payload] = form;
+            return FormId.vatLocal(payload);
+        }
         const id = self.forms.items.len;
         // post-V0 the vat-local payload is 30 bits, so the per-vat
         // ceiling is ~1B forms.
@@ -228,13 +291,27 @@ pub const Heap = struct {
     }
 
     /// tombstone the Form at `payload`: free its slot/handler/meta
-    /// hash-map storage and reset to a clean tombstone marker. the
-    /// slot in `forms` stays — FormId stability (L11) requires we
-    /// never reuse a tombstoned index in V1.
+    /// hash-map storage, reset to a clean tombstone marker, and push
+    /// the payload onto `free_list` so the next `alloc` can reuse it.
+    ///
+    /// **L11 (FormId stability):** see heap.zig header comment. once
+    /// a Form is tombstoned, no live reference can reach it; the
+    /// FormId's "identity" is gone. allocating a new Form at the
+    /// same FormId is logically a new identity — there's no overlap
+    /// in observability.
+    ///
+    /// the push can fail (OOM) but we treat that as fatal — a heap
+    /// that can't track its own tombstones is too broken to continue.
+    /// (the alternative is silent leak: skip the push and the slot
+    /// stays tombstoned forever. but then alloc throughput regresses
+    /// silently. fail loud.)
     pub fn gcTombstone(self: *Heap, payload: u30) void {
         const f = &self.forms.items[payload];
         f.deinit(self.allocator);
         f.* = Form.init();
         f.gc_tombstone = true;
+        self.free_list.append(self.allocator, payload) catch |err| {
+            std.debug.panic("gcTombstone: free_list OOM ({s})", .{@errorName(err)});
+        };
     }
 };
