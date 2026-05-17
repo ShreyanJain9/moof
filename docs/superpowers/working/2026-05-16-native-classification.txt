@@ -131,9 +131,17 @@ Object:initialize  AXE — trivial `return self_` stub; no moof code calls [obj 
 # Object:= — fundamental identity eq; no moof equivalent in stdlib/object.moof.
 
 ## SUMMARY
-# REGISTRY entries: 77 (approximate)
+# REGISTRY entries: 112 total (~77 explicit Proto:method entries + ~35
+#                   infrastructure entries enumerated above as Opcode:*,
+#                   Chunk:*, Chunks:*, Heap:*, Env:*, Global:*, etc.)
 # Axeable: 1 (Object:initialize)
-# Keep: 76
+# Keep: 111
+#
+# Note: tasks C2-C11 from the phase 1 plan are all no-ops at this layer —
+# the spec's §12.2 axe table predicted removals (Cons:length, Cons:map:,
+# Integer:abs, String:trim, Char:digit?, etc.) but those methods never
+# existed in the zig substrate (greps confirm: zero matches for any of
+# them). The zig port was designed minimally from the start.
 #
 # The zig substrate is already minimal for a 30% shrink via method removal.
 # The spec's §12.2 shrink table assumed more derivable methods were in zig
